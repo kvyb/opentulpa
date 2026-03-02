@@ -142,10 +142,18 @@ Then start Telegram + webhook manager:
 
 `start.sh` will:
 - Start FastAPI on `:8000`
-- Launch a `cloudflared` tunnel
+- Launch a `cloudflared` quick tunnel
 - Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
-- Auto-generate a Telegram webhook secret for that run when missing.
-- Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`.
+- Auto-generate a Telegram webhook secret for that run when missing
+- Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`
+
+Set this env var in `.env` for local Telegram mode:
+
+```bash
+TELEGRAM_BOT_TOKEN=your_botfather_token
+```
+
+If you are exposing OpenTulpa on your own public domain (without the quick tunnel manager), set the webhook manually:
 
 ```bash
 curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://yourdomain.com/webhook/telegram"

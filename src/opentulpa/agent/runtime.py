@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -1170,6 +1172,27 @@ class OpenTulpaLangGraphRuntime:
             saw_agent_output = False
             in_tool_phase = False
             approval_handoff_detected = False
+            stream_started_at = time.monotonic()
+            stream_no_visible_timeout_s = float(
+                str(os.environ.get("AGENT_STREAM_NO_VISIBLE_PROGRESS_SECONDS", "210")).strip()
+                or "210"
+            )
+            stream_total_chunks = 0
+            stream_agent_chunks = 0
+            stream_tool_chunks = 0
+            stream_wait_signals = 0
+            stream_visible_yields = 0
+            stream_filtered_empty = 0
+            stream_filtered_incomplete_json = 0
+            stream_filtered_blank_expanded = 0
+            first_visible_yield_ms: int | None = None
+            self.log_behavior_event(
+                event="turn_stream_loop_start",
+                trace_id=turn_trace_id,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                stream_no_visible_timeout_s=stream_no_visible_timeout_s,
+            )
 
             def _finalize_segment() -> None:
                 nonlocal segment_accumulated
@@ -1201,17 +1224,66 @@ class OpenTulpaLangGraphRuntime:
                 config=config,
                 stream_mode="messages",
             ):
+                stream_total_chunks += 1
                 node_name = str(metadata.get("langgraph_node", "")).strip().lower()
+                if stream_total_chunks % 50 == 0:
+                    self.log_behavior_event(
+                        event="turn_stream_heartbeat",
+                        trace_id=turn_trace_id,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        stream_total_chunks=stream_total_chunks,
+                        stream_agent_chunks=stream_agent_chunks,
+                        stream_tool_chunks=stream_tool_chunks,
+                        stream_visible_yields=stream_visible_yields,
+                    )
                 if node_name != "agent":
+                    stream_tool_chunks += 1
                     if node_name == "tools":
                         tool_text = _content_to_text(getattr(message_chunk, "content", "")).strip()
                         if isinstance(message_chunk, ToolMessage) and tool_text == "APPROVAL_HANDOFF":
                             approval_handoff_detected = True
+                            self.log_behavior_event(
+                                event="turn_stream_tool_approval_handoff_detected",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                stream_total_chunks=stream_total_chunks,
+                            )
                     if saw_agent_output and not in_tool_phase:
                         in_tool_phase = True
+                        stream_wait_signals += 1
+                        self.log_behavior_event(
+                            event="turn_stream_wait_signal",
+                            trace_id=turn_trace_id,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            stream_wait_signals=stream_wait_signals,
+                            stream_total_chunks=stream_total_chunks,
+                        )
                         _finalize_segment()
                         yield STREAM_WAIT_SIGNAL
+                    if (
+                        not yielded_any
+                        and stream_no_visible_timeout_s > 0
+                        and (time.monotonic() - stream_started_at) >= stream_no_visible_timeout_s
+                    ):
+                        self.log_behavior_event(
+                            event="turn_stream_no_visible_progress_timeout",
+                            trace_id=turn_trace_id,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
+                            stream_total_chunks=stream_total_chunks,
+                            stream_agent_chunks=stream_agent_chunks,
+                            stream_tool_chunks=stream_tool_chunks,
+                            stream_filtered_empty=stream_filtered_empty,
+                            stream_filtered_incomplete_json=stream_filtered_incomplete_json,
+                            stream_filtered_blank_expanded=stream_filtered_blank_expanded,
+                        )
+                        break
                     continue
+                stream_agent_chunks += 1
                 if in_tool_phase:
                     in_tool_phase = False
                     stream_key = ""
@@ -1226,15 +1298,53 @@ class OpenTulpaLangGraphRuntime:
                     segment_accumulated += str(message_chunk.content)
                     cleaned = self._strip_internal_json_prefix(segment_accumulated)
                     if not cleaned.strip():
+                        stream_filtered_empty += 1
                         continue
                     if cleaned == segment_accumulated and self._has_incomplete_internal_json_prefix(
                         segment_accumulated
                     ):
+                        stream_filtered_incomplete_json += 1
                         continue
                     expanded = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
                     if expanded.strip():
                         yielded_any = True
+                        stream_visible_yields += 1
+                        if first_visible_yield_ms is None:
+                            first_visible_yield_ms = int((time.monotonic() - stream_started_at) * 1000)
+                        if stream_visible_yields <= 3 or stream_visible_yields % 20 == 0:
+                            self.log_behavior_event(
+                                event="turn_stream_chunk_yielded",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                stream_visible_yields=stream_visible_yields,
+                                stream_total_chunks=stream_total_chunks,
+                                output_chars=len(expanded.strip()),
+                                first_visible_yield_ms=first_visible_yield_ms,
+                            )
                         yield expanded
+                    else:
+                        stream_filtered_blank_expanded += 1
+
+                if (
+                    not yielded_any
+                    and stream_no_visible_timeout_s > 0
+                    and (time.monotonic() - stream_started_at) >= stream_no_visible_timeout_s
+                ):
+                    self.log_behavior_event(
+                        event="turn_stream_no_visible_progress_timeout",
+                        trace_id=turn_trace_id,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
+                        stream_total_chunks=stream_total_chunks,
+                        stream_agent_chunks=stream_agent_chunks,
+                        stream_tool_chunks=stream_tool_chunks,
+                        stream_filtered_empty=stream_filtered_empty,
+                        stream_filtered_incomplete_json=stream_filtered_incomplete_json,
+                        stream_filtered_blank_expanded=stream_filtered_blank_expanded,
+                    )
+                    break
 
             if through_id is not None and self._context_events is not None:
                 self._context_events.clear_events(customer_id, through_id=through_id)
@@ -1260,6 +1370,13 @@ class OpenTulpaLangGraphRuntime:
                     trace_id=turn_trace_id,
                     thread_id=thread_id,
                     customer_id=customer_id,
+                    elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
+                    stream_total_chunks=stream_total_chunks,
+                    stream_agent_chunks=stream_agent_chunks,
+                    stream_tool_chunks=stream_tool_chunks,
+                    stream_filtered_empty=stream_filtered_empty,
+                    stream_filtered_incomplete_json=stream_filtered_incomplete_json,
+                    stream_filtered_blank_expanded=stream_filtered_blank_expanded,
                 )
                 fallback_result = await self._graph.ainvoke(
                     {
@@ -1348,6 +1465,13 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 customer_id=customer_id,
                 yielded_any=yielded_any,
+                elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
+                stream_total_chunks=stream_total_chunks,
+                stream_agent_chunks=stream_agent_chunks,
+                stream_tool_chunks=stream_tool_chunks,
+                stream_wait_signals=stream_wait_signals,
+                stream_visible_yields=stream_visible_yields,
+                first_visible_yield_ms=first_visible_yield_ms,
             )
         except Exception:
             logger.exception(
