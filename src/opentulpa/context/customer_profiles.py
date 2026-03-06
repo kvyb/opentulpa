@@ -48,11 +48,27 @@ class CustomerProfileService:
                     directive_text TEXT,
                     utc_offset TEXT,
                     locale TEXT,
+                    lessons_learnt TEXT,
                     source TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 """
             )
+            self._ensure_column(conn, "customer_profiles", "lessons_learnt", "TEXT")
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        column_sql: str,
+    ) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row["name"]).strip().lower() for row in rows if isinstance(row, sqlite3.Row)}
+        if str(column).strip().lower() in existing:
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}")
+        conn.commit()
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -65,6 +81,7 @@ class CustomerProfileService:
         directive_text: str | None = None,
         utc_offset: str | None = None,
         locale: str | None = None,
+        lessons_learnt: str | None = None,
         source: str = "agent",
     ) -> None:
         cid = str(customer_id or "").strip()
@@ -74,6 +91,7 @@ class CustomerProfileService:
             existing = conn.execute(
                 """
                 SELECT directive_text, utc_offset, locale
+                , lessons_learnt
                 FROM customer_profiles
                 WHERE customer_id=?
                 """,
@@ -82,21 +100,24 @@ class CustomerProfileService:
             cur_directive = str(existing["directive_text"]) if existing and existing["directive_text"] is not None else None
             cur_offset = str(existing["utc_offset"]) if existing and existing["utc_offset"] is not None else None
             cur_locale = str(existing["locale"]) if existing and existing["locale"] is not None else None
+            cur_lessons = str(existing["lessons_learnt"]) if existing and existing["lessons_learnt"] is not None else None
 
             next_directive = cur_directive if directive_text is None else directive_text
             next_offset = cur_offset if utc_offset is None else utc_offset
             next_locale = cur_locale if locale is None else locale
+            next_lessons = cur_lessons if lessons_learnt is None else lessons_learnt
 
             conn.execute(
                 """
                 INSERT INTO customer_profiles
-                    (customer_id, directive_text, utc_offset, locale, source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (customer_id, directive_text, utc_offset, locale, lessons_learnt, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(customer_id)
                 DO UPDATE SET
                     directive_text=excluded.directive_text,
                     utc_offset=excluded.utc_offset,
                     locale=excluded.locale,
+                    lessons_learnt=excluded.lessons_learnt,
                     source=excluded.source,
                     updated_at=excluded.updated_at
                 """,
@@ -105,6 +126,7 @@ class CustomerProfileService:
                     next_directive,
                     next_offset,
                     next_locale,
+                    next_lessons,
                     str(source or "agent"),
                     self._utc_now_iso(),
                 ),
@@ -119,6 +141,7 @@ class CustomerProfileService:
             row = conn.execute(
                 """
                 SELECT customer_id, directive_text, utc_offset, locale, source, updated_at
+                , lessons_learnt
                 FROM customer_profiles
                 WHERE customer_id=?
                 """,
@@ -131,6 +154,7 @@ class CustomerProfileService:
             "directive_text": str(row["directive_text"]) if row["directive_text"] is not None else None,
             "utc_offset": str(row["utc_offset"]) if row["utc_offset"] is not None else None,
             "locale": str(row["locale"]) if row["locale"] is not None else None,
+            "lessons_learnt": str(row["lessons_learnt"]) if row["lessons_learnt"] is not None else None,
             "source": str(row["source"]),
             "updated_at": str(row["updated_at"]),
         }
@@ -169,6 +193,49 @@ class CustomerProfileService:
         normalized = _normalize_utc_offset(utc_offset)
         self._upsert(customer_id, utc_offset=normalized, source=source)
         return normalized
+
+    def get_lessons_learnt(self, customer_id: str) -> str | None:
+        profile = self.get_profile(customer_id)
+        if not profile:
+            return None
+        text = str(profile.get("lessons_learnt") or "").strip()
+        return text or None
+
+    def set_lessons_learnt(self, customer_id: str, lessons: str, *, source: str = "agent") -> str:
+        text = str(lessons or "").strip()
+        if not text:
+            raise ValueError("lessons_learnt is required")
+        self._upsert(customer_id, lessons_learnt=text, source=source)
+        return text
+
+    def append_lesson(
+        self,
+        customer_id: str,
+        lesson: str,
+        *,
+        source: str = "agent",
+        max_chars: int = 20000,
+    ) -> str:
+        safe_lesson = str(lesson or "").strip()
+        if not safe_lesson:
+            raise ValueError("lesson is required")
+        current = str(self.get_lessons_learnt(customer_id) or "").strip()
+        merged = f"{current}\n{safe_lesson}".strip() if current else safe_lesson
+        safe_limit = max(500, min(int(max_chars), 200000))
+        if len(merged) > safe_limit:
+            merged = merged[-safe_limit:]
+        self._upsert(customer_id, lessons_learnt=merged, source=source)
+        return merged
+
+    def clear_lessons_learnt(self, customer_id: str, *, source: str = "agent") -> bool:
+        cid = str(customer_id or "").strip()
+        if not cid:
+            return False
+        profile = self.get_profile(cid)
+        if profile is None:
+            return False
+        self._upsert(cid, lessons_learnt="", source=source)
+        return True
 
     def import_legacy(
         self,

@@ -25,13 +25,20 @@ def register_scheduler_routes(
     async def internal_scheduler_add_routine(request: Request) -> Any:
         sched = get_scheduler()
         body = await request.json()
+        payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+        instruction = str(payload.get("instruction", "")).strip()
+        if not instruction:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "payload.instruction is required"},
+            )
 
         rid = str(body.get("id", "")).strip() or new_short_id("rtn")
         routine = Routine(
             id=rid,
             name=body.get("name", "Unnamed"),
             schedule=body.get("schedule", "0 9 * * *"),
-            payload=body.get("payload", {}),
+            payload=payload,
             enabled=body.get("enabled", True),
             is_cron=body.get("is_cron", True),
         )

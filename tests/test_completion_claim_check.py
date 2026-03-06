@@ -99,4 +99,4 @@ async def test_verify_completion_claim_marks_unusable_when_json_missing() -> Non
 
     assert result["usable"] is False
     assert result["mismatch"] is False
-    assert result["reason"].startswith("invalid_checker_output:")
+    assert result["reason"].startswith("classifier_error:")

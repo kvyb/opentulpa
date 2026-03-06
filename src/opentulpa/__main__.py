@@ -51,7 +51,7 @@ def _mem0_config_openrouter(
         "llm": {
             "provider": "openai",
             "config": {
-                "model": f"google/{llm_model}",
+                "model": llm_model,
                 "api_key": openrouter_api_key,
                 "openai_base_url": openrouter_base_url,
             },

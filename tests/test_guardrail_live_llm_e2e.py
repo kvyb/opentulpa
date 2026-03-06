@@ -530,7 +530,7 @@ def test_live_llm_schedule_read_write_and_subflows(live_llm_harness: _Harness) -
             "Create recurring read schedule now with routine_create.\n"
             "name: LiveReadSchedule\n"
             "schedule: 0 * * * *\n"
-            "message: At run time call tulpa_run_terminal with `curl https://mockapi.io/`.\n"
+            "instruction: You must call tulpa_run_terminal with `curl https://mockapi.io/` at run time and report concise status.\n"
             "implementation_command: curl https://mockapi.io/\n"
             "notify_user: true"
         ),
@@ -548,7 +548,7 @@ def test_live_llm_schedule_read_write_and_subflows(live_llm_harness: _Harness) -
             "Create recurring write schedule now with routine_create.\n"
             "name: LiveWriteSchedule\n"
             "schedule: 0 * * * *\n"
-            "message: At run time call tulpa_run_terminal with a POST to mockapi.\n"
+            "instruction: You must call tulpa_run_terminal with a POST to mockapi at run time and report concise status.\n"
             "implementation_command: curl -X POST https://mockapi.io/api/v1/posts "
             "-H \"Content-Type: application/json\" -d '{\"source\":\"live_llm\",\"kind\":\"schedule_write_deny\"}'\n"
             "notify_user: true"
@@ -586,7 +586,7 @@ def test_live_llm_schedule_read_write_and_subflows(live_llm_harness: _Harness) -
             "Retry recurring write schedule creation with routine_create.\n"
             "name: LiveWriteScheduleApproved\n"
             "schedule: 0 * * * *\n"
-            "message: At run time call tulpa_run_terminal with POST to mockapi.\n"
+            "instruction: You must call tulpa_run_terminal with POST to mockapi at run time and report concise status.\n"
             "implementation_command: curl -X POST https://mockapi.io/api/v1/posts "
             "-H \"Content-Type: application/json\" -d '{\"source\":\"live_llm\",\"kind\":\"schedule_write_approve\"}'\n"
             "notify_user: true"
@@ -629,7 +629,7 @@ def test_live_llm_schedule_read_write_and_subflows(live_llm_harness: _Harness) -
             "payload": {
                 "customer_id": TEST_CUSTOMER_ID,
                 "notify_user": True,
-                "message": (
+                "instruction": (
                     "Scheduled run instruction: call tulpa_run_terminal with command "
                     "`curl https://mockapi.io/` and send concise status."
                 ),
@@ -645,7 +645,7 @@ def test_live_llm_schedule_read_write_and_subflows(live_llm_harness: _Harness) -
             "payload": {
                 "customer_id": TEST_CUSTOMER_ID,
                 "notify_user": True,
-                "message": (
+                "instruction": (
                     "Scheduled run instruction: call tulpa_run_terminal with command "
                     "`curl -X POST https://mockapi.io/api/v1/posts "
                     "-H \"Content-Type: application/json\" "
@@ -664,9 +664,9 @@ def test_live_llm_schedule_read_write_and_subflows(live_llm_harness: _Harness) -
         )
         assert wake_response.status_code == 200
         assert _wait_until(
-            lambda: any(
+            lambda _start_wake=start_wake: any(
                 item.get("path") == "/internal/tulpa/run_terminal"
-                for item in _calls_since(live_llm_harness, start_wake)
+                for item in _calls_since(live_llm_harness, _start_wake)
             ),
             timeout_seconds=max(LIVE_E2E_WAIT_TIMEOUT_SECONDS, 60.0),
         ), f"scheduled wake {idx} did not execute tulpa_run_terminal"

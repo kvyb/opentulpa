@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
@@ -32,6 +33,18 @@ from opentulpa.policy.execution_boundary import (
     ExecutionBoundaryContext,
     ExecutionBoundaryGuard,
 )
+
+
+def _require_customer_id(runtime: Any) -> str:
+    getter = getattr(runtime, "get_active_customer_id", None)
+    customer_id = ""
+    if callable(getter):
+        customer_id = str(getter() or "").strip()
+    if not customer_id:
+        customer_id = str(getattr(runtime, "_active_customer_id", "") or "").strip()
+    if not customer_id:
+        raise RuntimeError("customer_id is missing in runtime context")
+    return customer_id
 
 
 def _browser_use_api_key() -> str:
@@ -96,6 +109,48 @@ def _normalize_cleanup_paths(paths: list[str] | None) -> list[str]:
     return out
 
 
+_WORKING_DIR_PREFIXES: dict[str, str] = {
+    "tulpa_stuff": "tulpa_stuff",
+    "integrations": "src/opentulpa/integrations",
+    "interfaces": "src/opentulpa/interfaces",
+    "tools": "src/opentulpa/tools",
+    "skills": "src/opentulpa/skills",
+    "opentulpa": "src/opentulpa",
+}
+
+
+def _normalize_command_for_working_dir(command: str, working_dir: str) -> str:
+    text = str(command or "").strip()
+    if not text:
+        return ""
+    prefix = _WORKING_DIR_PREFIXES.get(str(working_dir or "").strip())
+    if not prefix:
+        return text
+    try:
+        parts = shlex.split(text)
+    except Exception:
+        return text
+    if len(parts) <= 1:
+        return text
+
+    markers = (f"{prefix}/", f"./{prefix}/")
+
+    def _strip_one(token: str) -> str:
+        raw = str(token)
+        for marker in markers:
+            if raw.startswith(marker):
+                return raw[len(marker) :]
+        if raw.startswith("--") and "=" in raw:
+            key, value = raw.split("=", 1)
+            for marker in markers:
+                if value.startswith(marker):
+                    return f"{key}={value[len(marker):]}"
+        return raw
+
+    normalized = [parts[0], *(_strip_one(item) for item in parts[1:])]
+    return shlex.join(normalized)
+
+
 def _normalize_execution_origin(
     *,
     thread_id: str | None,
@@ -114,8 +169,27 @@ def _approval_pending_payload(
     decision: dict[str, Any],
 ) -> dict[str, Any]:
     approval_id = str(decision.get("approval_id", "")).strip()
+    if approval_id.lower() in {"none", "null"}:
+        approval_id = ""
     summary = str(decision.get("summary", f"execute {action_name}")).strip()
     reason = str(decision.get("reason", "approval_required")).strip()
+    if not approval_id:
+        return {
+            "ok": False,
+            "status": "guardrail_unavailable",
+            "action_name": action_name,
+            "command_preview": command_preview[:300],
+            "approval_id": None,
+            "delivery_mode": str(decision.get("delivery_mode", "")).strip() or None,
+            "summary": summary,
+            "reason": reason or "approval_challenge_unavailable",
+            "message": (
+                "GUARDRAIL_BLOCKED: Approval is required but the approval challenge "
+                "could not be created. Please retry."
+            ),
+            "gate": "require_approval",
+            "retryable": True,
+        }
     message = (
         "APPROVAL_PENDING: This executable action is waiting for user approval "
         f"(approval_id={approval_id}; summary={summary}; reason={reason})."
@@ -385,7 +459,7 @@ async def _sync_proactive_heartbeat(
                 "notify_user": True,
                 "proactive_heartbeat": True,
                 "heartbeat_interval_hours": interval_hours,
-                "message": _build_proactive_heartbeat_prompt(interval_hours),
+                "instruction": _build_proactive_heartbeat_prompt(interval_hours),
             },
         },
         timeout=10.0,
@@ -414,8 +488,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     boundary_guard = ExecutionBoundaryGuard(runtime=runtime)
 
     @tool
-    async def memory_search(query: str, customer_id: str) -> Any:
+    async def memory_search(query: str) -> Any:
         """Search user memory."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/memory/search",
@@ -427,8 +502,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("results", [])
 
     @tool
-    async def memory_add(summary: str, customer_id: str) -> Any:
+    async def memory_add(summary: str) -> Any:
         """Store a user memory summary."""
+        customer_id = _require_customer_id(runtime)
         retryable_errors = (
             httpx.ConnectError,
             httpx.ConnectTimeout,
@@ -461,8 +537,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return {"error": "memory_add failed: exhausted retries"}
 
     @tool
-    async def uploaded_file_search(query: str, customer_id: str, limit: int = 5) -> Any:
+    async def uploaded_file_search(query: str, limit: int = 5) -> Any:
         """Search uploaded files for this user by natural-language query."""
+        customer_id = _require_customer_id(runtime)
         safe_limit = max(1, min(int(limit), 20))
         r = await runtime._request_with_backoff(
             "POST",
@@ -481,10 +558,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def uploaded_file_get(
         file_id: str,
-        customer_id: str,
         max_excerpt_chars: int = 16000,
     ) -> Any:
         """Get metadata and text excerpt for one uploaded file."""
+        customer_id = _require_customer_id(runtime)
         safe_chars = max(500, min(int(max_excerpt_chars), 60000))
         r = await runtime._request_with_backoff(
             "POST",
@@ -503,10 +580,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def uploaded_file_send(
         file_id: str,
-        customer_id: str,
         caption: str | None = None,
     ) -> Any:
         """Send a previously uploaded file back to the user's Telegram chat."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/files/send",
@@ -524,10 +601,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def tulpa_file_send(
         path: str,
-        customer_id: str,
         caption: str | None = None,
     ) -> Any:
         """Send a local file from tulpa_stuff/ back to the user's Telegram chat."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/files/send_local",
@@ -545,7 +622,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def web_image_send(
         url: str,
-        customer_id: str,
         caption: str | None = None,
         max_bytes: int = 10_000_000,
     ) -> Any:
@@ -553,6 +629,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         Download an image from a web URL (validated content-type) and send it to Telegram.
         Use web_search first to find candidate URLs, then call this tool.
         """
+        customer_id = _require_customer_id(runtime)
         safe_max_bytes = max(250_000, min(int(max_bytes), 25_000_000))
         r = await runtime._request_with_backoff(
             "POST",
@@ -573,10 +650,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def uploaded_file_analyze(
         file_id: str,
-        customer_id: str,
         question: str | None = None,
     ) -> Any:
         """Analyze a previously uploaded file again, optionally with a focused question."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/files/analyze",
@@ -593,8 +670,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def skill_list(customer_id: str, include_global: bool = True, limit: int = 50) -> Any:
+    async def skill_list(include_global: bool = True, limit: int = 50) -> Any:
         """List reusable skills available to this user."""
+        customer_id = _require_customer_id(runtime)
         safe_limit = max(1, min(int(limit), 200))
         r = await runtime._request_with_backoff(
             "POST",
@@ -614,11 +692,11 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def skill_get(
         name: str,
-        customer_id: str,
         include_files: bool = True,
         include_global: bool = True,
     ) -> Any:
         """Get one skill by name, using user-scope first then global fallback."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/skills/get",
@@ -639,11 +717,11 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         name: str,
         description: str,
         instructions: str,
-        customer_id: str,
         scope: str = "user",
         supporting_files: dict[str, str] | None = None,
     ) -> Any:
         """Create or update a reusable skill for this user (or global when explicitly chosen)."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/skills/upsert",
@@ -663,8 +741,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("skill", {})
 
     @tool
-    async def skill_delete(name: str, customer_id: str, scope: str = "user") -> Any:
+    async def skill_delete(name: str, scope: str = "user") -> Any:
         """Delete a reusable skill by name."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/skills/delete",
@@ -680,8 +759,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def directive_get(customer_id: str) -> Any:
+    async def directive_get() -> Any:
         """Get the active persistent directive profile for this user."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/directive/get",
@@ -693,8 +773,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def directive_set(directive: str, customer_id: str) -> Any:
+    async def directive_set(directive: str) -> Any:
         """Set or overwrite the user's persistent directive profile."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/directive/set",
@@ -717,8 +798,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return payload
 
     @tool
-    async def directive_clear(customer_id: str) -> Any:
+    async def directive_clear() -> Any:
         """Clear the user's persistent directive profile."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/directive/clear",
@@ -737,8 +819,81 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return payload
 
     @tool
-    async def time_profile_get(customer_id: str) -> Any:
+    async def lessons_learnt(
+        action: str,
+        lesson: str = "",
+        max_chars: int = 20000,
+    ) -> Any:
+        """
+        Manage the user's persistent lessons_learnt scratchpad.
+
+        Use action='get' to read, action='append' to add a new lesson,
+        action='set' to replace full content, and action='clear' to delete content.
+        Pass lesson for append/set actions.
+        """
+        customer_id = _require_customer_id(runtime)
+        op = str(action or "").strip().lower()
+        if op == "get":
+            r = await runtime._request_with_backoff(
+                "POST",
+                "/internal/lessons_learnt/get",
+                json_body={"customer_id": customer_id},
+                timeout=5.0,
+            )
+            if r.status_code != 200:
+                return {"error": f"lessons_learnt failed (get): {r.text}"}
+            return r.json()
+        if op == "append":
+            safe_lesson = str(lesson or "").strip()
+            if not safe_lesson:
+                return {"error": "lessons_learnt failed (append): lesson is required"}
+            r = await runtime._request_with_backoff(
+                "POST",
+                "/internal/lessons_learnt/append",
+                json_body={
+                    "customer_id": customer_id,
+                    "lesson": safe_lesson,
+                    "source": "langgraph_tool",
+                    "max_chars": max(500, min(int(max_chars), 200000)),
+                },
+                timeout=6.0,
+            )
+            if r.status_code != 200:
+                return {"error": f"lessons_learnt failed (append): {r.text}"}
+            return r.json()
+        if op == "set":
+            safe_lessons = str(lesson or "").strip()
+            if not safe_lessons:
+                return {"error": "lessons_learnt failed (set): lesson is required"}
+            r = await runtime._request_with_backoff(
+                "POST",
+                "/internal/lessons_learnt/set",
+                json_body={
+                    "customer_id": customer_id,
+                    "lessons_learnt": safe_lessons,
+                    "source": "langgraph_tool",
+                },
+                timeout=6.0,
+            )
+            if r.status_code != 200:
+                return {"error": f"lessons_learnt failed (set): {r.text}"}
+            return r.json()
+        if op == "clear":
+            r = await runtime._request_with_backoff(
+                "POST",
+                "/internal/lessons_learnt/clear",
+                json_body={"customer_id": customer_id},
+                timeout=5.0,
+            )
+            if r.status_code != 200:
+                return {"error": f"lessons_learnt failed (clear): {r.text}"}
+            return r.json()
+        return {"error": "lessons_learnt failed: action must be one of get|append|set|clear"}
+
+    @tool
+    async def time_profile_get() -> Any:
         """Get stored user UTC offset (if known)."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/time_profile/get",
@@ -750,8 +905,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def time_profile_set(utc_offset: str, customer_id: str) -> Any:
+    async def time_profile_set(utc_offset: str) -> Any:
         """Set user UTC offset in +HH:MM or -HH:MM format."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/time_profile/set",
@@ -782,7 +938,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def browser_use_run(
         task: str,
-        customer_id: str,
         allowed_domains: list[str] | None = None,
         max_steps: int = 20,
         wait_timeout_seconds: int = 600,
@@ -802,6 +957,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         task_text = str(task or "").strip()
         if not task_text:
             return {"error": "browser_use_run requires a non-empty task"}
+        customer_id = _require_customer_id(runtime)
 
         safe_max_steps = max(1, min(int(max_steps), 80))
         safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
@@ -1199,14 +1355,17 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         command: str,
         working_dir: str = "tulpa_stuff",
         timeout_seconds: int = 90,
-        customer_id: str = "",
         thread_id: str = "",
         execution_origin: str | None = None,
         preapproved: bool = False,
         guard_context: dict[str, Any] | None = None,
     ) -> Any:
         """Run executable shell/script command through execution-boundary guard."""
-        safe_command = str(command or "").strip()
+        safe_working_dir = str(working_dir or "").strip() or "tulpa_stuff"
+        safe_command = _normalize_command_for_working_dir(
+            command=str(command or "").strip(),
+            working_dir=safe_working_dir,
+        )
         if not _looks_like_shell_command(safe_command):
             return {
                 "error": (
@@ -1215,7 +1374,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 )
             }
         safe_timeout = max(5, min(int(timeout_seconds), 600))
-        safe_customer = str(customer_id or "").strip()
+        safe_customer = _require_customer_id(runtime)
         safe_thread = str(thread_id or "").strip()
         normalized_origin = _normalize_execution_origin(
             thread_id=safe_thread,
@@ -1232,7 +1391,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 action_name="tulpa_run_terminal",
                 action_args={
                     "command": safe_command,
-                    "working_dir": str(working_dir or "").strip() or "tulpa_stuff",
+                    "working_dir": safe_working_dir,
                     "timeout_seconds": safe_timeout,
                     "execution_origin": normalized_origin,
                 },
@@ -1266,7 +1425,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             "/internal/tulpa/run_terminal",
             json_body={
                 "command": safe_command,
-                "working_dir": working_dir,
+                "working_dir": safe_working_dir,
                 "timeout_seconds": safe_timeout,
             },
             timeout=max(10.0, float(safe_timeout) + 10.0),
@@ -1361,9 +1520,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     async def routine_create(
         name: str,
         schedule: str,
-        message: str,
         implementation_command: str,
-        customer_id: str,
+        instruction: str,
         notify_user: bool = True,
         cleanup_paths: list[str] | None = None,
         thread_id: str = "",
@@ -1375,20 +1533,25 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         Create a scheduled routine.
         - Recurring: cron (e.g. "0 9 * * *")
         - One-time: local ISO datetime (e.g. "2026-02-18T23:45:00+08:00")
+        - instruction: explicit schedule-time scratchpad for each run. Include required scripts,
+          files/paths, keys to read from storage, and expected output/action.
         - implementation_command: planned shell/script command used for guardrail evaluation.
         - cleanup_paths: optional repo-relative file paths to remove when deleting this automation.
         """
         safe_name = str(name or "").strip()
         safe_schedule = str(schedule or "").strip()
-        safe_message = str(message or "").strip()
-        safe_command = str(implementation_command or "").strip()
-        safe_customer = str(customer_id or "").strip()
+        safe_instruction = str(instruction or "").strip()
+        safe_command = _normalize_command_for_working_dir(
+            command=str(implementation_command or "").strip(),
+            working_dir="tulpa_stuff",
+        )
+        safe_customer = _require_customer_id(runtime)
         if not safe_name:
             return {"error": "routine_create failed: name is required"}
         if not safe_schedule:
             return {"error": "routine_create failed: schedule is required"}
-        if not safe_customer:
-            return {"error": "routine_create failed: customer_id is required"}
+        if not safe_instruction:
+            return {"error": "routine_create failed: instruction is required"}
         if not safe_command:
             return {
                 "error": (
@@ -1420,8 +1583,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 action_args={
                     "name": safe_name,
                     "schedule": safe_schedule,
-                    "message": safe_message[:1200],
-                    "customer_id": safe_customer,
+                    "instruction": safe_instruction[:1200],
                     "notify_user": bool(notify_user),
                     "implementation_command": safe_command,
                 },
@@ -1460,7 +1622,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 "name": safe_name,
                 "schedule": safe_schedule,
                 "payload": {
-                    "message": safe_message,
+                    "instruction": safe_instruction,
                     "customer_id": safe_customer,
                     "notify_user": auto_notify,
                     "notification_opt_out": not auto_notify,
@@ -1475,8 +1637,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def routine_list(customer_id: str) -> Any:
+    async def routine_list() -> Any:
         """List routines for the current user."""
+        customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "GET",
             "/internal/scheduler/routines",
@@ -1488,8 +1651,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("routines", [])
 
     @tool
-    async def routine_delete(routine_id: str, customer_id: str) -> Any:
+    async def routine_delete(routine_id: str) -> Any:
         """Delete/stop one routine by id for the current user."""
+        customer_id = _require_customer_id(runtime)
         rid = str(routine_id or "").strip()
         if not rid:
             return {"error": "routine_delete failed: routine_id is required"}
@@ -1534,11 +1698,11 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def automation_delete(
         routine_id: str,
-        customer_id: str,
         delete_files: bool = True,
         cleanup_paths: list[str] | None = None,
     ) -> Any:
         """Delete an automation by id, including optional script/file cleanup."""
+        customer_id = _require_customer_id(runtime)
         rid = str(routine_id or "").strip()
         if not rid:
             return {"error": "automation_delete failed: routine_id is required"}
@@ -1558,8 +1722,9 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def guardrail_execute_approved_action(approval_id: str, customer_id: str) -> Any:
+    async def guardrail_execute_approved_action(approval_id: str) -> Any:
         """Execute a previously approved external-impact action exactly once."""
+        customer_id = _require_customer_id(runtime)
         aid = str(approval_id or "").strip()
         if not aid:
             return {"error": "guardrail_execute_approved_action requires approval_id"}
@@ -1602,6 +1767,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,
+        "lessons_learnt": lessons_learnt,
         "time_profile_get": time_profile_get,
         "time_profile_set": time_profile_set,
         "web_search": web_search,

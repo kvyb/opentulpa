@@ -299,7 +299,6 @@ class _ScriptedAgentModel:
                                 "-d '{\"source\":\"e2e\",\"kind\":\"immediate\"}'"
                             ),
                             "working_dir": "tulpa_stuff",
-                            "customer_id": TEST_CUSTOMER_ID,
                         },
                         "type": "tool_call",
                     }
@@ -317,7 +316,6 @@ class _ScriptedAgentModel:
                                 "python3 -c \"print('read from https://mockapi.io/api/v1/posts')\""
                             ),
                             "working_dir": "tulpa_stuff",
-                            "customer_id": TEST_CUSTOMER_ID,
                         },
                         "type": "tool_call",
                     }
@@ -333,13 +331,17 @@ class _ScriptedAgentModel:
                         "args": {
                             "name": "Market Writer",
                             "schedule": "0 * * * *",
-                            "message": "Post market reflection update.",
+                            "instruction": (
+                                "You must post market reflection update. First read required context from "
+                                "tulpa_stuff/post_context.md and API key source from environment. "
+                                "Then call the configured endpoint to publish update. "
+                                "If request fails, log error and return failure summary."
+                            ),
                             "implementation_command": (
                                 "curl -X POST https://mockapi.io/api/v1/posts "
                                 "-H 'Content-Type: application/json' "
                                 "-d '{\"source\":\"e2e\",\"kind\":\"schedule\"}'"
                             ),
-                            "customer_id": TEST_CUSTOMER_ID,
                             "notify_user": True,
                         },
                         "type": "tool_call",
@@ -356,12 +358,16 @@ class _ScriptedAgentModel:
                         "args": {
                             "name": "Read Poller",
                             "schedule": "0 * * * *",
-                            "message": "Read latest updates from API.",
+                            "instruction": (
+                                "You must read latest updates from API. First read endpoint config file "
+                                "tulpa_stuff/api_source.txt and API key source from environment. "
+                                "Then fetch data and write summary to tulpa_stuff/read_poller.log. "
+                                "If fetch fails, log error and return failure summary."
+                            ),
                             "implementation_command": (
                                 "python3 -c \"print('scheduled read from "
                                 "https://mockapi.io/api/v1/posts')\""
                             ),
-                            "customer_id": TEST_CUSTOMER_ID,
                             "notify_user": True,
                         },
                         "type": "tool_call",
@@ -378,7 +384,6 @@ class _ScriptedAgentModel:
                         "name": "guardrail_execute_approved_action",
                         "args": {
                             "approval_id": approval_id,
-                            "customer_id": TEST_CUSTOMER_ID,
                         },
                         "type": "tool_call",
                     }
@@ -397,7 +402,6 @@ class _ScriptedAgentModel:
                                 "https://mockapi.io/api/v1/posts')\""
                             ),
                             "working_dir": "tulpa_stuff",
-                            "customer_id": TEST_CUSTOMER_ID,
                         },
                         "type": "tool_call",
                     }
@@ -416,7 +420,6 @@ class _ScriptedAgentModel:
                                 "https://mockapi.io/api/v1/posts')\""
                             ),
                             "working_dir": "tulpa_stuff",
-                            "customer_id": TEST_CUSTOMER_ID,
                         },
                         "type": "tool_call",
                     }

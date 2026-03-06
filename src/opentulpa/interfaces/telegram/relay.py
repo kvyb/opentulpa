@@ -406,7 +406,7 @@ async def relay_event_via_main_agent(
     if agent_runtime is None:
         raise RuntimeError("Agent runtime unavailable for wake relay")
     routine_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
-    routine_message = str(routine_payload.get("message", "")).strip()
+    routine_instruction = str(routine_payload.get("instruction", "")).strip()
     routine_name = str(payload.get("routine_name", "")).strip()
     proactive_heartbeat = bool(routine_payload.get("proactive_heartbeat", False))
     now_utc = datetime.now(timezone.utc)
@@ -461,7 +461,7 @@ async def relay_event_via_main_agent(
                 "Decide if the user should be messaged right now.\n"
                 f"- event: {event_label}\n"
                 f"- routine_name: {routine_name or 'unnamed'}\n"
-                f"- routine_instruction: {routine_message[:3000] or '(none)'}\n"
+                f"- routine_instruction: {routine_instruction[:3000] or '(none)'}\n"
                 f"- last_user_message_at_utc: {last_user_at or 'unknown'}\n"
                 f"- user_idle_hours: {user_idle_hours}\n"
                 f"- last_assistant_message_at_utc: {last_assistant_at or 'unknown'}\n"

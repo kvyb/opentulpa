@@ -86,7 +86,7 @@ If there's a public API or a service with documentation, OpenTulpa can integrate
 - Estimated cost per task/message: **~$0.033-$0.044**
 - Estimated cost for **100 chat messages** (at 3-4 loops each): **~$3.30-$4.40 total**
 - Midpoint estimate (3.5 loops avg): **~$3.85**
-- These estimates assume the current default model mix: main runtime `gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
+- These estimates assume the current default model mix: main runtime `google/gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `google/gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
 
 This makes the agent runtime inexpensive for day-to-day use, even with tool-driven multi-step reasoning.
 
@@ -112,6 +112,8 @@ cp .env.example .env
 ```bash
 # .env
 OPENROUTER_API_KEY=your_key
+LLM_MODEL=google/gemini-3-flash-preview
+GUARDRAIL_CLASSIFIER_MODEL=minimax/minimax-m2.5
 ```
 
 Current runtime expects OpenRouter-compatible chat routing for the main agent path.

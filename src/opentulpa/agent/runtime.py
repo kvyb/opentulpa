@@ -11,6 +11,7 @@ This replaces the Parlant subprocess/session model with a local StateGraph that:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from typing import Any
 import httpx
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from pydantic import BaseModel, ConfigDict, Field
 
 from opentulpa.agent.context_compaction import (
     compress_rollup as _compress_rollup,
@@ -108,6 +111,7 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "directive_get",
     "directive_set",
     "directive_clear",
+    "lessons_learnt",
     "time_profile_get",
     "time_profile_set",
     "routine_list",
@@ -117,6 +121,56 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "browser_use_run",
     "tulpa_run_terminal",
 }
+
+
+class _WakeClassification(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    notify_user: bool = False
+    reason: str = ""
+
+
+class _ClaimCheckDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ok: bool = True
+    applies: bool = False
+    mismatch: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+    repair_instruction: str = ""
+
+
+class _GuardrailIntentDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ok: bool = True
+    gate: str = "allow"
+    impact_type: str = "read"
+    recipient_scope: str = "self"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
+class _SkillSelectionItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    score: float = Field(default=0.0)
+    reason: str = ""
+
+
+class _SkillSelectionDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    selected: list[_SkillSelectionItem] = Field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _PreparedTurnContext:
+    through_id: int | None
+    config: dict[str, Any]
+    graph_input: dict[str, Any]
 
 
 class OpenTulpaLangGraphRuntime:
@@ -187,6 +241,11 @@ class OpenTulpaLangGraphRuntime:
         self._behavior_log_lock = threading.Lock()
         if self._behavior_log_enabled:
             self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "opentulpa_active_customer_id",
+            default="",
+        )
+        self._active_customer_id = ""
 
         self._model = init_chat_model(
             self.model_name,
@@ -272,129 +331,157 @@ class OpenTulpaLangGraphRuntime:
         with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
             f.write(serialized + "\n")
 
-    @staticmethod
-    def _extract_json_object(text: str) -> dict[str, Any] | None:
-        raw = str(text or "").strip()
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            pass
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        try:
-            parsed = json.loads(raw[start : end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _strip_internal_json_prefix(text: str) -> str:
-        """
-        Remove internal control JSON prefixes that can leak into streamed user output.
-
-        Example internal payloads:
-        - {"selected": []} from skill selector
-        - {"notify_user": false, "reason": "..."} from wake classifier
-        """
-        raw = str(text or "")
-        working = raw.lstrip()
-        changed = False
-        decoder = json.JSONDecoder()
-
-        while working.startswith("{"):
+    async def _invoke_structured_model(
+        self,
+        *,
+        model: Any,
+        messages: list[Any],
+        schema: type[BaseModel],
+    ) -> tuple[BaseModel | None, str | None]:
+        last_error: str | None = None
+        structured = getattr(model, "with_structured_output", None)
+        if callable(structured):
             try:
-                parsed, end_idx = decoder.raw_decode(working)
-            except Exception:
-                break
-
-            is_internal_selector = (
-                isinstance(parsed, dict)
-                and set(parsed.keys()) == {"selected"}
-                and isinstance(parsed.get("selected"), list)
-            )
-            is_internal_classifier = (
-                isinstance(parsed, dict)
-                and "notify_user" in parsed
-                and set(parsed.keys()).issubset({"notify_user", "reason"})
-            )
-            if not (is_internal_selector or is_internal_classifier):
-                break
-
-            working = working[end_idx:].lstrip()
-            changed = True
-
-        return working if changed else raw
-
-    @staticmethod
-    def _has_incomplete_internal_json_prefix(text: str) -> bool:
-        """
-        Detect incomplete internal control JSON prefixes during streaming.
-        This prevents leaking partial internal payloads (e.g. '{"selected": ...') to users.
-        """
-        working = str(text or "").lstrip()
-        if not working.startswith("{"):
-            return False
-        head = working[:400]
-        if '"selected"' not in head and '"notify_user"' not in head:
-            return False
-        decoder = json.JSONDecoder()
+                runner = structured(schema)
+                payload = await runner.ainvoke(messages)
+                if isinstance(payload, schema):
+                    return payload, None
+                if isinstance(payload, dict):
+                    return schema.model_validate(payload), None
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
         try:
-            parsed, _ = decoder.raw_decode(working)
-        except Exception:
-            return True
-        is_internal_selector = (
-            isinstance(parsed, dict)
-            and set(parsed.keys()) == {"selected"}
-            and isinstance(parsed.get("selected"), list)
-        )
-        is_internal_classifier = (
-            isinstance(parsed, dict)
-            and "notify_user" in parsed
-            and set(parsed.keys()).issubset({"notify_user", "reason"})
-        )
-        return bool(is_internal_selector or is_internal_classifier)
+            response = await model.ainvoke(messages)
+            raw = _content_to_text(getattr(response, "content", response)).strip()
+            if raw:
+                return schema.model_validate_json(raw), None
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        return None, last_error
 
     @staticmethod
-    def _format_pending_context(events: list[dict[str, Any]], *, payload_limit: int = 800) -> str:
+    def _tool_message_indicates_approval_handoff(message: Any) -> bool:
+        if not isinstance(message, ToolMessage):
+            return False
+        extras = getattr(message, "additional_kwargs", {}) or {}
+        if isinstance(extras, dict):
+            control = extras.get("opentulpa_control", {})
+            if isinstance(control, dict):
+                status = str(control.get("status", "")).strip().lower()
+                if status == "approval_pending":
+                    return True
+        raw_content = _content_to_text(getattr(message, "content", "")).strip()
+        if not raw_content or not raw_content.startswith("{"):
+            return False
+        try:
+            payload = json.loads(raw_content)
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return str(payload.get("status", "")).strip().lower() == "approval_pending"
+
+    @staticmethod
+    def _build_approval_handoff_text(result: dict[str, Any]) -> str:
+        outcomes = result.get("tool_outcomes", [])
+        if not isinstance(outcomes, list):
+            return ""
+        for item in outcomes:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status", "")).strip().lower() != "approval_pending":
+                continue
+            approval_id = str(item.get("approval_id", "")).strip()
+            action_name = str(item.get("tool_name", "")).strip() or "action"
+            if approval_id:
+                return (
+                    "Approval required before execution. "
+                    f"approval_id={approval_id}. Approve or deny this request in the UI."
+                )
+            return f"Approval required before execution of {action_name}. Approve or deny in the UI."
+        return ""
+
+    @staticmethod
+    def _summarize_pending_payload(payload: Any, *, payload_limit: int = 240) -> str:
+        if isinstance(payload, dict):
+            allowed_keys = (
+                "approval_id",
+                "status",
+                "action_name",
+                "execution_ok",
+                "retryable",
+                "event_label",
+                "routine_id",
+                "routine_name",
+                "task_id",
+                "reason",
+            )
+            parts: list[str] = []
+            for key in allowed_keys:
+                value = payload.get(key)
+                if value in (None, ""):
+                    continue
+                text = " ".join(str(value).split())
+                if len(text) > 90:
+                    text = text[:90] + "..."
+                parts.append(f"{key}={text}")
+            if not parts:
+                keys = sorted(str(k) for k in payload if str(k).strip())
+                if keys:
+                    shown = ", ".join(keys[:6])
+                    more = f" (+{len(keys) - 6})" if len(keys) > 6 else ""
+                    return f"payload_keys={shown}{more}"
+                return ""
+            summary = "; ".join(parts)
+        else:
+            summary = " ".join(str(payload).split())
+        if len(summary) > payload_limit:
+            summary = summary[:payload_limit] + "..."
+        return summary
+
+    @staticmethod
+    def _format_pending_context(events: list[dict[str, Any]], *, payload_limit: int = 240) -> str:
         lines: list[str] = []
         for idx, event in enumerate(events, start=1):
             source = str(event.get("source", "event"))
             event_type = str(event.get("event_type", "update"))
-            payload = event.get("payload", {})
-            if isinstance(payload, dict):
-                payload_text = json.dumps(payload, ensure_ascii=False)
+            payload_text = OpenTulpaLangGraphRuntime._summarize_pending_payload(
+                event.get("payload", {}),
+                payload_limit=payload_limit,
+            )
+            if payload_text:
+                lines.append(f"{idx}. [{source}/{event_type}] {payload_text}")
             else:
-                payload_text = str(payload)
-            payload_text = " ".join(payload_text.split())
-            if len(payload_text) > payload_limit:
-                payload_text = payload_text[:payload_limit] + "..."
-            lines.append(f"{idx}. [{source}/{event_type}] {payload_text}")
+                lines.append(f"{idx}. [{source}/{event_type}]")
         return "\n".join(lines)
 
-    def _prepend_pending_context(
+    def _load_pending_context(
         self,
         *,
         customer_id: str,
-        text: str,
         include_pending_context: bool,
-    ) -> tuple[str, int | None]:
+    ) -> tuple[list[dict[str, Any]], int | None]:
         if not include_pending_context or self._context_events is None:
-            return text, None
+            return [], None
         pending = self._context_events.list_events(customer_id, limit=20)
         if not pending:
-            return text, None
+            return [], None
         through_id = int(pending[-1]["id"])
-        wrapped = (
-            "System context updates collected while the user was away:\n"
-            f"{self._format_pending_context(pending)}\n\n"
-            f"User message:\n{text}"
+        return pending, through_id
+
+    def _build_pending_context_summary(
+        self,
+        *,
+        customer_id: str,
+        include_pending_context: bool,
+    ) -> tuple[str, int | None]:
+        pending, through_id = self._load_pending_context(
+            customer_id=customer_id,
+            include_pending_context=include_pending_context,
         )
-        return wrapped, through_id
+        if not pending:
+            return "", through_id
+        return self._format_pending_context(pending), through_id
 
     async def _has_pending_approval_lock(self, *, customer_id: str, thread_id: str) -> bool:
         cid = str(customer_id or "").strip()
@@ -626,58 +713,51 @@ class OpenTulpaLangGraphRuntime:
                 for c in shortlist
             ]
         )
-        try:
-            response = await self._model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You select reusable skills for the current user request.\n"
-                            "Return strict JSON object with key 'selected', an array of objects:\n"
-                            "  {\"name\": string, \"score\": number, \"reason\": string}\n"
-                            "Choose only skills that materially improve answer quality.\n"
-                            "If none apply, return {\"selected\": []}."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"customer_id={customer_id}\n"
-                            f"user_request={prompt_query[:2000]}\n\n"
-                            f"available_skills:\n{catalog}"
-                        )
-                    ),
-                ]
-            )
-            raw = _content_to_text(getattr(response, "content", "")).strip()
-            parsed = self._extract_json_object(raw) or {}
-            selected_raw = parsed.get("selected", [])
-            if not isinstance(selected_raw, list):
-                return []
-            by_name = {c["name"]: c for c in shortlist}
-            selected: list[dict[str, Any]] = []
-            for item in selected_raw:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name", "")).strip()
-                if not name or name not in by_name:
-                    continue
-                score_raw = item.get("score", 0)
-                try:
-                    score = float(score_raw)
-                except Exception:
-                    score = 0.0
-                if score < 0.45:
-                    continue
-                selected.append(
-                    {
-                        **by_name[name],
-                        "score": score,
-                        "reason": str(item.get("reason", "")).strip()[:300],
-                    }
-                )
-            selected.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-            return selected[: max(1, min(int(max_skills), 3))]
-        except Exception:
+        decision, _ = await self._invoke_structured_model(
+            model=self._model,
+            schema=_SkillSelectionDecision,
+            messages=[
+                SystemMessage(
+                    content=(
+                        "You select reusable skills for the current user request.\n"
+                        "Return strict JSON object with key 'selected', an array of objects:\n"
+                        "  {\"name\": string, \"score\": number, \"reason\": string}\n"
+                        "Choose only skills that materially improve answer quality.\n"
+                        "If the request is about reminders, schedules, recurring jobs, cron, or automations, "
+                        "prefer selecting routine-schedule-composer when available.\n"
+                        "Prioritize skills that improve execution reliability and claim accuracy over style-only skills.\n"
+                        "If none apply, return {\"selected\": []}."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"customer_id={customer_id}\n"
+                        f"user_request={prompt_query[:2000]}\n\n"
+                        f"available_skills:\n{catalog}"
+                    )
+                ),
+            ],
+        )
+        if decision is None or not isinstance(decision, _SkillSelectionDecision):
             return []
+        by_name = {c["name"]: c for c in shortlist}
+        selected: list[dict[str, Any]] = []
+        for item in decision.selected:
+            name = str(item.name or "").strip()
+            if not name or name not in by_name:
+                continue
+            score = float(item.score)
+            if score < 0.45:
+                continue
+            selected.append(
+                {
+                    **by_name[name],
+                    "score": score,
+                    "reason": str(item.reason or "").strip()[:300],
+                }
+            )
+        selected.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return selected[: max(1, min(int(max_skills), 3))]
 
     async def _resolve_skill_context(self, customer_id: str, user_text: str) -> dict[str, Any]:
         cid = str(customer_id or "").strip()
@@ -941,6 +1021,83 @@ class OpenTulpaLangGraphRuntime:
     def healthy(self) -> bool:
         return self._graph is not None
 
+    def _effective_recursion_limit(self, recursion_limit_override: int | None = None) -> int:
+        if recursion_limit_override is None:
+            return int(self.recursion_limit)
+        return max(5, min(int(recursion_limit_override), 200))
+
+    @staticmethod
+    def _build_graph_input(
+        *,
+        user_text: str,
+        customer_id: str,
+        thread_id: str,
+        pending_context_summary: str,
+        trace_id: str,
+        skill_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "messages": [HumanMessage(content=user_text)],
+            "customer_id": customer_id,
+            "thread_id": thread_id,
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": pending_context_summary,
+            "agent_trace_id": trace_id,
+            "tool_error_count": 0,
+            "approval_handoff": False,
+            "claim_check_retry_count": 0,
+            "claim_check_needs_retry": False,
+            **skill_state,
+        }
+
+    async def _prepare_turn_context(
+        self,
+        *,
+        thread_id: str,
+        customer_id: str,
+        text: str,
+        include_pending_context: bool,
+        trace_id: str,
+        recursion_limit_override: int | None = None,
+    ) -> _PreparedTurnContext | None:
+        await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
+        if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
+            return None
+        user_text = str(text or "")
+        self.register_links_from_text(
+            customer_id=customer_id,
+            text=user_text,
+            source="user_turn",
+            limit=30,
+        )
+        user_text = self.expand_link_aliases(customer_id=customer_id, text=user_text)
+        pending_context_summary, through_id = self._build_pending_context_summary(
+            customer_id=customer_id,
+            include_pending_context=include_pending_context,
+        )
+        skill_state = await self._pre_resolve_skill_state(
+            customer_id=customer_id,
+            user_text=user_text,
+        )
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
+        }
+        graph_input = self._build_graph_input(
+            user_text=user_text,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            pending_context_summary=pending_context_summary,
+            trace_id=trace_id,
+            skill_state=skill_state,
+        )
+        return _PreparedTurnContext(
+            through_id=through_id,
+            config=config,
+            graph_input=graph_input,
+        )
+
     async def ainvoke_text(
         self,
         *,
@@ -974,13 +1131,15 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=customer_id,
                 input_chars=len(str(effective_text or "")),
             )
-            await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-            merged_text, through_id = self._prepend_pending_context(
+            prepared = await self._prepare_turn_context(
+                thread_id=thread_id,
                 customer_id=customer_id,
-                text=effective_text,
+                text=str(effective_text or ""),
                 include_pending_context=include_pending_context,
+                trace_id=turn_trace_id,
+                recursion_limit_override=recursion_limit_override,
             )
-            if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
+            if prepared is None:
                 self.log_behavior_event(
                     event="turn_blocked_pending_approval",
                     trace_id=turn_trace_id,
@@ -989,41 +1148,8 @@ class OpenTulpaLangGraphRuntime:
                     customer_id=customer_id,
                 )
                 return ""
-            self.register_links_from_text(
-                customer_id=customer_id,
-                text=merged_text,
-                source="user_turn",
-                limit=30,
-            )
-            merged_text = self.expand_link_aliases(customer_id=customer_id, text=merged_text)
-            skill_state = await self._pre_resolve_skill_state(
-                customer_id=customer_id,
-                user_text=merged_text,
-            )
-            effective_recursion_limit = (
-                max(5, min(int(recursion_limit_override), 200))
-                if recursion_limit_override is not None
-                else self.recursion_limit
-            )
-            config = {
-                "configurable": {"thread_id": thread_id},
-                "recursion_limit": effective_recursion_limit,
-            }
-            result = await self._graph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=merged_text)],
-                    "customer_id": customer_id,
-                    "thread_id": thread_id,
-                    "agent_trace_id": turn_trace_id,
-                    "tool_error_count": 0,
-                    "approval_handoff": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_needs_retry": False,
-                    **skill_state,
-                },
-                config=config,
-            )
-            if bool(result.get("approval_handoff", False)):
+            result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
+            if bool(result.get("approval_handoff", False)) or str(result.get("turn_status", "")) == "approval_pending":
                 self.log_behavior_event(
                     event="turn_approval_handoff",
                     trace_id=turn_trace_id,
@@ -1031,13 +1157,39 @@ class OpenTulpaLangGraphRuntime:
                     thread_id=thread_id,
                     customer_id=customer_id,
                 )
-                return ""
+                handoff_text = self._build_approval_handoff_text(result)
+                if handoff_text:
+                    self.register_links_from_text(
+                        customer_id=customer_id,
+                        text=handoff_text,
+                        source="assistant_turn",
+                        limit=10,
+                    )
+                return handoff_text
+            final_reply = str(result.get("final_response_text", "")).strip()
+            if final_reply:
+                self.register_links_from_text(
+                    customer_id=customer_id,
+                    text=final_reply,
+                    source="assistant_turn",
+                    limit=30,
+                )
+                cleaned = self.expand_link_aliases(customer_id=customer_id, text=final_reply)
+                if prepared.through_id is not None and self._context_events is not None:
+                    self._context_events.clear_events(customer_id, through_id=prepared.through_id)
+                self.log_behavior_event(
+                    event="turn_complete",
+                    trace_id=turn_trace_id,
+                    mode="ainvoke",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    output_chars=len(cleaned.strip()),
+                )
+                return cleaned.strip()
             messages = result.get("messages", [])
             for message in reversed(messages):
                 if isinstance(message, AIMessage) and (message.content or "").strip():
-                    cleaned = self._strip_internal_json_prefix(str(message.content))
-                    if self._has_incomplete_internal_json_prefix(cleaned):
-                        continue
+                    cleaned = str(message.content)
                     self.register_links_from_text(
                         customer_id=customer_id,
                         text=cleaned,
@@ -1045,8 +1197,8 @@ class OpenTulpaLangGraphRuntime:
                         limit=30,
                     )
                     cleaned = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
-                    if through_id is not None and self._context_events is not None:
-                        self._context_events.clear_events(customer_id, through_id=through_id)
+                    if prepared.through_id is not None and self._context_events is not None:
+                        self._context_events.clear_events(customer_id, through_id=prepared.through_id)
                     self.log_behavior_event(
                         event="turn_complete",
                         trace_id=turn_trace_id,
@@ -1137,13 +1289,15 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=customer_id,
                 input_chars=len(str(effective_text or "")),
             )
-            await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-            merged_text, through_id = self._prepend_pending_context(
+            prepared = await self._prepare_turn_context(
+                thread_id=thread_id,
                 customer_id=customer_id,
-                text=effective_text,
+                text=str(effective_text or ""),
                 include_pending_context=include_pending_context,
+                trace_id=turn_trace_id,
+                recursion_limit_override=None,
             )
-            if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
+            if prepared is None:
                 yielded_any = True
                 self.log_behavior_event(
                     event="turn_blocked_pending_approval",
@@ -1154,18 +1308,7 @@ class OpenTulpaLangGraphRuntime:
                 )
                 yield STREAM_APPROVAL_HANDOFF_SIGNAL
                 return
-            self.register_links_from_text(
-                customer_id=customer_id,
-                text=merged_text,
-                source="user_turn",
-                limit=30,
-            )
-            merged_text = self.expand_link_aliases(customer_id=customer_id, text=merged_text)
-            skill_state = await self._pre_resolve_skill_state(
-                customer_id=customer_id,
-                user_text=merged_text,
-            )
-            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
+            config = prepared.config
             segment_accumulated = ""
             stream_key = ""
             yielded_any = False
@@ -1183,7 +1326,6 @@ class OpenTulpaLangGraphRuntime:
             stream_wait_signals = 0
             stream_visible_yields = 0
             stream_filtered_empty = 0
-            stream_filtered_incomplete_json = 0
             stream_filtered_blank_expanded = 0
             first_visible_yield_ms: int | None = None
             self.log_behavior_event(
@@ -1198,10 +1340,8 @@ class OpenTulpaLangGraphRuntime:
                 nonlocal segment_accumulated
                 if not segment_accumulated:
                     return
-                cleaned_segment = self._strip_internal_json_prefix(segment_accumulated)
-                if cleaned_segment.strip() and not self._has_incomplete_internal_json_prefix(
-                    cleaned_segment
-                ):
+                cleaned_segment = segment_accumulated
+                if cleaned_segment.strip():
                     self.register_links_from_text(
                         customer_id=customer_id,
                         text=cleaned_segment,
@@ -1211,16 +1351,7 @@ class OpenTulpaLangGraphRuntime:
                 segment_accumulated = ""
 
             async for message_chunk, metadata in self._graph.astream(
-                {
-                    "messages": [HumanMessage(content=merged_text)],
-                    "customer_id": customer_id,
-                    "thread_id": thread_id,
-                    "agent_trace_id": turn_trace_id,
-                    "tool_error_count": 0,
-                    "claim_check_retry_count": 0,
-                    "claim_check_needs_retry": False,
-                    **skill_state,
-                },
+                prepared.graph_input,
                 config=config,
                 stream_mode="messages",
             ):
@@ -1239,17 +1370,15 @@ class OpenTulpaLangGraphRuntime:
                     )
                 if node_name != "agent":
                     stream_tool_chunks += 1
-                    if node_name == "tools":
-                        tool_text = _content_to_text(getattr(message_chunk, "content", "")).strip()
-                        if isinstance(message_chunk, ToolMessage) and tool_text == "APPROVAL_HANDOFF":
-                            approval_handoff_detected = True
-                            self.log_behavior_event(
-                                event="turn_stream_tool_approval_handoff_detected",
-                                trace_id=turn_trace_id,
-                                thread_id=thread_id,
-                                customer_id=customer_id,
-                                stream_total_chunks=stream_total_chunks,
-                            )
+                    if node_name == "tools" and self._tool_message_indicates_approval_handoff(message_chunk):
+                        approval_handoff_detected = True
+                        self.log_behavior_event(
+                            event="turn_stream_tool_approval_handoff_detected",
+                            trace_id=turn_trace_id,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            stream_total_chunks=stream_total_chunks,
+                        )
                     if saw_agent_output and not in_tool_phase:
                         in_tool_phase = True
                         stream_wait_signals += 1
@@ -1278,7 +1407,6 @@ class OpenTulpaLangGraphRuntime:
                             stream_agent_chunks=stream_agent_chunks,
                             stream_tool_chunks=stream_tool_chunks,
                             stream_filtered_empty=stream_filtered_empty,
-                            stream_filtered_incomplete_json=stream_filtered_incomplete_json,
                             stream_filtered_blank_expanded=stream_filtered_blank_expanded,
                         )
                         break
@@ -1296,14 +1424,9 @@ class OpenTulpaLangGraphRuntime:
                 if message_chunk.content:
                     saw_agent_output = True
                     segment_accumulated += str(message_chunk.content)
-                    cleaned = self._strip_internal_json_prefix(segment_accumulated)
+                    cleaned = segment_accumulated
                     if not cleaned.strip():
                         stream_filtered_empty += 1
-                        continue
-                    if cleaned == segment_accumulated and self._has_incomplete_internal_json_prefix(
-                        segment_accumulated
-                    ):
-                        stream_filtered_incomplete_json += 1
                         continue
                     expanded = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
                     if expanded.strip():
@@ -1341,13 +1464,12 @@ class OpenTulpaLangGraphRuntime:
                         stream_agent_chunks=stream_agent_chunks,
                         stream_tool_chunks=stream_tool_chunks,
                         stream_filtered_empty=stream_filtered_empty,
-                        stream_filtered_incomplete_json=stream_filtered_incomplete_json,
                         stream_filtered_blank_expanded=stream_filtered_blank_expanded,
                     )
                     break
 
-            if through_id is not None and self._context_events is not None:
-                self._context_events.clear_events(customer_id, through_id=through_id)
+            if prepared.through_id is not None and self._context_events is not None:
+                self._context_events.clear_events(customer_id, through_id=prepared.through_id)
             _finalize_segment()
             if not yielded_any and approval_handoff_detected:
                 yielded_any = True
@@ -1375,24 +1497,15 @@ class OpenTulpaLangGraphRuntime:
                     stream_agent_chunks=stream_agent_chunks,
                     stream_tool_chunks=stream_tool_chunks,
                     stream_filtered_empty=stream_filtered_empty,
-                    stream_filtered_incomplete_json=stream_filtered_incomplete_json,
                     stream_filtered_blank_expanded=stream_filtered_blank_expanded,
                 )
                 fallback_result = await self._graph.ainvoke(
-                    {
-                        "messages": [HumanMessage(content=merged_text)],
-                        "customer_id": customer_id,
-                        "thread_id": thread_id,
-                        "agent_trace_id": turn_trace_id,
-                        "tool_error_count": 0,
-                        "approval_handoff": False,
-                        "claim_check_retry_count": 0,
-                        "claim_check_needs_retry": False,
-                        **skill_state,
-                    },
+                    prepared.graph_input,
                     config=config,
                 )
-                if bool(fallback_result.get("approval_handoff", False)):
+                if bool(fallback_result.get("approval_handoff", False)) or str(
+                    fallback_result.get("turn_status", "")
+                ) == "approval_pending":
                     yielded_any = True
                     self.log_behavior_event(
                         event="turn_approval_handoff",
@@ -1405,11 +1518,33 @@ class OpenTulpaLangGraphRuntime:
                     fallback_result = {"messages": []}
                 fallback_messages = fallback_result.get("messages", [])
                 fallback_yielded = False
+                fallback_text = str(fallback_result.get("final_response_text", "")).strip()
+                if fallback_text:
+                    self.register_links_from_text(
+                        customer_id=customer_id,
+                        text=fallback_text,
+                        source="assistant_turn",
+                        limit=30,
+                    )
+                    fallback_text = self.expand_link_aliases(
+                        customer_id=customer_id,
+                        text=fallback_text,
+                    )
+                    if fallback_text.strip():
+                        fallback_yielded = True
+                        self.log_behavior_event(
+                            event="turn_stream_fallback_yielded",
+                            trace_id=turn_trace_id,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            output_chars=len(fallback_text.strip()),
+                        )
+                        yield fallback_text.strip()
                 for message in reversed(fallback_messages):
+                    if fallback_yielded:
+                        break
                     if isinstance(message, AIMessage) and (message.content or "").strip():
-                        cleaned = self._strip_internal_json_prefix(str(message.content))
-                        if self._has_incomplete_internal_json_prefix(cleaned):
-                            continue
+                        cleaned = str(message.content)
                         if cleaned.strip():
                             self.register_links_from_text(
                                 customer_id=customer_id,
@@ -1498,34 +1633,39 @@ class OpenTulpaLangGraphRuntime:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         """Let the model decide whether a wake event should interrupt the user now."""
-        try:
-            response = await self._wake_classifier_model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You classify background assistant events.\n"
-                            "Return strict JSON with keys: notify_user (bool), reason (string).\n"
-                            "Use notify_user=true only when immediate user attention is required."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"customer_id={customer_id}\n"
-                            f"event_label={event_label}\n"
-                            f"payload={json.dumps(payload, ensure_ascii=False)[:5000]}"
-                        )
-                    ),
-                ]
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text) or {}
+        decision, invoke_error = await self._invoke_structured_model(
+            model=self._wake_classifier_model,
+            schema=_WakeClassification,
+            messages=[
+                SystemMessage(
+                    content=(
+                        "You classify background assistant events.\n"
+                        "Return strict JSON with keys: notify_user (bool), reason (string).\n"
+                        "Use notify_user=true only when immediate user attention is required."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"customer_id={customer_id}\n"
+                        f"event_label={event_label}\n"
+                        f"payload={json.dumps(payload, ensure_ascii=False)[:5000]}"
+                    )
+                ),
+            ],
+        )
+        if decision is None or not isinstance(decision, _WakeClassification):
             return {
-                "notify_user": bool(parsed.get("notify_user", False)),
-                "reason": str(parsed.get("reason", "")).strip()[:500],
+                "notify_user": False,
+                "reason": (
+                    f"classifier_error:{invoke_error}"
+                    if invoke_error
+                    else "classifier_error:invalid_wake_classifier_output"
+                ),
             }
-        except Exception as exc:
-            return {"notify_user": False, "reason": f"classifier_error:{exc}"}
+        return {
+            "notify_user": bool(decision.notify_user),
+            "reason": str(decision.reason).strip()[:500],
+        }
 
     async def verify_completion_claim(
         self,
@@ -1559,94 +1699,73 @@ class OpenTulpaLangGraphRuntime:
             if text:
                 safe_tools.append(text)
 
-        try:
-            response = await self._guardrail_classifier_model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You verify assistant execution claims against tool evidence.\n"
-                            "Return strict JSON only with keys:\n"
-                            "ok (bool), applies (bool), mismatch (bool), confidence (0..1), "
-                            "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
-                            "Decision policy (conservative, non-aggressive):\n"
-                            "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
-                            "- applies=true if assistant commits to an immediate follow-up action in this same turn "
-                            "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
-                            "- applies=true if assistant asks the user to approve/deny or says approval is pending now.\n"
-                            "- If user_message asks only for an outcome/failure summary, assistant must not promise "
-                            "new immediate execution unless tool evidence exists in this turn.\n"
-                            "- If assistant is future-tense or conditional without immediate-action claims, set applies=false and mismatch=false.\n"
-                            "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
-                            "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
-                            "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
-                            "- If assistant asks for approval (or says approval is pending) but tool evidence lacks a pending-approval artifact "
-                            "(e.g., approval_id, APPROVAL_PENDING, or explicit pending challenge), set mismatch=true.\n"
-                            "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
-                            "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
-                            "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
-                            "No markdown. No extra keys."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"user_message={safe_user}\n"
-                            f"assistant_message={safe_assistant}\n"
-                            f"turn_window={safe_turn_window}\n"
-                            f"recent_tool_outputs={json.dumps(safe_tools, ensure_ascii=False)}"
-                        )
-                    ),
-                ]
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text)
-            if not isinstance(parsed, dict):
-                return {
-                    "ok": False,
-                    "applies": False,
-                    "mismatch": False,
-                    "confidence": 0.0,
-                    "reason": "invalid_checker_output:no_json_object",
-                    "repair_instruction": "",
-                    "usable": False,
-                }
-            required_keys = {"ok", "applies", "mismatch", "confidence", "reason", "repair_instruction"}
-            if not required_keys.issubset(parsed.keys()):
-                missing = ",".join(sorted(required_keys.difference(parsed.keys())))
-                return {
-                    "ok": False,
-                    "applies": False,
-                    "mismatch": False,
-                    "confidence": 0.0,
-                    "reason": f"invalid_checker_output:missing_keys:{missing}"[:180],
-                    "repair_instruction": "",
-                    "usable": False,
-                }
-            applies = bool(parsed.get("applies", False))
-            mismatch = bool(parsed.get("mismatch", False)) if applies else False
-            try:
-                confidence = float(parsed.get("confidence", 0.0))
-            except Exception:
-                confidence = 0.0
-            return {
-                "ok": bool(parsed.get("ok", True)),
-                "applies": applies,
-                "mismatch": mismatch,
-                "confidence": max(0.0, min(confidence, 1.0)),
-                "reason": str(parsed.get("reason", "")).strip()[:180],
-                "repair_instruction": str(parsed.get("repair_instruction", "")).strip()[:220],
-                "usable": True,
-            }
-        except Exception as exc:
+        decision, invoke_error = await self._invoke_structured_model(
+            model=self._guardrail_classifier_model,
+            schema=_ClaimCheckDecision,
+            messages=[
+                SystemMessage(
+                    content=(
+                        "You verify assistant execution claims against tool evidence.\n"
+                        "Return strict JSON only with keys:\n"
+                        "ok (bool), applies (bool), mismatch (bool), confidence (0..1), "
+                        "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
+                        "Decision policy (conservative, non-aggressive):\n"
+                        "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
+                        "- applies=true if assistant commits to an immediate follow-up action in this same turn "
+                        "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
+                        "- applies=true if assistant asks the user to approve/deny or says approval is pending now.\n"
+                        "- If user_message asks only for an outcome/failure summary, assistant must not promise "
+                        "new immediate execution unless tool evidence exists in this turn.\n"
+                        "- If assistant is future-tense or conditional without immediate-action claims, set applies=false and mismatch=false.\n"
+                        "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
+                        "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
+                        "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
+                        "- If assistant asks for approval (or says approval is pending) but tool evidence lacks a pending-approval artifact "
+                        "(e.g., approval_id, APPROVAL_PENDING, or explicit pending challenge), set mismatch=true.\n"
+                        "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
+                        "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
+                        "- If assistant claims it fetched/initialized/updated specific content (e.g., named headlines, numbers, concrete facts) "
+                        "but those concrete details are not present in tool outputs from this turn, set mismatch=true.\n"
+                        "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
+                        "No markdown. No extra keys."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"user_message={safe_user}\n"
+                        f"assistant_message={safe_assistant}\n"
+                        f"turn_window={safe_turn_window}\n"
+                        f"recent_tool_outputs={json.dumps(safe_tools, ensure_ascii=False)}"
+                    )
+                ),
+            ],
+        )
+        if decision is None or not isinstance(decision, _ClaimCheckDecision):
             return {
                 "ok": False,
                 "applies": False,
                 "mismatch": False,
                 "confidence": 0.0,
-                "reason": f"classifier_error:{exc}",
+                "reason": (
+                    f"classifier_error:{invoke_error}"
+                    if invoke_error
+                    else "invalid_checker_output:no_json_object"
+                ),
                 "repair_instruction": "",
                 "usable": False,
             }
+        applies = bool(decision.applies)
+        mismatch = bool(decision.mismatch) if applies else False
+        confidence = float(decision.confidence)
+        return {
+            "ok": bool(decision.ok),
+            "applies": applies,
+            "mismatch": mismatch,
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "reason": str(decision.reason).strip()[:180],
+            "repair_instruction": str(decision.repair_instruction).strip()[:220],
+            "usable": True,
+        }
 
     async def classify_guardrail_intent(
         self,
@@ -1696,84 +1815,80 @@ class OpenTulpaLangGraphRuntime:
             else:
                 safe_args[key_text] = str(value)[:200]
 
-        try:
-            response = await self._guardrail_classifier_model.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "Classify action safety intent for an approval gate.\n"
-                            "Return strict JSON object only with keys:\n"
-                            "ok (bool), gate (allow|require_approval|deny),\n"
-                            "impact_type (read|write|purchase|costly),\n"
-                            "recipient_scope (self|external|unknown),\n"
-                            "confidence (0..1), reason (string <= 160 chars).\n"
-                            "Rules:\n"
-                            "- Approval should be required in exactly one case: external write side effects.\n"
-                            "- External write means mutating/posting/sending/purchasing/updating data on services "
-                            "outside this local project/runtime.\n"
-                            "- Treat ANY non-localhost network mutation as external write.\n"
-                            "- For shell/terminal commands, classify from literal command intent, not user phrasing.\n"
-                            "- If command contains write verbs/flags with remote URLs, set gate=require_approval.\n"
-                            "- High-signal external write indicators include: "
-                            "curl -X POST|PUT|PATCH|DELETE, --request POST|PUT|PATCH|DELETE, "
-                            "--data/-d/--json with http(s) URL, requests.post/put/patch/delete, "
-                            "httpx.post/put/patch/delete, fetch(...,{method:'POST'|'PUT'|'PATCH'|'DELETE'}).\n"
-                            "- URLs to localhost/127.0.0.1/::1 are local; do not treat as external by URL alone.\n"
-                            "- Internal reads/writes (repo files, local artifacts, local config/state) are allow.\n"
-                            "- Remote reads/fetch/summarization without external mutation are allow.\n"
-                            "- Never set gate=require_approval for read-only actions, including external/API/web "
-                            "reads.\n"
-                            "- For tulpa_run_terminal, classify from full command/script text in action_args.command.\n"
-                            "- For routine_create, evaluate planned downstream behavior from action_args + action_note:\n"
-                            "  * inspect implementation_command/implementation fields as the execution artifact.\n"
-                            "  * if future scheduled behavior includes external writes, set gate=require_approval.\n"
-                            "  * otherwise set gate=allow.\n"
-                            "- For non-routine actions, set gate=require_approval only when this immediate action "
-                            "implies external write side effects.\n"
-                            "- If uncertain on a command that includes a non-localhost URL plus write-like markers, "
-                            "escalate to require_approval.\n"
-                            "- If uncertain without write-like markers, set gate=allow with recipient_scope=unknown "
-                            "or self as appropriate.\n"
-                            "- Use deny only for actions that should never run as requested.\n"
-                            "- Treat action_note as agent reasoning about next planned action and likely tool path.\n"
-                            "Do not include any extra keys or markdown."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"action_name={safe_name}\n"
-                            f"action_args={json.dumps(safe_args, ensure_ascii=False)[:20000]}\n"
-                            f"action_note={str(action_note or '').strip()[:2000]}"
-                        )
-                    ),
-                ]
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            parsed = self._extract_json_object(raw_text) or {}
-            gate = str(parsed.get("gate", "")).strip().lower()
-            impact_type = str(parsed.get("impact_type", "")).strip().lower()
-            recipient_scope = str(parsed.get("recipient_scope", "")).strip().lower()
-            if gate not in {"allow", "require_approval", "deny"}:
-                return {"ok": False, "error": "invalid_gate"}
-            if impact_type not in {"read", "write", "purchase", "costly"}:
-                return {"ok": False, "error": "invalid_impact_type"}
-            if recipient_scope not in {"self", "external", "unknown"}:
-                return {"ok": False, "error": "invalid_recipient_scope"}
-            try:
-                confidence = float(parsed.get("confidence", 0.0))
-            except Exception:
-                confidence = 0.0
-            return {
-                "ok": True,
-                "gate": gate,
-                "impact_type": impact_type,
-                "recipient_scope": recipient_scope,
-                "confidence": max(0.0, min(confidence, 1.0)),
-                "reason": str(parsed.get("reason", "")).strip()[:160],
-            }
-        except Exception as exc:
-            return {"ok": False, "error": f"classifier_error:{exc}"}
+        decision, invoke_error = await self._invoke_structured_model(
+            model=self._guardrail_classifier_model,
+            schema=_GuardrailIntentDecision,
+            messages=[
+                SystemMessage(
+                    content=(
+                        "Classify action safety intent for an approval gate.\n"
+                        "Return strict JSON object only with keys:\n"
+                        "ok (bool), gate (allow|require_approval|deny),\n"
+                        "impact_type (read|write|purchase|costly),\n"
+                        "recipient_scope (self|external|unknown),\n"
+                        "confidence (0..1), reason (string <= 160 chars).\n"
+                        "Rules:\n"
+                        "- Approval should be required in exactly one case: external write side effects.\n"
+                        "- External write means mutating/posting/sending/purchasing/updating data on services "
+                        "outside this local project/runtime.\n"
+                        "- Treat ANY non-localhost network mutation as external write.\n"
+                        "- For shell/terminal commands, classify from literal command intent, not user phrasing.\n"
+                        "- If command contains write verbs/flags with remote URLs, set gate=require_approval.\n"
+                        "- High-signal external write indicators include: "
+                        "curl -X POST|PUT|PATCH|DELETE, --request POST|PUT|PATCH|DELETE, "
+                        "--data/-d/--json with http(s) URL, requests.post/put/patch/delete, "
+                        "httpx.post/put/patch/delete, fetch(...,{method:'POST'|'PUT'|'PATCH'|'DELETE'}).\n"
+                        "- URLs to localhost/127.0.0.1/::1 are local; do not treat as external by URL alone.\n"
+                        "- Internal reads/writes (repo files, local artifacts, local config/state) are allow.\n"
+                        "- Remote reads/fetch/summarization without external mutation are allow.\n"
+                        "- Never set gate=require_approval for read-only actions, including external/API/web "
+                        "reads.\n"
+                        "- For tulpa_run_terminal, classify from full command/script text in action_args.command.\n"
+                        "- For routine_create, evaluate planned downstream behavior from action_args + action_note:\n"
+                        "  * inspect implementation_command/implementation fields as the execution artifact.\n"
+                        "  * if future scheduled behavior includes external writes, set gate=require_approval.\n"
+                        "  * otherwise set gate=allow.\n"
+                        "- For non-routine actions, set gate=require_approval only when this immediate action "
+                        "implies external write side effects.\n"
+                        "- If uncertain on a command that includes a non-localhost URL plus write-like markers, "
+                        "escalate to require_approval.\n"
+                        "- If uncertain without write-like markers, set gate=allow with recipient_scope=unknown "
+                        "or self as appropriate.\n"
+                        "- Use deny only for actions that should never run as requested.\n"
+                        "- Treat action_note as agent reasoning about next planned action and likely tool path.\n"
+                        "Do not include any extra keys or markdown."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"action_name={safe_name}\n"
+                        f"action_args={json.dumps(safe_args, ensure_ascii=False)[:20000]}\n"
+                        f"action_note={str(action_note or '').strip()[:2000]}"
+                    )
+                ),
+            ],
+        )
+        if decision is None or not isinstance(decision, _GuardrailIntentDecision):
+            detail = invoke_error or "invalid_guardrail_output"
+            return {"ok": False, "error": f"classifier_error:{detail}"}
+
+        gate = str(decision.gate).strip().lower()
+        impact_type = str(decision.impact_type).strip().lower()
+        recipient_scope = str(decision.recipient_scope).strip().lower()
+        if gate not in {"allow", "require_approval", "deny"}:
+            return {"ok": False, "error": "invalid_gate"}
+        if impact_type not in {"read", "write", "purchase", "costly"}:
+            return {"ok": False, "error": "invalid_impact_type"}
+        if recipient_scope not in {"self", "external", "unknown"}:
+            return {"ok": False, "error": "invalid_recipient_scope"}
+        return {
+            "ok": bool(decision.ok),
+            "gate": gate,
+            "impact_type": impact_type,
+            "recipient_scope": recipient_scope,
+            "confidence": max(0.0, min(float(decision.confidence), 1.0)),
+            "reason": str(decision.reason).strip()[:160],
+        }
 
     async def evaluate_tool_guardrail(
         self,
@@ -1888,6 +2003,19 @@ class OpenTulpaLangGraphRuntime:
     def _build_graph(self):
         return build_runtime_graph(self)
 
+    def set_active_customer_id(self, customer_id: str):
+        cid = str(customer_id or "").strip()
+        token = self._active_customer_id_ctx.set(cid)
+        self._active_customer_id = cid
+        return token
+
+    def reset_active_customer_id(self, token: object) -> None:
+        self._active_customer_id_ctx.reset(token)
+        self._active_customer_id = str(self._active_customer_id_ctx.get() or "").strip()
+
+    def get_active_customer_id(self) -> str:
+        return str(self._active_customer_id_ctx.get() or "").strip()
+
     async def execute_tool(
         self,
         *,
@@ -1915,13 +2043,16 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=str(customer_id or "").strip(),
             )
             raise RuntimeError(f"unknown tool: {action_name}")
-        args = action_args if isinstance(action_args, dict) else {}
-        if inject_customer_id and action_name in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS:
-            args = {**args, "customer_id": str(customer_id or "").strip()}
+        cid = str(customer_id or "").strip()
+        args = dict(action_args) if isinstance(action_args, dict) else {}
+        args.pop("customer_id", None)
+        if inject_customer_id and str(action_name or "").strip() in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS and not cid:
+            raise RuntimeError(f"customer_id is required for tool: {action_name}")
         args = self.resolve_link_aliases_in_args(
-            customer_id=str(customer_id or "").strip(),
+            customer_id=cid,
             args=args,
         )
+        token = self.set_active_customer_id(cid)
         try:
             result = await tool_fn.ainvoke(args)
         except Exception as exc:
@@ -1932,7 +2063,8 @@ class OpenTulpaLangGraphRuntime:
                 error=str(exc)[:500],
             )
             raise
-        cid = str(customer_id or "").strip()
+        finally:
+            self.reset_active_customer_id(token)
         if cid:
             self.register_links_from_text(
                 customer_id=cid,

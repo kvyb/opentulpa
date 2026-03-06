@@ -18,7 +18,7 @@ from opentulpa.agent.lc_messages import (
 
 
 def normalize_model_name(model_name: str) -> str:
-    return model_name if "/" in model_name else f"google/{model_name}"
+    return str(model_name or "").strip()
 
 
 def safe_json(data: Any) -> str:

@@ -19,9 +19,10 @@ class _Response:
 
 
 class _DummyRuntime:
-    def __init__(self, responses: list[_Response]) -> None:
+    def __init__(self, responses: list[_Response], *, customer_id: str = "telegram_123") -> None:
         self._responses = list(responses)
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self._active_customer_id = customer_id
 
     async def _request_with_backoff(self, method: str, path: str, **kwargs: Any) -> _Response:
         self.calls.append((method, path, kwargs))
@@ -35,7 +36,7 @@ async def test_routine_list_passes_customer_scope() -> None:
     runtime = _DummyRuntime([_Response(200, {"routines": [{"id": "rtn_abc"}]})])
     tools = register_runtime_tools(runtime)
 
-    result = await tools["routine_list"].ainvoke({"customer_id": "telegram_123"})
+    result = await tools["routine_list"].ainvoke({})
     assert result == [{"id": "rtn_abc"}]
     assert runtime.calls[0][0] == "GET"
     assert runtime.calls[0][1] == "/internal/scheduler/routines"
@@ -53,7 +54,7 @@ async def test_routine_delete_verifies_removed() -> None:
     tools = register_runtime_tools(runtime)
 
     result = await tools["routine_delete"].ainvoke(
-        {"routine_id": "rtn_deadbeef", "customer_id": "telegram_123"}
+        {"routine_id": "rtn_deadbeef"}
     )
     assert result["ok"] is True
     assert result["verified_removed"] is True
@@ -67,7 +68,6 @@ async def test_automation_delete_calls_delete_with_assets() -> None:
     result = await tools["automation_delete"].ainvoke(
         {
             "routine_id": "rtn_1",
-            "customer_id": "telegram_123",
             "delete_files": True,
             "cleanup_paths": ["tulpa_stuff/scripts/weather.py"],
         }
@@ -79,3 +79,78 @@ async def test_automation_delete_calls_delete_with_assets() -> None:
     assert sent["routine_id"] == "rtn_1"
     assert sent["delete_files"] is True
     assert sent["cleanup_paths"] == ["tulpa_stuff/scripts/weather.py"]
+
+
+@pytest.mark.asyncio
+async def test_lessons_learnt_get_action() -> None:
+    runtime = _DummyRuntime([_Response(200, {"customer_id": "telegram_123", "lessons_learnt": "foo"})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["lessons_learnt"].ainvoke(
+        {"action": "get"}
+    )
+    assert result["lessons_learnt"] == "foo"
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/lessons_learnt/get"
+
+
+@pytest.mark.asyncio
+async def test_lessons_learnt_append_action() -> None:
+    runtime = _DummyRuntime([_Response(200, {"ok": True, "lessons_learnt": "old\nnew"})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["lessons_learnt"].ainvoke(
+        {"action": "append", "lesson": "new"}
+    )
+    assert result["ok"] is True
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/lessons_learnt/append"
+    sent = runtime.calls[0][2]["json_body"]
+    assert sent["lesson"] == "new"
+    assert sent["max_chars"] == 20000
+
+
+@pytest.mark.asyncio
+async def test_lessons_learnt_set_action() -> None:
+    runtime = _DummyRuntime([_Response(200, {"ok": True, "lessons_learnt": "rewritten"})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["lessons_learnt"].ainvoke(
+        {"action": "set", "lesson": "rewritten"}
+    )
+    assert result["ok"] is True
+    assert runtime.calls[0][1] == "/internal/lessons_learnt/set"
+    sent = runtime.calls[0][2]["json_body"]
+    assert sent["lessons_learnt"] == "rewritten"
+
+
+@pytest.mark.asyncio
+async def test_lessons_learnt_clear_action() -> None:
+    runtime = _DummyRuntime([_Response(200, {"ok": True, "cleared": True})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["lessons_learnt"].ainvoke(
+        {"action": "clear"}
+    )
+    assert result["ok"] is True
+    assert runtime.calls[0][1] == "/internal/lessons_learnt/clear"
+
+
+@pytest.mark.asyncio
+async def test_lessons_learnt_rejects_invalid_action() -> None:
+    runtime = _DummyRuntime([])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["lessons_learnt"].ainvoke(
+        {"action": "destroy"}
+    )
+    assert "action must be one of get|append|set|clear" in str(result.get("error", ""))
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_customer_scoped_tool_fails_closed_without_customer_context() -> None:
+    runtime = _DummyRuntime([_Response(200, {"routines": []})], customer_id="")
+    tools = register_runtime_tools(runtime)
+    with pytest.raises(RuntimeError, match="customer_id is missing"):
+        await tools["routine_list"].ainvoke({})

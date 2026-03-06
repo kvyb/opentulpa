@@ -78,7 +78,12 @@ class ApprovalEvaluator:
     @staticmethod
     def is_background_thread(thread_id: str) -> bool:
         raw = str(thread_id or "").strip().lower()
-        return raw.startswith("wake_") or raw.startswith("wake-")
+        return (
+            raw.startswith("wake_")
+            or raw.startswith("wake-")
+            or raw.startswith("routine_")
+            or raw.startswith("routine-")
+        )
 
     @staticmethod
     def _resolve_recipient_scope(

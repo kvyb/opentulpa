@@ -22,8 +22,23 @@ class _FakeRuntime:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def execute_tool(self, *, action_name: str, action_args: dict[str, object]):
-        self.calls.append({"kind": "execute", "action_name": action_name, "action_args": action_args})
+    async def execute_tool(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, object],
+        customer_id: str | None = None,
+        inject_customer_id: bool = False,
+    ):
+        self.calls.append(
+            {
+                "kind": "execute",
+                "action_name": action_name,
+                "action_args": action_args,
+                "customer_id": customer_id,
+                "inject_customer_id": inject_customer_id,
+            }
+        )
         return {
             "ok": True,
             "approval_id": "apr_test",

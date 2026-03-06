@@ -86,3 +86,63 @@ def register_profile_routes(
         source = str(body.get("source", "agent") or "agent")
         normalized = profiles.set_utc_offset(customer_id, utc_offset, source=source)
         return {"ok": True, "customer_id": customer_id, "utc_offset": normalized}
+
+    @app.post("/internal/lessons_learnt/get")
+    async def internal_lessons_learnt_get(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        return {
+            "customer_id": customer_id,
+            "lessons_learnt": profiles.get_lessons_learnt(customer_id),
+        }
+
+    @app.post("/internal/lessons_learnt/append")
+    async def internal_lessons_learnt_append(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        lesson = str(body.get("lesson", "")).strip()
+        source = str(body.get("source", "agent") or "agent")
+        max_chars = int(body.get("max_chars", 20000))
+        merged = profiles.append_lesson(
+            customer_id,
+            lesson,
+            source=source,
+            max_chars=max_chars,
+        )
+        return {
+            "ok": True,
+            "customer_id": customer_id,
+            "lessons_learnt": merged,
+        }
+
+    @app.post("/internal/lessons_learnt/set")
+    async def internal_lessons_learnt_set(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        lessons_learnt = str(body.get("lessons_learnt", "")).strip()
+        source = str(body.get("source", "agent") or "agent")
+        updated = profiles.set_lessons_learnt(
+            customer_id,
+            lessons_learnt,
+            source=source,
+        )
+        return {
+            "ok": True,
+            "customer_id": customer_id,
+            "lessons_learnt": updated,
+        }
+
+    @app.post("/internal/lessons_learnt/clear")
+    async def internal_lessons_learnt_clear(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        cleared = profiles.clear_lessons_learnt(customer_id, source="agent")
+        return {
+            "ok": True,
+            "customer_id": customer_id,
+            "cleared": cleared,
+        }

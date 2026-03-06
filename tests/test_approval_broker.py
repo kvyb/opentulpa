@@ -527,6 +527,23 @@ async def test_background_thread_legacy_wake_prefix_allows_without_prompt(
 
 
 @pytest.mark.asyncio
+async def test_background_thread_routine_prefix_allows_without_prompt(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    result = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="routine_rtn_legacy01",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "x", "text": "y"},
+    )
+    assert result["gate"] == "allow"
+    assert result["reason"] == "background_preauthorized_execution"
+    assert result.get("approval_id") is None
+    assert len(adapter.sent) == 0
+
+
+@pytest.mark.asyncio
 async def test_background_thread_external_routine_creation_still_requires_approval(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:

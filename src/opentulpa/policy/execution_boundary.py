@@ -7,6 +7,7 @@ from typing import Any
 
 
 _SCHEDULED_ORIGINS = {"scheduled", "schedule", "routine", "wake", "background"}
+_SCHEDULED_THREAD_PREFIXES = ("wake_", "wake-", "routine_", "routine-")
 
 
 @dataclass(slots=True)
@@ -43,7 +44,7 @@ class ExecutionBoundaryGuard:
         if raw_origin in {"interactive", "manual", "chat"}:
             return "interactive"
         safe_thread = cls._normalize_thread_id(thread_id).lower()
-        if safe_thread.startswith("wake_") or safe_thread.startswith("wake-"):
+        if any(safe_thread.startswith(prefix) for prefix in _SCHEDULED_THREAD_PREFIXES):
             return "scheduled"
         return "interactive"
 

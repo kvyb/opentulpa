@@ -203,6 +203,62 @@ class WakeOrchestrator:
         }
 
         runtime = self._get_agent_runtime()
+        if runtime is None:
+            self._backlog(
+                customer_id=customer_id,
+                source="routine",
+                event_type=event_type,
+                payload=queue_payload,
+            )
+            return
+
+        routine_instruction = str(payload.get("instruction", "")).strip()
+        if not routine_instruction:
+            queue_payload["execution_status"] = "invalid"
+            queue_payload["execution_error"] = "routine payload missing required instruction"
+            self._backlog(
+                customer_id=customer_id,
+                source="routine",
+                event_type=event_type,
+                payload=queue_payload,
+            )
+            return
+        execution_prompt = (
+            "System update: a scheduled routine fired.\n"
+            "Execute this routine now using tools/skills as needed.\n"
+            "Treat this as background execution, not a normal chat reply.\n"
+            f"- event: routine/{event_type}\n"
+            f"- routine_id: {routine_id or 'unknown'}\n"
+            f"- routine_name: {routine_name or 'unnamed'}\n"
+            f"- instruction: {routine_instruction[:3000]}\n"
+            f"- payload: {payload}\n\n"
+            "After execution, return a concise summary: what was done, outcome, and any blockers."
+        )
+        execution_thread_id = f"routine_{routine_id}" if routine_id else f"routine_{customer_id}"
+        try:
+            execution_text = await runtime.ainvoke_text(
+                thread_id=execution_thread_id,
+                customer_id=customer_id,
+                text=execution_prompt,
+                include_pending_context=False,
+            )
+        except Exception as exc:
+            queue_payload["execution_status"] = "failed"
+            queue_payload["execution_error"] = str(exc)[:500]
+            self._backlog(
+                customer_id=customer_id,
+                source="routine",
+                event_type=event_type,
+                payload=queue_payload,
+            )
+            return
+
+        execution_summary = str(execution_text or "").strip()
+        if not execution_summary:
+            execution_summary = "Routine executed, but no summary was produced."
+        queue_payload["execution_status"] = "executed"
+        queue_payload["execution_summary"] = execution_summary[:2000]
+
         if not notify_user:
             self._backlog(
                 customer_id=customer_id,
@@ -211,7 +267,7 @@ class WakeOrchestrator:
                 payload=queue_payload,
             )
             return
-        if not self._settings.telegram_bot_token or runtime is None:
+        if not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
             self._backlog(
                 customer_id=customer_id,
                 source="routine",
@@ -219,14 +275,11 @@ class WakeOrchestrator:
                 payload=queue_payload,
             )
             return
-        try:
-            replies = await self._get_telegram_chat().relay_event(
-                customer_id=customer_id,
-                event_label=f"routine/{event_type}",
-                payload=queue_payload,
-                agent_runtime=runtime,
-            )
-        except Exception:
+
+        slots: list[dict[str, Any]] = []
+        with suppress(Exception):
+            slots = self._get_telegram_chat().find_session_slots(customer_id)
+        if not slots:
             self._backlog(
                 customer_id=customer_id,
                 source="routine",
@@ -234,23 +287,14 @@ class WakeOrchestrator:
                 payload=queue_payload,
             )
             return
-        if not replies:
-            self._backlog(
-                customer_id=customer_id,
-                source="routine",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        for item in replies:
-            safe_text = str(item.get("text", "")).strip()
-            if not safe_text or safe_text == NO_NOTIFY_TOKEN:
-                continue
+
+        for slot in slots:
+            chat_id = int(slot["chat_id"])
             await self._get_telegram_client().send_message(
-                chat_id=item["chat_id"],
-                text=safe_text,
+                chat_id=chat_id,
+                text=execution_summary,
                 parse_mode="HTML",
             )
             with suppress(Exception):
-                self._get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
-            await self._flush_deferred_challenges(chat_id=item["chat_id"])
+                self._get_telegram_chat().touch_assistant_message(chat_id)
+            await self._flush_deferred_challenges(chat_id=chat_id)

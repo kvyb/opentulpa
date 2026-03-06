@@ -57,7 +57,7 @@ async def test_relay_event_regenerates_invalid_wake_thread_id(initial_wake_threa
     replies = await relay_module.relay_event_via_main_agent(
         customer_id="telegram_1",
         event_label="routine/scheduled",
-        payload={"routine_name": "autopost", "payload": {"message": "post update"}},
+        payload={"routine_name": "autopost", "payload": {"instruction": "You must send update."}},
         state_store=state_store,
         find_session_slots=lambda cid: _find_slots(state_store, cid),
         agent_runtime=runtime,
@@ -78,7 +78,7 @@ async def test_relay_event_keeps_existing_wake_thread_id() -> None:
     replies = await relay_module.relay_event_via_main_agent(
         customer_id="telegram_1",
         event_label="routine/scheduled",
-        payload={"routine_name": "autopost", "payload": {"message": "post update"}},
+        payload={"routine_name": "autopost", "payload": {"instruction": "You must send update."}},
         state_store=state_store,
         find_session_slots=lambda cid: _find_slots(state_store, cid),
         agent_runtime=runtime,

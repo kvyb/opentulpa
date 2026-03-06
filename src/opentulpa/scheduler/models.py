@@ -13,7 +13,7 @@ class Routine:
     name: str
     # Cron expression or next run time; for one-off, run once then disable
     schedule: str  # e.g. "0 9 * * *" (9am daily) or "2025-02-18 10:00:00"
-    payload: dict[str, Any]  # e.g. {"message": "Check Slack", "action": "wake"}
+    payload: dict[str, Any]  # e.g. {"instruction": "You must ...", "action": "wake"}
     enabled: bool = True
     created_at: datetime = field(default_factory=datetime.utcnow)
     is_cron: bool = True  # False = one-off at schedule time

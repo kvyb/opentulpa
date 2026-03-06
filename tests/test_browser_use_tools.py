@@ -6,6 +6,9 @@ from opentulpa.agent.tools_registry import _normalize_allowed_domains, register_
 
 
 class _DummyRuntime:
+    def __init__(self) -> None:
+        self._active_customer_id = "u_1"
+
     async def _request_with_backoff(self, *args, **kwargs):  # pragma: no cover - not used in tests
         raise RuntimeError("unexpected internal API call")
 
@@ -29,7 +32,7 @@ async def test_browser_use_run_requires_api_key(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
     tools = register_runtime_tools(_DummyRuntime())
 
-    result = await tools["browser_use_run"].ainvoke({"task": "open docs", "customer_id": "u_1"})
+    result = await tools["browser_use_run"].ainvoke({"task": "open docs"})
     assert "error" in result
     assert "BROWSER_USE_API_KEY missing" in str(result["error"])
 
