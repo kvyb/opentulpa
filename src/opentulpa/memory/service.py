@@ -112,7 +112,7 @@ class MemoryService:
         except TypeError:
             pass
         except Exception:
-            # fall through to alternate API signatures
+            # fall through to compatibility paths
             pass
 
         # 2) Older style: user_id included in filters.
@@ -127,6 +127,18 @@ class MemoryService:
         except TypeError:
             # 3) Minimal fallback.
             return mem.search(query, limit=limit)
+
+    def get_all(
+        self,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Get recent memories for the user (search with broad query)."""
+        return self.search(
+            "all memories and context about the user",
+            user_id=user_id,
+            limit=limit,
+        )
 
     @property
     def user_id(self) -> str:

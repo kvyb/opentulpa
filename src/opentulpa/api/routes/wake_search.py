@@ -8,8 +8,6 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from opentulpa.api.errors import parse_request_model
-from opentulpa.api.schemas.wake_search import WakePayload, WebSearchRequest
 from opentulpa.integrations.web_search import web_search as run_web_search
 
 
@@ -25,10 +23,11 @@ def register_wake_and_search_routes(
     @app.post("/internal/wake")
     async def internal_wake(request: Request) -> Any:
         """Called by scheduler or external trigger to wake the agent with a payload."""
-        parsed, error = await parse_request_model(request, WakePayload)
-        if error is not None or parsed is None:
-            return error
-        body = parsed.root
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400, content={"detail": "wake payload must be JSON object"}
+            )
         queue_id = await get_wake_queue().enqueue(body)
         return {"ok": True, "queued": True, "queue_id": queue_id}
 
@@ -40,10 +39,8 @@ def register_wake_and_search_routes(
     @app.post("/internal/web_search")
     async def internal_web_search(request: Request) -> Any:
         """Run OpenRouter web search (default: Perplexity Sonar Pro Search)."""
-        parsed, error = await parse_request_model(request, WebSearchRequest)
-        if error is not None or parsed is None:
-            return error
-        query = str(parsed.query).strip()
+        body = await request.json()
+        query = body.get("query", "").strip()
         if not query:
             return JSONResponse(status_code=400, content={"detail": "query required"})
         result = await run_web_search(query)

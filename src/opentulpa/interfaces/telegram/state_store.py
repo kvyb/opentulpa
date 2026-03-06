@@ -37,6 +37,10 @@ class TelegramStateStore:
         with self._lock:
             return self._load_unlocked()
 
+    def save(self, state: dict[str, Any]) -> None:
+        with self._lock:
+            self._save_unlocked(state)
+
     def update(self, mutator: Any) -> Any:
         """
         Atomically load-modify-save state in one lock scope.

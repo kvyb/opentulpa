@@ -45,7 +45,7 @@ class ApprovalBroker:
     - Gate decisions (`allow`/`require_approval`/`deny`) come from LLM guardrail evaluator output.
     - Instant external actions that evaluate to `require_approval` create a challenge.
     - Scheduled external automations evaluate at routine creation time.
-    - Background (`wake_*`) runs are treated as pre-authorized scheduled execution.
+    - Background (`wake_*` / `routine_*`) runs are treated as pre-authorized scheduled execution.
       No per-run approval prompts/checks.
     - One approval record represents one executable action intent.
     """

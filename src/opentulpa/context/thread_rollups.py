@@ -74,3 +74,12 @@ class ThreadRollupService:
                 (tid, text, self._utc_now_iso()),
             )
             conn.commit()
+
+    def clear_rollup(self, thread_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return False
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM thread_rollups WHERE thread_id=?", (tid,))
+            conn.commit()
+            return bool(cur.rowcount)

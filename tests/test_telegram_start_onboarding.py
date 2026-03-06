@@ -1,8 +1,8 @@
-from opentulpa.interfaces.telegram.chat_commands import start_help_text
+from opentulpa.interfaces.telegram.chat_service import _start_help_text
 
 
 def test_start_help_text_includes_capabilities_and_onboarding_questions() -> None:
-    text = start_help_text()
+    text = _start_help_text()
     assert "What I can do:" in text
     assert "Web + links" in text
     assert "Interactive browsing" in text

@@ -8,8 +8,6 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from opentulpa.api.errors import parse_request_model
-from opentulpa.api.schemas.chat import InternalChatRequest
 from opentulpa.domain.conversation import ConversationTurnRequest
 
 
@@ -22,16 +20,22 @@ def register_chat_routes(
 
     @app.post("/internal/chat")
     async def internal_chat(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, InternalChatRequest)
-        if error is not None or parsed is None:
-            return error
-        customer_id = str(parsed.customer_id).strip()
-        text = str(parsed.text).strip()
-        thread_id = str(parsed.thread_id).strip()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        text = str(body.get("text", "")).strip()
+        thread_id = str(body.get("thread_id", "")).strip()
         if not thread_id and customer_id:
             thread_id = f"chat-{customer_id}"
-        include_pending_context = bool(parsed.include_pending_context)
-        recursion_limit_override = parsed.recursion_limit_override
+        include_pending_context = bool(body.get("include_pending_context", True))
+        recursion_limit_override = body.get("recursion_limit_override")
+        if recursion_limit_override is not None:
+            try:
+                recursion_limit_override = int(recursion_limit_override)
+            except Exception:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "recursion_limit_override must be an integer"},
+                )
 
         if not customer_id or not text:
             return JSONResponse(

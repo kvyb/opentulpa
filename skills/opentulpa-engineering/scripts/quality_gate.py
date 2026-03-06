@@ -87,7 +87,6 @@ def main() -> int:
         "scripts/manager.py",
         "pyproject.toml",
         "README.md",
-        "docs/SCRATCHPAD.md",
         "tulpa_stuff/README.md",
     ]
     lint_targets = [p for p in lint_targets if Path(p).exists()]

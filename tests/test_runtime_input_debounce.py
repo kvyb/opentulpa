@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
-from opentulpa.agent.runtime_input import ThreadInputCoordinator
 
 
 def _mk_runtime(*, debounce: float) -> OpenTulpaLangGraphRuntime:
@@ -25,13 +24,13 @@ async def test_thread_input_coalesces_burst_before_turn_start() -> None:
 
     async def _submit(text: str, delay: float) -> None:
         await asyncio.sleep(delay)
-        state, merged = await runtime._thread_inputs.begin_turn(thread_id="chat-1", text=text)
+        state, merged = await runtime._begin_thread_turn(thread_id="chat-1", text=text)
         if state is None:
             results.append(("suppressed", text, merged))
             return
         results.append(("active", text, merged))
         await asyncio.sleep(0.01)
-        ThreadInputCoordinator.end_turn(state)
+        state.turn_lock.release()
 
     await asyncio.gather(
         _submit("first", 0.0),
@@ -52,13 +51,13 @@ async def test_thread_input_enqueues_while_running_then_coalesces_next_turn() ->
 
     async def _submit(text: str, delay: float, hold_seconds: float) -> None:
         await asyncio.sleep(delay)
-        state, merged = await runtime._thread_inputs.begin_turn(thread_id="chat-2", text=text)
+        state, merged = await runtime._begin_thread_turn(thread_id="chat-2", text=text)
         if state is None:
             results.append(("suppressed", text, merged))
             return
         results.append(("active", text, merged))
         await asyncio.sleep(hold_seconds)
-        ThreadInputCoordinator.end_turn(state)
+        state.turn_lock.release()
 
     await asyncio.gather(
         _submit("first", 0.0, 0.25),

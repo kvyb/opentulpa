@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 
 RecipientScope = Literal["self", "external", "unknown"]
@@ -50,6 +51,17 @@ class ApprovalRecord:
     decided_at: str | None
     executed_at: str | None
     decision_actor_id: str | None
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == "pending"
+
+    def is_expired(self, *, now: datetime) -> bool:
+        try:
+            expires = datetime.fromisoformat(self.expires_at)
+        except Exception:
+            return True
+        return now >= expires
 
 
 @dataclass(slots=True)

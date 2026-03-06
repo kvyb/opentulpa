@@ -6,11 +6,6 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-from opentulpa.api.errors import parse_request_model
-from opentulpa.api.schemas.memory import MemoryAddRequest, MemorySearchRequest
-from opentulpa.application.memory_orchestrator import MemoryOrchestrator, MemoryOrchestratorResult
 
 
 def register_memory_routes(
@@ -19,35 +14,31 @@ def register_memory_routes(
     get_memory: Callable[[], Any],
 ) -> None:
     """Register internal memory add/search endpoints."""
-    orchestrator = MemoryOrchestrator(get_memory=get_memory)
-
-    def _to_http_response(result: MemoryOrchestratorResult) -> Any:
-        if result.status_code != 200:
-            return JSONResponse(status_code=result.status_code, content=result.payload)
-        return result.payload
 
     @app.post("/internal/memory/add")
     async def internal_memory_add(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, MemoryAddRequest)
-        if error is not None or parsed is None:
-            return error
-        result = orchestrator.add_memory(
-            messages=parsed.messages,
-            user_id=parsed.user_id,
-            metadata=parsed.metadata,
-            infer=parsed.infer,
-            retries=parsed.retries,
+        mem = get_memory()
+        body = await request.json()
+        messages = body.get("messages", [])
+        user_id = body.get("user_id") or mem.user_id
+        metadata = body.get("metadata") or {}
+        infer = bool(body.get("infer", True))
+        retries = int(body.get("retries", 1) or 1)
+        result = mem.add(
+            messages,
+            user_id=user_id,
+            metadata=metadata,
+            infer=infer,
+            retries=retries,
         )
-        return _to_http_response(result)
+        return {"ok": True, "result": result}
 
     @app.post("/internal/memory/search")
     async def internal_memory_search(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, MemorySearchRequest)
-        if error is not None or parsed is None:
-            return error
-        result = orchestrator.search_memory(
-            query=parsed.query,
-            user_id=parsed.user_id,
-            limit=parsed.limit,
-        )
-        return _to_http_response(result)
+        mem = get_memory()
+        body = await request.json()
+        query = body.get("query", "")
+        user_id = body.get("user_id") or mem.user_id
+        limit = body.get("limit", 5)
+        results = mem.search(query, user_id=user_id, limit=limit)
+        return {"results": results}

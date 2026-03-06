@@ -11,7 +11,7 @@ UV_CACHE_DIR=.opentulpa/.uv-cache \
 
 ## What It Runs
 
-1. `uv run ruff check src/opentulpa scripts/manager.py pyproject.toml README.md docs/SCRATCHPAD.md tulpa_stuff/README.md` (existing files only)
+1. `uv run ruff check src/opentulpa scripts/manager.py pyproject.toml README.md tulpa_stuff/README.md` (existing files only)
 2. `python3 -m compileall src/opentulpa`
 3. `uv run pytest -q`
 4. Smoke checks for runtime/API/Telegram when `--smoke` is set

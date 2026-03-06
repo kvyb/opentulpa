@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from opentulpa.application.telegram_webhook_orchestrator import (
-    execute_approved_action_and_summarize,
-    run_post_approval_execution_flow,
-    run_post_denial_iteration_flow,
+from opentulpa.api.routes.telegram_webhook import (
+    _execute_approved_action_and_summarize,
+    _run_post_approval_execution_flow,
+    _run_post_denial_iteration_flow,
 )
 
 
@@ -22,8 +22,23 @@ class _FakeRuntime:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def execute_tool(self, *, action_name: str, action_args: dict[str, object]):
-        self.calls.append({"kind": "execute", "action_name": action_name, "action_args": action_args})
+    async def execute_tool(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, object],
+        customer_id: str | None = None,
+        inject_customer_id: bool = False,
+    ):
+        self.calls.append(
+            {
+                "kind": "execute",
+                "action_name": action_name,
+                "action_args": action_args,
+                "customer_id": customer_id,
+                "inject_customer_id": inject_customer_id,
+            }
+        )
         return {
             "ok": True,
             "approval_id": "apr_test",
@@ -140,7 +155,7 @@ async def test_failed_approved_action_uses_autonomous_recovery_message() -> None
         "action_args": {"path": "tulpa_stuff/gmail_setup.py", "content": "print('x')"},
     }
 
-    out = await execute_approved_action_and_summarize(
+    out = await _execute_approved_action_and_summarize(
         get_agent_runtime=lambda: runtime,
         get_context_events=lambda: context_events,
         approval_id="apr_test",
@@ -160,7 +175,7 @@ async def test_post_approval_flow_flushes_deferred_challenges() -> None:
     approvals = _FakeApprovals()
     orchestrator = _FakeApprovalExecutionOrchestrator()
 
-    await run_post_approval_execution_flow(
+    await _run_post_approval_execution_flow(
         get_telegram_client=lambda: client,
         get_approvals=lambda: approvals,
         get_approval_execution_orchestrator=lambda: orchestrator,
@@ -193,7 +208,7 @@ async def test_post_denial_flow_flushes_deferred_challenges() -> None:
         "action_args": {"command": "curl -X POST https://example.com"},
     }
 
-    await run_post_denial_iteration_flow(
+    await _run_post_denial_iteration_flow(
         get_telegram_client=lambda: client,
         get_agent_runtime=lambda: runtime,
         get_approvals=lambda: approvals,

@@ -20,6 +20,7 @@ def test_skill_store_default_skill_and_user_override(tmp_path: Path) -> None:
     names = {s["name"] for s in all_global}
     assert "skill-creator" in names
     assert "browser-use-operator" in names
+    assert "routine-schedule-composer" in names
 
     global_md = build_skill_markdown(
         name="weather-report",

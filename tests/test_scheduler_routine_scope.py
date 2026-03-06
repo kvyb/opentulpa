@@ -54,3 +54,19 @@ def test_scheduler_routine_filter_and_owner_delete(tmp_path: Path) -> None:
         )
         assert deleted.status_code == 200
         assert deleted.json()["ok"] is True
+
+
+def test_scheduler_route_requires_instruction_payload(tmp_path: Path) -> None:
+    with _mk_client(tmp_path) as client:
+        created = client.post(
+            "/internal/scheduler/routine",
+            json={
+                "name": "Missing Instruction",
+                "schedule": "0 * * * *",
+                "is_cron": True,
+                "enabled": True,
+                "payload": {"customer_id": "telegram_1", "notify_user": True},
+            },
+        )
+        assert created.status_code == 400
+        assert created.json()["detail"] == "payload.instruction is required"

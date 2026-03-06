@@ -3,22 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-
-from opentulpa.api.errors import parse_request_model
-from opentulpa.api.schemas.skills import (
-    SkillDeleteRequest,
-    SkillGetRequest,
-    SkillListRequest,
-    SkillUpsertRequest,
-)
-from opentulpa.application.skill_orchestrator import (
-    SkillOrchestrator,
-    SkillOrchestratorResult,
-)
 
 
 def register_skill_routes(
@@ -28,69 +17,118 @@ def register_skill_routes(
     get_memory: Callable[[], Any],
 ) -> None:
     """Register internal skill list/get/upsert/delete endpoints."""
-    orchestrator = SkillOrchestrator(
-        get_skill_store=get_skill_store,
-        get_memory=get_memory,
-    )
-
-    def _to_http_response(result: SkillOrchestratorResult) -> Any:
-        if result.status_code != 200:
-            return JSONResponse(status_code=result.status_code, content=result.payload)
-        return result.payload
 
     @app.post("/internal/skills/list")
     async def internal_skills_list(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, SkillListRequest)
-        if error is not None or parsed is None:
-            return error
-        result = orchestrator.list_skills(
-            customer_id=str(parsed.customer_id).strip(),
-            include_global=bool(parsed.include_global),
-            include_disabled=bool(parsed.include_disabled),
-            limit=int(parsed.limit),
+        store = get_skill_store()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        include_global = bool(body.get("include_global", True))
+        include_disabled = bool(body.get("include_disabled", False))
+        limit = int(body.get("limit", 200))
+        skills = store.list_skills(
+            customer_id=customer_id,
+            include_global=include_global,
+            include_disabled=include_disabled,
+            limit=limit,
         )
-        return _to_http_response(result)
+        return {"ok": True, "skills": skills}
 
     @app.post("/internal/skills/get")
     async def internal_skills_get(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, SkillGetRequest)
-        if error is not None or parsed is None:
-            return error
-        result = orchestrator.get_skill(
-            customer_id=str(parsed.customer_id).strip(),
-            name=str(parsed.name).strip(),
-            include_files=bool(parsed.include_files),
-            include_global=bool(parsed.include_global),
+        store = get_skill_store()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        name = str(body.get("name", "")).strip()
+        include_files = bool(body.get("include_files", True))
+        include_global = bool(body.get("include_global", True))
+        if not name:
+            return JSONResponse(status_code=400, content={"detail": "name is required"})
+        skill = store.get_skill(
+            customer_id=customer_id,
+            name=name,
+            include_files=include_files,
+            include_global=include_global,
         )
-        return _to_http_response(result)
+        if skill is None:
+            return JSONResponse(status_code=404, content={"detail": "skill not found"})
+        return {"ok": True, "skill": skill}
 
     @app.post("/internal/skills/upsert")
     async def internal_skills_upsert(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, SkillUpsertRequest)
-        if error is not None or parsed is None:
-            return error
-        result = orchestrator.upsert_skill(
-            customer_id=str(parsed.customer_id).strip(),
-            scope=str(parsed.scope).strip().lower(),
-            name=str(parsed.name).strip(),
-            description=str(parsed.description).strip(),
-            instructions=str(parsed.instructions).strip(),
-            skill_markdown=str(parsed.skill_markdown).strip(),
-            source=str(parsed.source or "agent"),
-            supporting_files=(
-                parsed.supporting_files if isinstance(parsed.supporting_files, dict) else None
-            ),
+        store = get_skill_store()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        scope = str(body.get("scope", "user")).strip().lower()
+        name = str(body.get("name", "")).strip()
+        description = str(body.get("description", "")).strip()
+        instructions = str(body.get("instructions", "")).strip()
+        skill_markdown = str(body.get("skill_markdown", "")).strip()
+        source = str(body.get("source", "agent") or "agent")
+        supporting_files_raw = body.get("supporting_files")
+        supporting_files = (
+            supporting_files_raw if isinstance(supporting_files_raw, dict) else None
         )
-        return _to_http_response(result)
+        if scope == "user" and not customer_id:
+            return JSONResponse(
+                status_code=400, content={"detail": "customer_id is required for user skills"}
+            )
+        if not name:
+            return JSONResponse(status_code=400, content={"detail": "name is required"})
+        try:
+            if not skill_markdown:
+                from opentulpa.skills.service import build_skill_markdown
+
+                skill_markdown = build_skill_markdown(
+                    name=name,
+                    description=description,
+                    instructions=instructions,
+                )
+            skill = store.upsert_skill(
+                scope=scope,
+                customer_id=customer_id,
+                name=name,
+                skill_markdown=skill_markdown,
+                source=source,
+                enabled=True,
+                supporting_files=supporting_files,
+            )
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+        memory = get_memory()
+        if memory is not None:
+            with suppress(Exception):
+                memory.add_text(
+                    (
+                        "Skill stored for this user: "
+                        f"name={skill.get('name')} scope={skill.get('scope')} "
+                        f"description={skill.get('description')}"
+                    ),
+                    user_id=customer_id or "global",
+                    metadata={
+                        "kind": "user_skill",
+                        "skill_name": skill.get("name"),
+                        "scope": skill.get("scope"),
+                    },
+                )
+        return {"ok": True, "skill": skill}
 
     @app.post("/internal/skills/delete")
     async def internal_skills_delete(request: Request) -> Any:
-        parsed, error = await parse_request_model(request, SkillDeleteRequest)
-        if error is not None or parsed is None:
-            return error
-        result = orchestrator.delete_skill(
-            customer_id=str(parsed.customer_id).strip(),
-            scope=str(parsed.scope).strip().lower(),
-            name=str(parsed.name).strip(),
-        )
-        return _to_http_response(result)
+        store = get_skill_store()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        scope = str(body.get("scope", "user")).strip().lower()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return JSONResponse(status_code=400, content={"detail": "name is required"})
+        if scope == "user" and not customer_id:
+            return JSONResponse(
+                status_code=400, content={"detail": "customer_id is required for user skills"}
+            )
+        try:
+            deleted = store.delete_skill(scope=scope, customer_id=customer_id, name=name)
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+        return {"ok": True, "deleted": bool(deleted)}

@@ -29,6 +29,7 @@ class _DummyRuntime:
         self._guard_result = guard_result or {"gate": "allow", "reason": "ok", "summary": "execute"}
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.guard_calls: list[dict[str, Any]] = []
+        self._active_customer_id = "telegram_1"
 
     async def _request_with_backoff(self, method: str, path: str, **kwargs: Any) -> _Response:
         self.calls.append((method, path, kwargs))
@@ -73,7 +74,6 @@ async def test_terminal_interactive_requires_approval_before_execution() -> None
         {
             "command": "python3 tulpa_stuff/scripts/post_update.py",
             "working_dir": "tulpa_stuff",
-            "customer_id": "telegram_1",
             "thread_id": "chat-1",
             "execution_origin": "interactive",
         }
@@ -81,6 +81,33 @@ async def test_terminal_interactive_requires_approval_before_execution() -> None
     assert result["status"] == "approval_pending"
     assert result["approval_id"] == "apr_boundary_1"
     assert len(runtime.guard_calls) == 1
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_require_approval_without_approval_id_returns_guardrail_unavailable() -> None:
+    runtime = _DummyRuntime(
+        [],
+        guard_result={
+            "gate": "require_approval",
+            "approval_id": None,
+            "summary": "run terminal command",
+            "reason": "guardrail_request_error:ReadTimeout",
+        },
+    )
+    tools = register_runtime_tools(runtime)
+    result = await tools["tulpa_run_terminal"].ainvoke(
+        {
+            "command": "python3 tg_scan_work.py",
+            "working_dir": "tulpa_stuff",
+            "thread_id": "chat-1",
+            "execution_origin": "interactive",
+        }
+    )
+    assert result["status"] == "guardrail_unavailable"
+    assert result["approval_id"] is None
+    assert result["gate"] == "require_approval"
+    assert result["retryable"] is True
     assert runtime.calls == []
 
 
@@ -95,7 +122,6 @@ async def test_terminal_scheduled_execution_skips_guardrail() -> None:
         {
             "command": "python3 tulpa_stuff/scripts/digest.py",
             "working_dir": "tulpa_stuff",
-            "customer_id": "telegram_1",
             "thread_id": "wake_abc123",
             "execution_origin": "scheduled",
         }
@@ -105,6 +131,51 @@ async def test_terminal_scheduled_execution_skips_guardrail() -> None:
     assert len(runtime.guard_calls) == 0
     assert len(runtime.calls) == 1
     assert runtime.calls[0][1] == "/internal/tulpa/run_terminal"
+
+
+@pytest.mark.asyncio
+async def test_terminal_routine_thread_prefix_is_treated_as_scheduled() -> None:
+    runtime = _DummyRuntime(
+        [_Response(200, {"ok": True, "stdout": "done", "stderr": "", "returncode": 0})],
+        guard_result={"gate": "require_approval", "approval_id": "apr_should_not_happen"},
+    )
+    tools = register_runtime_tools(runtime)
+    result = await tools["tulpa_run_terminal"].ainvoke(
+        {
+            "command": "python3 scripts/digest.py",
+            "working_dir": "tulpa_stuff",
+            "thread_id": "routine_rtn_abc123",
+        }
+    )
+    assert result["ok"] is True
+    assert result["execution_origin"] == "scheduled"
+    assert len(runtime.guard_calls) == 0
+    assert len(runtime.calls) == 1
+    assert runtime.calls[0][1] == "/internal/tulpa/run_terminal"
+
+
+@pytest.mark.asyncio
+async def test_terminal_normalizes_redundant_working_dir_prefix_before_guard_and_execution() -> None:
+    runtime = _DummyRuntime(
+        [_Response(200, {"ok": True, "stdout": "done", "stderr": "", "returncode": 0})],
+        guard_result={"gate": "allow", "reason": "ok", "summary": "execute"},
+    )
+    tools = register_runtime_tools(runtime)
+    result = await tools["tulpa_run_terminal"].ainvoke(
+        {
+            "command": "python3 tulpa_stuff/tg_login.py",
+            "working_dir": "tulpa_stuff",
+            "thread_id": "chat-1",
+            "execution_origin": "interactive",
+        }
+    )
+    assert result["ok"] is True
+    assert len(runtime.guard_calls) == 1
+    assert runtime.guard_calls[0]["action_args"]["command"] == "python3 tg_login.py"
+    assert len(runtime.calls) == 1
+    sent = runtime.calls[0][2]["json_body"]
+    assert sent["command"] == "python3 tg_login.py"
+    assert sent["working_dir"] == "tulpa_stuff"
 
 
 @pytest.mark.asyncio
@@ -118,11 +189,15 @@ async def test_routine_create_saves_schedule_without_execution_artifact_metadata
         {
             "name": "Daily Digest",
             "schedule": "0 9 * * *",
-            "message": "Prepare and send digest",
+            "instruction": (
+                "You must run scripts/digest.py for the daily digest. First read market inputs "
+                "using file tulpa_stuff/input.json and API key source NEWS_API_KEY from env. "
+                "Then append concise bullets to tulpa_stuff/digest.md. "
+                "If the API fails or the file is missing, log error and return failure summary."
+            ),
             "implementation_command": "python3 tulpa_stuff/scripts/digest.py",
             "implementation_working_dir": "tulpa_stuff",
             "implementation_timeout_seconds": 120,
-            "customer_id": "telegram_1",
             "notify_user": True,
             "thread_id": "chat-1",
             "execution_origin": "interactive",
@@ -134,6 +209,79 @@ async def test_routine_create_saves_schedule_without_execution_artifact_metadata
     assert len(runtime.calls) == 1
     sent = runtime.calls[0][2]["json_body"]
     assert "execution" not in sent["payload"]
+    assert sent["payload"]["instruction"].startswith("You must run scripts/digest.py")
+    assert "message" not in sent["payload"]
+
+
+@pytest.mark.asyncio
+async def test_routine_create_normalizes_implementation_command_prefix_for_guardrail() -> None:
+    runtime = _DummyRuntime(
+        [_Response(200, {"ok": True, "id": "rtn_3"})],
+        guard_result={"gate": "allow", "reason": "ok", "summary": "create routine"},
+    )
+    tools = register_runtime_tools(runtime)
+    result = await tools["routine_create"].ainvoke(
+        {
+            "name": "Login Refresh",
+            "schedule": "0 */6 * * *",
+            "instruction": "You must run scripts/tg_login.py and report result.",
+            "implementation_command": "python3 tulpa_stuff/tg_login.py",
+            "thread_id": "chat-1",
+            "execution_origin": "interactive",
+        }
+    )
+    assert result["ok"] is True
+    assert len(runtime.guard_calls) == 1
+    assert runtime.guard_calls[0]["action_args"]["implementation_command"] == "python3 tg_login.py"
+
+
+@pytest.mark.asyncio
+async def test_routine_create_accepts_instruction_without_legacy_message() -> None:
+    runtime = _DummyRuntime(
+        [_Response(200, {"ok": True, "id": "rtn_2"})],
+        guard_result={"gate": "allow", "reason": "internal plan", "summary": "create routine"},
+    )
+    tools = register_runtime_tools(runtime)
+    result = await tools["routine_create"].ainvoke(
+        {
+            "name": "Silent Timelog",
+            "schedule": "0 */3 * * *",
+            "instruction": (
+                "You must run scripts/logtime.py to keep timelog fresh. "
+                "First read existing file tulpa_stuff/logtimes.md if present. "
+                "Then append ISO-8601 UTC timestamp to tulpa_stuff/logtimes.md. "
+                "If file access fails, log error and return failure summary."
+            ),
+            "implementation_command": "python3 scripts/logtime.py",
+            "notify_user": False,
+            "thread_id": "chat-1",
+            "execution_origin": "interactive",
+        }
+    )
+    assert result["ok"] is True
+    assert len(runtime.calls) == 1
+    sent = runtime.calls[0][2]["json_body"]
+    assert sent["payload"]["instruction"].startswith("You must run scripts/logtime.py")
+    assert "message" not in sent["payload"]
+
+
+@pytest.mark.asyncio
+async def test_routine_create_requires_non_empty_instruction() -> None:
+    runtime = _DummyRuntime([_Response(200, {"ok": True, "id": "rtn_unexpected"})])
+    tools = register_runtime_tools(runtime)
+    result = await tools["routine_create"].ainvoke(
+        {
+            "name": "Daily Digest",
+            "schedule": "0 9 * * *",
+            "instruction": "   ",
+            "implementation_command": "python3 tulpa_stuff/scripts/digest.py",
+            "notify_user": True,
+            "thread_id": "chat-1",
+            "execution_origin": "interactive",
+        }
+    )
+    assert str(result.get("error", "")).startswith("routine_create failed: instruction is required")
+    assert runtime.calls == []
 
 
 @pytest.mark.asyncio
@@ -152,9 +300,13 @@ async def test_routine_create_pending_approval_does_not_save_schedule() -> None:
         {
             "name": "Auto Post",
             "schedule": "0 */2 * * *",
-            "message": "Post market reflections",
+            "instruction": (
+                "You must run scripts/post_agentx.py for recurring market post. "
+                "First read source file tulpa_stuff/post_context.md and API key source POST_API_KEY from env. "
+                "Then post summary to https://mockapi.io/api/v1/posts. "
+                "If request fails or key is missing, log error and return failure summary."
+            ),
             "implementation_command": "python3 tulpa_stuff/scripts/post_agentx.py",
-            "customer_id": "telegram_1",
             "thread_id": "chat-1",
             "execution_origin": "interactive",
         }
@@ -166,6 +318,38 @@ async def test_routine_create_pending_approval_does_not_save_schedule() -> None:
 
 
 @pytest.mark.asyncio
+async def test_routine_create_require_approval_without_approval_id_returns_guardrail_unavailable() -> None:
+    runtime = _DummyRuntime(
+        [],
+        guard_result={
+            "gate": "require_approval",
+            "approval_id": "None",
+            "summary": "create external write routine",
+            "reason": "guardrail_request_error:ReadTimeout",
+        },
+    )
+    tools = register_runtime_tools(runtime)
+    result = await tools["routine_create"].ainvoke(
+        {
+            "name": "Auto Post",
+            "schedule": "0 */2 * * *",
+            "instruction": (
+                "You must run scripts/post_agentx.py for recurring market post. "
+                "Then post summary to https://mockapi.io/api/v1/posts."
+            ),
+            "implementation_command": "python3 scripts/post_agentx.py",
+            "thread_id": "chat-1",
+            "execution_origin": "interactive",
+        }
+    )
+    assert result["status"] == "guardrail_unavailable"
+    assert result["approval_id"] is None
+    assert result["gate"] == "require_approval"
+    assert result["retryable"] is True
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
 async def test_routine_create_requires_non_empty_implementation_command() -> None:
     runtime = _DummyRuntime([_Response(200, {"ok": True, "id": "rtn_unexpected"})])
     tools = register_runtime_tools(runtime)
@@ -173,9 +357,13 @@ async def test_routine_create_requires_non_empty_implementation_command() -> Non
         {
             "name": "Auto Post",
             "schedule": "0 */2 * * *",
-            "message": "Post market reflections",
+            "instruction": (
+                "You must run scripts/post_agentx.py for recurring market post. "
+                "First read source file tulpa_stuff/post_context.md and API key source POST_API_KEY from env. "
+                "Then post summary to https://mockapi.io/api/v1/posts. "
+                "If request fails or key is missing, log error and return failure summary."
+            ),
             "implementation_command": "   ",
-            "customer_id": "telegram_1",
         }
     )
     assert str(result.get("error", "")).startswith("ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED")

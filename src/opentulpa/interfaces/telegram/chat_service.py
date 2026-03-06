@@ -4,26 +4,26 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.attachments import (
     build_uploaded_files_context,
     extract_attachments,
     ingest_attachments,
 )
-from opentulpa.interfaces.telegram.chat_commands import (
-    format_agent_error_for_user as _format_agent_error_for_user,
-)
-from opentulpa.interfaces.telegram.chat_commands import (
-    handle_control_command as _handle_control_command,
-)
-from opentulpa.interfaces.telegram.chat_commands import (
-    inject_voice_message_context as _inject_voice_message_context,
-)
 from opentulpa.interfaces.telegram.client import parse_telegram_update
 from opentulpa.interfaces.telegram.constants import STATE_PATH
-from opentulpa.interfaces.telegram.env_management import missing_key_prompt
+from opentulpa.interfaces.telegram.env_management import (
+    extract_inline_key_value,
+    extract_set_command,
+    mask_secret,
+    missing_key_prompt,
+    status_text,
+    upsert_env_key,
+)
 from opentulpa.interfaces.telegram.models import TelegramContext
 from opentulpa.interfaces.telegram.relay import (
     debug_log,
@@ -36,23 +36,118 @@ from opentulpa.interfaces.telegram.relay import (
     relay_task_event_via_main_agent as _relay_task_event_via_main_agent,
 )
 from opentulpa.interfaces.telegram.security import is_user_allowed
-from opentulpa.interfaces.telegram.session_state import (
-    ensure_admin_and_read_pending as _ensure_admin_and_read_pending,
-)
-from opentulpa.interfaces.telegram.session_state import (
-    upsert_session_for_chat as _upsert_session_for_chat,
-)
 from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 
 STATE_STORE = TelegramStateStore(STATE_PATH)
 logger = logging.getLogger(__name__)
 
+
+def _clean_thread_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null"}:
+        return ""
+    return text
+
+
 def find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]]:
     return STATE_STORE.find_session_slots(customer_id)
 
 
+def _find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]]:
+    """Backward-compatible alias."""
+    return find_session_slots_for_customer_id(customer_id)
+
+
 def get_session_slot_for_chat_id(chat_id: int) -> dict[str, Any] | None:
     return STATE_STORE.get_session_slot(chat_id)
+
+
+def _format_agent_error_for_user(exc: Exception) -> str:
+    """Convert backend/model failures into actionable Telegram-safe user messages."""
+    text = str(exc)
+    lowered = text.lower()
+    if "401" in lowered and (
+        "user not found" in lowered
+        or "authentication" in lowered
+        or "invalid api key" in lowered
+        or "unauthorized" in lowered
+    ):
+        return (
+            "Model authentication failed (OpenRouter key is invalid or revoked). "
+            "Set a valid OPENROUTER_API_KEY and restart OpenTulpa."
+        )
+    if "429" in lowered or "rate limit" in lowered:
+        return "The model provider is rate-limiting requests right now. Please try again shortly."
+    return "I hit a backend error while generating a reply. Please try again."
+
+
+def _inject_voice_message_context(text: str, transcripts: list[str]) -> str:
+    safe_lines = [str(item).strip() for item in transcripts if str(item).strip()]
+    if not safe_lines:
+        return str(text or "")
+    voice_block = "\n".join(f"<user sent voice message>: {line}" for line in safe_lines)
+    base = str(text or "").strip()
+    if base:
+        return f"{base}\n\n{voice_block}"
+    return voice_block
+
+
+def _reset_chat_session_context(
+    state: dict[str, Any],
+    *,
+    chat_id: int,
+    user_id: int,
+) -> tuple[str, str]:
+    sessions = state.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+    chat_key = str(chat_id)
+    slot = sessions.get(chat_key)
+    if not isinstance(slot, dict):
+        slot = {}
+    customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{user_id}"
+    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    thread_id = new_short_id("chat")
+    wake_thread_id = new_short_id("wake")
+    sessions[chat_key] = {
+        "user_id": int(user_id),
+        "customer_id": customer_id,
+        "thread_id": thread_id,
+        "wake_thread_id": wake_thread_id,
+        "last_user_message_at": now_utc_iso,
+        "last_assistant_message_at": None,
+    }
+    state["sessions"] = sessions
+
+    pending_map = state.get("pending_key_by_chat")
+    if not isinstance(pending_map, dict):
+        pending_map = {}
+    pending_map.pop(chat_key, None)
+    state["pending_key_by_chat"] = pending_map
+    return thread_id, customer_id
+
+
+def _start_help_text() -> str:
+    return (
+        "OpenTulpa is connected.\n\n"
+        "What I can do:\n"
+        "- Web + links: web search, read URLs, summarize current info\n"
+        "- Interactive browsing: browser automation for dynamic sites (when configured)\n"
+        "- Files: analyze PDFs/DOCX/text/images/voice notes you send\n"
+        "- Code + automations: write/debug scripts, run checks, schedule recurring tasks\n"
+        "- Memory + preferences: remember your style/process directives\n\n"
+        "To personalize quickly, answer these:\n"
+        "1. What are you struggling with right now?\n"
+        "2. Which repetitive task should I automate first?\n"
+        "3. Which services should I connect first (Gmail, Sheets, custom APIs, etc.)?\n\n"
+        "Commands:\n"
+        "/status\n"
+        "/setup\n"
+        "/set KEY VALUE\n"
+        "/setenv KEY VALUE\n"
+        "/fresh\n"
+        "/cancel"
+    )
 
 
 async def relay_task_event_via_main_agent(
@@ -128,39 +223,129 @@ async def handle_telegram_text(
     ):
         return "This bot is restricted and your Telegram account is not allowed."
 
-    admin_user_id, pending_key = STATE_STORE.update(
-        lambda state: _ensure_admin_and_read_pending(
-            state,
-            chat_id=ctx.chat_id,
-            user_id=ctx.user_id,
-        )
-    )
+    def _ensure_admin_and_read_pending(state: dict[str, Any]) -> tuple[Any, str | None]:
+        admin_user_id = state.get("admin_user_id")
+        if admin_user_id is None:
+            admin_user_id = ctx.user_id
+            state["admin_user_id"] = admin_user_id
+        pending_map = state.get("pending_key_by_chat")
+        if not isinstance(pending_map, dict):
+            pending_map = {}
+            state["pending_key_by_chat"] = pending_map
+        pending_key = pending_map.get(str(ctx.chat_id))
+        if pending_key is None:
+            return admin_user_id, None
+        pending_key_text = str(pending_key).strip()
+        return admin_user_id, (pending_key_text or None)
+
+    admin_user_id, pending_key = STATE_STORE.update(_ensure_admin_and_read_pending)
     is_admin = int(admin_user_id) == int(ctx.user_id)
 
-    control_response = _handle_control_command(
-        text=ctx.text,
-        chat_id=ctx.chat_id,
-        user_id=ctx.user_id,
-        is_admin=is_admin,
-        pending_key=pending_key,
-        state_store=STATE_STORE,
-        agent_runtime=agent_runtime,
-    )
-    if control_response is not None:
-        return control_response
+    text_lower = ctx.text.lower()
+    if text_lower in {"/start", "/help"}:
+        return _start_help_text()
+    if text_lower == "/status":
+        agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
+        return status_text(agent_up)
+    if text_lower == "/cancel":
+        def _clear_pending(state: dict[str, Any]) -> None:
+            pending_map = state.get("pending_key_by_chat")
+            if not isinstance(pending_map, dict):
+                pending_map = {}
+            pending_map.pop(str(ctx.chat_id), None)
+            state["pending_key_by_chat"] = pending_map
+
+        STATE_STORE.update(_clear_pending)
+        return "Cancelled pending setup."
+    if text_lower == "/fresh":
+        thread_id, _ = STATE_STORE.update(
+            lambda state: _reset_chat_session_context(
+                state,
+                chat_id=ctx.chat_id,
+                user_id=ctx.user_id,
+            )
+        )
+        return (
+            "Started a fresh chat context. "
+            f"New thread: {thread_id}. "
+            "Your long-term memory is unchanged."
+        )
+
+    if text_lower == "/setup":
+        if not is_admin:
+            return "Only the bot admin can set keys."
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            def _set_pending_openrouter(state: dict[str, Any]) -> None:
+                pending_map = state.get("pending_key_by_chat")
+                if not isinstance(pending_map, dict):
+                    pending_map = {}
+                pending_map[str(ctx.chat_id)] = "OPENROUTER_API_KEY"
+                state["pending_key_by_chat"] = pending_map
+
+            STATE_STORE.update(_set_pending_openrouter)
+            return "Please send your OPENROUTER_API_KEY value now."
+        return "Core key is already set. Use /set KEY VALUE for additional keys."
+
+    if pending_key:
+        if not is_admin:
+            return "Only the bot admin can set keys."
+        value = ctx.text.strip()
+        if not value:
+            return f"Please send the value for {pending_key}."
+        try:
+            upsert_env_key(pending_key, value)
+        except Exception as exc:
+            return f"Failed to save {pending_key}: {exc}"
+
+        def _clear_pending_after_save(state: dict[str, Any]) -> None:
+            pending_map = state.get("pending_key_by_chat")
+            if not isinstance(pending_map, dict):
+                pending_map = {}
+            pending_map.pop(str(ctx.chat_id), None)
+            state["pending_key_by_chat"] = pending_map
+
+        STATE_STORE.update(_clear_pending_after_save)
+        return f"Saved {pending_key}={mask_secret(value)}.\nRestart OpenTulpa to apply."
+
+    kv = extract_set_command(ctx.text) or extract_inline_key_value(ctx.text)
+    if kv:
+        key, value = kv
+        if not is_admin:
+            return "Only the bot admin can set keys."
+        try:
+            upsert_env_key(key, value)
+        except Exception as exc:
+            return f"Failed to save {key}: {exc}"
+        return f"Saved {key}={mask_secret(value)}."
 
     if not os.environ.get("OPENROUTER_API_KEY"):
         return missing_key_prompt()
     if agent_runtime is None:
         return "Agent runtime is unavailable. Restart OpenTulpa and try again."
 
-    thread_id, customer_id = STATE_STORE.update(
-        lambda state: _upsert_session_for_chat(
-            state,
-            chat_id=ctx.chat_id,
-            user_id=ctx.user_id,
-        )
-    )
+    def _upsert_session(state: dict[str, Any]) -> tuple[str, str]:
+        sessions = state.get("sessions")
+        if not isinstance(sessions, dict):
+            sessions = {}
+        slot = sessions.get(str(ctx.chat_id))
+        if not isinstance(slot, dict):
+            slot = {}
+        thread_id = _clean_thread_id(slot.get("thread_id")) or f"chat-{ctx.chat_id}"
+        wake_thread_id = _clean_thread_id(slot.get("wake_thread_id")) or None
+        customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
+        now_utc_iso = datetime.now(timezone.utc).isoformat()
+        sessions[str(ctx.chat_id)] = {
+            "user_id": ctx.user_id,
+            "customer_id": customer_id,
+            "thread_id": thread_id,
+            "wake_thread_id": wake_thread_id,
+            "last_user_message_at": now_utc_iso,
+            "last_assistant_message_at": slot.get("last_assistant_message_at"),
+        }
+        state["sessions"] = sessions
+        return thread_id, customer_id
+
+    thread_id, customer_id = STATE_STORE.update(_upsert_session)
 
     ingested_files: list[dict[str, Any]] = []
     if attachments and bot_token and file_vault is not None:

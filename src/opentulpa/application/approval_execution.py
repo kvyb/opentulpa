@@ -29,6 +29,12 @@ def _extract_execution_error_text(execution_result: Any) -> str:
     return ""
 
 
+def _recovery_thread_id(*, thread_id: str, approval_id: str) -> str:
+    base = str(thread_id or "").strip() or "approval"
+    aid = str(approval_id or "").strip() or "unknown"
+    return f"{base}::approval-recovery::{aid}"
+
+
 class ApprovalExecutionOrchestrator:
     """Executes approved actions and produces user-facing summaries."""
 
@@ -45,7 +51,7 @@ class ApprovalExecutionOrchestrator:
         self,
         *,
         approval_id: str,
-        decision_payload: dict[str, object],
+        decision_payload: dict[str, Any],
         chat_id: int,
     ) -> str:
         customer_id = str(decision_payload.get("customer_id", "")).strip()
@@ -61,7 +67,9 @@ class ApprovalExecutionOrchestrator:
         try:
             execution_result = await runtime.execute_tool(
                 action_name="guardrail_execute_approved_action",
-                action_args={"approval_id": approval_id, "customer_id": customer_id},
+                action_args={"approval_id": approval_id},
+                customer_id=customer_id,
+                inject_customer_id=True,
             )
         except Exception as exc:
             error_detail = str(exc).strip() or exc.__class__.__name__
@@ -100,6 +108,49 @@ class ApprovalExecutionOrchestrator:
         payload_preview = json.dumps(execution_result, ensure_ascii=False)[:6000]
         execution_error_text = _extract_execution_error_text(execution_result)
         is_error_result = bool(execution_error_text)
+        retry_succeeded = False
+        if is_error_result and isinstance(execution_result, dict) and bool(
+            execution_result.get("retryable")
+        ):
+            try:
+                retry_result = await runtime.execute_tool(
+                    action_name="guardrail_execute_approved_action",
+                    action_args={"approval_id": approval_id},
+                    customer_id=customer_id,
+                    inject_customer_id=True,
+                )
+                retry_error = _extract_execution_error_text(retry_result)
+                if not retry_error:
+                    execution_result = retry_result
+                    payload_preview = json.dumps(execution_result, ensure_ascii=False)[:6000]
+                    execution_error_text = ""
+                    is_error_result = False
+                    retry_succeeded = True
+                    with suppress(Exception):
+                        self._get_context_events().add_event(
+                            customer_id=customer_id,
+                            source="approval",
+                            event_type="executed_retry_success",
+                            payload={
+                                "approval_id": approval_id,
+                                "thread_id": thread_id,
+                                "retry_result": (
+                                    retry_result
+                                    if isinstance(retry_result, dict)
+                                    else {"raw": str(retry_result)}
+                                ),
+                            },
+                        )
+            except Exception:
+                pass
+
+        if retry_succeeded:
+            return "The approved action failed once, then succeeded automatically on retry."
+
+        recovery_thread_id = _recovery_thread_id(
+            thread_id=thread_id,
+            approval_id=approval_id,
+        )
         if is_error_result:
             try:
                 original_action = str(decision_payload.get("action_name", "")).strip()
@@ -108,7 +159,7 @@ class ApprovalExecutionOrchestrator:
                 if not isinstance(original_args, dict):
                     original_args = {}
                 recovery_text = await runtime.ainvoke_text(
-                    thread_id=thread_id,
+                    thread_id=recovery_thread_id,
                     customer_id=customer_id,
                     text=(
                         "An approved action failed during execution. Continue autonomously and try to fix it.\n\n"
@@ -155,7 +206,7 @@ class ApprovalExecutionOrchestrator:
                     "Do not expose internal JSON or system internals."
                 )
             summary = await runtime.ainvoke_text(
-                thread_id=thread_id,
+                thread_id=recovery_thread_id,
                 customer_id=customer_id,
                 text=summary_prompt,
                 include_pending_context=False,
@@ -174,7 +225,7 @@ class ApprovalExecutionOrchestrator:
         self,
         *,
         approval_ids: list[str],
-        decision_payload: dict[str, object],
+        decision_payload: dict[str, Any],
         chat_id: int,
     ) -> str:
         safe_ids = [str(item).strip() for item in approval_ids if str(item).strip()]

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from opentulpa.agent.tools.content_fetch_tools import _crawl4ai_extract
+from opentulpa.agent import tools_registry
 
 
 @dataclass
@@ -53,7 +53,7 @@ async def test_crawl4ai_extract_prefers_markdown_and_title(monkeypatch: pytest.M
             metadata={"title": "Test Page"},
         ),
     )
-    text, title, error = await _crawl4ai_extract("https://example.com")
+    text, title, error = await tools_registry._crawl4ai_extract("https://example.com")
     assert error is None
     assert "Hello" in text
     assert title == "Test Page"
@@ -65,8 +65,9 @@ async def test_crawl4ai_extract_handles_failed_result(monkeypatch: pytest.Monkey
         monkeypatch,
         _Result(success=False, error_message="blocked"),
     )
-    text, title, error = await _crawl4ai_extract("https://example.com")
+    text, title, error = await tools_registry._crawl4ai_extract("https://example.com")
     assert text == ""
     assert title is None
     assert isinstance(error, str)
     assert "blocked" in error
+

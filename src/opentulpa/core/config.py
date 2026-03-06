@@ -60,10 +60,6 @@ class Settings(BaseSettings):
         default=".opentulpa/pending_approvals.db",
         description="SQLite path for external-impact pending approvals.",
     )
-    wake_events_db_path: str = Field(
-        default=".opentulpa/wake_events.db",
-        description="SQLite path for durable wake-event queue.",
-    )
     approvals_ttl_minutes: int = Field(
         default=10,
         ge=1,
@@ -80,6 +76,11 @@ class Settings(BaseSettings):
     telegram_allowed_user_ids: str | None = Field(
         default=None,
         description="Optional CSV allowlist of Telegram numeric user IDs.",
+    )
+
+    # Slack (for Slack skill: list channels, read history, post)
+    slack_bot_token: str | None = Field(
+        default=None, description="Slack Bot OAuth token (xoxb-...)"
     )
     telegram_webhook_secret: str | None = Field(
         default=None,
@@ -107,8 +108,8 @@ class Settings(BaseSettings):
         description="OpenRouter API base URL for OpenAI-compatible clients (mem0).",
     )
     llm_model: str = Field(
-        default="gemini-3-flash-preview",
-        description="Model id: for OpenRouter use 'google/<this>'; for mem0 Gemini use as-is.",
+        default="google/gemini-3-flash-preview",
+        description="OpenRouter model id, including provider slug (for example: google/gemini-3-flash-preview).",
     )
     wake_classifier_model: str | None = Field(
         default=None,
@@ -143,7 +144,7 @@ class Settings(BaseSettings):
         description="Embedding model id for mem0 via OpenRouter embeddings API.",
     )
 
-    # OpenRouter: OPENROUTER_API_KEY required. OPENROUTER_MODEL set from llm_model (google/<llm_model>).
+    # OpenRouter: OPENROUTER_API_KEY required. OPENROUTER_MODEL uses llm_model as-is.
     # mem0 is configured via OpenRouter base URL + key (OpenAI-compatible endpoints).
 
 @lru_cache

@@ -40,10 +40,18 @@ ALLOWED_TERMINAL_DIRS = {
     "opentulpa": PACKAGE_ROOT,
 }
 
+_WORKING_DIR_PREFIXES: dict[str, str] = {
+    "tulpa_stuff": "tulpa_stuff",
+    "integrations": "src/opentulpa/integrations",
+    "interfaces": "src/opentulpa/interfaces",
+    "tools": "src/opentulpa/tools",
+    "skills": "src/opentulpa/skills",
+    "opentulpa": "src/opentulpa",
+}
+
 ALLOWED_TERMINAL_COMMANDS = {
     "wget",
     "curl",
-    "ssh",
     "python",
     "python3",
     "uv",
@@ -381,6 +389,41 @@ def run_terminal(
         raise PermissionError(f"command '{parts[0]}' is not allowed")
     agent_venv_dir = _ensure_agent_venv()
 
+    prefix = _WORKING_DIR_PREFIXES.get(working_dir)
+    normalized_parts = list(parts)
+    if prefix and len(parts) > 1:
+        rel_markers = (f"{prefix}/", f"./{prefix}/")
+        abs_prefix = str((PROJECT_ROOT / prefix).resolve()) + "/"
+
+        def _strip_prefix(token: str) -> str:
+            raw = str(token)
+            for marker in rel_markers:
+                if raw.startswith(marker):
+                    return raw[len(marker) :]
+            if raw.startswith(abs_prefix):
+                return raw[len(abs_prefix) :]
+            if raw.startswith("--") and "=" in raw:
+                key, value = raw.split("=", 1)
+                for marker in rel_markers:
+                    if value.startswith(marker):
+                        return f"{key}={value[len(marker):]}"
+                if value.startswith(abs_prefix):
+                    return f"{key}={value[len(abs_prefix):]}"
+            return raw
+
+        normalized_parts = [parts[0], *(_strip_prefix(item) for item in parts[1:])]
+        if normalized_parts != parts:
+            _debug_log(
+                hypothesis_id="H1",
+                location="tasks/sandbox.py:run_terminal",
+                message="terminal_command_normalized",
+                data={
+                    "working_dir": working_dir,
+                    "original": cmd[:500],
+                    "normalized": shlex.join(normalized_parts)[:500],
+                },
+            )
+
     cwd = ALLOWED_TERMINAL_DIRS[working_dir]
     cwd.mkdir(parents=True, exist_ok=True)
     run_env = os.environ.copy()
@@ -393,7 +436,7 @@ def run_terminal(
 
     try:
         proc = subprocess.run(
-            parts,
+            normalized_parts,
             cwd=str(cwd),
             capture_output=True,
             text=True,

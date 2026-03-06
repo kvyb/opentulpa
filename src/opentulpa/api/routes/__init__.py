@@ -8,6 +8,7 @@ from opentulpa.api.routes.memory import register_memory_routes
 from opentulpa.api.routes.profiles import register_profile_routes
 from opentulpa.api.routes.scheduler import register_scheduler_routes
 from opentulpa.api.routes.skills import register_skill_routes
+from opentulpa.api.routes.slack import register_slack_routes
 from opentulpa.api.routes.tasks import register_task_routes
 from opentulpa.api.routes.telegram_webhook import register_telegram_webhook_routes
 from opentulpa.api.routes.tulpa import register_tulpa_routes
@@ -22,6 +23,7 @@ __all__ = [
     "register_profile_routes",
     "register_scheduler_routes",
     "register_skill_routes",
+    "register_slack_routes",
     "register_task_routes",
     "register_telegram_webhook_routes",
     "register_tulpa_routes",

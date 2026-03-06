@@ -54,8 +54,8 @@ Describe a workflow and OpenTulpa writes the code, runs it, schedules it, and sa
 top movers, my portfolio delta, any earnings today."
 → Stores the key, writes the integration, registers the recurring job.
 
-"Build me a Telegram bot routine that posts a daily standup prompt at 9am."
-→ Writes the full integration from scratch, saves it as a reusable skill.
+"Build me a Slack bot that posts a daily standup prompt to #engineering at 9am."
+→ Writes the full Slack integration from scratch, saves it as a reusable skill.
 
 "Register me on Moltbook." (with Browser Use connected)
 → Opens a browser, fills the form, completes the flow autonomously.
@@ -63,7 +63,7 @@ top movers, my portfolio delta, any earnings today."
 "Here's my Notion token. Summarize everything updated this week into a digest."
 → Done. Say "schedule that" and it registers the recurring job immediately.
 
-"Write me a GitHub webhook that posts a Telegram alert on every failed CI run."
+"Write me a GitHub webhook that posts a Slack message on every failed CI run."
 → Builds both ends of the integration, inside the chat, from a single message.
 ```
 
@@ -86,7 +86,7 @@ If there's a public API or a service with documentation, OpenTulpa can integrate
 - Estimated cost per task/message: **~$0.033-$0.044**
 - Estimated cost for **100 chat messages** (at 3-4 loops each): **~$3.30-$4.40 total**
 - Midpoint estimate (3.5 loops avg): **~$3.85**
-- These estimates assume the current default model mix: main runtime `gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
+- These estimates assume the current default model mix: main runtime `google/gemini-3-flash-preview`, guardrail classifier `minimax/minimax-m2.5`, and wake classifier `google/gemini-3-flash-preview` unless `WAKE_CLASSIFIER_MODEL` is set.
 
 This makes the agent runtime inexpensive for day-to-day use, even with tool-driven multi-step reasoning.
 
@@ -112,6 +112,8 @@ cp .env.example .env
 ```bash
 # .env
 OPENROUTER_API_KEY=your_key
+LLM_MODEL=google/gemini-3-flash-preview
+GUARDRAIL_CLASSIFIER_MODEL=minimax/minimax-m2.5
 ```
 
 Current runtime expects OpenRouter-compatible chat routing for the main agent path.
@@ -142,10 +144,18 @@ Then start Telegram + webhook manager:
 
 `start.sh` will:
 - Start FastAPI on `:8000`
-- Launch a `cloudflared` tunnel
+- Launch a `cloudflared` quick tunnel
 - Auto-register the Telegram webhook at `<public_url>/webhook/telegram`
-- Auto-generate a Telegram webhook secret for that run when missing.
-- Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`.
+- Auto-generate a Telegram webhook secret for that run when missing
+- Default to `HOST=127.0.0.1` for local-only bind unless you override `HOST`
+
+Set this env var in `.env` for local Telegram mode:
+
+```bash
+TELEGRAM_BOT_TOKEN=your_botfather_token
+```
+
+If you are exposing OpenTulpa on your own public domain (without the quick tunnel manager), set the webhook manually:
 
 ```bash
 curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://yourdomain.com/webhook/telegram"
@@ -274,7 +284,7 @@ src/opentulpa/
 ├── context/       # Profiles, event backlog, file vault, rollups
 ├── domain/        # Domain contracts (conversation request/response)
 ├── interfaces/    # Telegram transport and streaming relay
-├── integrations/  # External clients (web/etc.)
+├── integrations/  # External clients (web/slack/etc.)
 ├── memory/        # mem0 integration layer
 ├── policy/        # Approval intent/policy evaluation
 ├── scheduler/     # Routine scheduling and persistence

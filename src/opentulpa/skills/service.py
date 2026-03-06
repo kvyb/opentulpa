@@ -474,3 +474,36 @@ class SkillStoreService:
                 "- Prefer ordinary web tools for simple fetch/search tasks."
             ),
         )
+        self._ensure_global_skill(
+            name="routine-schedule-composer",
+            description=(
+                "Use this skill when creating or updating reminders/scheduled routines with "
+                "routine_create, especially when you need clear schedule-time instructions that "
+                "capture scripts, files, and required resources."
+            ),
+            instructions=(
+                "## Purpose\n"
+                "Compose routine_create payloads so schedule-time behavior is explicit and deterministic.\n\n"
+                "## Field mapping\n"
+                "1. instruction: schedule-time scratchpad (what to run, files to read/write, expected output).\n"
+                "2. implementation_command: concrete shell/script command for scheduled execution and guardrail evaluation.\n\n"
+                "3. implementation_command path style: keep script/file arguments relative to working_dir.\n"
+                "   Example with default working_dir=tulpa_stuff: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`.\n\n"
+                "## Instruction style\n"
+                "1. Write instruction in second-person imperative voice: start with 'You must ...'.\n"
+                "2. Include concrete steps, required scripts/files/keys source, and expected result.\n"
+                "3. Include failure/reporting behavior (what to return/log if blocked).\n\n"
+                "## Execution claim policy\n"
+                "1. If user asked for immediate bootstrap/initialization, execute now and verify before claiming success.\n"
+                "2. If only scheduling was done, state clearly that future runs are scheduled but bootstrap was not executed.\n"
+                "3. Never include concrete fetched facts (headlines/metrics) unless they came from tool output in this run.\n\n"
+                "## Defaults\n"
+                "1. Set notify_user=true unless user explicitly asks for silent runs.\n"
+                "2. For one-time reminders from relative time phrases, use local ISO datetime schedule.\n"
+                "3. For recurring jobs, use cron schedule.\n\n"
+                "## Quality checks before calling routine_create\n"
+                "1. Ensure instruction describes the actual work output (file/API/update).\n"
+                "2. Ensure instruction references required scripts/files/keys source as needed.\n"
+                "3. Ensure implementation_command is concrete (executable + args), not natural language.\n"
+            ),
+        )

@@ -20,8 +20,8 @@ dependencies = [
     "mem0ai[llms]>=1.0",
     "pypdf>=5.0",
     "apscheduler>=3.10",
+    "slack-sdk>=3.27",
     "pydantic-settings>=2.0",
-    "vulture>=2.14",
 ]
 
 [project.optional-dependencies]

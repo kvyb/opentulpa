@@ -1,136 +1,107 @@
 # OpenTulpa Architecture
 
-Last updated: February 27, 2026
-
-This document describes the repository structure after the current refactor, including layer boundaries, runtime decomposition, and code conventions.
+This document describes the current runtime design, request flows, safety controls, and extension points.
 
 ## Design goals
 
-- Keep transport, orchestration, and agent reasoning separate.
-- Keep API routes transport-only (validation + delegation).
-- Keep agent runtime behavior modular and testable.
-- Keep safety gating at execution boundaries for external-impact actions.
-- Keep persistent context (profiles, memory, rollups, files, approvals) durable across sessions.
+- Keep interfaces thin and replaceable.
+- Keep decision logic centralized in the agent runtime/graph.
+- Keep domain/application boundaries explicit for easier testing and refactoring.
+- Persist user context, directives, and artifacts across sessions.
+- Enforce external-impact safety at tool-action time.
 
-## Dependency direction
+## Layered modules
 
-Allowed dependency flow:
+- `src/opentulpa/api`: FastAPI composition and route registration.
+- `src/opentulpa/api/routes`: internal route surface (`/internal/*`) + Telegram webhook.
+- `src/opentulpa/application`: orchestration use-cases (`TurnOrchestrator`, `WakeOrchestrator`, `ApprovalExecutionOrchestrator`).
+- `src/opentulpa/domain`: domain contracts (for example conversation turn request/result).
+- `src/opentulpa/agent`: LangGraph runtime, graph nodes, compaction, tool registry.
+- `src/opentulpa/interfaces/telegram`: Telegram transport, parsing, and streaming relay.
+- `src/opentulpa/approvals`: broker, adapters, store, approval models.
+- `src/opentulpa/policy`: approval intent/policy evaluator used by broker.
+- `src/opentulpa/context`: profiles, event backlog, file vault, thread rollups, link aliases.
+- `src/opentulpa/skills`: skill storage and retrieval.
+- `src/opentulpa/scheduler`: routine scheduling service.
+- `src/opentulpa/tasks`: task runtime, sandbox, wake queue integration.
 
-1. `api/routes` -> `application` -> `domain/context/services`
-2. `interfaces/*` -> `application` and/or `agent`
-3. `agent` -> `context`, `policy`, `approvals`, `integrations` (via internal APIs/tools)
+## Primary request flows
 
-Disallowed by convention:
+### Telegram turn flow
 
-- Business logic in route handlers.
-- FastAPI types imported into `application/*`.
-- Circular imports through package-level aggregators.
+1. Telegram calls `POST /webhook/telegram`.
+2. `interfaces/telegram/chat_service.py` parses text/files/voice and resolves `customer_id`/`thread_id`.
+3. Streaming path calls `runtime.astream_text(...)`.
+4. LangGraph runs nodes: `agent -> validate_tools -> guardrail_precheck -> tools -> claim_check`.
+5. Assistant reply is streamed/posted to Telegram.
+6. Deferred approval prompts (if any) are flushed after the assistant reply for the same turn.
 
-## Repository map
+### Direct API turn flow (non-Telegram)
 
-- `src/opentulpa/api`
-  - App composition and route registration.
-  - Request parsing helpers in `api/errors.py`.
-  - Request/query DTOs in `api/schemas/*` (Pydantic).
-- `src/opentulpa/application`
-  - Orchestrators per domain (`*_orchestrator.py`).
-  - Shared `ApplicationResult` in `application/contracts.py`.
-  - `application/__init__.py` intentionally minimal to avoid import cycles.
-- `src/opentulpa/domain`
-  - Core domain contracts (for example conversation turn contracts).
-- `src/opentulpa/agent`
-  - LangGraph runtime and behavior modules.
-  - Graph composition in `graph_builder.py`.
-  - Node routing in `graph_routes.py`.
-  - Node implementations in focused modules:
-    - `graph_node_agent.py`
-    - `graph_node_validate.py`
-    - `graph_node_tools.py`
-    - `graph_node_claim_check.py`
-    - `graph_node_limits.py`
-  - `graph_nodes.py` is now composition/export only.
-  - Runtime decomposition:
-    - `runtime.py` (facade + composition)
-    - `runtime_turns.py`
-    - `runtime_lifecycle.py`
-    - `runtime_classification.py`
-    - `runtime_facade.py`
-    - plus focused helpers (`runtime_*` modules).
-  - Tools decomposition:
-    - Composition in `tools_registry.py`
-    - Shared helper utilities in `tools_registry_support.py`
-    - Domain tool modules in `agent/tools/*`.
-- `src/opentulpa/interfaces/telegram`
-  - Telegram transport split by concern:
-    - `chat_service.py` (chat ingress orchestration)
-    - `chat_commands.py` (command/control branch handling)
-    - `relay_streaming.py` (stream delivery behavior)
-    - `relay_events.py` (wake/task event relay behavior)
-    - `relay.py` (thin composition facade)
-    - plus `client.py`, `attachments.py`, `session_state.py`, etc.
-- `src/opentulpa/approvals`, `src/opentulpa/policy`
-  - Approval lifecycle + policy evaluation.
-- `src/opentulpa/context`
-  - Persistent context services (profiles, rollups, files, links, events).
-- `src/opentulpa/tasks`, `src/opentulpa/scheduler`, `src/opentulpa/skills`
-  - Task execution, scheduling, skill storage/services.
+1. Client calls `POST /internal/chat`.
+2. `TurnOrchestrator` validates/normalizes the turn.
+3. Runtime executes `ainvoke_text(...)`.
+4. Route returns normalized `{ok, status, customer_id, thread_id, text}`.
 
-## Primary runtime flows
+### Approval decision + execution flow
 
-### Telegram message flow
+1. Guardrail precheck calls `POST /internal/approvals/evaluate`.
+2. `ApprovalBroker` + `policy/evaluator.py` decide `allow|require_approval|deny`.
+3. `require_approval` creates a pending record in approvals DB.
+4. User approves/denies via Telegram callback or `/approve` token path.
+5. Approved action executes once via `POST /internal/approvals/execute`.
+6. `ApprovalExecutionOrchestrator` summarizes execution outcome back to user.
 
-1. `POST /webhook/telegram` receives update.
-2. `TelegramWebhookOrchestrator` handles callback/message branching.
-3. Message path delegates to `TelegramChatService.handle_update`.
-4. Chat path parses text/attachments, resolves session/thread, and calls:
-   - `runtime.astream_text(...)` for streaming Telegram responses, or
-   - `runtime.ainvoke_text(...)` fallback path.
-5. Deferred approval challenges are flushed after response delivery.
+### Background wake flow
 
-### Internal chat flow
+1. Scheduler/task events enqueue wake payloads.
+2. `WakeOrchestrator` classifies notify-vs-backlog behavior.
+3. Notify-worthy events are drafted through agent runtime and delivered via interface.
+4. Non-notify events are persisted to context backlog for later turn injection.
 
-1. `POST /internal/chat` validates request DTO.
-2. Route delegates to `TurnOrchestrator`.
-3. Runtime executes turn.
-4. Route returns normalized response payload.
+## Agent graph behavior
 
-### Approval flow
+- Tool-call validation happens before execution (`validate_tools`).
+- Guardrail precheck evaluates each requested action and only allows approved tool call IDs through.
+- Claim-check verifies immediate execution claims against tool evidence before turn end.
+- Claim-check includes retry/backoff handling for:
+  - empty assistant output,
+  - unusable checker output,
+  - claim/evidence mismatch.
+- Streaming path has a fallback path that guarantees a visible user-facing message when no chunks are produced.
 
-1. Tool/action calls are evaluated through approval policy/broker.
-2. Pending approvals are stored durably.
-3. Telegram callback approve/deny updates approval state.
-4. Approved actions execute through `ApprovalExecutionOrchestrator`.
-5. Result summary is sent back to user.
+## Context window policy (current defaults)
 
-### Wake flow
+Configured in `src/opentulpa/core/config.py`:
 
-1. Task/scheduler/approval events produce wake payloads.
-2. `WakeOrchestrator` decides notify vs backlog.
-3. Notify events are relayed through Telegram + agent drafting.
-4. Non-notify events are persisted to context backlog.
+- `AGENT_CONTEXT_TOKEN_LIMIT` default `12000` (short-term high watermark).
+- `AGENT_CONTEXT_RECENT_TOKENS` default `3500` (post-compaction target).
+- `AGENT_CONTEXT_ROLLUP_TOKENS` default `2200` (older-context rollup budget).
+- `AGENT_CONTEXT_COMPACTION_SOURCE_TOKENS` default `100000` (max old span compacted per pass).
 
-## LangGraph state machine
+Compaction is hysteresis-based: compact at high watermark, then reduce toward low watermark, while folding older history into a bounded rollup injected as system context.
 
-Current node graph:
+## Approval model details
 
-1. `agent`
-2. `validate_tools` (if tool calls exist)
-3. `tools`
-4. `claim_check`
-5. loop to `agent` or `END` based on route predicates
+- Internal/read-oriented actions are deterministically allowed by policy.
+- External-impact actions are gated through approval broker.
+- Pending approvals are durable in SQLite (`pending_approvals.db`).
+- Telegram approvals are currently delivered with deferred queue/flush so approval bubbles appear after the assistant message in that turn.
+- State machine: `pending -> approved|denied|expired`, and `approved -> executed` (single-use).
 
-Notes:
+## Internal API boundary
 
-- Tool-call validation occurs before tool execution.
-- Guardrail approval logic is enforced at execution boundary tools.
-- Claim-check retries with bounded backoff for empty/mismatched outcomes.
-
-## Current contracts and typing
-
-- API transport contracts: Pydantic request/query DTOs in `api/schemas/*`.
-- Agent classifier/result contracts: Pydantic models in `agent/result_models.py`.
-- Application contracts: `ApplicationResult[TPayload]`.
-- Current orchestrator payloads are standardized as `dict[str, object]`.
+- `/webhook/*` is the public webhook ingress surface (Telegram and future integrations).
+- Public internet clients are denied for all non-webhook routes except health checks
+  (`/healthz`, `/agent/healthz`) for platform liveness probing.
+- `/webhook/telegram` requires Telegram secret header auth
+  (`x-telegram-bot-api-secret-token`).
+- `/internal/*` routes are intended for server-local traffic only
+  (`localhost`/private network).
+- `scripts/manager.py` auto-generates `TELEGRAM_WEBHOOK_SECRET` for tunnel runs
+  when not provided.
+- Cloud deploy bootstrap (`python -m opentulpa`) can auto-register Telegram webhook
+  when `TELEGRAM_BOT_TOKEN` and `PUBLIC_BASE_URL` (or `RAILWAY_PUBLIC_DOMAIN`) are set.
 
 ## Runtime data stores
 
@@ -144,83 +115,35 @@ Notes:
 - File vault: `.opentulpa/file_vault.db` + file storage
 - Tasks/wake queue: `.opentulpa/tasks.db`, `.opentulpa/wake_events.db`
 
-## Codebase conventions
+## Observability and debugging
 
-### Route conventions
+- Structured agent behavior log (JSONL):
+  - enabled by default (`AGENT_BEHAVIOR_LOG_ENABLED=true`)
+  - path default `.opentulpa/logs/agent_behavior.jsonl`
+- Includes turn lifecycle, graph node outcomes, guardrail decisions, claim-check retries, and tool execution outcomes.
 
-- Parse request bodies via `parse_request_model(...)`.
-- Parse query params via `parse_query_model(...)`.
-- Delegate to an orchestrator; do not embed domain logic in route functions.
-- Return orchestrator payload or `JSONResponse` for non-200 results.
+## Separation of concerns
 
-### Application conventions
+- Interfaces: transport + serialization only.
+- Application layer: request orchestration and outcome shaping.
+- Domain layer: typed request/result contracts.
+- Agent runtime: reasoning, graph progression, tool orchestration.
+- Policy + approvals: guardrail classification, lifecycle, authorization.
+- Sandbox/tasks: constrained command/file execution for generated automation code.
 
-- One orchestrator per domain boundary (`*_orchestrator.py`).
-- No FastAPI/transport imports in application layer.
-- Return `ApplicationResult`.
-- Keep side effects explicit and isolated.
+## Extension points
 
-### Agent conventions
+- Add tools in `src/opentulpa/agent/tools_registry.py`.
+- Add internal APIs in `src/opentulpa/api/routes/*`.
+- Add interface adapters under `src/opentulpa/interfaces/*`.
+- Add approval adapters under `src/opentulpa/approvals/adapters/*`.
+- Add skills via `src/opentulpa/skills/*`.
 
-- `runtime.py` is a facade, not a monolith.
-- Put new runtime behavior in focused `runtime_*` modules.
-- Keep `tools_registry.py` composition-only; place tool logic in `agent/tools/*`.
-- Keep graph node logic in `graph_node_*` modules; `graph_nodes.py` is an export surface.
+For external integrations, follow `docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`.
 
-### Telegram conventions
+## Failure behavior
 
-- Keep transport parsing in `client.py` and `chat_service.py`.
-- Keep command handling in `chat_commands.py`.
-- Keep streaming behavior in `relay_streaming.py`.
-- Keep event relay behavior in `relay_events.py`.
-
-### Purity and maintenance
-
-- Avoid compatibility wrappers unless required for an active migration window.
-- Prefer explicit typed contracts over `Any` for new boundaries.
-- Preserve strict layer boundaries when adding features.
-
-## Security and boundary policy
-
-- `/webhook/*` is public ingress.
-- `/internal/*` is server-local-only surface.
-- `/webhook/telegram` requires `x-telegram-bot-api-secret-token`.
-- External-impact actions require approval unless explicitly safe/allowed by policy.
-
-## Observability
-
-- Behavior log: `.opentulpa/logs/agent_behavior.jsonl`
-- Controlled by:
-  - `AGENT_BEHAVIOR_LOG_ENABLED`
-  - `AGENT_BEHAVIOR_LOG_PATH`
-
-## How to extend safely
-
-### Add a new internal endpoint
-
-1. Add request/query DTO in `api/schemas/`.
-2. Add/extend orchestrator in `application/`.
-3. Add thin route in `api/routes/`.
-4. Add/adjust tests for route + orchestrator.
-
-### Add a new tool
-
-1. Implement domain tool function(s) in `agent/tools/<domain>_tools.py`.
-2. Wire it in `tools_registry.py` composition.
-3. Add guardrail/approval handling if external-impacting.
-4. Add tool execution and integration tests.
-
-### Add a new Telegram behavior
-
-1. Place logic in the appropriate Telegram module (`chat_commands`, `relay_streaming`, or `relay_events`).
-2. Keep `chat_service.py` and `relay.py` as orchestration/composition boundaries.
-3. Add focused tests per module.
-
-## Quality gates
-
-Run before merging refactor changes:
-
-1. `uv run ruff check`
-2. `uv run pytest -q`
-
-For external integrations and action safety, see `docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`.
+- Guardrail classifier uncertainty defaults to approval-required.
+- If approval delivery cannot be completed, action remains non-executed.
+- Tool-call failures return explicit tool error messages back into the graph.
+- Wake delivery failures are persisted to context backlog for recovery.

@@ -45,10 +45,10 @@ async def test_verify_completion_claim_flags_mismatch_when_supported() -> None:
         recent_tool_outputs=[],
     )
 
-    assert result.mismatch is True
-    assert result.applies is True
-    assert result.confidence == pytest.approx(0.91)
-    assert result.usable is True
+    assert result["mismatch"] is True
+    assert result["applies"] is True
+    assert result["confidence"] == pytest.approx(0.91)
+    assert result["usable"] is True
 
 
 @pytest.mark.asyncio
@@ -66,9 +66,9 @@ async def test_verify_completion_claim_is_conservative_when_not_applicable() -> 
         recent_tool_outputs=[],
     )
 
-    assert result.applies is False
-    assert result.mismatch is False
-    assert result.usable is True
+    assert result["applies"] is False
+    assert result["mismatch"] is False
+    assert result["usable"] is True
 
 
 @pytest.mark.asyncio
@@ -81,10 +81,10 @@ async def test_verify_completion_claim_fails_open_on_classifier_error() -> None:
         recent_tool_outputs=[],
     )
 
-    assert result.ok is False
-    assert result.mismatch is False
-    assert "classifier_error" in result.reason
-    assert result.usable is False
+    assert result["ok"] is False
+    assert result["mismatch"] is False
+    assert "classifier_error" in result["reason"]
+    assert result["usable"] is False
 
 
 @pytest.mark.asyncio
@@ -97,6 +97,6 @@ async def test_verify_completion_claim_marks_unusable_when_json_missing() -> Non
         recent_tool_outputs=[],
     )
 
-    assert result.usable is False
-    assert result.mismatch is False
-    assert result.reason.startswith("invalid_checker_output:")
+    assert result["usable"] is False
+    assert result["mismatch"] is False
+    assert result["reason"].startswith("classifier_error:")

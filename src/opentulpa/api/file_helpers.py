@@ -54,6 +54,29 @@ def normalize_cleanup_paths(value: Any) -> list[str]:
     return out
 
 
+def collect_routine_cleanup_paths(payload: dict[str, Any]) -> list[str]:
+    """Collect cleanup file paths from supported routine payload keys."""
+    if not isinstance(payload, dict):
+        return []
+    candidates: list[str] = []
+    list_keys = ("cleanup_paths", "script_paths", "file_paths")
+    scalar_keys = ("cleanup_path", "script_path", "file_path")
+    for key in list_keys:
+        candidates.extend(normalize_cleanup_paths(payload.get(key)))
+    for key in scalar_keys:
+        raw = str(payload.get(key, "")).strip()
+        if raw:
+            candidates.append(raw)
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
 def safe_telegram_filename(name: str, *, fallback: str = "image.jpg") -> str:
     """Build a filesystem-safe Telegram filename."""
     raw = str(name or "").strip()

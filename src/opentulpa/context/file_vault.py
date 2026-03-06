@@ -240,6 +240,25 @@ class FileVaultService:
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
+    def get_many(self, customer_id: str, file_ids: list[str]) -> list[dict[str, Any]]:
+        cid = str(customer_id or "").strip()
+        ids = [str(fid).strip() for fid in file_ids if str(fid).strip()]
+        if not cid or not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM uploaded_files
+                WHERE customer_id=? AND id IN ({placeholders})
+                ORDER BY created_at DESC
+                """,
+                (cid, *ids),
+            ).fetchall()
+        by_id = {str(r["id"]): self._row_to_dict(r) for r in rows}
+        return [by_id[fid] for fid in ids if fid in by_id]
+
     def read_file_bytes(self, customer_id: str, file_id: str) -> bytes | None:
         record = self.get_file(customer_id, file_id)
         if not record:

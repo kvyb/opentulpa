@@ -40,6 +40,7 @@ def test_skills_endpoints_crud(tmp_path: Path) -> None:
         names = {s["name"] for s in listed.json()["skills"]}
         assert "sales-pitch" in names
         assert "skill-creator" in names
+        assert "routine-schedule-composer" in names
 
         fetched = client.post(
             "/internal/skills/get",

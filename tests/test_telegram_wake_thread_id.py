@@ -57,7 +57,7 @@ async def test_relay_event_regenerates_invalid_wake_thread_id(initial_wake_threa
     replies = await relay_module.relay_event_via_main_agent(
         customer_id="telegram_1",
         event_label="routine/scheduled",
-        payload={"routine_name": "autopost", "payload": {"message": "post update"}},
+        payload={"routine_name": "autopost", "payload": {"instruction": "You must send update."}},
         state_store=state_store,
         find_session_slots=lambda cid: _find_slots(state_store, cid),
         agent_runtime=runtime,
@@ -78,7 +78,7 @@ async def test_relay_event_keeps_existing_wake_thread_id() -> None:
     replies = await relay_module.relay_event_via_main_agent(
         customer_id="telegram_1",
         event_label="routine/scheduled",
-        payload={"routine_name": "autopost", "payload": {"message": "post update"}},
+        payload={"routine_name": "autopost", "payload": {"instruction": "You must send update."}},
         state_store=state_store,
         find_session_slots=lambda cid: _find_slots(state_store, cid),
         agent_runtime=runtime,
@@ -89,89 +89,3 @@ async def test_relay_event_keeps_existing_wake_thread_id() -> None:
     used_thread_id = str(runtime.calls[0].get("thread_id", ""))
     assert used_thread_id == "wake_abcd12"
     assert state_store.state["sessions"]["1"]["wake_thread_id"] == "wake_abcd12"
-
-
-@pytest.mark.asyncio
-async def test_relay_event_non_heartbeat_prompt_requires_execution() -> None:
-    state_store = _FakeStateStore(initial_wake_thread_id="wake_abcd12")
-    runtime = _Runtime()
-
-    await relay_module.relay_event_via_main_agent(
-        customer_id="telegram_1",
-        event_label="routine/scheduled",
-        payload={"routine_name": "autopost", "payload": {"message": "post update"}},
-        state_store=state_store,
-        find_session_slots=lambda cid: _find_slots(state_store, cid),
-        agent_runtime=runtime,
-    )
-
-    assert runtime.calls
-    prompt = str(runtime.calls[0].get("text", ""))
-    assert "Execute the routine instruction first" in prompt
-    assert relay_module.NO_NOTIFY_TOKEN not in prompt
-
-
-@pytest.mark.asyncio
-async def test_relay_event_heartbeat_prompt_allows_no_notify_token() -> None:
-    state_store = _FakeStateStore(initial_wake_thread_id="wake_abcd12")
-    runtime = _Runtime()
-
-    await relay_module.relay_event_via_main_agent(
-        customer_id="telegram_1",
-        event_label="routine/scheduled",
-        payload={
-            "routine_name": "heartbeat",
-            "payload": {"message": "gentle check", "proactive_heartbeat": True},
-        },
-        state_store=state_store,
-        find_session_slots=lambda cid: _find_slots(state_store, cid),
-        agent_runtime=runtime,
-    )
-
-    assert runtime.calls
-    prompt = str(runtime.calls[0].get("text", ""))
-    assert relay_module.NO_NOTIFY_TOKEN in prompt
-
-
-@pytest.mark.asyncio
-async def test_relay_event_scopes_wake_threads_by_routine_id() -> None:
-    state_store = _FakeStateStore(initial_wake_thread_id="wake_seeded")
-    runtime = _Runtime()
-
-    await relay_module.relay_event_via_main_agent(
-        customer_id="telegram_1",
-        event_label="routine/scheduled",
-        payload={
-            "routine_id": "rtn_one",
-            "routine_name": "one",
-            "payload": {"message": "run one"},
-        },
-        state_store=state_store,
-        find_session_slots=lambda cid: _find_slots(state_store, cid),
-        agent_runtime=runtime,
-    )
-    await relay_module.relay_event_via_main_agent(
-        customer_id="telegram_1",
-        event_label="routine/scheduled",
-        payload={
-            "routine_id": "rtn_two",
-            "routine_name": "two",
-            "payload": {"message": "run two"},
-        },
-        state_store=state_store,
-        find_session_slots=lambda cid: _find_slots(state_store, cid),
-        agent_runtime=runtime,
-    )
-
-    assert len(runtime.calls) == 2
-    first_thread = str(runtime.calls[0].get("thread_id", ""))
-    second_thread = str(runtime.calls[1].get("thread_id", ""))
-    assert first_thread.startswith("wake_")
-    assert second_thread.startswith("wake_")
-    assert first_thread != second_thread
-
-    slot = state_store.state["sessions"]["1"]
-    thread_map = slot.get("wake_thread_ids")
-    assert isinstance(thread_map, dict)
-    assert str(thread_map.get("routine:rtn_one", "")).startswith("wake_")
-    assert str(thread_map.get("routine:rtn_two", "")).startswith("wake_")

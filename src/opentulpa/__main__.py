@@ -16,6 +16,7 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_settings
+from opentulpa.integrations.slack_client import SlackClient
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -50,7 +51,7 @@ def _mem0_config_openrouter(
         "llm": {
             "provider": "openai",
             "config": {
-                "model": f"google/{llm_model}",
+                "model": llm_model,
                 "api_key": openrouter_api_key,
                 "openai_base_url": openrouter_base_url,
             },
@@ -228,6 +229,7 @@ def main() -> None:
         db_path=project_root / ".opentulpa" / "tasks.db",
         wake_callback=_wake_callback,
     )
+    slack_client = SlackClient(settings.slack_bot_token) if settings.slack_bot_token else None
 
     agent_runtime: OpenTulpaLangGraphRuntime | None = None
     if openrouter_api_key:
@@ -261,6 +263,7 @@ def main() -> None:
     app = create_app(
         memory=memory,
         scheduler=scheduler,
+        slack_client=slack_client,
         task_service=task_service,
         agent_runtime=agent_runtime,
         context_events=context_events,
