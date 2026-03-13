@@ -5,7 +5,7 @@
 # OpenTulpa
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 [![Self-Hosted](https://img.shields.io/badge/self--hosted-yes-green.svg)]()
 
 OpenTulpa is a personal AI agent you run on your own server, accessible through Telegram and a direct internal chat API.
@@ -94,7 +94,7 @@ This makes the agent runtime inexpensive for day-to-day use, even with tool-driv
 
 ## Prerequisites
 
-- Python `3.10+`
+- Python `3.12+`
 - [`uv`](https://docs.astral.sh/uv/) installed
 - Telegram bot token from `@BotFather` *(optional, Telegram interface only)*
 - `cloudflared` installed *(optional, local Telegram webhook tunneling only)*
@@ -163,12 +163,21 @@ curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://yourdomain
 
 > Telegram requires a public URL. For local dev, `cloudflared` or `ngrok` both work.
 
-**4. Optional: Browser Use capability**
+**4. Optional: Local Browser Use capability**
 
-Add this env var only if you want Browser Use browsing tools:
+Browser tasks run locally (headless by default). Install Chromium once:
 
 ```bash
-BROWSER_USE_API_KEY=your_key
+uv run playwright install chromium
+```
+
+Optional Browser Use tuning envs:
+
+```bash
+BROWSER_USE_HEADLESS=true
+BROWSER_USE_MODEL=
+BROWSER_USE_MAX_CONCURRENT_TASKS=2
+BROWSER_USE_TASK_RETENTION_SECONDS=1800
 ```
 
 **5. Start chatting.** Try:
@@ -237,7 +246,10 @@ summary and outputs 3 concise follow-up drafts in my tone."
 
 | Variable | Purpose |
 |---|---|
-| `BROWSER_USE_API_KEY` | Browser automation (form filling, web flows) |
+| `BROWSER_USE_HEADLESS` | Run local Browser Use headless (default `true`) |
+| `BROWSER_USE_MODEL` | Optional Browser Use model override |
+| `BROWSER_USE_MAX_CONCURRENT_TASKS` | Max concurrent local browser tasks |
+| `BROWSER_USE_TASK_RETENTION_SECONDS` | Keep finished browser tasks queryable in memory |
 
 **Core stack:** FastAPI · LangGraph · LangChain · mem0 · SQLite · APScheduler
 
@@ -250,7 +262,6 @@ summary and outputs 3 concise follow-up drafts in my tone."
 **External services** (only active when you configure them):
 - OpenRouter — LLM routing and embeddings
 - Telegram Bot API
-- Browser Use Cloud *(optional)*
 - Any API you integrate yourself
 
 **Runtime data:**

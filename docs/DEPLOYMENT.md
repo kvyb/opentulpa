@@ -15,11 +15,16 @@ The repo includes a production `Dockerfile` so Railway can deploy directly.
 
 - `TELEGRAM_WEBHOOK_SECRET` (recommended; if omitted, an ephemeral secret is generated at startup)
 - `PUBLIC_BASE_URL` (for example `https://your-app.up.railway.app`)
-- `BROWSER_USE_API_KEY` (required only for Browser Use tools)
-- `BROWSER_USE_BASE_URL` (defaults to `https://api.browser-use.com/api/v2`)
+- `BROWSER_USE_HEADLESS` (defaults to `true`)
+- `BROWSER_USE_MODEL` (optional Browser Use model override)
+- `BROWSER_USE_MAX_CONCURRENT_TASKS` (defaults to `2`)
+- `BROWSER_USE_TASK_RETENTION_SECONDS` (defaults to `1800`)
 
 Railway note:
 - If `PUBLIC_BASE_URL` is empty and Railway provides `RAILWAY_PUBLIC_DOMAIN`, startup auto-registers Telegram webhook to `https://$RAILWAY_PUBLIC_DOMAIN/webhook/telegram`.
+
+Browser Use local note:
+- Ensure Playwright Chromium is installed in the image/runtime (`uv run playwright install --with-deps chromium` in Docker).
 
 ## What startup configures automatically
 

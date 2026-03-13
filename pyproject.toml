@@ -3,7 +3,7 @@ name = "opentulpa"
 version = "0.1.0"
 description = "A background-capable AI agent using LangGraph with mem0 memory"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     { name = "kvyb", email = "you@example.com" }
 ]
@@ -17,11 +17,12 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "httpx>=0.26",
     "crawl4ai>=0.7.0",
-    "mem0ai[llms]>=1.0",
+    "mem0ai>=1.0",
     "pypdf>=5.0",
     "apscheduler>=3.10",
     "slack-sdk>=3.27",
     "pydantic-settings>=2.0",
+    "browser-use==0.12.2",
 ]
 
 [project.optional-dependencies]
@@ -49,7 +50,7 @@ dev-dependencies = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 src = ["src"]
 
@@ -58,7 +59,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
