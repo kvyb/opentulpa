@@ -143,6 +143,29 @@ class Settings(BaseSettings):
         default="openai/text-embedding-3-small",
         description="Embedding model id for mem0 via OpenRouter embeddings API.",
     )
+    browser_use_headless: bool = Field(
+        default=True,
+        description="Run local Browser Use sessions in headless mode by default.",
+    )
+    browser_use_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional Browser Use model override. If unset, browser tasks use tool arg llm "
+            "(when explicit) or LLM_MODEL."
+        ),
+    )
+    browser_use_max_concurrent_tasks: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Maximum concurrent local Browser Use tasks.",
+    )
+    browser_use_task_retention_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        description="How long completed local Browser Use task records remain queryable in memory.",
+    )
 
     # OpenRouter: OPENROUTER_API_KEY required. OPENROUTER_MODEL uses llm_model as-is.
     # mem0 is configured via OpenRouter base URL + key (OpenAI-compatible endpoints).

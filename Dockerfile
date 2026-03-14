@@ -13,7 +13,7 @@ COPY scripts /app/scripts
 COPY skills /app/skills
 COPY docs /app/docs
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev && uv run playwright install --with-deps chromium
 
 ENV HOST=0.0.0.0
 ENV PORT=8000

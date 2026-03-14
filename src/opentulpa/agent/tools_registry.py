@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shlex
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -47,26 +46,17 @@ def _require_customer_id(runtime: Any) -> str:
     return customer_id
 
 
-def _browser_use_api_key() -> str:
-    return str(os.environ.get("BROWSER_USE_API_KEY", "")).strip()
-
-
-def _browser_use_base_url() -> str:
-    raw = str(os.environ.get("BROWSER_USE_BASE_URL", "")).strip().rstrip("/")
-    return raw or "https://api.browser-use.com/api/v2"
-
-
-def _browser_use_error_detail(resp: httpx.Response) -> str:
+def _get_browser_use_local_manager(runtime: Any) -> tuple[Any | None, str | None]:
+    getter = getattr(runtime, "get_browser_use_local_manager", None)
+    if not callable(getter):
+        return None, "browser_use local backend unavailable: runtime manager not initialized"
     try:
-        payload = resp.json()
-    except Exception:
-        return (resp.text or "").strip()[:500] or f"HTTP {resp.status_code}"
-    if isinstance(payload, dict):
-        for key in ("detail", "message", "error"):
-            value = payload.get(key)
-            if value:
-                return str(value)
-    return str(payload)[:500]
+        manager = getter()
+    except Exception as exc:
+        return None, f"browser_use local backend unavailable: {exc}"
+    if manager is None:
+        return None, "browser_use local backend unavailable: manager is None"
+    return manager, None
 
 
 def _normalize_allowed_domains(allowed_domains: list[str] | None) -> list[str]:
@@ -947,17 +937,13 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         session_id: str | None = None,
     ) -> Any:
         """
-        Run a Browser Use Cloud task and wait for completion.
+        Run a local Browser Use task and wait for completion.
         Use for dynamic web tasks that need real browser interactions.
         """
-        api_key = _browser_use_api_key()
-        if not api_key:
-            return {"error": "browser_use_run unavailable: BROWSER_USE_API_KEY missing"}
-
         task_text = str(task or "").strip()
         if not task_text:
             return {"error": "browser_use_run requires a non-empty task"}
-        customer_id = _require_customer_id(runtime)
+        _require_customer_id(runtime)
 
         safe_max_steps = max(1, min(int(max_steps), 80))
         safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
@@ -967,99 +953,58 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         safe_start_url = str(start_url or "").strip()
         safe_session_id = str(session_id or "").strip()
 
-        payload: dict[str, Any] = {
-            "task": task_text,
-            "maxSteps": safe_max_steps,
-            "llm": safe_llm,
-            "metadata": {
-                "source": "opentulpa",
-                "customer_id": str(customer_id or "").strip()[:120],
-            },
-        }
-        if safe_domains:
-            payload["allowedDomains"] = safe_domains
-        if safe_start_url:
-            payload["startUrl"] = safe_start_url
-        if safe_session_id:
-            payload["sessionId"] = safe_session_id
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_run unavailable"}
 
-        headers = {"X-Browser-Use-API-Key": api_key, "Content-Type": "application/json"}
-        timeout = httpx.Timeout(60.0, connect=10.0, read=60.0)
-        base_url = _browser_use_base_url()
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            try:
-                create_resp = await client.post(f"{base_url}/tasks", json=payload)
-            except Exception as exc:
-                return {"error": f"browser_use_run create request failed: {exc}"}
-            if create_resp.status_code not in {200, 201, 202}:
+        created = await manager.start_task(
+            task=task_text,
+            max_steps=safe_max_steps,
+            llm=safe_llm,
+            allowed_domains=safe_domains,
+            start_url=safe_start_url or None,
+            session_id=safe_session_id or None,
+        )
+        if isinstance(created, dict) and created.get("error"):
+            return {"error": str(created.get("error"))}
+
+        task_id = str((created or {}).get("id") or "").strip()
+        result_session_id = str((created or {}).get("sessionId") or safe_session_id).strip()
+        if not task_id:
+            return {"error": "browser_use_run create failed: missing task id"}
+
+        deadline = datetime.now(UTC).timestamp() + safe_wait_timeout
+        while True:
+            task_data = await manager.get_task(task_id)
+            if not isinstance(task_data, dict):
                 return {
-                    "error": (
-                        f"browser_use_run create failed: HTTP {create_resp.status_code}: "
-                        f"{_browser_use_error_detail(create_resp)}"
-                    )
+                    "error": f"browser_use_run poll failed: task not found ({task_id})",
+                    "task_id": task_id,
+                    "session_id": result_session_id or None,
                 }
-            try:
-                created = create_resp.json()
-            except Exception:
-                return {"error": "browser_use_run create failed: invalid JSON response"}
 
-            task_id = str(created.get("id") or "").strip()
-            result_session_id = str(created.get("sessionId") or safe_session_id).strip()
-            if not task_id:
-                return {"error": "browser_use_run create failed: missing task id in response"}
+            status = str(task_data.get("status") or "").strip().lower()
+            if status in {"finished", "stopped", "failed"}:
+                compact = _compact_browser_use_task_view(task_data)
+                compact["task_id"] = task_id
+                compact["session_id"] = result_session_id or compact.get("session_id")
+                compact["status"] = status or str(compact.get("status") or "unknown")
+                compact["live_url"] = None
+                return compact
 
-            deadline = datetime.now(timezone.utc).timestamp() + safe_wait_timeout
-            while True:
-                try:
-                    task_resp = await client.get(f"{base_url}/tasks/{task_id}")
-                except Exception as exc:
-                    return {"error": f"browser_use_run poll failed: {exc}", "task_id": task_id}
-                if task_resp.status_code != 200:
-                    return {
-                        "error": (
-                            f"browser_use_run poll failed: HTTP {task_resp.status_code}: "
-                            f"{_browser_use_error_detail(task_resp)}"
-                        ),
-                        "task_id": task_id,
-                        "session_id": result_session_id or None,
-                    }
-                try:
-                    task_data = task_resp.json()
-                except Exception:
-                    return {"error": "browser_use_run poll failed: invalid JSON", "task_id": task_id}
+            if datetime.now(UTC).timestamp() >= deadline:
+                return {
+                    "task_id": task_id,
+                    "session_id": result_session_id or None,
+                    "status": status or "started",
+                    "timed_out": True,
+                    "message": (
+                        "Task is still running. Use browser_use_task_get(task_id) "
+                        "to check progress or browser_use_task_control to stop."
+                    ),
+                }
 
-                status = str(task_data.get("status") or "").strip().lower()
-                if status in {"finished", "stopped"}:
-                    live_url = None
-                    if result_session_id:
-                        with_context = await client.get(f"{base_url}/sessions/{result_session_id}")
-                        if with_context.status_code == 200:
-                            with suppress(Exception):
-                                live_url = with_context.json().get("liveUrl")
-                    compact = _compact_browser_use_task_view(task_data)
-                    compact["task_id"] = task_id
-                    compact["session_id"] = result_session_id or compact.get("session_id")
-                    compact["status"] = status or str(compact.get("status") or "unknown")
-                    compact["live_url"] = live_url
-                    return compact
-
-                if datetime.now(timezone.utc).timestamp() >= deadline:
-                    return {
-                        "task_id": task_id,
-                        "session_id": result_session_id or None,
-                        "status": status or "started",
-                        "timed_out": True,
-                        "message": (
-                            "Task is still running. Use browser_use_task_get(task_id) "
-                            "to check progress or browser_use_task_control to stop."
-                        ),
-                    }
-
-                await asyncio.sleep(safe_poll_interval)
+            await asyncio.sleep(safe_poll_interval)
 
     @tool
     async def browser_use_task_get(
@@ -1068,50 +1013,26 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         max_steps_preview: int = 3,
     ) -> Any:
         """Get Browser Use task status/details by task_id (compact by default)."""
-        api_key = _browser_use_api_key()
-        if not api_key:
-            return {"error": "browser_use_task_get unavailable: BROWSER_USE_API_KEY missing"}
-
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_get requires task_id"}
 
-        headers = {"X-Browser-Use-API-Key": api_key}
-        timeout = httpx.Timeout(45.0, connect=10.0, read=45.0)
-        base_url = _browser_use_base_url()
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            try:
-                resp = await client.get(f"{base_url}/tasks/{safe_task_id}")
-            except Exception as exc:
-                return {"error": f"browser_use_task_get request failed: {exc}"}
-            if resp.status_code != 200:
-                return {
-                    "error": (
-                        f"browser_use_task_get failed: HTTP {resp.status_code}: "
-                        f"{_browser_use_error_detail(resp)}"
-                    )
-                }
-            try:
-                payload = resp.json()
-            except Exception:
-                return {"error": "browser_use_task_get failed: invalid JSON response"}
-            return _compact_browser_use_task_view(
-                payload if isinstance(payload, dict) else {},
-                include_steps=bool(include_steps),
-                max_steps_preview=max_steps_preview,
-            )
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_task_get unavailable"}
+
+        payload = await manager.get_task(safe_task_id)
+        if not isinstance(payload, dict):
+            return {"error": f"browser_use_task_get failed: task not found ({safe_task_id})"}
+        return _compact_browser_use_task_view(
+            payload,
+            include_steps=bool(include_steps),
+            max_steps_preview=max_steps_preview,
+        )
 
     @tool
     async def browser_use_task_control(task_id: str, action: str = "stop_task_and_session") -> Any:
         """Control Browser Use task execution (stop, pause, resume, or stop_task_and_session)."""
-        api_key = _browser_use_api_key()
-        if not api_key:
-            return {"error": "browser_use_task_control unavailable: BROWSER_USE_API_KEY missing"}
-
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_control requires task_id"}
@@ -1125,33 +1046,14 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 )
             }
 
-        headers = {"X-Browser-Use-API-Key": api_key, "Content-Type": "application/json"}
-        timeout = httpx.Timeout(45.0, connect=10.0, read=45.0)
-        base_url = _browser_use_base_url()
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            try:
-                resp = await client.patch(
-                    f"{base_url}/tasks/{safe_task_id}",
-                    json={"action": safe_action},
-                )
-            except Exception as exc:
-                return {"error": f"browser_use_task_control request failed: {exc}"}
-            if resp.status_code != 200:
-                return {
-                    "error": (
-                        f"browser_use_task_control failed: HTTP {resp.status_code}: "
-                        f"{_browser_use_error_detail(resp)}"
-                    )
-                }
-            try:
-                payload = resp.json()
-            except Exception:
-                return {"error": "browser_use_task_control failed: invalid JSON response"}
-            return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_task_control unavailable"}
+
+        payload = await manager.control_task(task_id=safe_task_id, action=safe_action)
+        if isinstance(payload, dict) and payload.get("error"):
+            return {"error": str(payload.get("error"))}
+        return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
 
     async def _fetch_remote_content(
         url: str,
@@ -1743,7 +1645,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     async def server_time() -> Any:
         """Get server time."""
         now_local = datetime.now().astimezone()
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         return {
             "server_time_local_iso": now_local.isoformat(),
             "server_timezone": str(now_local.tzinfo),

@@ -21,7 +21,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -180,6 +180,7 @@ class OpenTulpaLangGraphRuntime:
         app_url: str,
         openrouter_api_key: str,
         model_name: str,
+        openrouter_base_url: str = "https://openrouter.ai/api/v1",
         wake_classifier_model_name: str | None = None,
         guardrail_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
@@ -196,9 +197,14 @@ class OpenTulpaLangGraphRuntime:
         proactive_heartbeat_default_hours: int = 3,
         behavior_log_enabled: bool = True,
         behavior_log_path: str = ".opentulpa/logs/agent_behavior.jsonl",
+        browser_use_headless: bool = True,
+        browser_use_model_override: str | None = None,
+        browser_use_max_concurrent_tasks: int = 2,
+        browser_use_task_retention_seconds: int = 1800,
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
+        self.openrouter_base_url = str(openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
         self.model_name = _normalize_model_name(model_name)
         self._wake_classifier_model_name = (
             _normalize_model_name(wake_classifier_model_name)
@@ -241,6 +247,11 @@ class OpenTulpaLangGraphRuntime:
         self._behavior_log_lock = threading.Lock()
         if self._behavior_log_enabled:
             self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._browser_use_headless = bool(browser_use_headless)
+        self._browser_use_model_override = str(browser_use_model_override or "").strip()
+        self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
+        self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
+        self._browser_use_local_manager: Any | None = None
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_customer_id",
             default="",
@@ -251,7 +262,7 @@ class OpenTulpaLangGraphRuntime:
             self.model_name,
             model_provider="openai",
             api_key=openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
+            base_url=self.openrouter_base_url,
             temperature=0,
         )
         if self._wake_classifier_model_name == self.model_name:
@@ -262,7 +273,7 @@ class OpenTulpaLangGraphRuntime:
                     self._wake_classifier_model_name,
                     model_provider="openai",
                     api_key=openrouter_api_key,
-                    base_url="https://openrouter.ai/api/v1",
+                    base_url=self.openrouter_base_url,
                     temperature=0,
                 )
             except Exception:
@@ -282,7 +293,7 @@ class OpenTulpaLangGraphRuntime:
                     self._guardrail_classifier_model_name,
                     model_provider="openai",
                     api_key=openrouter_api_key,
-                    base_url="https://openrouter.ai/api/v1",
+                    base_url=self.openrouter_base_url,
                     temperature=0,
                 )
             except Exception:
@@ -302,6 +313,21 @@ class OpenTulpaLangGraphRuntime:
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
 
+    def get_browser_use_local_manager(self) -> Any:
+        if self._browser_use_local_manager is None:
+            from opentulpa.agent.browser_use_local import BrowserUseLocalManager
+
+            self._browser_use_local_manager = BrowserUseLocalManager(
+                openrouter_api_key=self.openrouter_api_key,
+                openrouter_base_url=self.openrouter_base_url,
+                default_model=self.model_name,
+                model_override=self._browser_use_model_override,
+                headless=self._browser_use_headless,
+                max_concurrent_tasks=self._browser_use_max_concurrent_tasks,
+                task_retention_seconds=self._browser_use_task_retention_seconds,
+            )
+        return self._browser_use_local_manager
+
     def log_behavior_event(self, *, event: str, **fields: Any) -> None:
         if not bool(getattr(self, "_behavior_log_enabled", False)):
             return
@@ -309,7 +335,7 @@ class OpenTulpaLangGraphRuntime:
         if not event_name:
             return
         payload: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "event": event_name,
         }
         for key, value in fields.items():
@@ -825,7 +851,7 @@ class OpenTulpaLangGraphRuntime:
 
     async def _build_live_time_context(self, customer_id: str) -> dict[str, str]:
         now_server = datetime.now().astimezone()
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         server_offset = now_server.utcoffset() or timedelta()
         server_offset_minutes = int(server_offset.total_seconds() // 60)
         server_offset_text = _minutes_to_utc_offset(server_offset_minutes)
@@ -1010,8 +1036,18 @@ class OpenTulpaLangGraphRuntime:
         self._register_tools()
         self._model_with_tools = self._model.bind_tools(list(self._tools.values()))
         self._graph = self._build_graph()
+        manager = self.get_browser_use_local_manager()
+        with suppress(Exception):
+            preflight_error = await manager.preflight()
+            if preflight_error:
+                logger.warning("browser_use local preflight warning: %s", preflight_error)
 
     async def shutdown(self) -> None:
+        manager = self._browser_use_local_manager
+        if manager is not None:
+            with suppress(Exception):
+                await manager.shutdown()
+        self._browser_use_local_manager = None
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
         self._checkpointer_cm = None

@@ -236,6 +236,7 @@ def main() -> None:
         agent_runtime = OpenTulpaLangGraphRuntime(
             app_url=f"http://127.0.0.1:{settings.port}",
             openrouter_api_key=openrouter_api_key,
+            openrouter_base_url=settings.openrouter_base_url,
             model_name=settings.llm_model,
             wake_classifier_model_name=settings.wake_classifier_model,
             guardrail_classifier_model_name=settings.guardrail_classifier_model,
@@ -252,6 +253,10 @@ def main() -> None:
             proactive_heartbeat_default_hours=settings.proactive_heartbeat_default_hours,
             behavior_log_enabled=settings.agent_behavior_log_enabled,
             behavior_log_path=settings.agent_behavior_log_path,
+            browser_use_headless=settings.browser_use_headless,
+            browser_use_model_override=settings.browser_use_model,
+            browser_use_max_concurrent_tasks=settings.browser_use_max_concurrent_tasks,
+            browser_use_task_retention_seconds=settings.browser_use_task_retention_seconds,
         )
     else:
         print(

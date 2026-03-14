@@ -86,14 +86,16 @@ def status_text(agent_up: bool) -> str:
     keys = {
         "OPENROUTER_API_KEY": bool(os.environ.get("OPENROUTER_API_KEY")),
         "TELEGRAM_BOT_TOKEN": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
-        "BROWSER_USE_API_KEY": bool(os.environ.get("BROWSER_USE_API_KEY")),
+        "BROWSER_USE_HEADLESS": bool(os.environ.get("BROWSER_USE_HEADLESS")),
+        "BROWSER_USE_MODEL": bool(os.environ.get("BROWSER_USE_MODEL")),
     }
     lines = [
         "OpenTulpa status:",
         f"- Agent backend: {'up' if agent_up else 'down'}",
         f"- OPENROUTER_API_KEY: {'set' if keys['OPENROUTER_API_KEY'] else 'missing'}",
         f"- TELEGRAM_BOT_TOKEN: {'set' if keys['TELEGRAM_BOT_TOKEN'] else 'missing'}",
-        f"- BROWSER_USE_API_KEY: {'set' if keys['BROWSER_USE_API_KEY'] else 'missing'}",
+        f"- BROWSER_USE_HEADLESS: {'set' if keys['BROWSER_USE_HEADLESS'] else 'default(true)'}",
+        f"- BROWSER_USE_MODEL: {'set' if keys['BROWSER_USE_MODEL'] else 'default(LLM_MODEL)'}",
         "",
         "Commands: /setup, /status, /set KEY VALUE, /cancel",
     ]
