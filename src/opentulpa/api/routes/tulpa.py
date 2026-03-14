@@ -9,9 +9,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from opentulpa.tasks.sandbox import (
-    ALLOWED_TERMINAL_COMMANDS,
     ALLOWED_TERMINAL_DIRS,
     PROJECT_ROOT,
+    TERMINAL_COMMAND_ALLOWLIST_ENV,
+    get_terminal_command_allowlist,
     get_tulpa_catalog,
 )
 from opentulpa.tasks.sandbox import read_file as sandbox_read_file
@@ -88,9 +89,14 @@ def register_tulpa_routes(
                 timeout_seconds=timeout_seconds,
             )
         except PermissionError as exc:
+            allowed_commands = sorted(get_terminal_command_allowlist())
             return JSONResponse(
                 status_code=403,
-                content={"detail": str(exc), "allowed_commands": sorted(ALLOWED_TERMINAL_COMMANDS)},
+                content={
+                    "detail": str(exc),
+                    "allowlist_env": TERMINAL_COMMAND_ALLOWLIST_ENV,
+                    "allowed_commands": allowed_commands,
+                },
             )
         except TimeoutError as exc:
             return JSONResponse(status_code=408, content={"detail": str(exc)})

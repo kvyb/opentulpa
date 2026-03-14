@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,7 @@ _WORKING_DIR_PREFIXES: dict[str, str] = {
     "opentulpa": "src/opentulpa",
 }
 
-ALLOWED_TERMINAL_COMMANDS = {
+DEFAULT_TERMINAL_COMMAND_ALLOWLIST = {
     "wget",
     "curl",
     "python",
@@ -69,6 +69,16 @@ ALLOWED_TERMINAL_COMMANDS = {
     "pytest",
     "sqlite3",
 }
+TERMINAL_COMMAND_ALLOWLIST_ENV = "OPENTULPA_TERMINAL_COMMAND_ALLOWLIST"
+
+
+def get_terminal_command_allowlist() -> set[str]:
+    raw = str(os.environ.get(TERMINAL_COMMAND_ALLOWLIST_ENV, "")).strip()
+    if not raw:
+        return set()
+    if raw.lower() == "default":
+        return set(DEFAULT_TERMINAL_COMMAND_ALLOWLIST)
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def _is_tulpa_router_module(path: Path) -> bool:
@@ -377,16 +387,24 @@ def run_terminal(
         },
     )
     # endregion
-    if parts[0] not in ALLOWED_TERMINAL_COMMANDS:
+    allowed_commands = get_terminal_command_allowlist()
+    if allowed_commands and parts[0] not in allowed_commands:
         # region agent log
         _debug_log(
             hypothesis_id="H1",
             location="tasks/sandbox.py:run_terminal",
             message="terminal_command_rejected",
-            data={"working_dir": working_dir, "command_bin": parts[0], "reason": "not_allowlisted"},
+            data={
+                "working_dir": working_dir,
+                "command_bin": parts[0],
+                "reason": "not_allowlisted",
+                "allowlist_env": TERMINAL_COMMAND_ALLOWLIST_ENV,
+            },
         )
         # endregion
-        raise PermissionError(f"command '{parts[0]}' is not allowed")
+        raise PermissionError(
+            f"command '{parts[0]}' is not allowed by {TERMINAL_COMMAND_ALLOWLIST_ENV}"
+        )
     agent_venv_dir = _ensure_agent_venv()
 
     prefix = _WORKING_DIR_PREFIXES.get(working_dir)
@@ -557,7 +575,7 @@ def _write_catalog_readme(catalog: dict[str, Any]) -> None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def json_dumps(value: Any, indent: int | None = None) -> str:
