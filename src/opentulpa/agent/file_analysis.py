@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import mimetypes
+import re
 from io import BytesIO
 from typing import Any
 from xml.etree import ElementTree
@@ -13,6 +16,20 @@ import httpx
 
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
+
+_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".webm",
+    ".mpeg",
+    ".mpg",
+    ".m4v",
+}
+_VIDEO_SEGMENT_SECONDS = 30
+_VIDEO_MAX_SEGMENTS = 12
+_VIDEO_INLINE_MAX_BYTES = 20_000_000
+_VIDEO_FALLBACK_DURATION_SECONDS = 120
 
 
 def extract_docx_text(raw_bytes: bytes) -> str:
@@ -106,6 +123,246 @@ def _infer_audio_format(*, filename: str | None, mime_type: str | None) -> str:
         "audio/m4a": "m4a",
     }
     return mime_map.get(safe_mime, "ogg")
+
+
+def _looks_like_video_blob(*, filename: str, mime_type: str, kind: str) -> bool:
+    safe_name = str(filename or "").strip().lower()
+    safe_mime = str(mime_type or "").strip().lower()
+    safe_kind = str(kind or "").strip().lower()
+    if safe_kind == "video":
+        return True
+    if safe_mime.startswith("video/"):
+        return True
+    return any(safe_name.endswith(ext) for ext in _VIDEO_EXTENSIONS)
+
+
+def _video_mime_or_default(mime_type: str) -> str:
+    safe = str(mime_type or "").strip().lower()
+    return safe if safe.startswith("video/") else "video/mp4"
+
+
+def _seconds_to_mmss(seconds: int) -> str:
+    total = max(0, int(seconds))
+    mins = total // 60
+    secs = total % 60
+    return f"{mins:02d}:{secs:02d}"
+
+
+def _build_30s_segments(*, duration_seconds: int, max_segments: int = _VIDEO_MAX_SEGMENTS) -> list[tuple[int, int]]:
+    safe_max = max(1, int(max_segments))
+    safe_duration = max(1, int(duration_seconds))
+    out: list[tuple[int, int]] = []
+    start = 0
+    while start < safe_duration and len(out) < safe_max:
+        end = min(start + _VIDEO_SEGMENT_SECONDS, safe_duration)
+        out.append((start, end))
+        start = end
+    return out
+
+
+def _extract_first_json_block(text: str) -> dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    for match in re.finditer(r"\{.*?\}", raw, flags=re.DOTALL):
+        chunk = match.group(0).strip()
+        try:
+            payload = json.loads(chunk)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+async def _estimate_video_duration_seconds(
+    runtime: Any,
+    *,
+    video_data_url: str,
+    question: str,
+    caption: str,
+) -> int:
+    prompt = (
+        "Estimate this video's total duration. "
+        "Return JSON only: {\"duration_seconds\": <integer>}."
+    )
+    if question:
+        prompt += f"\nUser question: {question[:400]}"
+    if caption:
+        prompt += f"\nUser caption: {caption[:400]}"
+    try:
+        response = await runtime._model.ainvoke(
+            [
+                SystemMessage(content="Return strict JSON only."),
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": prompt},
+                        {"type": "video_url", "video_url": {"url": video_data_url}},
+                    ]
+                ),
+            ]
+        )
+    except Exception:
+        return 0
+    text = _content_to_text(getattr(response, "content", "")).strip()
+    payload = _extract_first_json_block(text)
+    if not payload:
+        return 0
+    duration = payload.get("duration_seconds")
+    try:
+        value = int(float(str(duration)))
+    except Exception:
+        return 0
+    return max(0, min(value, 3600))
+
+
+async def _analyze_video_segment(
+    runtime: Any,
+    *,
+    video_data_url: str,
+    start_seconds: int,
+    end_seconds: int,
+    caption: str,
+    question: str,
+) -> str:
+    start_label = _seconds_to_mmss(start_seconds)
+    end_label = _seconds_to_mmss(end_seconds)
+    prompt = (
+        "Analyze ONLY the requested video window and ignore other timestamps.\n"
+        f"Window: {start_label} to {end_label}.\n"
+        "Return concise notes with these headings:\n"
+        "- Scene\n"
+        "- Visual actions\n"
+        "- Spoken dialogue\n"
+        "- Music/SFX\n"
+        "- Vibe/Atmosphere\n"
+        "- Visual style (color, lighting, camera/editing feel)\n"
+        "- Notable changes"
+    )
+    if caption:
+        prompt += f"\nUser caption: {caption[:500]}"
+    if question:
+        prompt += f"\nUser question focus: {question[:600]}"
+    response = await runtime._model.ainvoke(
+        [
+            SystemMessage(content="You are precise about timeline-based video analysis."),
+            HumanMessage(
+                content=[
+                    {"type": "text", "text": prompt},
+                    {"type": "video_url", "video_url": {"url": video_data_url}},
+                ]
+            ),
+        ]
+    )
+    text = _content_to_text(getattr(response, "content", "")).strip()
+    if not text:
+        return f"{start_label}-{end_label}: no details returned."
+    return f"{start_label}-{end_label}\n{text[:1800]}"
+
+
+async def _synthesize_video_segments(
+    runtime: Any,
+    *,
+    filename: str,
+    mime_type: str,
+    caption: str,
+    question: str,
+    segment_notes: list[str],
+) -> str:
+    compiled_notes = "\n\n".join(note for note in segment_notes if str(note).strip())
+    if not compiled_notes:
+        return ""
+    prompt = (
+        "Create a final video description from segmented notes.\n"
+        "Output sections:\n"
+        "1) Scene Timeline\n"
+        "2) Dialogue Summary\n"
+        "3) Music and Sound Design\n"
+        "4) Vibe, Atmosphere, and Style\n"
+        "5) Key Moments\n"
+        "6) One-paragraph overall summary"
+    )
+    if question:
+        prompt += f"\nUser question to prioritize: {question[:800]}"
+    response = await runtime._model.ainvoke(
+        [
+            SystemMessage(content="Synthesize segment notes into one cohesive video report."),
+            HumanMessage(
+                content=(
+                    f"{prompt}\n\n"
+                    f"filename={filename}\n"
+                    f"mime_type={mime_type}\n"
+                    f"caption={caption[:500]}\n\n"
+                    "Segment notes:\n"
+                    f"{compiled_notes[:24000]}"
+                )
+            ),
+        ]
+    )
+    final_text = _content_to_text(getattr(response, "content", "")).strip()
+    return final_text[:6000]
+
+
+async def _summarize_video_blob(
+    runtime: Any,
+    *,
+    filename: str,
+    mime_type: str,
+    raw_bytes: bytes,
+    caption: str,
+    question: str,
+) -> str:
+    content_bytes = bytes(raw_bytes or b"")
+    if len(content_bytes) > _VIDEO_INLINE_MAX_BYTES:
+        return (
+            f"Uploaded video '{filename}' is {len(content_bytes)} bytes, which is too large for inline "
+            "video analysis. Please send a shorter/compressed clip (under 20MB) or share a supported video URL."
+        )
+
+    safe_mime = _video_mime_or_default(mime_type)
+    b64_video = base64.b64encode(content_bytes).decode("ascii")
+    video_data_url = f"data:{safe_mime};base64,{b64_video}"
+
+    estimated_duration = await _estimate_video_duration_seconds(
+        runtime,
+        video_data_url=video_data_url,
+        question=question,
+        caption=caption,
+    )
+    if estimated_duration <= 0:
+        estimated_duration = _VIDEO_FALLBACK_DURATION_SECONDS
+
+    segments = _build_30s_segments(duration_seconds=estimated_duration, max_segments=_VIDEO_MAX_SEGMENTS)
+    tasks = [
+        _analyze_video_segment(
+            runtime,
+            video_data_url=video_data_url,
+            start_seconds=start,
+            end_seconds=end,
+            caption=caption,
+            question=question,
+        )
+        for start, end in segments
+    ]
+    try:
+        raw_notes = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception:
+        raw_notes = []
+    notes: list[str] = []
+    for item in raw_notes:
+        if isinstance(item, Exception):
+            continue
+        text = str(item or "").strip()
+        if text:
+            notes.append(text)
+    return await _synthesize_video_segments(
+        runtime,
+        filename=filename,
+        mime_type=safe_mime,
+        caption=caption,
+        question=question,
+        segment_notes=notes,
+    )
 
 
 async def transcribe_audio_blob(
@@ -210,6 +467,18 @@ async def summarize_uploaded_blob(
     content_bytes = bytes(raw_bytes or b"")
     if not content_bytes:
         return f"Uploaded {safe_kind} file '{safe_filename}' was empty."
+
+    if _looks_like_video_blob(filename=safe_filename, mime_type=safe_mime, kind=safe_kind):
+        with_video = await _summarize_video_blob(
+            runtime,
+            filename=safe_filename,
+            mime_type=safe_mime,
+            raw_bytes=content_bytes,
+            caption=caption_text,
+            question=q,
+        )
+        if with_video:
+            return with_video[:6000]
 
     # Gemini/OpenRouter can handle image input; keep payload bounded to avoid excessive prompt size.
     if safe_mime.startswith("image/") and len(content_bytes) <= 2_000_000:
