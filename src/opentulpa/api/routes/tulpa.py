@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from opentulpa.tasks.sandbox import (
     ALLOWED_TERMINAL_DIRS,
@@ -83,7 +84,8 @@ def register_tulpa_routes(
         if not command:
             return JSONResponse(status_code=400, content={"detail": "command is required"})
         try:
-            return sandbox_run_terminal(
+            return await run_in_threadpool(
+                sandbox_run_terminal,
                 command=command,
                 working_dir=working_dir_key,
                 timeout_seconds=timeout_seconds,

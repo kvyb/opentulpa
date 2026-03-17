@@ -80,3 +80,26 @@ def test_run_terminal_rejects_non_allowlisted_command_when_allowlist_configured(
             working_dir="tulpa_stuff",
             timeout_seconds=20,
         )
+
+
+def test_run_terminal_logs_timeout_before_raising(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox, "AGENT_VENV_DIR", sandbox.REPO_VENV_DIR)
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def _fake_debug_log(*, hypothesis_id, location, message, data):  # type: ignore[no-untyped-def]
+        events.append((message, dict(data)))
+
+    def _fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        raise sandbox.subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(sandbox, "_debug_log", _fake_debug_log)
+    monkeypatch.setattr(sandbox.subprocess, "run", _fake_run)
+
+    with pytest.raises(TimeoutError, match="command timed out"):
+        sandbox.run_terminal(
+            command="agent-context query hello --json",
+            working_dir="tulpa_stuff",
+            timeout_seconds=20,
+        )
+
+    assert ("terminal_command_timeout", {"working_dir": "tulpa_stuff", "command_bin": "agent-context", "timeout_seconds": 20}) in events

@@ -463,6 +463,16 @@ def run_terminal(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        _debug_log(
+            hypothesis_id="H1",
+            location="tasks/sandbox.py:run_terminal",
+            message="terminal_command_timeout",
+            data={
+                "working_dir": working_dir,
+                "command_bin": parts[0],
+                "timeout_seconds": timeout_seconds,
+            },
+        )
         raise TimeoutError("command timed out") from exc
 
     result = {
