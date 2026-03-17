@@ -1,7 +1,7 @@
 [project]
 name = "opentulpa"
 version = "0.1.0"
-description = "A background-capable AI agent using LangGraph with mem0 memory"
+description = "A self-hosted persistent agent runtime with durable context and guarded execution"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [

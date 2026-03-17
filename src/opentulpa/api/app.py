@@ -272,7 +272,7 @@ def create_app(
 
     app = FastAPI(
         title="OpenTulpa",
-        description="Background-capable agent API",
+        description="Persistent agent runtime API with durable context and guarded execution",
         version="0.1.0",
         lifespan=lifespan,
     )
