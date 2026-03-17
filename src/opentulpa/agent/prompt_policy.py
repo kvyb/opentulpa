@@ -20,6 +20,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("A07", "If user asks to reset preferences, call directive_clear first; if user asks current directive, call directive_get."),
             ("A08", "Use lessons_learnt as persistent scratchpad: get for context, append after meaningful corrections/failures, set/clear only on explicit user intent."),
             ("A09", "Do not claim completion while validation/tests are failing."),
+            ("A10", "For direct chat delivery, keep replies chat-sized. Do not generate giant monologues or full artifacts in chat unless the user explicitly asks for long-form output."),
         ],
     ),
     (

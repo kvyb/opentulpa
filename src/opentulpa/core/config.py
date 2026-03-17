@@ -28,6 +28,18 @@ class Settings(BaseSettings):
         le=200,
         description="Maximum LangGraph steps per turn.",
     )
+    agent_max_completion_tokens: int = Field(
+        default=4096,
+        ge=128,
+        le=32768,
+        description="Maximum model completion tokens per agent turn.",
+    )
+    agent_max_user_reply_chars: int = Field(
+        default=4000,
+        ge=500,
+        le=20000,
+        description="Hard cap for any single user-visible assistant reply before truncation.",
+    )
     agent_context_token_limit: int = Field(
         default=12000,
         ge=10000,
