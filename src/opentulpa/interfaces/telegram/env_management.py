@@ -75,6 +75,8 @@ def extract_inline_key_value(text: str) -> tuple[str, str] | None:
 def missing_key_prompt() -> str:
     return (
         "I can help set keys from Telegram.\n\n"
+        "OpenTulpa uses OPENROUTER_* env names for the model backend, even if you are "
+        "pointing them at another OpenAI-compatible provider.\n\n"
         "Use:\n"
         "/set OPENROUTER_API_KEY <value>\n"
         "or send OPENROUTER_API_KEY=<value>\n\n"
@@ -92,7 +94,7 @@ def status_text(agent_up: bool) -> str:
     lines = [
         "OpenTulpa status:",
         f"- Agent backend: {'up' if agent_up else 'down'}",
-        f"- OPENROUTER_API_KEY: {'set' if keys['OPENROUTER_API_KEY'] else 'missing'}",
+        f"- OPENROUTER_API_KEY (model provider key): {'set' if keys['OPENROUTER_API_KEY'] else 'missing'}",
         f"- TELEGRAM_BOT_TOKEN: {'set' if keys['TELEGRAM_BOT_TOKEN'] else 'missing'}",
         f"- BROWSER_USE_HEADLESS: {'set' if keys['BROWSER_USE_HEADLESS'] else 'default(true)'}",
         f"- BROWSER_USE_MODEL: {'set' if keys['BROWSER_USE_MODEL'] else 'default(LLM_MODEL)'}",

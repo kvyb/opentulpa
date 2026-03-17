@@ -73,8 +73,8 @@ def _format_agent_error_for_user(exc: Exception) -> str:
         or "unauthorized" in lowered
     ):
         return (
-            "Model authentication failed (OpenRouter key is invalid or revoked). "
-            "Set a valid OPENROUTER_API_KEY and restart OpenTulpa."
+            "Model authentication failed (the configured provider key is invalid or revoked). "
+            "Set a valid OPENROUTER_API_KEY for your OpenAI-compatible endpoint and restart OpenTulpa."
         )
     if "429" in lowered or "rate limit" in lowered:
         return "The model provider is rate-limiting requests right now. Please try again shortly."
@@ -283,7 +283,10 @@ async def handle_telegram_text(
                 state["pending_key_by_chat"] = pending_map
 
             STATE_STORE.update(_set_pending_openrouter)
-            return "Please send your OPENROUTER_API_KEY value now."
+            return (
+                "Please send your model provider API key now "
+                "(stored in OPENROUTER_API_KEY)."
+            )
         return "Core key is already set. Use /set KEY VALUE for additional keys."
 
     if pending_key:
