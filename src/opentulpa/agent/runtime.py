@@ -185,6 +185,8 @@ class OpenTulpaLangGraphRuntime:
         guardrail_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
         recursion_limit: int = 30,
+        max_completion_tokens: int = 4096,
+        max_user_reply_chars: int = 4000,
         context_events: EventContextService | None = None,
         customer_profile_service: CustomerProfileService | None = None,
         thread_rollup_service: ThreadRollupService | None = None,
@@ -206,6 +208,8 @@ class OpenTulpaLangGraphRuntime:
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_base_url = str(openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
         self.model_name = _normalize_model_name(model_name)
+        self._max_completion_tokens = max(128, min(int(max_completion_tokens), 32768))
+        self._max_user_reply_chars = max(500, min(int(max_user_reply_chars), 20000))
         self._wake_classifier_model_name = (
             _normalize_model_name(wake_classifier_model_name)
             if str(wake_classifier_model_name or "").strip()
@@ -264,6 +268,7 @@ class OpenTulpaLangGraphRuntime:
             api_key=openrouter_api_key,
             base_url=self.openrouter_base_url,
             temperature=0,
+            max_completion_tokens=self._max_completion_tokens,
         )
         if self._wake_classifier_model_name == self.model_name:
             self._wake_classifier_model = self._model
@@ -275,6 +280,7 @@ class OpenTulpaLangGraphRuntime:
                     api_key=openrouter_api_key,
                     base_url=self.openrouter_base_url,
                     temperature=0,
+                    max_completion_tokens=self._max_completion_tokens,
                 )
             except Exception:
                 logger.exception(
@@ -295,6 +301,7 @@ class OpenTulpaLangGraphRuntime:
                     api_key=openrouter_api_key,
                     base_url=self.openrouter_base_url,
                     temperature=0,
+                    max_completion_tokens=self._max_completion_tokens,
                 )
             except Exception:
                 logger.exception(
@@ -356,6 +363,31 @@ class OpenTulpaLangGraphRuntime:
             return
         with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
             f.write(serialized + "\n")
+
+    def _truncate_user_visible_reply(self, text: str) -> tuple[str, bool]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", False
+        max_chars = int(getattr(self, "_max_user_reply_chars", 4000))
+        if len(raw) <= max_chars:
+            return raw, False
+
+        suffix = "\n\n[Response truncated to fit chat limits.]"
+        keep = max(160, max_chars - len(suffix))
+        clipped = raw[:keep].rstrip()
+        boundary_floor = max(0, int(keep * 0.6))
+        cut_positions = [
+            clipped.rfind("\n\n", boundary_floor),
+            clipped.rfind("\n", boundary_floor),
+            clipped.rfind(". ", boundary_floor),
+            clipped.rfind("! ", boundary_floor),
+            clipped.rfind("? ", boundary_floor),
+            clipped.rfind("; ", boundary_floor),
+        ]
+        best_cut = max(cut_positions)
+        if best_cut > 0:
+            clipped = clipped[:best_cut].rstrip()
+        return clipped + suffix, True
 
     async def _invoke_structured_model(
         self,
@@ -1211,6 +1243,18 @@ class OpenTulpaLangGraphRuntime:
                     limit=30,
                 )
                 cleaned = self.expand_link_aliases(customer_id=customer_id, text=final_reply)
+                cleaned, truncated = self._truncate_user_visible_reply(cleaned)
+                if truncated:
+                    self.log_behavior_event(
+                        event="turn_reply_truncated",
+                        trace_id=turn_trace_id,
+                        mode="ainvoke",
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        max_chars=self._max_user_reply_chars,
+                        output_chars=len(str(final_reply).strip()),
+                        truncated_chars=len(cleaned.strip()),
+                    )
                 if prepared.through_id is not None and self._context_events is not None:
                     self._context_events.clear_events(customer_id, through_id=prepared.through_id)
                 self.log_behavior_event(
@@ -1233,6 +1277,18 @@ class OpenTulpaLangGraphRuntime:
                         limit=30,
                     )
                     cleaned = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
+                    cleaned, truncated = self._truncate_user_visible_reply(cleaned)
+                    if truncated:
+                        self.log_behavior_event(
+                            event="turn_reply_truncated",
+                            trace_id=turn_trace_id,
+                            mode="ainvoke",
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            max_chars=self._max_user_reply_chars,
+                            output_chars=len(str(message.content or "").strip()),
+                            truncated_chars=len(cleaned.strip()),
+                        )
                     if prepared.through_id is not None and self._context_events is not None:
                         self._context_events.clear_events(customer_id, through_id=prepared.through_id)
                     self.log_behavior_event(
@@ -1466,6 +1522,7 @@ class OpenTulpaLangGraphRuntime:
                         continue
                     expanded = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
                     if expanded.strip():
+                        expanded, truncated = self._truncate_user_visible_reply(expanded)
                         yielded_any = True
                         stream_visible_yields += 1
                         if first_visible_yield_ms is None:
@@ -1482,6 +1539,17 @@ class OpenTulpaLangGraphRuntime:
                                 first_visible_yield_ms=first_visible_yield_ms,
                             )
                         yield expanded
+                        if truncated:
+                            self.log_behavior_event(
+                                event="turn_stream_reply_truncated",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                max_chars=self._max_user_reply_chars,
+                                output_chars=len(cleaned.strip()),
+                                truncated_chars=len(expanded.strip()),
+                            )
+                            break
                     else:
                         stream_filtered_blank_expanded += 1
 

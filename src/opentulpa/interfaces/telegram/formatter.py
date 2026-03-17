@@ -5,6 +5,29 @@ from __future__ import annotations
 import re
 from html import escape
 
+TELEGRAM_TEXT_CHAR_LIMIT = 3800
+
+
+def _truncate_plain_text(text: str, *, max_chars: int = TELEGRAM_TEXT_CHAR_LIMIT) -> str:
+    raw = str(text or "").strip()
+    if not raw or len(raw) <= max_chars:
+        return raw
+    suffix = "\n\n[Truncated to fit Telegram.]"
+    keep = max(120, max_chars - len(suffix))
+    clipped = raw[:keep].rstrip()
+    boundary_floor = max(0, int(keep * 0.6))
+    cut_positions = [
+        clipped.rfind("\n\n", boundary_floor),
+        clipped.rfind("\n", boundary_floor),
+        clipped.rfind(". ", boundary_floor),
+        clipped.rfind("! ", boundary_floor),
+        clipped.rfind("? ", boundary_floor),
+    ]
+    best_cut = max(cut_positions)
+    if best_cut > 0:
+        clipped = clipped[:best_cut].rstrip()
+    return clipped + suffix
+
 
 def markdownish_to_html(text: str) -> str:
     """
@@ -78,10 +101,13 @@ def markdownish_to_html(text: str) -> str:
 
 
 def prepare_text_and_mode(text: str, parse_mode: str | None) -> tuple[str, str | None]:
-    raw = str(text or "").strip()
+    raw = _truncate_plain_text(str(text or "").strip())
     if not raw:
         return "", parse_mode
     mode = (parse_mode or "HTML").upper()
     if mode == "HTML":
-        return markdownish_to_html(raw), "HTML"
-    return raw, parse_mode
+        formatted = markdownish_to_html(raw)
+        if len(formatted) <= TELEGRAM_TEXT_CHAR_LIMIT:
+            return formatted, "HTML"
+        return escape(_truncate_plain_text(raw, max_chars=TELEGRAM_TEXT_CHAR_LIMIT - 32)), "HTML"
+    return _truncate_plain_text(raw), parse_mode

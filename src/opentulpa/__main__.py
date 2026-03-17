@@ -242,6 +242,8 @@ def main() -> None:
             guardrail_classifier_model_name=settings.guardrail_classifier_model,
             checkpoint_db_path=settings.agent_checkpoint_db_path,
             recursion_limit=settings.agent_recursion_limit,
+            max_completion_tokens=settings.agent_max_completion_tokens,
+            max_user_reply_chars=settings.agent_max_user_reply_chars,
             context_events=context_events,
             customer_profile_service=customer_profiles,
             thread_rollup_service=thread_rollups,
