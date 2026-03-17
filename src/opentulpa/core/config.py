@@ -110,18 +110,27 @@ class Settings(BaseSettings):
         description="Persist Qdrant vectors on disk (recommended true for durability).",
     )
 
-    # LLM: used for Parlant (OpenRouter) and mem0 (Gemini). Single model for all agent/LLM calls.
+    # LLM: single OpenAI-compatible model backend used for agent calls and mem0.
     openrouter_api_key: str | None = Field(
         default=None,
-        description="OpenRouter API key (loaded from OPENROUTER_API_KEY in env/.env).",
+        description=(
+            "API key for the configured OpenAI-compatible model endpoint "
+            "(loaded from OPENROUTER_API_KEY in env/.env)."
+        ),
     )
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
-        description="OpenRouter API base URL for OpenAI-compatible clients (mem0).",
+        description=(
+            "Base URL for the configured OpenAI-compatible model endpoint. "
+            "Defaults to OpenRouter."
+        ),
     )
     llm_model: str = Field(
         default="google/gemini-3-flash-preview",
-        description="OpenRouter model id, including provider slug (for example: google/gemini-3-flash-preview).",
+        description=(
+            "Model identifier accepted by the configured provider. "
+            "Default is the OpenRouter slug google/gemini-3-flash-preview."
+        ),
     )
     wake_classifier_model: str | None = Field(
         default=None,
@@ -153,7 +162,10 @@ class Settings(BaseSettings):
     )
     openrouter_embedding_model: str = Field(
         default="openai/text-embedding-3-small",
-        description="Embedding model id for mem0 via OpenRouter embeddings API.",
+        description=(
+            "Embedding model identifier for mem0 via the configured "
+            "OpenAI-compatible embeddings endpoint."
+        ),
     )
     browser_use_headless: bool = Field(
         default=True,
@@ -179,8 +191,8 @@ class Settings(BaseSettings):
         description="How long completed local Browser Use task records remain queryable in memory.",
     )
 
-    # OpenRouter: OPENROUTER_API_KEY required. OPENROUTER_MODEL uses llm_model as-is.
-    # mem0 is configured via OpenRouter base URL + key (OpenAI-compatible endpoints).
+    # The OPENROUTER_* env names are kept for compatibility even when pointing at
+    # another OpenAI-compatible endpoint via OPENROUTER_BASE_URL.
 
 @lru_cache
 def get_settings() -> Settings:

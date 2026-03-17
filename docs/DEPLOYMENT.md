@@ -8,11 +8,12 @@ The repo includes a production `Dockerfile` so Railway can deploy directly.
 
 ### Required env vars
 
-- `OPENROUTER_API_KEY`
+- `OPENROUTER_API_KEY` for the configured OpenAI-compatible model endpoint
 - `TELEGRAM_BOT_TOKEN`
 
 ### Optional env vars
 
+- `OPENROUTER_BASE_URL` (defaults to OpenRouter; can point at another OpenAI-compatible endpoint)
 - `TELEGRAM_WEBHOOK_SECRET` (recommended; if omitted, an ephemeral secret is generated at startup)
 - `PUBLIC_BASE_URL` (for example `https://your-app.up.railway.app`)
 - `BROWSER_USE_HEADLESS` (defaults to `true`)
@@ -41,6 +42,7 @@ Browser Use local note:
 2. Railway detects the `Dockerfile` and builds automatically.
 3. Set env vars in Railway:
    - `OPENROUTER_API_KEY`
+   - `OPENROUTER_BASE_URL` if you are not using OpenRouter
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_WEBHOOK_SECRET` (recommended)
    - `PUBLIC_BASE_URL` (optional when `RAILWAY_PUBLIC_DOMAIN` is available)

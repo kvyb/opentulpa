@@ -51,7 +51,7 @@ That makes it useful for workflows developers actually care about:
 
 ## 30-Second Start (Local API Mode)
 
-Prereqs: Python `3.12+`, [`uv`](https://docs.astral.sh/uv/), and an OpenRouter API key.
+Prereqs: Python `3.12+`, [`uv`](https://docs.astral.sh/uv/), and access to an OpenAI-compatible API endpoint.
 
 ```bash
 cp .env.example .env
@@ -71,11 +71,13 @@ curl -s http://127.0.0.1:8000/internal/chat \
   -d '{
     "customer_id":"demo_user",
     "thread_id":"chat-demo_user",
-    "text":"Find the top 3 trends in AI agents this week and summarize with sources."
+    "text":"Turn this repeated workflow into a reusable skill and a daily routine: review an API changelog every morning, summarize important changes, and draft a short team update."
   }'
 ```
 
 Note: setup is ~30 seconds once prerequisites are installed. First dependency install can take longer.
+
+The current env names use `OPENROUTER_*` for compatibility, and the default example points at OpenRouter because the recommended out-of-the-box model is `google/gemini-3-flash-preview`. You can also set `OPENROUTER_BASE_URL` to another OpenAI-compatible endpoint and use that provider's API key.
 
 ## Optional: Telegram in 2 Minutes
 
