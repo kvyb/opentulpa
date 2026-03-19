@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from opentulpa.application.approval_execution import _extract_execution_error_text
-from opentulpa.application.approval_execution import ApprovalExecutionOrchestrator
+from opentulpa.application.approval_execution import (
+    ApprovalExecutionOrchestrator,
+    _extract_execution_error_text,
+)
 
 
 def test_extract_execution_error_text_top_level_error() -> None:
@@ -148,3 +150,4 @@ async def test_orchestrator_uses_isolated_recovery_thread_for_llm_repair() -> No
     assert "retried and fixed" in out.lower()
     assert len(runtime.ainvoke_calls) >= 1
     assert str(runtime.ainvoke_calls[0]["thread_id"]).startswith("chat_main::approval-recovery::apr_y")
+    assert runtime.ainvoke_calls[0]["turn_mode"] == "approval_recovery"

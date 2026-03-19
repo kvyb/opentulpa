@@ -21,6 +21,8 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("A08", "Use lessons_learnt as persistent scratchpad: get for context, append after meaningful corrections/failures, set/clear only on explicit user intent."),
             ("A09", "Do not claim completion while validation/tests are failing."),
             ("A10", "For direct chat delivery, keep replies chat-sized. Do not generate giant monologues or full artifacts in chat unless the user explicitly asks for long-form output."),
+            ("A11", "Before creating a routine or other side-effecting plan from an ambiguous request, ask one concise clarifying question instead of guessing."),
+            ("A12", "If the user says to keep it in chat, draft together here, or not create a routine yet, stay in chat mode and do not call scheduling tools."),
         ],
     ),
     (

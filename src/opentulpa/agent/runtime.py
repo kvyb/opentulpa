@@ -68,6 +68,9 @@ from opentulpa.agent.runtime_input import (
     ThreadInputCoordinator,
 )
 from opentulpa.agent.tools_registry import register_runtime_tools
+from opentulpa.agent.turn_policy import (
+    normalize_turn_mode as _normalize_turn_mode,
+)
 from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )
@@ -450,14 +453,44 @@ class OpenTulpaLangGraphRuntime:
             if str(item.get("status", "")).strip().lower() != "approval_pending":
                 continue
             approval_id = str(item.get("approval_id", "")).strip()
-            action_name = str(item.get("tool_name", "")).strip() or "action"
+            action_summary = OpenTulpaLangGraphRuntime._approval_handoff_subject(item)
+            follow_up_hint = OpenTulpaLangGraphRuntime._approval_handoff_follow_up_hint(item)
             if approval_id:
                 return (
-                    "Approval required before execution. "
+                    f"Approval required before execution of {action_summary}. "
                     f"approval_id={approval_id}. Approve or deny this request in the UI."
+                    f"{follow_up_hint}"
                 )
-            return f"Approval required before execution of {action_name}. Approve or deny in the UI."
+            return (
+                f"Approval required before execution of {action_summary}. "
+                f"Approve or deny in the UI.{follow_up_hint}"
+            )
         return ""
+
+    @staticmethod
+    def _approval_handoff_subject(item: dict[str, Any]) -> str:
+        summary = " ".join(str(item.get("summary", "")).split()).strip()
+        if summary:
+            return summary[:180] + ("..." if len(summary) > 180 else "")
+        action_name = str(item.get("action_name", "") or item.get("tool_name", "")).strip()
+        if action_name:
+            return action_name
+        return "this action"
+
+    @staticmethod
+    def _approval_handoff_follow_up_hint(item: dict[str, Any]) -> str:
+        haystack = " ".join(
+            str(item.get(key, "")).strip().lower()
+            for key in ("summary", "action_name", "tool_name")
+        )
+        if any(token in haystack for token in ("send", "message", "post", "publish")):
+            return " If you want, I can draft the content here first before you approve anything."
+        if any(token in haystack for token in ("routine", "schedule", "automation", "remind")):
+            return (
+                " If you wanted discussion first, tell me to keep it in chat "
+                "and I will plan it with you before creating any routine."
+            )
+        return " If you want, I can explain the planned action before you approve it."
 
     @staticmethod
     def _summarize_pending_payload(payload: Any, *, payload_limit: int = 240) -> str:
@@ -1100,6 +1133,7 @@ class OpenTulpaLangGraphRuntime:
         user_text: str,
         customer_id: str,
         thread_id: str,
+        turn_mode: str,
         pending_context_summary: str,
         trace_id: str,
         skill_state: dict[str, Any],
@@ -1108,6 +1142,7 @@ class OpenTulpaLangGraphRuntime:
             "messages": [HumanMessage(content=user_text)],
             "customer_id": customer_id,
             "thread_id": thread_id,
+            "turn_mode": _normalize_turn_mode(turn_mode),
             "turn_status": "running",
             "final_response_text": "",
             "pending_context_summary": pending_context_summary,
@@ -1125,6 +1160,7 @@ class OpenTulpaLangGraphRuntime:
         thread_id: str,
         customer_id: str,
         text: str,
+        turn_mode: str,
         include_pending_context: bool,
         trace_id: str,
         recursion_limit_override: int | None = None,
@@ -1156,6 +1192,7 @@ class OpenTulpaLangGraphRuntime:
             user_text=user_text,
             customer_id=customer_id,
             thread_id=thread_id,
+            turn_mode=turn_mode,
             pending_context_summary=pending_context_summary,
             trace_id=trace_id,
             skill_state=skill_state,
@@ -1172,11 +1209,13 @@ class OpenTulpaLangGraphRuntime:
         thread_id: str,
         customer_id: str,
         text: str,
+        turn_mode: str = "interactive",
         include_pending_context: bool = True,
         recursion_limit_override: int | None = None,
     ) -> str:
         await self.start()
         assert self._graph is not None
+        normalized_turn_mode = _normalize_turn_mode(turn_mode)
         turn_trace_id = new_short_id("turn")
         turn_state, effective_text = await self._thread_inputs.begin_turn(
             thread_id=thread_id, text=text
@@ -1198,11 +1237,13 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 customer_id=customer_id,
                 input_chars=len(str(effective_text or "")),
+                turn_mode=normalized_turn_mode,
             )
             prepared = await self._prepare_turn_context(
                 thread_id=thread_id,
                 customer_id=customer_id,
                 text=str(effective_text or ""),
+                turn_mode=normalized_turn_mode,
                 include_pending_context=include_pending_context,
                 trace_id=turn_trace_id,
                 recursion_limit_override=recursion_limit_override,
@@ -1214,6 +1255,7 @@ class OpenTulpaLangGraphRuntime:
                     mode="ainvoke",
                     thread_id=thread_id,
                     customer_id=customer_id,
+                    turn_mode=normalized_turn_mode,
                 )
                 return ""
             result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
@@ -1224,6 +1266,7 @@ class OpenTulpaLangGraphRuntime:
                     mode="ainvoke",
                     thread_id=thread_id,
                     customer_id=customer_id,
+                    turn_mode=normalized_turn_mode,
                 )
                 handoff_text = self._build_approval_handoff_text(result)
                 if handoff_text:
@@ -1264,6 +1307,7 @@ class OpenTulpaLangGraphRuntime:
                     thread_id=thread_id,
                     customer_id=customer_id,
                     output_chars=len(cleaned.strip()),
+                    turn_mode=normalized_turn_mode,
                 )
                 return cleaned.strip()
             messages = result.get("messages", [])
@@ -1298,6 +1342,7 @@ class OpenTulpaLangGraphRuntime:
                         thread_id=thread_id,
                         customer_id=customer_id,
                         output_chars=len(cleaned.strip()),
+                        turn_mode=normalized_turn_mode,
                     )
                     return cleaned.strip()
             self.log_behavior_event(
@@ -1306,6 +1351,7 @@ class OpenTulpaLangGraphRuntime:
                 mode="ainvoke",
                 thread_id=thread_id,
                 customer_id=customer_id,
+                turn_mode=normalized_turn_mode,
             )
             return "I ran into an issue and could not produce a final response yet."
         except Exception as exc:
@@ -1316,6 +1362,7 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 customer_id=customer_id,
                 error=str(exc)[:500],
+                turn_mode=normalized_turn_mode,
             )
             raise
         finally:
@@ -1344,10 +1391,12 @@ class OpenTulpaLangGraphRuntime:
         thread_id: str,
         customer_id: str,
         text: str,
+        turn_mode: str = "interactive",
         include_pending_context: bool = True,
     ) -> AsyncIterator[str]:
         await self.start()
         assert self._graph is not None
+        normalized_turn_mode = _normalize_turn_mode(turn_mode)
         turn_trace_id = new_short_id("turn")
         turn_state, effective_text = await self._thread_inputs.begin_turn(
             thread_id=thread_id, text=text
@@ -1364,6 +1413,7 @@ class OpenTulpaLangGraphRuntime:
                 mode="astream",
                 thread_id=thread_id,
                 customer_id=customer_id,
+                turn_mode=normalized_turn_mode,
             )
             raise MergedInputSuppressedError("input merged into previous in-flight turn")
         try:
@@ -1380,11 +1430,13 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 customer_id=customer_id,
                 input_chars=len(str(effective_text or "")),
+                turn_mode=normalized_turn_mode,
             )
             prepared = await self._prepare_turn_context(
                 thread_id=thread_id,
                 customer_id=customer_id,
                 text=str(effective_text or ""),
+                turn_mode=normalized_turn_mode,
                 include_pending_context=include_pending_context,
                 trace_id=turn_trace_id,
                 recursion_limit_override=None,
@@ -1397,6 +1449,7 @@ class OpenTulpaLangGraphRuntime:
                     mode="astream",
                     thread_id=thread_id,
                     customer_id=customer_id,
+                    turn_mode=normalized_turn_mode,
                 )
                 yield STREAM_APPROVAL_HANDOFF_SIGNAL
                 return
@@ -1426,6 +1479,7 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 customer_id=customer_id,
                 stream_no_visible_timeout_s=stream_no_visible_timeout_s,
+                turn_mode=normalized_turn_mode,
             )
 
             def _finalize_segment() -> None:
@@ -1470,6 +1524,7 @@ class OpenTulpaLangGraphRuntime:
                             thread_id=thread_id,
                             customer_id=customer_id,
                             stream_total_chunks=stream_total_chunks,
+                            turn_mode=normalized_turn_mode,
                         )
                     if saw_agent_output and not in_tool_phase:
                         in_tool_phase = True
@@ -1481,6 +1536,7 @@ class OpenTulpaLangGraphRuntime:
                             customer_id=customer_id,
                             stream_wait_signals=stream_wait_signals,
                             stream_total_chunks=stream_total_chunks,
+                            turn_mode=normalized_turn_mode,
                         )
                         _finalize_segment()
                         yield STREAM_WAIT_SIGNAL
@@ -1500,6 +1556,7 @@ class OpenTulpaLangGraphRuntime:
                             stream_tool_chunks=stream_tool_chunks,
                             stream_filtered_empty=stream_filtered_empty,
                             stream_filtered_blank_expanded=stream_filtered_blank_expanded,
+                            turn_mode=normalized_turn_mode,
                         )
                         break
                     continue
@@ -1537,6 +1594,7 @@ class OpenTulpaLangGraphRuntime:
                                 stream_total_chunks=stream_total_chunks,
                                 output_chars=len(expanded.strip()),
                                 first_visible_yield_ms=first_visible_yield_ms,
+                                turn_mode=normalized_turn_mode,
                             )
                         yield expanded
                         if truncated:
@@ -1548,6 +1606,7 @@ class OpenTulpaLangGraphRuntime:
                                 max_chars=self._max_user_reply_chars,
                                 output_chars=len(cleaned.strip()),
                                 truncated_chars=len(expanded.strip()),
+                                turn_mode=normalized_turn_mode,
                             )
                             break
                     else:
@@ -1569,6 +1628,7 @@ class OpenTulpaLangGraphRuntime:
                         stream_tool_chunks=stream_tool_chunks,
                         stream_filtered_empty=stream_filtered_empty,
                         stream_filtered_blank_expanded=stream_filtered_blank_expanded,
+                        turn_mode=normalized_turn_mode,
                     )
                     break
 
@@ -1583,6 +1643,7 @@ class OpenTulpaLangGraphRuntime:
                     mode="astream",
                     thread_id=thread_id,
                     customer_id=customer_id,
+                    turn_mode=normalized_turn_mode,
                 )
                 yield STREAM_APPROVAL_HANDOFF_SIGNAL
             if not yielded_any:
@@ -1602,6 +1663,7 @@ class OpenTulpaLangGraphRuntime:
                     stream_tool_chunks=stream_tool_chunks,
                     stream_filtered_empty=stream_filtered_empty,
                     stream_filtered_blank_expanded=stream_filtered_blank_expanded,
+                    turn_mode=normalized_turn_mode,
                 )
                 fallback_result = await self._graph.ainvoke(
                     prepared.graph_input,
@@ -1617,6 +1679,7 @@ class OpenTulpaLangGraphRuntime:
                         mode="astream",
                         thread_id=thread_id,
                         customer_id=customer_id,
+                        turn_mode=normalized_turn_mode,
                     )
                     yield STREAM_APPROVAL_HANDOFF_SIGNAL
                     fallback_result = {"messages": []}
@@ -1642,6 +1705,7 @@ class OpenTulpaLangGraphRuntime:
                             thread_id=thread_id,
                             customer_id=customer_id,
                             output_chars=len(fallback_text.strip()),
+                            turn_mode=normalized_turn_mode,
                         )
                         yield fallback_text.strip()
                 for message in reversed(fallback_messages):
@@ -1667,6 +1731,7 @@ class OpenTulpaLangGraphRuntime:
                                 thread_id=thread_id,
                                 customer_id=customer_id,
                                 output_chars=len(cleaned.strip()),
+                                turn_mode=normalized_turn_mode,
                             )
                             yield cleaned.strip()
                             break
@@ -1689,6 +1754,7 @@ class OpenTulpaLangGraphRuntime:
                         trace_id=turn_trace_id,
                         thread_id=thread_id,
                         customer_id=customer_id,
+                        turn_mode=normalized_turn_mode,
                     )
                     yield STREAM_EMPTY_REPLY_FALLBACK
             logger.info(
@@ -1711,6 +1777,7 @@ class OpenTulpaLangGraphRuntime:
                 stream_wait_signals=stream_wait_signals,
                 stream_visible_yields=stream_visible_yields,
                 first_visible_yield_ms=first_visible_yield_ms,
+                turn_mode=normalized_turn_mode,
             )
         except Exception:
             logger.exception(
@@ -1724,6 +1791,7 @@ class OpenTulpaLangGraphRuntime:
                 mode="astream",
                 thread_id=thread_id,
                 customer_id=customer_id,
+                turn_mode=normalized_turn_mode,
             )
             raise
         finally:

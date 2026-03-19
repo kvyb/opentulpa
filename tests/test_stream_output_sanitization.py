@@ -30,12 +30,19 @@ def test_build_approval_handoff_text_from_tool_outcome() -> None:
     result = {
         "tool_outcomes": [
             {"status": "ok"},
-            {"status": "approval_pending", "approval_id": "apr_123", "tool_name": "routine_create"},
+            {
+                "status": "approval_pending",
+                "approval_id": "apr_123",
+                "tool_name": "routine_create",
+                "action_name": "routine_create",
+                "summary": "create routine name=Daily Digest schedule=0 9 * * * run=python3 digest.py",
+            },
         ]
     }
     text = OpenTulpaLangGraphRuntime._build_approval_handoff_text(result)
-    assert "Approval required before execution." in text
+    assert "Approval required before execution of create routine name=Daily Digest" in text
     assert "approval_id=apr_123" in text
+    assert "keep it in chat" in text
 
 
 def test_pending_context_summary_redacts_raw_payload_text() -> None:

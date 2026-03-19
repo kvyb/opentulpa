@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -26,6 +27,15 @@ from opentulpa.agent.tool_message_protocol import (
 )
 from opentulpa.agent.tool_message_protocol import (
     sanitize_history_messages_for_model as _sanitize_history_messages_for_model,
+)
+from opentulpa.agent.turn_policy import (
+    build_turn_mode_system_message as _build_turn_mode_system_message,
+)
+from opentulpa.agent.turn_policy import (
+    execution_origin_for_turn_mode as _execution_origin_for_turn_mode,
+)
+from opentulpa.agent.turn_policy import (
+    normalize_turn_mode as _normalize_turn_mode,
 )
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
@@ -82,6 +92,32 @@ _WORKING_DIR_PREFIXES: dict[str, str] = {
     "opentulpa": "src/opentulpa",
 }
 
+_CHAT_ONLY_ROUTINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bstay in chat\b"),
+    re.compile(r"\b(?:just )?draft (?:it )?(?:with me )?here\b"),
+    re.compile(r"\bthink it through with me here\b"),
+    re.compile(r"\bwork through it with me here\b"),
+    re.compile(r"\bdo not create (?:a )?(?:routine|automation)\b"),
+    re.compile(r"\bdon't create (?:a )?(?:routine|automation)\b"),
+    re.compile(r"\bdo not automate (?:this|it)(?: yet)?\b"),
+    re.compile(r"\bdon't automate (?:this|it)(?: yet)?\b"),
+)
+_EXPLICIT_ROUTINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bremind me\b"),
+    re.compile(r"\bset (?:a )?reminder\b"),
+    re.compile(r"\bschedule\b"),
+    re.compile(r"\bautomation\b"),
+    re.compile(r"\bautomate\b"),
+    re.compile(r"\broutine\b"),
+    re.compile(r"\brecurr(?:ing|ence)?\b"),
+    re.compile(r"\brepeat(?:ing)?\b"),
+    re.compile(r"\b(?:daily|weekly|monthly|hourly|nightly)\b"),
+    re.compile(r"\bevery (?:morning|afternoon|evening|night|weekday|weekend)\b"),
+    re.compile(r"\bevery \d+\s*(?:minute|hour|day|week|month)s?\b"),
+    re.compile(r"\beach (?:day|week|month)\b"),
+    re.compile(r"\bonce (?:a|per) (?:day|week|month)\b"),
+)
+
 
 def _is_iso_datetime_schedule(value: str) -> bool:
     text = str(value or "").strip()
@@ -118,11 +154,57 @@ def _has_redundant_working_dir_prefix(command: str, working_dir: str) -> bool:
     return False
 
 
+def _normalize_user_intent_text(text: str) -> str:
+    return " ".join(str(text or "").split()).strip().lower()
+
+
+def _user_requested_chat_only_for_routine(text: str) -> bool:
+    normalized = _normalize_user_intent_text(text)
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in _CHAT_ONLY_ROUTINE_PATTERNS)
+
+
+def _user_explicitly_requested_routine(text: str) -> bool:
+    normalized = _normalize_user_intent_text(text)
+    if not normalized:
+        return False
+    if _extract_relative_delay_minutes(text) is not None:
+        return True
+    return any(pattern.search(normalized) for pattern in _EXPLICIT_ROUTINE_PATTERNS)
+
+
+def _routine_create_clarification_error(latest_user_text: str, *, turn_mode: str) -> str | None:
+    normalized_turn_mode = _normalize_turn_mode(turn_mode)
+    if normalized_turn_mode == "routine_wake":
+        return None
+    if normalized_turn_mode == "event_notification":
+        return (
+            "TURN_MODE_MISMATCH: this is a background event-notification turn, not a fresh "
+            "user scheduling request. Do not call routine_create here unless the event "
+            "explicitly instructs schedule management."
+        )
+    if _user_requested_chat_only_for_routine(latest_user_text):
+        return (
+            "CHAT_MODE_LOCKED: the latest user message asks to keep this in chat "
+            "or avoid creating a routine. Do not call routine_create. "
+            "Reply in chat or ask one concise clarifying question instead."
+        )
+    if not _user_explicitly_requested_routine(latest_user_text):
+        return (
+            "ACTION_CLARIFICATION_REQUIRED: routine_create is only for explicit reminders, "
+            "schedules, or automations. The latest user message does not clearly request that. "
+            "Ask one concise clarifying question or continue in chat instead of creating a routine."
+        )
+    return None
+
+
 def _validate_model_tool_call(
     *,
     call_name: str,
     args: Any,
     latest_user_text: str,
+    turn_mode: str,
     required_args: dict[str, tuple[str, ...]],
     forbidden_tool_args: dict[str, set[str]],
 ) -> str | None:
@@ -169,6 +251,12 @@ def _validate_model_tool_call(
     if call_name == "routine_create":
         schedule = str(args.get("schedule", "")).strip()
         implementation_command = str(args.get("implementation_command", "")).strip()
+        clarification_error = _routine_create_clarification_error(
+            latest_user_text,
+            turn_mode=turn_mode,
+        )
+        if clarification_error:
+            return clarification_error
         if not (_is_cron_like_schedule(schedule) or _is_iso_datetime_schedule(schedule)):
             return (
                 "TOOL_VALIDATION_ERROR: routine_create schedule must be either cron "
@@ -334,6 +422,7 @@ def build_runtime_graph(runtime: Any):
     async def agent_node(state: AgentState) -> Command[Literal["validate_tools", "claim_check"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
+        turn_mode = _normalize_turn_mode(state.get("turn_mode"))
         messages = state.get("messages", [])
         latest_user = _latest_user_text(messages)
         _log(
@@ -341,6 +430,7 @@ def build_runtime_graph(runtime: Any):
             "graph.agent.start",
             message_count=len(messages),
             latest_user_chars=len(latest_user),
+            turn_mode=turn_mode,
         )
         cached_query = str(state.get("active_skill_query", "")).strip()
         cached_context = str(state.get("active_skill_context", "")).strip()
@@ -375,6 +465,7 @@ def build_runtime_graph(runtime: Any):
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
         prompt_messages_base: list[AnyMessage] = [
             system_prompt,
+            _build_turn_mode_system_message(turn_mode),
             SystemMessage(
                 content=(
                     f"customer_id={customer_id}. "
@@ -506,6 +597,7 @@ def build_runtime_graph(runtime: Any):
             history_budget=history_budget,
             history_message_count=len(bounded_messages),
             optional_context_messages=max(0, len(prompt_messages) - len(prompt_messages_base)),
+            turn_mode=turn_mode,
         )
         response = await runtime._model_with_tools.ainvoke(
             [
@@ -519,6 +611,7 @@ def build_runtime_graph(runtime: Any):
             "graph.agent.response",
             response_chars=len(response_text.strip()),
             tool_call_count=len(getattr(response, "tool_calls", []) or []),
+            turn_mode=turn_mode,
         )
         update: dict[str, Any] = {"messages": [response], "turn_status": "running"}
         if skill_query:
@@ -543,10 +636,12 @@ def build_runtime_graph(runtime: Any):
             state,
             "graph.validate_tools.start",
             tool_call_count=len(last.tool_calls),
+            turn_mode=_normalize_turn_mode(state.get("turn_mode")),
         )
 
         validation_errors: list[ToolMessage] = []
         latest_user = _latest_user_text(messages)
+        turn_mode = _normalize_turn_mode(state.get("turn_mode"))
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
@@ -555,6 +650,7 @@ def build_runtime_graph(runtime: Any):
                 call_name=call_name,
                 args=args,
                 latest_user_text=latest_user,
+                turn_mode=turn_mode,
                 required_args=required_args,
                 forbidden_tool_args=forbidden_tool_args,
             )
@@ -566,6 +662,7 @@ def build_runtime_graph(runtime: Any):
                 state,
                 "graph.validate_tools.failed",
                 error_count=len(validation_errors),
+                turn_mode=turn_mode,
             )
             return Command(
                 update={
@@ -577,7 +674,12 @@ def build_runtime_graph(runtime: Any):
                 },
                 goto="agent",
             )
-        _log(state, "graph.validate_tools.passed", tool_call_count=len(last.tool_calls))
+        _log(
+            state,
+            "graph.validate_tools.passed",
+            tool_call_count=len(last.tool_calls),
+            turn_mode=turn_mode,
+        )
         return Command(update={"tool_validation_passed": True}, goto="tools")
 
     async def tools_node(state: AgentState) -> Command[Literal["agent", "__end__"]]:
@@ -590,18 +692,14 @@ def build_runtime_graph(runtime: Any):
 
         customer_id = state.get("customer_id", "")
         thread_id = str(state.get("thread_id", "")).strip()
-        safe_thread_id = thread_id.lower()
-        scheduled_origin = (
-            safe_thread_id.startswith("wake_")
-            or safe_thread_id.startswith("wake-")
-            or safe_thread_id.startswith("routine_")
-            or safe_thread_id.startswith("routine-")
-        )
+        turn_mode = _normalize_turn_mode(state.get("turn_mode"))
+        execution_origin = _execution_origin_for_turn_mode(turn_mode, thread_id=thread_id)
         _log(
             state,
             "graph.tools.start",
             requested_tool_calls=len(last.tool_calls),
-            execution_origin=("scheduled" if scheduled_origin else "interactive"),
+            execution_origin=execution_origin,
+            turn_mode=turn_mode,
         )
 
         latest_user_for_guard = _latest_user_text(messages)
@@ -631,7 +729,7 @@ def build_runtime_graph(runtime: Any):
                     args = {
                         **args,
                         "thread_id": thread_id,
-                        "execution_origin": "scheduled" if scheduled_origin else "interactive",
+                        "execution_origin": execution_origin,
                         "guard_context": {
                             "previous_user_message": latest_user_for_guard[:2000],
                             "previous_assistant_message": prior_assistant_for_guard[:2000],
@@ -684,6 +782,9 @@ def build_runtime_graph(runtime: Any):
                     compact_payload = {
                         "status": "approval_pending",
                         "approval_id": approval_id,
+                        "action_name": str(result.get("action_name", "")).strip() or call_name,
+                        "summary": str(result.get("summary", "")).strip() or None,
+                        "reason": str(result.get("reason", "")).strip() or None,
                     }
                     tool_messages.append(
                         ToolMessage(
@@ -698,6 +799,9 @@ def build_runtime_graph(runtime: Any):
                             "tool_call_id": call_id,
                             "status": "approval_pending",
                             "approval_id": approval_id,
+                            "action_name": str(result.get("action_name", "")).strip() or call_name,
+                            "summary": str(result.get("summary", "")).strip() or None,
+                            "reason": str(result.get("reason", "")).strip() or None,
                             "result_text": _safe_json(compact_payload),
                         }
                     )

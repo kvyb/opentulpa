@@ -73,6 +73,7 @@ class _WeatherStormRuntime:
         thread_id: str,
         customer_id: str,
         text: str,
+        turn_mode: str = "interactive",
         include_pending_context: bool = True,
         recursion_limit_override: int | None = None,
     ) -> str:
@@ -81,6 +82,7 @@ class _WeatherStormRuntime:
                 "thread_id": thread_id,
                 "customer_id": customer_id,
                 "text": text,
+                "turn_mode": turn_mode,
                 "include_pending_context": include_pending_context,
                 "recursion_limit_override": recursion_limit_override,
             }

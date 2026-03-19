@@ -87,6 +87,7 @@ class _FakeRuntime:
         thread_id: str,
         customer_id: str,
         text: str,
+        turn_mode: str = "interactive",
         include_pending_context: bool = True,
         **_: Any,
     ) -> str:
@@ -95,6 +96,7 @@ class _FakeRuntime:
                 "thread_id": thread_id,
                 "customer_id": customer_id,
                 "text": text,
+                "turn_mode": turn_mode,
                 "include_pending_context": include_pending_context,
             }
         )
@@ -147,6 +149,7 @@ async def test_routine_event_flushes_deferred_approval_challenges() -> None:
     ]
     assert client.sent
     assert runtime.calls
+    assert runtime.calls[0]["turn_mode"] == "routine_wake"
 
 
 @pytest.mark.asyncio
@@ -183,6 +186,7 @@ async def test_routine_event_silent_mode_still_executes_and_backlogs() -> None:
     )
 
     assert runtime.calls
+    assert runtime.calls[0]["turn_mode"] == "routine_wake"
     assert not client.sent
     assert context_events.events
     queued = context_events.events[-1]

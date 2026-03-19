@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
@@ -106,7 +106,7 @@ def _reset_chat_session_context(
     if not isinstance(slot, dict):
         slot = {}
     customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{user_id}"
-    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    now_utc_iso = datetime.now(UTC).isoformat()
     thread_id = new_short_id("chat")
     wake_thread_id = new_short_id("wake")
     sessions[chat_key] = {
@@ -336,7 +336,7 @@ async def handle_telegram_text(
         thread_id = _clean_thread_id(slot.get("thread_id")) or f"chat-{ctx.chat_id}"
         wake_thread_id = _clean_thread_id(slot.get("wake_thread_id")) or None
         customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
-        now_utc_iso = datetime.now(timezone.utc).isoformat()
+        now_utc_iso = datetime.now(UTC).isoformat()
         sessions[str(ctx.chat_id)] = {
             "user_id": ctx.user_id,
             "customer_id": customer_id,
@@ -435,6 +435,7 @@ async def handle_telegram_text(
             thread_id=thread_id,
             customer_id=customer_id,
             text=effective_text,
+            turn_mode="interactive",
         )
         return response
     except Exception as exc:

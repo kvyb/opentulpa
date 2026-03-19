@@ -240,6 +240,7 @@ class WakeOrchestrator:
                 thread_id=execution_thread_id,
                 customer_id=customer_id,
                 text=execution_prompt,
+                turn_mode="routine_wake",
                 include_pending_context=False,
             )
         except Exception as exc:

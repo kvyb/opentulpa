@@ -9,6 +9,11 @@ from opentulpa.agent.graph_builder import (
     _validate_model_tool_call,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
+from opentulpa.agent.turn_policy import (
+    build_turn_mode_system_message,
+    execution_origin_for_turn_mode,
+    normalize_turn_mode,
+)
 
 
 def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
@@ -23,6 +28,8 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
         assert f"- {rid}:" in text
     assert "skill glossary as high-level discovery only" in text
     assert "call skill_get(name)" in text
+    assert "ask one concise clarifying question" in text
+    assert "stay in chat mode" in text
 
 
 def test_build_skill_glossary_context_is_high_level_and_points_to_skill_get() -> None:
@@ -37,6 +44,24 @@ def test_build_skill_glossary_context_is_high_level_and_points_to_skill_get() ->
     assert "- routine-schedule-composer (global): Compose robust routine instructions" in text
 
 
+def test_turn_mode_policy_messages_are_mode_specific() -> None:
+    interactive = str(build_turn_mode_system_message("interactive").content)
+    routine_wake = str(build_turn_mode_system_message("routine_wake").content)
+    approval_recovery = str(build_turn_mode_system_message("approval_recovery").content)
+    event_notification = str(build_turn_mode_system_message("event_notification").content)
+
+    assert "live user-guided turn" in interactive
+    assert "scheduled routine execution" in routine_wake
+    assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
+    assert "previously approved action" in approval_recovery
+    assert "background event/status notification" in event_notification
+    assert normalize_turn_mode("unexpected") == "interactive"
+    assert execution_origin_for_turn_mode("routine_wake") == "scheduled"
+    assert execution_origin_for_turn_mode("approval_recovery") == "interactive"
+    assert execution_origin_for_turn_mode("interactive", thread_id="wake_legacy") == "scheduled"
+    assert execution_origin_for_turn_mode("event_notification", thread_id="wake_legacy") == "interactive"
+
+
 def test_validate_model_tool_call_rejects_runtime_managed_args() -> None:
     err = _validate_model_tool_call(
         call_name="routine_create",
@@ -48,6 +73,7 @@ def test_validate_model_tool_call_rejects_runtime_managed_args() -> None:
             "customer_id": "telegram_1",
         },
         latest_user_text="set recurring digest",
+        turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
@@ -66,6 +92,7 @@ def test_validate_model_tool_call_rejects_legacy_routine_message_field() -> None
             "message": "legacy",
         },
         latest_user_text="set recurring digest",
+        turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
@@ -83,6 +110,7 @@ def test_validate_model_tool_call_rejects_invalid_schedule_shape() -> None:
             "implementation_command": "python3 scripts/digest.py",
         },
         latest_user_text="set recurring digest",
+        turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
@@ -100,6 +128,60 @@ def test_validate_model_tool_call_accepts_valid_routine_create() -> None:
             "implementation_command": "python3 scripts/digest.py",
         },
         latest_user_text="set recurring digest",
+        turn_mode="interactive",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is None
+
+
+def test_validate_model_tool_call_rejects_ambiguous_routine_create_request() -> None:
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args={
+            "name": "Post Draft",
+            "schedule": "0 9 * * *",
+            "instruction": "Post the saved draft and report status.",
+            "implementation_command": "python3 post_draft.py",
+        },
+        latest_user_text="Make that post today. Use the one we drafted.",
+        turn_mode="interactive",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is not None
+    assert "ACTION_CLARIFICATION_REQUIRED" in err
+
+
+def test_validate_model_tool_call_rejects_routine_create_when_user_wants_chat_only() -> None:
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args={
+            "name": "Draft Post",
+            "schedule": "0 9 * * *",
+            "instruction": "Prepare the post and report back.",
+            "implementation_command": "python3 prepare_post.py",
+        },
+        latest_user_text="Think it through with me here first. Do not create a routine yet.",
+        turn_mode="interactive",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is not None
+    assert "CHAT_MODE_LOCKED" in err
+
+
+def test_validate_model_tool_call_accepts_explicit_one_time_reminder_request() -> None:
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args={
+            "name": "Report Reminder",
+            "schedule": "2026-03-19T17:00:00+08:00",
+            "instruction": "Remind the user to send the report and confirm delivery.",
+            "implementation_command": "python3 remind_report.py",
+        },
+        latest_user_text="Remind me in 3 hours to send the report.",
+        turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
@@ -114,6 +196,7 @@ def test_validate_model_tool_call_rejects_redundant_tulpa_prefix_for_terminal() 
             "working_dir": "tulpa_stuff",
         },
         latest_user_text="run login",
+        turn_mode="interactive",
         required_args={"tulpa_run_terminal": ("command",)},
         forbidden_tool_args={},
     )
@@ -131,11 +214,47 @@ def test_validate_model_tool_call_rejects_redundant_tulpa_prefix_for_routine_com
             "implementation_command": "python3 tulpa_stuff/tg_login.py",
         },
         latest_user_text="set recurring login refresh",
+        turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
     assert err is not None
     assert "should be relative to working_dir=tulpa_stuff" in err
+
+
+def test_validate_model_tool_call_allows_routine_create_during_routine_wake() -> None:
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args={
+            "name": "Follow-up Brief",
+            "schedule": "0 9 * * *",
+            "instruction": "Create a daily follow-up brief routine.",
+            "implementation_command": "python3 build_brief.py",
+        },
+        latest_user_text="System update: a scheduled routine fired. Create a follow-up routine.",
+        turn_mode="routine_wake",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is None
+
+
+def test_validate_model_tool_call_rejects_routine_create_during_event_notification() -> None:
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args={
+            "name": "Follow-up Brief",
+            "schedule": "0 9 * * *",
+            "instruction": "Create a daily follow-up brief routine.",
+            "implementation_command": "python3 build_brief.py",
+        },
+        latest_user_text="System update: a background event occurred.",
+        turn_mode="event_notification",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is not None
+    assert "TURN_MODE_MISMATCH" in err
 
 
 def test_sanitize_history_keeps_tool_response_shape_for_approval_handoff() -> None:
