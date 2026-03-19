@@ -40,3 +40,44 @@ def test_internal_tulpa_run_terminal_uses_threadpool(monkeypatch) -> None:
             },
         }
     ]
+
+
+def test_internal_tulpa_read_file_returns_404_for_missing_file(monkeypatch) -> None:
+    app = FastAPI()
+    tulpa.register_tulpa_routes(app, get_tulpa_loader=lambda: object())
+
+    def _fake_read_file(path: str, max_chars: int = 12000) -> str:
+        del max_chars
+        raise FileNotFoundError(f"file not found under allowed read roots: {path}")
+
+    monkeypatch.setattr(tulpa, "sandbox_read_file", _fake_read_file)
+
+    with TestClient(app) as client:
+        response = client.get("/internal/tulpa/read_file", params={"path": "tulpa_stuff/missing.txt"})
+
+    assert response.status_code == 404
+    assert response.json()["requested_path"] == "tulpa_stuff/missing.txt"
+    assert "file not found under allowed read roots" in response.json()["detail"]
+    assert "allowed_read_roots" in response.json()
+
+
+def test_internal_tulpa_read_file_returns_403_for_disallowed_path(monkeypatch) -> None:
+    app = FastAPI()
+    tulpa.register_tulpa_routes(app, get_tulpa_loader=lambda: object())
+
+    def _fake_read_file(path: str, max_chars: int = 12000) -> str:
+        del max_chars
+        raise PermissionError(
+            "path outside allowed read roots; allowed roots: "
+            "tulpa_stuff/, src/opentulpa/integrations/"
+        )
+
+    monkeypatch.setattr(tulpa, "sandbox_read_file", _fake_read_file)
+
+    with TestClient(app) as client:
+        response = client.get("/internal/tulpa/read_file", params={"path": "README.md"})
+
+    assert response.status_code == 403
+    assert response.json()["requested_path"] == "README.md"
+    assert "path outside allowed read roots" in response.json()["detail"]
+    assert "allowed_read_roots" in response.json()
