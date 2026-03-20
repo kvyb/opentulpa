@@ -54,6 +54,7 @@ class _FakeRuntime:
         thread_id: str,
         customer_id: str,
         text: str,
+        turn_mode: str = "interactive",
         include_pending_context: bool = True,
         recursion_limit_override: int | None = None,
     ) -> str:
@@ -62,6 +63,7 @@ class _FakeRuntime:
                 "kind": "ainvoke",
                 "thread_id": thread_id,
                 "customer_id": customer_id,
+                "turn_mode": turn_mode,
                 "include_pending_context": include_pending_context,
                 "recursion_limit_override": recursion_limit_override,
                 "text": text,
@@ -167,6 +169,7 @@ async def test_failed_approved_action_uses_autonomous_recovery_message() -> None
     ainvoke_calls = [c for c in runtime.calls if c.get("kind") == "ainvoke"]
     assert len(ainvoke_calls) == 1
     assert ainvoke_calls[0].get("recursion_limit_override") == 48
+    assert ainvoke_calls[0].get("turn_mode") == "approval_recovery"
 
 
 @pytest.mark.asyncio
@@ -222,3 +225,6 @@ async def test_post_denial_flow_flushes_deferred_challenges() -> None:
             "origin_conversation_id": "42",
         }
     ]
+    ainvoke_calls = [c for c in runtime.calls if c.get("kind") == "ainvoke"]
+    assert len(ainvoke_calls) == 1
+    assert ainvoke_calls[0].get("turn_mode") == "event_notification"

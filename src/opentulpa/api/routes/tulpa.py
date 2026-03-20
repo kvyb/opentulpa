@@ -13,6 +13,7 @@ from opentulpa.tasks.sandbox import (
     ALLOWED_TERMINAL_DIRS,
     PROJECT_ROOT,
     TERMINAL_COMMAND_ALLOWLIST_ENV,
+    get_allowed_read_roots,
     get_terminal_command_allowlist,
     get_tulpa_catalog,
 )
@@ -69,6 +70,32 @@ def register_tulpa_routes(
         """Read a file inside approved integration/self-modification paths."""
         try:
             content = sandbox_read_file(path, max_chars=max_chars)
+        except FileNotFoundError as exc:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": str(exc),
+                    "requested_path": path,
+                    "allowed_read_roots": get_allowed_read_roots(),
+                },
+            )
+        except PermissionError as exc:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": str(exc),
+                    "requested_path": path,
+                    "allowed_read_roots": get_allowed_read_roots(),
+                },
+            )
+        except IsADirectoryError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": str(exc),
+                    "requested_path": path,
+                },
+            )
         except Exception as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
         return {"ok": True, "path": path, "content": content}

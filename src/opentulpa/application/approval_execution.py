@@ -173,6 +173,7 @@ class ApprovalExecutionOrchestrator:
                         "3) If still unresolved after substantial attempts, report what you tried and ask user whether to continue.\n"
                         "Do not leak internal JSON or system internals."
                     ),
+                    turn_mode="approval_recovery",
                     include_pending_context=False,
                     recursion_limit_override=48,
                 )
@@ -209,6 +210,7 @@ class ApprovalExecutionOrchestrator:
                 thread_id=recovery_thread_id,
                 customer_id=customer_id,
                 text=summary_prompt,
+                turn_mode="event_notification",
                 include_pending_context=False,
             )
         except Exception:

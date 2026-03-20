@@ -39,6 +39,13 @@ ALLOWED_TERMINAL_DIRS = {
     "skills": SKILLS_DIR,
     "opentulpa": PACKAGE_ROOT,
 }
+ALLOWED_READ_DIRS = {
+    "tulpa_stuff": TULPA_STUFF_DIR,
+    "integrations": INTEGRATIONS_DIR,
+    "interfaces": INTERFACES_DIR,
+    "tools": TOOLS_DIR,
+    "skills": SKILLS_DIR,
+}
 
 _WORKING_DIR_PREFIXES: dict[str, str] = {
     "tulpa_stuff": "tulpa_stuff",
@@ -111,6 +118,14 @@ def is_within(path: Path, root: Path) -> bool:
     path_r = path.resolve()
     root_r = root.resolve()
     return path_r == root_r or root_r in path_r.parents
+
+
+def get_allowed_read_roots() -> list[str]:
+    roots: list[str] = []
+    for key in ALLOWED_READ_DIRS:
+        prefix = _WORKING_DIR_PREFIXES.get(key, key).strip("/")
+        roots.append(f"{prefix}/")
+    return roots
 
 
 def resolve_allowed_write_path(relative_path: str) -> Path:
@@ -259,18 +274,13 @@ def read_file(relative_path: str, max_chars: int = 12000) -> str:
     if Path(rel).is_absolute():
         raise ValueError("path must be relative")
     target = (PROJECT_ROOT / rel).resolve()
-    if not (
-        is_within(target, TULPA_STUFF_DIR)
-        or is_within(target, INTEGRATIONS_DIR)
-        or is_within(target, INTERFACES_DIR)
-        or is_within(target, TOOLS_DIR)
-        or is_within(target, SKILLS_DIR)
-    ):
-        raise ValueError("path outside allowed roots")
+    if not any(is_within(target, root) for root in ALLOWED_READ_DIRS.values()):
+        allowed_roots = ", ".join(get_allowed_read_roots())
+        raise PermissionError(f"path outside allowed read roots; allowed roots: {allowed_roots}")
     if not target.exists():
-        raise ValueError("file not found")
+        raise FileNotFoundError(f"file not found under allowed read roots: {rel}")
     if target.is_dir():
-        raise ValueError("path is a directory")
+        raise IsADirectoryError(f"path is a directory: {rel}")
     return target.read_text(encoding="utf-8", errors="replace")[:max_chars]
 
 

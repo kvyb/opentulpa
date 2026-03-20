@@ -179,6 +179,7 @@ async def _run_post_denial_iteration_flow(
             thread_id=thread_id,
             customer_id=customer_id,
             text=prompt,
+            turn_mode="event_notification",
             include_pending_context=False,
             recursion_limit_override=36,
         )

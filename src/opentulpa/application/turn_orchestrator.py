@@ -44,6 +44,7 @@ class TurnOrchestrator:
             thread_id=thread_id,
             customer_id=customer_id,
             text=text,
+            turn_mode="interactive",
             include_pending_context=bool(request.include_pending_context),
             recursion_limit_override=request.recursion_limit_override,
         )
@@ -53,4 +54,3 @@ class TurnOrchestrator:
             text=str(output or "").strip(),
             status="ok",
         )
-

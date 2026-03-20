@@ -8,7 +8,7 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from opentulpa.agent.runtime import (
@@ -123,6 +123,7 @@ async def stream_langgraph_reply_to_telegram(
                     thread_id=thread_id,
                     customer_id=customer_id,
                     text=text,
+                    turn_mode="interactive",
                 ),
                 timeout=90.0,
             )
@@ -138,6 +139,7 @@ async def stream_langgraph_reply_to_telegram(
             thread_id=thread_id,
             customer_id=customer_id,
             text=text,
+            turn_mode="interactive",
         )
         stream_iter = stream.__aiter__()
         while True:
@@ -164,7 +166,7 @@ async def stream_langgraph_reply_to_telegram(
             except StopAsyncIteration:
                 next_chunk_task = None
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 consecutive_timeouts += 1
                 if consecutive_timeouts < max_consecutive_timeouts:
                     if not progress_notified:
@@ -409,7 +411,7 @@ async def relay_event_via_main_agent(
     routine_instruction = str(routine_payload.get("instruction", "")).strip()
     routine_name = str(payload.get("routine_name", "")).strip()
     proactive_heartbeat = bool(routine_payload.get("proactive_heartbeat", False))
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     replies: list[dict[str, Any]] = []
     for slot in slots:
         chat_id = int(slot["chat_id"])
@@ -422,13 +424,13 @@ async def relay_event_via_main_agent(
             with suppress(Exception):
                 parsed = datetime.fromisoformat(last_user_at.replace("Z", "+00:00"))
                 if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
+                    parsed = parsed.replace(tzinfo=UTC)
                 user_idle_hours = f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
         if last_assistant_at:
             with suppress(Exception):
                 parsed = datetime.fromisoformat(last_assistant_at.replace("Z", "+00:00"))
                 if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
+                    parsed = parsed.replace(tzinfo=UTC)
                 assistant_idle_hours = f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
 
         if (
@@ -500,6 +502,7 @@ async def relay_event_via_main_agent(
                 thread_id=wake_thread_id,
                 customer_id=customer_id,
                 text=instruction,
+                turn_mode="event_notification",
                 include_pending_context=False,
                 recursion_limit_override=36 if proactive_heartbeat else None,
             )

@@ -67,6 +67,7 @@ async def test_relay_event_regenerates_invalid_wake_thread_id(initial_wake_threa
     assert runtime.calls
     used_thread_id = str(runtime.calls[0].get("thread_id", ""))
     assert used_thread_id.startswith("wake_")
+    assert runtime.calls[0]["turn_mode"] == "event_notification"
     assert state_store.state["sessions"]["1"]["wake_thread_id"] == used_thread_id
 
 
@@ -88,4 +89,5 @@ async def test_relay_event_keeps_existing_wake_thread_id() -> None:
     assert runtime.calls
     used_thread_id = str(runtime.calls[0].get("thread_id", ""))
     assert used_thread_id == "wake_abcd12"
+    assert runtime.calls[0]["turn_mode"] == "event_notification"
     assert state_store.state["sessions"]["1"]["wake_thread_id"] == "wake_abcd12"
