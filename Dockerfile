@@ -12,9 +12,11 @@ COPY src /app/src
 COPY scripts /app/scripts
 COPY skills /app/skills
 COPY docs /app/docs
-COPY tulpa_stuff /app/tulpa_stuff
 
-RUN uv sync --frozen --no-dev && uv run playwright install --with-deps chromium
+RUN mkdir -p /app/tulpa_stuff \
+    && printf '%s\n' '"""Agent-created integrations and skills."""' > /app/tulpa_stuff/__init__.py \
+    && uv sync --frozen --no-dev \
+    && uv run playwright install --with-deps chromium
 
 ENV HOST=0.0.0.0
 ENV PORT=8000
