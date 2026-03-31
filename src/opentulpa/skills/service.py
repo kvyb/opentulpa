@@ -9,6 +9,47 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_DEFAULT_SKILL_CREATOR_DESCRIPTION = (
+    "Use this skill when the user asks for recurring behavior/capabilities so the "
+    "assistant can create or update reusable skills."
+)
+_LEGACY_SKILL_CREATOR_INSTRUCTIONS = (
+    "## Purpose\n"
+    "Turn repeated user requests into durable reusable skills.\n\n"
+    "## Workflow\n"
+    "1. Detect recurring requests (style, reporting format, parser behavior, domain workflow).\n"
+    "2. Ask concise clarifying questions if requirements are ambiguous.\n"
+    "3. Create or update a user skill with durable instructions.\n"
+    "4. Confirm what was stored and when it will be reused.\n\n"
+    "## Storage Rule\n"
+    "Store user-specific skills in user scope by default.\n"
+    "Use global scope only for universally applicable capabilities."
+)
+_DEFAULT_SKILL_CREATOR_INSTRUCTIONS = (
+    "## Purpose\n"
+    "Turn repeated user requests into durable reusable skills that stay concise, valid, and reusable.\n\n"
+    "## When to create or update\n"
+    "1. Use this for recurring asks: style, reporting format, parser behavior, domain workflow, or tool procedure.\n"
+    "2. Update an existing skill instead of creating a near-duplicate when the capability is the same.\n\n"
+    "## Authoring rules\n"
+    "1. Keep SKILL.md lean; store only durable instructions the assistant is unlikely to infer reliably.\n"
+    "2. Start with YAML frontmatter and include the exact skill `name` plus a clear non-empty `description`.\n"
+    "3. In the body, focus on trigger conditions, workflow, guardrails, and expected output.\n"
+    "4. Prefer short examples over long explanation.\n"
+    "5. Put large or variant-specific detail in supporting files like `references/`, `scripts/`, or `assets/` only when needed.\n"
+    "6. Do not add extra docs like README or CHANGELOG just for the skill.\n\n"
+    "## Workflow\n"
+    "1. Detect the recurring request and the durable behavior worth storing.\n"
+    "2. Ask concise clarifying questions only if ambiguity would make the stored behavior wrong.\n"
+    "3. Choose scope: user by default, global only for broadly useful capabilities.\n"
+    "4. Create or update the skill with concise durable instructions and only the supporting files that are actually needed.\n"
+    "5. Confirm what was stored and when it will be reused.\n\n"
+    "## Validation\n"
+    "1. Ensure the frontmatter name matches the requested skill name.\n"
+    "2. Ensure the description is specific enough to trigger later.\n"
+    "3. Ensure the instructions are durable, not tied to a single conversation.\n"
+)
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -427,25 +468,35 @@ class SkillStoreService:
         )
 
     def ensure_default_skill(self) -> None:
-        self._ensure_global_skill(
+        existing_skill_creator = self.get_skill(
+            customer_id="",
             name="skill-creator",
-            description=(
-                "Use this skill when the user asks for recurring behavior/capabilities so the "
-                "assistant can create or update reusable skills."
-            ),
-            instructions=(
-                "## Purpose\n"
-                "Turn repeated user requests into durable reusable skills.\n\n"
-                "## Workflow\n"
-                "1. Detect recurring requests (style, reporting format, parser behavior, domain workflow).\n"
-                "2. Ask concise clarifying questions if requirements are ambiguous.\n"
-                "3. Create or update a user skill with durable instructions.\n"
-                "4. Confirm what was stored and when it will be reused.\n\n"
-                "## Storage Rule\n"
-                "Store user-specific skills in user scope by default.\n"
-                "Use global scope only for universally applicable capabilities."
-            ),
+            include_files=False,
+            include_global=True,
         )
+        desired_skill_creator = build_skill_markdown(
+            name="skill-creator",
+            description=_DEFAULT_SKILL_CREATOR_DESCRIPTION,
+            instructions=_DEFAULT_SKILL_CREATOR_INSTRUCTIONS,
+        )
+        legacy_skill_creator = build_skill_markdown(
+            name="skill-creator",
+            description=_DEFAULT_SKILL_CREATOR_DESCRIPTION,
+            instructions=_LEGACY_SKILL_CREATOR_INSTRUCTIONS,
+        )
+        if existing_skill_creator is None or (
+            existing_skill_creator["source"] == "system_bootstrap"
+            and existing_skill_creator["skill_markdown"] in {legacy_skill_creator, desired_skill_creator}
+        ):
+            self.upsert_skill(
+                scope="global",
+                customer_id="",
+                name="skill-creator",
+                skill_markdown=desired_skill_creator,
+                source="system_bootstrap",
+                enabled=True,
+                supporting_files=None,
+            )
         self._ensure_global_skill(
             name="browser-use-operator",
             description=(

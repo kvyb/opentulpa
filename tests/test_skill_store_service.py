@@ -79,3 +79,41 @@ def test_skill_store_supporting_files_roundtrip(tmp_path: Path) -> None:
     files = fetched.get("supporting_files", {})
     assert "references/rules.md" in files
     assert "scripts/transform.py" in files
+
+
+def test_skill_creator_default_upgrades_legacy_bootstrap_copy(tmp_path: Path) -> None:
+    store = _mk_service(tmp_path)
+    legacy_md = build_skill_markdown(
+        name="skill-creator",
+        description=(
+            "Use this skill when the user asks for recurring behavior/capabilities so the "
+            "assistant can create or update reusable skills."
+        ),
+        instructions=(
+            "## Purpose\n"
+            "Turn repeated user requests into durable reusable skills.\n\n"
+            "## Workflow\n"
+            "1. Detect recurring requests (style, reporting format, parser behavior, domain workflow).\n"
+            "2. Ask concise clarifying questions if requirements are ambiguous.\n"
+            "3. Create or update a user skill with durable instructions.\n"
+            "4. Confirm what was stored and when it will be reused.\n\n"
+            "## Storage Rule\n"
+            "Store user-specific skills in user scope by default.\n"
+            "Use global scope only for universally applicable capabilities."
+        ),
+    )
+    store.upsert_skill(
+        scope="global",
+        customer_id="",
+        name="skill-creator",
+        skill_markdown=legacy_md,
+        source="system_bootstrap",
+        enabled=True,
+    )
+
+    store.ensure_default_skill()
+
+    skill = store.get_skill(customer_id="", name="skill-creator", include_files=False)
+    assert skill is not None
+    assert "## Authoring rules" in skill["skill_markdown"]
+    assert "references/`, `scripts/`, or `assets/`" in skill["skill_markdown"]
