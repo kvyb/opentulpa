@@ -12,6 +12,7 @@ COPY src /app/src
 COPY scripts /app/scripts
 COPY skills /app/skills
 COPY docs /app/docs
+COPY tulpa_stuff /app/tulpa_stuff
 
 RUN uv sync --frozen --no-dev && uv run playwright install --with-deps chromium
 

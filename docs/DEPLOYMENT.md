@@ -14,6 +14,7 @@ The repo includes a production `Dockerfile` so Railway can deploy directly.
 ### Optional env vars
 
 - `OPENROUTER_BASE_URL` (defaults to OpenRouter; can point at another OpenAI-compatible endpoint)
+- `OPENTULPA_DATA_ROOT` (single persistent data root; aliases both `.opentulpa` and `tulpa_stuff` into one mounted volume)
 - `TELEGRAM_WEBHOOK_SECRET` (recommended; if omitted, an ephemeral secret is generated at startup)
 - `PUBLIC_BASE_URL` (for example `https://your-app.up.railway.app`)
 - `BROWSER_USE_HEADLESS` (defaults to `true`)
@@ -43,6 +44,7 @@ Browser Use local note:
 3. Set env vars in Railway:
    - `OPENROUTER_API_KEY`
    - `OPENROUTER_BASE_URL` if you are not using OpenRouter
+   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_WEBHOOK_SECRET` (recommended)
    - `PUBLIC_BASE_URL` (optional when `RAILWAY_PUBLIC_DOMAIN` is available)
@@ -50,4 +52,12 @@ Browser Use local note:
 
 ## Persistence (recommended)
 
-Mount a volume for `/app/.opentulpa` so memory, skills, approvals, and checkpoints survive redeploys.
+Railway services expose a single mounted volume path, so OpenTulpa supports a single data root for cloud deploys.
+
+Recommended Railway setup:
+
+1. Mount one volume at `/app/opentulpa_data`.
+2. Set `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
+3. Startup will alias both `/app/.opentulpa` and `/app/tulpa_stuff` into that mounted directory.
+
+This keeps the existing runtime paths stable while making both durable state and generated sandbox files persist across redeploys.

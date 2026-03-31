@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from opentulpa import __main__ as entry
@@ -35,6 +36,42 @@ def test_ensure_telegram_webhook_secret_generates_when_missing(monkeypatch) -> N
 def test_telegram_bot_commands_include_fresh() -> None:
     commands = entry._telegram_bot_commands()
     assert any(str(item.get("command", "")).strip() == "fresh" for item in commands)
+
+
+def test_bootstrap_persistent_storage_aliases_runtime_dirs(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / ".opentulpa").mkdir()
+    (project_root / ".opentulpa" / "state.db").write_text("checkpoint", encoding="utf-8")
+    (project_root / "tulpa_stuff").mkdir()
+    (project_root / "tulpa_stuff" / "__init__.py").write_text(
+        '"""Agent-created integrations and skills."""\n',
+        encoding="utf-8",
+    )
+
+    data_root = tmp_path / "data"
+    entry._bootstrap_persistent_storage(project_root, str(data_root))
+
+    assert (project_root / ".opentulpa").is_symlink()
+    assert (project_root / "tulpa_stuff").is_symlink()
+    assert (data_root / ".opentulpa" / "state.db").read_text(encoding="utf-8") == "checkpoint"
+    assert (data_root / "tulpa_stuff" / "__init__.py").read_text(encoding="utf-8").strip()
+
+
+def test_bootstrap_persistent_storage_keeps_existing_volume_contents(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "tulpa_stuff").mkdir()
+    (project_root / "tulpa_stuff" / "README.md").write_text("image seed", encoding="utf-8")
+
+    data_root = tmp_path / "data"
+    (data_root / "tulpa_stuff").mkdir(parents=True)
+    (data_root / "tulpa_stuff" / "README.md").write_text("persisted", encoding="utf-8")
+
+    entry._bootstrap_persistent_storage(project_root, str(data_root))
+
+    assert (project_root / "tulpa_stuff").is_symlink()
+    assert (data_root / "tulpa_stuff" / "README.md").read_text(encoding="utf-8") == "persisted"
 
 
 def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> None:

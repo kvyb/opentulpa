@@ -2,6 +2,7 @@
 
 import os
 import secrets
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,53 @@ def _resolve_public_base_url() -> str:
     if not raw.startswith(("http://", "https://")):
         raw = f"https://{raw}"
     return raw.rstrip("/")
+
+
+def _seed_missing_directory_entries(source_dir: Path, target_dir: Path) -> None:
+    if not source_dir.exists() or not source_dir.is_dir():
+        return
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for source_path in source_dir.rglob("*"):
+        relative = source_path.relative_to(source_dir)
+        target_path = target_dir / relative
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if target_path.exists():
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+
+
+def _alias_directory_into_data_root(project_root: Path, data_root: Path, name: str) -> None:
+    target_path = (data_root / name).resolve()
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    link_path = project_root / name
+    if link_path.is_symlink():
+        try:
+            if link_path.resolve() == target_path:
+                return
+        except FileNotFoundError:
+            pass
+        link_path.unlink()
+    elif link_path.exists():
+        _seed_missing_directory_entries(link_path, target_path)
+        shutil.rmtree(link_path)
+
+    link_path.symlink_to(target_path, target_is_directory=True)
+
+
+def _bootstrap_persistent_storage(project_root: Path, data_root: str | None) -> None:
+    raw_root = str(data_root or "").strip()
+    if not raw_root:
+        return
+    resolved_root = Path(raw_root).expanduser()
+    if not resolved_root.is_absolute():
+        resolved_root = (project_root / resolved_root).resolve()
+    resolved_root.mkdir(parents=True, exist_ok=True)
+    _alias_directory_into_data_root(project_root, resolved_root, ".opentulpa")
+    _alias_directory_into_data_root(project_root, resolved_root, "tulpa_stuff")
 
 
 def _ensure_telegram_webhook_secret(settings: Any) -> str:
@@ -183,6 +231,7 @@ def _auto_configure_telegram_commands(settings: Any) -> None:
 def main() -> None:
     settings = get_settings()
     project_root = Path(__file__).resolve().parents[2]
+    _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
     openrouter_api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
     qdrant_path = Path(settings.mem0_qdrant_path)
     if not qdrant_path.is_absolute():
