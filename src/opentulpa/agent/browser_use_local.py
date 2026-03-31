@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from opentulpa.core.ids import new_short_id
+from opentulpa.tasks.sandbox import TULPA_STUFF_DIR
 
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = {"finished", "stopped", "failed"}
+_SESSION_IDLE_TIMEOUT_SECONDS = 3600
 
 
 def _utc_now_iso() -> str:
@@ -45,6 +47,12 @@ class _BrowserUseTaskState:
     close_session_when_done: bool = False
 
 
+@dataclass(slots=True)
+class _BrowserUseSessionState:
+    session: Any
+    updated_monotonic: float = field(default_factory=time.monotonic)
+
+
 class BrowserUseLocalManager:
     """Manage local Browser Use runs with in-memory task/session state."""
 
@@ -68,7 +76,7 @@ class BrowserUseLocalManager:
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
         self._tasks: dict[str, _BrowserUseTaskState] = {}
-        self._sessions: dict[str, Any] = {}
+        self._sessions: dict[str, _BrowserUseSessionState] = {}
         self._preflight_checked = False
         self._preflight_error: str | None = None
 
@@ -155,12 +163,25 @@ class BrowserUseLocalManager:
 
         async with self._lock:
             self._cleanup_locked()
-            browser_session = self._sessions.get(safe_session_id)
-            if browser_session is None:
+            active_task = self._active_task_for_session_locked(safe_session_id)
+            if active_task is not None:
+                return {
+                    "error": (
+                        "browser_use_run session busy: "
+                        f"active task {active_task.task_id} is still {active_task.status}"
+                    ),
+                    "sessionId": safe_session_id,
+                    "activeTaskId": active_task.task_id,
+                }
+            session_state = self._sessions.get(safe_session_id)
+            if session_state is None:
                 browser_session = self._new_browser_session(
                     allowed_domains=safe_domains,
                 )
-                self._sessions[safe_session_id] = browser_session
+                session_state = _BrowserUseSessionState(session=browser_session)
+                self._sessions[safe_session_id] = session_state
+            else:
+                session_state.updated_monotonic = time.monotonic()
 
             task_id = new_short_id("task")
             state = _BrowserUseTaskState(
@@ -169,7 +190,7 @@ class BrowserUseLocalManager:
                 task=task_text,
                 llm=resolved_model,
                 status="queued",
-                browser_session=browser_session,
+                browser_session=session_state.session,
             )
             runner = asyncio.create_task(
                 self._run_task(
@@ -193,7 +214,47 @@ class BrowserUseLocalManager:
             state = self._tasks.get(safe_task_id)
             if state is None:
                 return None
+            self._touch_session_locked(state.session_id)
             return self._state_to_payload(state)
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            self._cleanup_locked()
+            now = time.monotonic()
+            out: list[dict[str, Any]] = []
+            for session_id, session_state in self._sessions.items():
+                related_tasks = [
+                    state
+                    for state in self._tasks.values()
+                    if str(state.session_id or "").strip() == session_id
+                ]
+                related_tasks.sort(
+                    key=lambda item: float(item.updated_monotonic or item.created_monotonic),
+                    reverse=True,
+                )
+                latest = related_tasks[0] if related_tasks else None
+                active_task_ids = [
+                    state.task_id for state in related_tasks if state.status not in _TERMINAL_STATUSES
+                ][:3]
+                last_url = None
+                if latest is not None and latest.steps:
+                    last_url = str(latest.steps[-1].get("url", "")).strip() or None
+                out.append(
+                    {
+                        "session_id": session_id,
+                        "reusable": not active_task_ids,
+                        "active_task_ids": active_task_ids,
+                        "latest_task_id": latest.task_id if latest is not None else None,
+                        "latest_status": latest.status if latest is not None else None,
+                        "last_url": last_url,
+                        "last_used_seconds": max(
+                            0,
+                            int(now - float(session_state.updated_monotonic or now)),
+                        ),
+                    }
+                )
+            out.sort(key=lambda item: (item["last_used_seconds"], item["session_id"]))
+            return out
 
     async def control_task(self, *, task_id: str, action: str) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
@@ -216,6 +277,7 @@ class BrowserUseLocalManager:
                 if state.status == "running":
                     state.status = "paused"
                     state.updated_monotonic = time.monotonic()
+                    self._touch_session_locked(state.session_id)
             elif safe_action == "resume":
                 if agent is not None and hasattr(agent, "resume"):
                     with suppress(Exception):
@@ -223,6 +285,7 @@ class BrowserUseLocalManager:
                 if state.status in {"paused", "queued"}:
                     state.status = "running"
                     state.updated_monotonic = time.monotonic()
+                    self._touch_session_locked(state.session_id)
             elif safe_action in {"stop", "stop_task_and_session"}:
                 state.stop_requested = True
                 if agent is not None and hasattr(agent, "stop"):
@@ -251,10 +314,77 @@ class BrowserUseLocalManager:
             await self._close_session(session_to_close)
         return payload
 
+    async def capture_screenshot(
+        self,
+        *,
+        task_id: str,
+        full_page: bool = True,
+    ) -> dict[str, Any]:
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_screenshot requires task_id"}
+
+        async with self._lock:
+            self._cleanup_locked()
+            state = self._tasks.get(safe_task_id)
+            if state is None:
+                return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
+            browser_session = state.browser_session
+            session_id = str(state.session_id or "").strip() or None
+            self._touch_session_locked(state.session_id)
+
+        if browser_session is None or not hasattr(browser_session, "take_screenshot"):
+            return {"error": "browser_use_task_screenshot unavailable: browser session missing"}
+
+        screenshot_dir = (TULPA_STUFF_DIR / "screenshots" / "browser_use").resolve()
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        target = (screenshot_dir / f"{safe_task_id}_{timestamp}.png").resolve()
+        try:
+            raw_bytes = await browser_session.take_screenshot(
+                path=str(target),
+                full_page=bool(full_page),
+                format="png",
+            )
+        except Exception as exc:
+            return {"error": f"browser_use_task_screenshot failed: {exc}"}
+
+        if not target.exists() and isinstance(raw_bytes, (bytes, bytearray)) and raw_bytes:
+            target.write_bytes(bytes(raw_bytes))
+        if not target.exists():
+            return {"error": "browser_use_task_screenshot failed: screenshot file not created"}
+
+        rel_path = str(target.relative_to(TULPA_STUFF_DIR.parent))
+        file_entry = {
+            "id": new_short_id("shot"),
+            "fileName": target.name,
+            "path": rel_path,
+        }
+        async with self._lock:
+            state = self._tasks.get(safe_task_id)
+            if state is not None:
+                state.output_files = [
+                    item
+                    for item in state.output_files
+                    if str(item.get("path", "")).strip() != rel_path
+                ]
+                state.output_files.append(file_entry)
+                if state.steps:
+                    state.steps[-1]["screenshotUrl"] = rel_path
+                state.updated_monotonic = time.monotonic()
+                self._touch_session_locked(state.session_id)
+        return {
+            "ok": True,
+            "task_id": safe_task_id,
+            "session_id": session_id,
+            "path": rel_path,
+            "file_name": target.name,
+        }
+
     async def shutdown(self) -> None:
         async with self._lock:
             task_states = list(self._tasks.values())
-            sessions = list(self._sessions.values())
+            sessions = [item.session for item in self._sessions.values()]
             self._tasks.clear()
             self._sessions.clear()
 
@@ -292,6 +422,7 @@ class BrowserUseLocalManager:
                 state.status = "running"
                 state.started_at = state.started_at or _utc_now_iso()
                 state.updated_monotonic = time.monotonic()
+                self._touch_session_locked(state.session_id)
                 model_name = state.llm
                 task_text = state.task
                 browser_session = state.browser_session
@@ -397,6 +528,7 @@ class BrowserUseLocalManager:
                     state.steps.append(step)
                     state.steps.sort(key=lambda item: int(item.get("number", 0) or 0))
                 state.updated_monotonic = time.monotonic()
+                self._touch_session_locked(state.session_id)
 
         return _callback
 
@@ -531,7 +663,7 @@ class BrowserUseLocalManager:
 
     def _new_browser_session(self, *, allowed_domains: list[str]) -> Any:
         _, _, browser_session_cls = self._import_browser_use_components()
-        session_kwargs: dict[str, Any] = {"headless": self._headless}
+        session_kwargs: dict[str, Any] = {"headless": self._headless, "keep_alive": True}
         if allowed_domains:
             session_kwargs["allowed_domains"] = allowed_domains
         return browser_session_cls(**session_kwargs)
@@ -582,6 +714,18 @@ class BrowserUseLocalManager:
         for task_id in expired:
             self._tasks.pop(task_id, None)
 
+        expired_sessions: list[str] = []
+        for session_id, session_state in self._sessions.items():
+            if self._session_has_active_tasks_locked(session_id):
+                continue
+            age = now - float(session_state.updated_monotonic or now)
+            if age >= _SESSION_IDLE_TIMEOUT_SECONDS:
+                expired_sessions.append(session_id)
+        for session_id in expired_sessions:
+            session_state = self._sessions.pop(session_id, None)
+            if session_state is not None:
+                asyncio.create_task(self._close_session(session_state.session))
+
     def _detach_session_if_unused_locked(self, session_id: str | None) -> Any | None:
         safe_session = str(session_id or "").strip()
         if not safe_session:
@@ -591,4 +735,40 @@ class BrowserUseLocalManager:
                 continue
             if state.status not in _TERMINAL_STATUSES:
                 return None
-        return self._sessions.pop(safe_session, None)
+        session_state = self._sessions.pop(safe_session, None)
+        return session_state.session if session_state is not None else None
+
+    def _touch_session_locked(self, session_id: str | None) -> None:
+        safe_session = str(session_id or "").strip()
+        if not safe_session:
+            return
+        session_state = self._sessions.get(safe_session)
+        if session_state is not None:
+            session_state.updated_monotonic = time.monotonic()
+
+    def _session_has_active_tasks_locked(self, session_id: str) -> bool:
+        safe_session = str(session_id or "").strip()
+        if not safe_session:
+            return False
+        for state in self._tasks.values():
+            if str(state.session_id or "").strip() != safe_session:
+                continue
+            if state.status not in _TERMINAL_STATUSES:
+                return True
+        return False
+
+    def _active_task_for_session_locked(self, session_id: str) -> _BrowserUseTaskState | None:
+        safe_session = str(session_id or "").strip()
+        if not safe_session:
+            return None
+        active: list[_BrowserUseTaskState] = []
+        for state in self._tasks.values():
+            if str(state.session_id or "").strip() != safe_session:
+                continue
+            if state.status in _TERMINAL_STATUSES:
+                continue
+            active.append(state)
+        if not active:
+            return None
+        active.sort(key=lambda item: float(item.updated_monotonic or item.created_monotonic), reverse=True)
+        return active[0]

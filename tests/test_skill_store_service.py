@@ -117,3 +117,13 @@ def test_skill_creator_default_upgrades_legacy_bootstrap_copy(tmp_path: Path) ->
     assert skill is not None
     assert "## Authoring rules" in skill["skill_markdown"]
     assert "references/`, `scripts/`, or `assets/`" in skill["skill_markdown"]
+
+
+def test_browser_use_operator_default_mentions_session_reuse(tmp_path: Path) -> None:
+    store = _mk_service(tmp_path)
+    store.ensure_default_skill()
+
+    skill = store.get_skill(customer_id="", name="browser-use-operator", include_files=False)
+    assert skill is not None
+    assert "browser_use_session_list" in skill["skill_markdown"]
+    assert "browser_use_task_screenshot" in skill["skill_markdown"]

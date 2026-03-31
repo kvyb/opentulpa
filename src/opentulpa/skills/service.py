@@ -49,6 +49,55 @@ _DEFAULT_SKILL_CREATOR_INSTRUCTIONS = (
     "2. Ensure the description is specific enough to trigger later.\n"
     "3. Ensure the instructions are durable, not tied to a single conversation.\n"
 )
+_DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION = (
+    "Use this skill for interactive browser tasks that require real page navigation, "
+    "JavaScript rendering, or multi-step website workflows."
+)
+_LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
+    "## Purpose\n"
+    "Use Browser Use tools safely and cost-effectively for tasks normal link fetch/search "
+    "cannot complete reliably.\n\n"
+    "## When to use\n"
+    "1. Dynamic websites where static fetching is insufficient.\n"
+    "2. Multi-step navigation/extraction across pages.\n"
+    "3. Tasks requiring browser state and real interactions.\n\n"
+    "## Workflow\n"
+    "1. Clarify task objective and exact deliverable.\n"
+    "2. Set tight scope first: allowed domains and low max_steps.\n"
+    "3. Call browser_use_run.\n"
+    "4. If timed out/in progress, call browser_use_task_get.\n"
+    "5. If needed, call browser_use_task_control to stop/pause.\n"
+    "6. Return concise results, confidence, and any unresolved gaps.\n\n"
+    "## Safety & cost guardrails\n"
+    "- Start with conservative defaults (max_steps around 10-25).\n"
+    "- Restrict domains whenever possible.\n"
+    "- Avoid autonomous long runs without explicit user request.\n"
+    "- Prefer ordinary web tools for simple fetch/search tasks."
+)
+_DEFAULT_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
+    "## Purpose\n"
+    "Use Browser Use tools safely and cost-effectively for tasks normal link fetch/search "
+    "cannot complete reliably.\n\n"
+    "## When to use\n"
+    "1. Dynamic websites where static fetching is insufficient.\n"
+    "2. Multi-step navigation/extraction across pages.\n"
+    "3. Tasks requiring browser state and real interactions.\n\n"
+    "## Workflow\n"
+    "1. Clarify task objective and exact deliverable.\n"
+    "2. If continuing the same site/workflow, reuse an existing idle browser session instead of creating a fresh one.\n"
+    "3. Reuse the latest known `session_id` when available; if unsure, call `browser_use_session_list` and choose an idle reusable session.\n"
+    "4. Call `browser_use_run`, passing `session_id` when continuing work in the same browser session.\n"
+    "5. If the task is still running or paused, call `browser_use_task_get` instead of starting another run on the same session.\n"
+    "6. If the user needs a screenshot artifact, call `browser_use_task_screenshot` and then `tulpa_file_send` with the returned `path`.\n"
+    "7. When the session is no longer needed, call `browser_use_task_control` to stop it; otherwise idle sessions auto-expire after about 1 hour.\n"
+    "8. Return concise results, confidence, and any unresolved gaps.\n\n"
+    "## Safety & cost guardrails\n"
+    "- Start with conservative defaults (max_steps around 10-25).\n"
+    "- Restrict domains whenever possible.\n"
+    "- Avoid autonomous long runs without explicit user request.\n"
+    "- Prefer ordinary web tools for simple fetch/search tasks.\n"
+    "- Reuse idle sessions to avoid spawning unnecessary browsers and wasting RAM."
+)
 
 
 def _utc_now() -> str:
@@ -497,34 +546,36 @@ class SkillStoreService:
                 enabled=True,
                 supporting_files=None,
             )
-        self._ensure_global_skill(
+        existing_browser_use_operator = self.get_skill(
+            customer_id="",
             name="browser-use-operator",
-            description=(
-                "Use this skill for interactive browser tasks that require real page navigation, "
-                "JavaScript rendering, or multi-step website workflows."
-            ),
-            instructions=(
-                "## Purpose\n"
-                "Use Browser Use tools safely and cost-effectively for tasks normal link fetch/search "
-                "cannot complete reliably.\n\n"
-                "## When to use\n"
-                "1. Dynamic websites where static fetching is insufficient.\n"
-                "2. Multi-step navigation/extraction across pages.\n"
-                "3. Tasks requiring browser state and real interactions.\n\n"
-                "## Workflow\n"
-                "1. Clarify task objective and exact deliverable.\n"
-                "2. Set tight scope first: allowed domains and low max_steps.\n"
-                "3. Call browser_use_run.\n"
-                "4. If timed out/in progress, call browser_use_task_get.\n"
-                "5. If needed, call browser_use_task_control to stop/pause.\n"
-                "6. Return concise results, confidence, and any unresolved gaps.\n\n"
-                "## Safety & cost guardrails\n"
-                "- Start with conservative defaults (max_steps around 10-25).\n"
-                "- Restrict domains whenever possible.\n"
-                "- Avoid autonomous long runs without explicit user request.\n"
-                "- Prefer ordinary web tools for simple fetch/search tasks."
-            ),
+            include_files=False,
+            include_global=True,
         )
+        desired_browser_use_operator = build_skill_markdown(
+            name="browser-use-operator",
+            description=_DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION,
+            instructions=_DEFAULT_BROWSER_USE_OPERATOR_INSTRUCTIONS,
+        )
+        legacy_browser_use_operator = build_skill_markdown(
+            name="browser-use-operator",
+            description=_DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION,
+            instructions=_LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS,
+        )
+        if existing_browser_use_operator is None or (
+            existing_browser_use_operator["source"] == "system_bootstrap"
+            and existing_browser_use_operator["skill_markdown"]
+            in {legacy_browser_use_operator, desired_browser_use_operator}
+        ):
+            self.upsert_skill(
+                scope="global",
+                customer_id="",
+                name="browser-use-operator",
+                skill_markdown=desired_browser_use_operator,
+                source="system_bootstrap",
+                enabled=True,
+                supporting_files=None,
+            )
         self._ensure_global_skill(
             name="routine-schedule-composer",
             description=(

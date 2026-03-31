@@ -225,6 +225,7 @@ def _compact_browser_use_task_view(
                     {
                         "id": item.get("id"),
                         "fileName": item.get("fileName"),
+                        "path": item.get("path"),
                     }
                 )
 
@@ -926,6 +927,17 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("result", "No result.")
 
     @tool
+    async def browser_use_session_list() -> Any:
+        """
+        List known Browser Use sessions so the agent can reuse an idle session_id
+        instead of spawning a fresh browser session.
+        """
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_session_list unavailable"}
+        return {"sessions": await manager.list_sessions()}
+
+    @tool
     async def browser_use_run(
         task: str,
         allowed_domains: list[str] | None = None,
@@ -939,6 +951,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         """
         Run a local Browser Use task and wait for completion.
         Use for dynamic web tasks that need real browser interactions.
+        Reuse a prior session_id when continuing the same browsing workflow.
         """
         task_text = str(task or "").strip()
         if not task_text:
@@ -966,12 +979,20 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             session_id=safe_session_id or None,
         )
         if isinstance(created, dict) and created.get("error"):
-            return {"error": str(created.get("error"))}
+            return {
+                "error": str(created.get("error")),
+                "session_id": created.get("sessionId") or safe_session_id or None,
+                "active_task_id": created.get("activeTaskId"),
+            }
 
         task_id = str((created or {}).get("id") or "").strip()
         result_session_id = str((created or {}).get("sessionId") or safe_session_id).strip()
         if not task_id:
-            return {"error": "browser_use_run create failed: missing task id"}
+            return {
+                "error": str((created or {}).get("error") or "browser_use_run create failed: missing task id"),
+                "session_id": result_session_id or None,
+                "active_task_id": (created or {}).get("activeTaskId"),
+            }
 
         deadline = datetime.now(UTC).timestamp() + safe_wait_timeout
         while True:
@@ -1029,6 +1050,31 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             include_steps=bool(include_steps),
             max_steps_preview=max_steps_preview,
         )
+
+    @tool
+    async def browser_use_task_screenshot(
+        task_id: str,
+        full_page: bool = True,
+    ) -> Any:
+        """
+        Capture a screenshot from an existing Browser Use task/session, save it under
+        tulpa_stuff/, and return the local path. Use tulpa_file_send(path) to send it.
+        """
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_screenshot requires task_id"}
+
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_task_screenshot unavailable"}
+
+        payload = await manager.capture_screenshot(
+            task_id=safe_task_id,
+            full_page=bool(full_page),
+        )
+        if isinstance(payload, dict) and payload.get("error"):
+            return {"error": str(payload.get("error"))}
+        return payload if isinstance(payload, dict) else {"error": "browser_use_task_screenshot failed"}
 
     @tool
     async def browser_use_task_control(task_id: str, action: str = "stop_task_and_session") -> Any:
@@ -1673,8 +1719,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "time_profile_get": time_profile_get,
         "time_profile_set": time_profile_set,
         "web_search": web_search,
+        "browser_use_session_list": browser_use_session_list,
         "browser_use_run": browser_use_run,
         "browser_use_task_get": browser_use_task_get,
+        "browser_use_task_screenshot": browser_use_task_screenshot,
         "browser_use_task_control": browser_use_task_control,
         "fetch_url_content": fetch_url_content,
         "fetch_file_content": fetch_file_content,

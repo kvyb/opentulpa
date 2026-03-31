@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +23,19 @@ class _FakeBrowserSession:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def take_screenshot(
+        self,
+        path: str | None = None,
+        full_page: bool = False,  # noqa: ARG002
+        format: str = "png",  # noqa: ARG002
+        quality: int | None = None,  # noqa: ARG002
+        clip: dict | None = None,  # noqa: ARG002
+    ) -> bytes:
+        raw = b"fake-png"
+        if path:
+            Path(path).write_bytes(raw)
+        return raw
 
 
 @dataclass
@@ -170,9 +184,16 @@ async def test_local_manager_reuses_session_id(monkeypatch: pytest.MonkeyPatch) 
         lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
     )
 
-    await manager.start_task(task="first", max_steps=2, llm="", session_id="sess_shared")
+    first = await manager.start_task(task="first", max_steps=2, llm="", session_id="sess_shared")
+    first_task_id = str(first["id"])
+    for _ in range(50):
+        payload = await manager.get_task(first_task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
     await manager.start_task(task="second", max_steps=2, llm="", session_id="sess_shared")
     assert len(manager._sessions) == 1
+    assert manager._sessions["sess_shared"].session.kwargs["keep_alive"] is True
 
 
 @pytest.mark.asyncio
@@ -235,3 +256,81 @@ async def test_local_manager_cleanup_removes_expired_terminal_tasks() -> None:
     async with manager._lock:
         manager._cleanup_locked()
     assert "task_old" not in manager._tasks
+
+
+@pytest.mark.asyncio
+async def test_local_manager_capture_screenshot_writes_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import opentulpa.agent.browser_use_local as browser_use_local
+
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+    monkeypatch.setattr(browser_use_local, "TULPA_STUFF_DIR", tmp_path / "tulpa_stuff")
+
+    created = await manager.start_task(task="first", max_steps=2, llm="", session_id="sess_shot")
+    task_id = str(created["id"])
+
+    for _ in range(50):
+        payload = await manager.get_task(task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    shot = await manager.capture_screenshot(task_id=task_id, full_page=False)
+    assert shot["ok"] is True
+    assert shot["path"].startswith("tulpa_stuff/screenshots/browser_use/")
+    assert (tmp_path / shot["path"]).exists()
+
+    payload = await manager.get_task(task_id)
+    assert payload is not None
+    assert payload["outputFiles"]
+    assert payload["steps"][-1]["screenshotUrl"] == shot["path"]
+
+
+@pytest.mark.asyncio
+async def test_local_manager_lists_sessions_and_expires_idle_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    created = await manager.start_task(task="first", max_steps=2, llm="", session_id="sess_idle")
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    sessions = await manager.list_sessions()
+    assert sessions[0]["session_id"] == "sess_idle"
+    assert sessions[0]["reusable"] is True
+
+    session = manager._sessions["sess_idle"].session
+    manager._sessions["sess_idle"].updated_monotonic = time.monotonic() - 3700
+    async with manager._lock:
+        manager._cleanup_locked()
+    await asyncio.sleep(0)
+    assert "sess_idle" not in manager._sessions
+    assert session.stopped is True

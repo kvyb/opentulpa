@@ -355,8 +355,10 @@ def build_runtime_graph(runtime: Any):
         "directive_set": ("directive",),
         "lessons_learnt": ("action",),
         "time_profile_set": ("utc_offset",),
+        "browser_use_session_list": (),
         "browser_use_run": ("task",),
         "browser_use_task_get": ("task_id",),
+        "browser_use_task_screenshot": ("task_id",),
         "browser_use_task_control": ("task_id",),
         "routine_list": (),
         "routine_create": (

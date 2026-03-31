@@ -20,6 +20,7 @@ class _DummyRuntime:
 class _DummyBrowserManager:
     def __init__(self) -> None:
         self.tasks: dict[str, dict] = {}
+        self.last_screenshot: dict[str, object] | None = None
 
     async def start_task(
         self,
@@ -67,6 +68,29 @@ class _DummyBrowserManager:
         payload["status"] = "stopped" if action.startswith("stop") else "running"
         return payload
 
+    async def capture_screenshot(self, *, task_id: str, full_page: bool = True) -> dict:
+        self.last_screenshot = {"task_id": task_id, "full_page": full_page}
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "session_id": "bses_1",
+            "path": f"tulpa_stuff/screenshots/browser_use/{task_id}.png",
+            "file_name": f"{task_id}.png",
+        }
+
+    async def list_sessions(self) -> list[dict]:
+        return [
+            {
+                "session_id": "bses_1",
+                "reusable": True,
+                "active_task_ids": [],
+                "latest_task_id": "task_123",
+                "latest_status": "finished",
+                "last_url": "https://example.com",
+                "last_used_seconds": 12,
+            }
+        ]
+
 
 def test_normalize_allowed_domains_filters_invalid_values() -> None:
     values = _normalize_allowed_domains(
@@ -95,6 +119,15 @@ async def test_browser_use_run_uses_local_manager() -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_use_session_list_returns_sessions() -> None:
+    tools = register_runtime_tools(_DummyRuntime(_DummyBrowserManager()))
+
+    result = await tools["browser_use_session_list"].ainvoke({})
+    assert result["sessions"][0]["session_id"] == "bses_1"
+    assert result["sessions"][0]["reusable"] is True
+
+
+@pytest.mark.asyncio
 async def test_browser_use_run_errors_when_manager_missing() -> None:
     tools = register_runtime_tools(_DummyRuntime(None))
 
@@ -120,3 +153,15 @@ async def test_browser_use_task_control_validates_action() -> None:
     )
     assert "error" in result
     assert "invalid action" in str(result["error"])
+
+
+@pytest.mark.asyncio
+async def test_browser_use_task_screenshot_returns_local_path() -> None:
+    manager = _DummyBrowserManager()
+    tools = register_runtime_tools(_DummyRuntime(manager))
+
+    result = await tools["browser_use_task_screenshot"].ainvoke(
+        {"task_id": "task_123", "full_page": False}
+    )
+    assert result.get("path") == "tulpa_stuff/screenshots/browser_use/task_123.png"
+    assert manager.last_screenshot == {"task_id": "task_123", "full_page": False}
