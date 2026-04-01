@@ -1,63 +1,113 @@
 # Deployment Guide
 
-This guide covers production deployment for OpenTulpa using Docker and Railway.
+## Local
 
-## Docker / Railway (Env-Only)
+Requirements:
+- Python `3.12+`
+- [`uv`](https://docs.astral.sh/uv/)
+- an OpenAI-compatible API key
 
-The repo includes a production `Dockerfile` so Railway can deploy directly.
+Setup:
 
-### Required env vars
+```bash
+git clone <repo-url>
+cd opentulpa
+cp .env.example .env
+```
 
-- `OPENROUTER_API_KEY` for the configured OpenAI-compatible model endpoint
+Set in `.env`:
+
+```bash
+OPENROUTER_API_KEY=...
+```
+
+Install and run:
+
+```bash
+./start.sh --app
+```
+
+Health checks:
+- `http://127.0.0.1:8000/healthz`
+- `http://127.0.0.1:8000/agent/healthz`
+
+If you want Telegram locally:
+
+1. set `TELEGRAM_BOT_TOKEN`
+2. run `./start.sh`
+
+If you want Browser Use locally:
+
+- it is installed by default when `./start.sh` runs
+- use `./start.sh --no-browser-use` to skip it
+
+Useful script modes:
+- `./start.sh`
+- `./start.sh --app`
+- `./start.sh install`
+- `./start.sh run --app`
+
+Useful `.env` knobs:
+- `START_MODE=auto|app|manager`
+- `INSTALL_BROWSER_USE=1|0`
+- `INSTALL_CLOUDFLARED=auto|1|0`
+
+## Docker
+
+The included `Dockerfile` already installs Python dependencies and Playwright Chromium:
+
+```bash
+docker build -t opentulpa .
+docker run --rm -p 8000:8000 --env-file .env opentulpa
+```
+
+Use Docker for local API testing or as the base for cloud deploys.
+
+## Railway
+
+Railway builds from the included `Dockerfile`.
+
+### Required
+
+- `OPENROUTER_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 
-### Optional env vars
+### Recommended
 
-- `OPENROUTER_BASE_URL` (defaults to OpenRouter; can point at another OpenAI-compatible endpoint)
-- `OPENTULPA_DATA_ROOT` (single persistent data root; aliases both `.opentulpa` and `tulpa_stuff` into one mounted volume)
-- `TELEGRAM_WEBHOOK_SECRET` (recommended; if omitted, an ephemeral secret is generated at startup)
-- `PUBLIC_BASE_URL` (for example `https://your-app.up.railway.app`)
-- `BROWSER_USE_HEADLESS` (defaults to `true`)
-- `BROWSER_USE_MODEL` (optional Browser Use model override)
-- `BROWSER_USE_MAX_CONCURRENT_TASKS` (defaults to `2`)
-- `BROWSER_USE_TASK_RETENTION_SECONDS` (defaults to `1800`)
+- `TELEGRAM_WEBHOOK_SECRET`
+- `PUBLIC_BASE_URL=https://your-service.up.railway.app`
+- `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
 
-Railway note:
-- If `PUBLIC_BASE_URL` is empty and Railway provides `RAILWAY_PUBLIC_DOMAIN`, startup auto-registers Telegram webhook to `https://$RAILWAY_PUBLIC_DOMAIN/webhook/telegram`.
+### Setup
 
-Browser Use local note:
-- Ensure Playwright Chromium is installed in the image/runtime (`uv run playwright install --with-deps chromium` in Docker).
-
-## What startup configures automatically
-
-- App binds to `HOST=0.0.0.0`, `PORT` from env (default `8000`).
-- Telegram webhook is auto-configured when:
-  - `TELEGRAM_BOT_TOKEN` exists, and
-  - `PUBLIC_BASE_URL` or `RAILWAY_PUBLIC_DOMAIN` exists.
-- Webhook URL is set to `<public_base_url>/webhook/telegram`.
-- `secret_token` is sent in `setWebhook` using `TELEGRAM_WEBHOOK_SECRET`.
-
-## Railway quick setup
-
-1. Create a new Railway project from this repo.
-2. Railway detects the `Dockerfile` and builds automatically.
-3. Set env vars in Railway:
+1. Create a Railway project from this repo.
+2. Add one volume mounted at `/app/opentulpa_data`.
+3. Set:
    - `OPENROUTER_API_KEY`
-   - `OPENROUTER_BASE_URL` if you are not using OpenRouter
-   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
    - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_WEBHOOK_SECRET` (recommended)
-   - `PUBLIC_BASE_URL` (optional when `RAILWAY_PUBLIC_DOMAIN` is available)
-4. Deploy.
+   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+4. Optionally set:
+   - `TELEGRAM_WEBHOOK_SECRET`
+   - `PUBLIC_BASE_URL`
+5. Deploy.
 
-## Persistence (recommended)
+### What happens automatically
 
-Railway services expose a single mounted volume path, so OpenTulpa supports a single data root for cloud deploys.
+- Railway builds the Docker image
+- Python dependencies are installed
+- Playwright Chromium is installed
+- Telegram webhook is auto-registered when a public URL is available
 
-Recommended Railway setup:
+### Persistence
 
-1. Mount one volume at `/app/opentulpa_data`.
-2. Set `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
-3. Startup will alias both `/app/.opentulpa` and `/app/tulpa_stuff` into that mounted directory.
+OpenTulpa stores state in:
+- `.opentulpa`
+- `tulpa_stuff`
 
-This keeps the existing runtime paths stable while making both durable state and generated sandbox files persist across redeploys.
+For Railway, use one mounted volume and set:
+
+```bash
+OPENTULPA_DATA_ROOT=/app/opentulpa_data
+```
+
+Startup aliases both storage directories into that mounted root.

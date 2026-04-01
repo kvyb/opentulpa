@@ -27,13 +27,17 @@ def register_tulpa_routes(
     app: FastAPI,
     *,
     get_tulpa_loader: Callable[[], Any],
+    refresh_tulpa_mounts: Callable[[], None] | None = None,
 ) -> None:
     """Register tulpa reload/read/write/run validation endpoints."""
 
     @app.post("/internal/tulpa/reload")
     async def internal_tulpa_reload() -> Any:
         """Reload APIRouter modules from tulpa_stuff."""
-        return get_tulpa_loader().reload()
+        result = get_tulpa_loader().reload()
+        if callable(refresh_tulpa_mounts):
+            refresh_tulpa_mounts()
+        return result
 
     @app.post("/internal/tulpa/write_file")
     async def internal_tulpa_write_file(request: Request) -> Any:

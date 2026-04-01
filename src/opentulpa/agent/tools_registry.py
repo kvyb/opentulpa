@@ -750,6 +750,58 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
+    async def signal_rule_upsert(
+        source: str,
+        wake_mode: str = "classifier",
+        customer_id: str = "",
+        thread_id: str = "",
+        batch_window_seconds: int = 0,
+        auto_reply: bool = True,
+        guidance_text: str = "",
+    ) -> Any:
+        """Create or update signal wake handling rules for an external inbox source."""
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/signals/rules/upsert",
+            json_body={
+                "source": source,
+                "wake_mode": wake_mode,
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "batch_window_seconds": max(0, int(batch_window_seconds)),
+                "auto_reply": bool(auto_reply),
+                "guidance_text": guidance_text,
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"signal_rule_upsert failed: {r.text}"}
+        return r.json().get("rule", {})
+
+    @tool
+    async def signal_rule_list(
+        source: str = "",
+        customer_id: str = "",
+        thread_id: str = "",
+        limit: int = 50,
+    ) -> Any:
+        """List stored signal wake handling rules."""
+        r = await runtime._request_with_backoff(
+            "GET",
+            "/internal/signals/rules",
+            params={
+                "source": source,
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "limit": max(1, min(int(limit), 200)),
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"signal_rule_list failed: {r.text}"}
+        return r.json().get("rules", [])
+
+    @tool
     async def directive_get() -> Any:
         """Get the active persistent directive profile for this user."""
         customer_id = _require_customer_id(runtime)
@@ -1299,6 +1351,18 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
+    async def tulpa_reload() -> Any:
+        """Reload tulpa_stuff routers so newly written connectors become active."""
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/tulpa/reload",
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"reload failed: {r.text}"}
+        return r.json()
+
+    @tool
     async def tulpa_run_terminal(
         command: str,
         working_dir: str = "tulpa_stuff",
@@ -1712,6 +1776,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "skill_get": skill_get,
         "skill_upsert": skill_upsert,
         "skill_delete": skill_delete,
+        "signal_rule_upsert": signal_rule_upsert,
+        "signal_rule_list": signal_rule_list,
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,
@@ -1728,6 +1794,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "fetch_file_content": fetch_file_content,
         "tulpa_write_file": tulpa_write_file,
         "tulpa_validate_file": tulpa_validate_file,
+        "tulpa_reload": tulpa_reload,
         "tulpa_run_terminal": tulpa_run_terminal,
         "tulpa_read_file": tulpa_read_file,
         "tulpa_catalog": tulpa_catalog,

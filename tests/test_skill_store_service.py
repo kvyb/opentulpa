@@ -127,3 +127,20 @@ def test_browser_use_operator_default_mentions_session_reuse(tmp_path: Path) -> 
     assert skill is not None
     assert "browser_use_session_list" in skill["skill_markdown"]
     assert "browser_use_task_screenshot" in skill["skill_markdown"]
+
+
+def test_signal_integration_operator_default_mentions_signal_core_routes(tmp_path: Path) -> None:
+    store = _mk_service(tmp_path)
+    store.ensure_default_skill()
+
+    skill = store.get_skill(customer_id="", name="signal-integration-operator", include_files=False)
+    assert skill is not None
+    assert "/internal/signals/ingest" in skill["skill_markdown"]
+    assert "/internal/signals/rules/upsert" in skill["skill_markdown"]
+    assert "signal_rule_list" in skill["skill_markdown"]
+    assert "public_router" in skill["skill_markdown"]
+    assert "external_subject_id" in skill["skill_markdown"]
+    assert "owner/operator identity" in skill["skill_markdown"]
+    assert "owner_customer_id" in skill["skill_markdown"]
+    assert "request.app.state.signal_ingest" in skill["skill_markdown"]
+    assert "incoming webhook JSON as generic" in skill["skill_markdown"]

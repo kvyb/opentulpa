@@ -39,6 +39,7 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
+from opentulpa.context.signals import SignalInboxService
 from opentulpa.core.config import get_settings
 from opentulpa.integrations.slack_client import grant_slack_write_consent, has_slack_write_consent
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
@@ -84,6 +85,7 @@ def create_app(
     file_vault_service: FileVaultService | None = None,
     link_alias_service: LinkAliasService | None = None,
     skill_store_service: SkillStoreService | None = None,
+    signal_inbox_service: SignalInboxService | None = None,
 ) -> FastAPI:
     """Create FastAPI app with internal API, webhook, and agent runtime."""
     memory_service = memory
@@ -109,6 +111,9 @@ def create_app(
     skill_service = skill_store_service or SkillStoreService(
         db_path=PROJECT_ROOT / ".opentulpa" / "skills.db",
         root_dir=PROJECT_ROOT / ".opentulpa" / "skills",
+    )
+    signals_service = signal_inbox_service or SignalInboxService(
+        db_path=PROJECT_ROOT / ".opentulpa" / "signals.db",
     )
     skill_service.ensure_default_skill()
     if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
@@ -219,12 +224,16 @@ def create_app(
     wake_queue_service: WakeQueueService | None = None
     tulpa_loader: TulpaRouterLoader | None = None
     tulpa_router = APIRouter()
+    tulpa_public_router = APIRouter()
 
     def get_wake_queue() -> WakeQueueService:
         return _require(wake_queue_service, "WakeQueueService")
 
     def get_tulpa_loader() -> TulpaRouterLoader:
         return _require(tulpa_loader, "TulpaRouterLoader")
+
+    def get_signal_inbox() -> SignalInboxService:
+        return _require(signals_service, "SignalInboxService")
 
     wake_orchestrator = WakeOrchestrator(
         settings=settings,
@@ -233,6 +242,7 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
         get_approvals=get_approvals,
+        get_signal_inbox=get_signal_inbox,
     )
 
     async def process_wake_event(body: dict[str, Any]) -> None:
@@ -246,12 +256,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        loader = get_tulpa_loader()
-        result = loader.reload()
-        if result.get("warnings"):
-            logger.info("Tulpa router load warnings: %s", result["warnings"])
-        if result.get("errors"):
-            logger.warning("Tulpa router load had errors: %s", result["errors"])
         if runtime and hasattr(runtime, "start"):
             await runtime.start()
         if scheduler_service:
@@ -276,6 +280,9 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.state.signal_inbox = signals_service
+    app.state.wake_queue = wake_queue_service
+    app.state.turn_orchestrator = turn_orchestrator
 
     @app.middleware("http")
     async def enforce_public_route_boundary(
@@ -296,8 +303,23 @@ def create_app(
             return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
         return await call_next(request)
 
-    tulpa_loader = TulpaRouterLoader(project_root=PROJECT_ROOT, mount_router=tulpa_router)
-    app.include_router(tulpa_router, prefix="/tulpa")
+    def refresh_tulpa_mounts() -> None:
+        kept_routes: list[Any] = []
+        for route in app.router.routes:
+            path = str(getattr(route, "path", "") or "")
+            if path.startswith("/tulpa/") or path.startswith("/webhook/tulpa/"):
+                continue
+            kept_routes.append(route)
+        app.router.routes[:] = kept_routes
+        app.include_router(tulpa_router, prefix="/tulpa")
+        app.include_router(tulpa_public_router, prefix="/webhook/tulpa")
+
+    tulpa_loader = TulpaRouterLoader(
+        project_root=PROJECT_ROOT,
+        mount_router=tulpa_router,
+        public_mount_router=tulpa_public_router,
+    )
+    tulpa_loader.reload()
 
     register_health_routes(app, get_agent_runtime=get_agent_runtime)
     register_chat_routes(app, get_turn_orchestrator=get_turn_orchestrator)
@@ -335,9 +357,14 @@ def create_app(
     register_wake_and_search_routes(
         app,
         get_wake_queue=get_wake_queue,
+        get_signal_inbox=get_signal_inbox,
         llm_model=settings.llm_model,
     )
-    register_tulpa_routes(app, get_tulpa_loader=get_tulpa_loader)
+    register_tulpa_routes(
+        app,
+        get_tulpa_loader=get_tulpa_loader,
+        refresh_tulpa_mounts=refresh_tulpa_mounts,
+    )
     register_task_routes(app, get_tasks=get_tasks)
 
     if slack_service is not None:
@@ -358,5 +385,7 @@ def create_app(
         get_approval_execution_orchestrator=get_approval_execution_orchestrator,
         decide_approval_and_maybe_wake=decide_approval_and_maybe_wake,
     )
+
+    refresh_tulpa_mounts()
 
     return app

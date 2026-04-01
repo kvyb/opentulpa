@@ -369,3 +369,36 @@ async def test_routine_create_requires_non_empty_implementation_command() -> Non
     assert str(result.get("error", "")).startswith("ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED")
     assert runtime.calls == []
     assert runtime.guard_calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_rule_upsert_and_tulpa_reload_call_internal_routes() -> None:
+    runtime = _DummyRuntime(
+        [
+            _Response(200, {"ok": True, "rule": {"source": "manychat", "wake_mode": "always"}}),
+            _Response(200, {"ok": True, "rules": [{"source": "manychat", "wake_mode": "always"}]}),
+            _Response(200, {"ok": True, "public_loaded": ["manychat_live"]}),
+        ]
+    )
+    tools = register_runtime_tools(runtime)
+
+    rule = await tools["signal_rule_upsert"].ainvoke(
+        {
+            "source": "manychat",
+            "wake_mode": "always",
+            "customer_id": "cust_1",
+            "thread_id": "thread_1",
+            "batch_window_seconds": 0,
+            "auto_reply": True,
+            "guidance_text": "Reply briefly.",
+        }
+    )
+    listed = await tools["signal_rule_list"].ainvoke({"source": "manychat", "customer_id": "cust_1"})
+    reload_result = await tools["tulpa_reload"].ainvoke({})
+
+    assert rule["source"] == "manychat"
+    assert listed[0]["source"] == "manychat"
+    assert reload_result["public_loaded"] == ["manychat_live"]
+    assert runtime.calls[0][1] == "/internal/signals/rules/upsert"
+    assert runtime.calls[1][1] == "/internal/signals/rules"
+    assert runtime.calls[2][1] == "/internal/tulpa/reload"

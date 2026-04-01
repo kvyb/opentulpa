@@ -17,12 +17,8 @@ from opentulpa.interfaces.telegram.attachments import (
 from opentulpa.interfaces.telegram.client import parse_telegram_update
 from opentulpa.interfaces.telegram.constants import STATE_PATH
 from opentulpa.interfaces.telegram.env_management import (
-    extract_inline_key_value,
-    extract_set_command,
-    mask_secret,
     missing_key_prompt,
     status_text,
-    upsert_env_key,
 )
 from opentulpa.interfaces.telegram.models import TelegramContext
 from opentulpa.interfaces.telegram.relay import (
@@ -141,12 +137,9 @@ def _start_help_text() -> str:
         "2. Which repetitive task should I automate first?\n"
         "3. Which services should I connect first (Gmail, Sheets, custom APIs, etc.)?\n\n"
         "Commands:\n"
+        "/start\n"
         "/status\n"
-        "/setup\n"
-        "/set KEY VALUE\n"
-        "/setenv KEY VALUE\n"
-        "/fresh\n"
-        "/cancel"
+        "/fresh"
     )
 
 
@@ -223,23 +216,15 @@ async def handle_telegram_text(
     ):
         return "This bot is restricted and your Telegram account is not allowed."
 
-    def _ensure_admin_and_read_pending(state: dict[str, Any]) -> tuple[Any, str | None]:
+    def _ensure_admin(state: dict[str, Any]) -> Any:
         admin_user_id = state.get("admin_user_id")
         if admin_user_id is None:
             admin_user_id = ctx.user_id
             state["admin_user_id"] = admin_user_id
-        pending_map = state.get("pending_key_by_chat")
-        if not isinstance(pending_map, dict):
-            pending_map = {}
-            state["pending_key_by_chat"] = pending_map
-        pending_key = pending_map.get(str(ctx.chat_id))
-        if pending_key is None:
-            return admin_user_id, None
-        pending_key_text = str(pending_key).strip()
-        return admin_user_id, (pending_key_text or None)
+        return admin_user_id
 
-    admin_user_id, pending_key = STATE_STORE.update(_ensure_admin_and_read_pending)
-    is_admin = int(admin_user_id) == int(ctx.user_id)
+    admin_user_id = STATE_STORE.update(_ensure_admin)
+    _ = int(admin_user_id) == int(ctx.user_id)
 
     text_lower = ctx.text.lower()
     if text_lower in {"/start", "/help"}:
@@ -247,16 +232,6 @@ async def handle_telegram_text(
     if text_lower == "/status":
         agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
         return status_text(agent_up)
-    if text_lower == "/cancel":
-        def _clear_pending(state: dict[str, Any]) -> None:
-            pending_map = state.get("pending_key_by_chat")
-            if not isinstance(pending_map, dict):
-                pending_map = {}
-            pending_map.pop(str(ctx.chat_id), None)
-            state["pending_key_by_chat"] = pending_map
-
-        STATE_STORE.update(_clear_pending)
-        return "Cancelled pending setup."
     if text_lower == "/fresh":
         thread_id, _ = STATE_STORE.update(
             lambda state: _reset_chat_session_context(
@@ -270,56 +245,6 @@ async def handle_telegram_text(
             f"New thread: {thread_id}. "
             "Your long-term memory is unchanged."
         )
-
-    if text_lower == "/setup":
-        if not is_admin:
-            return "Only the bot admin can set keys."
-        if not os.environ.get("OPENROUTER_API_KEY"):
-            def _set_pending_openrouter(state: dict[str, Any]) -> None:
-                pending_map = state.get("pending_key_by_chat")
-                if not isinstance(pending_map, dict):
-                    pending_map = {}
-                pending_map[str(ctx.chat_id)] = "OPENROUTER_API_KEY"
-                state["pending_key_by_chat"] = pending_map
-
-            STATE_STORE.update(_set_pending_openrouter)
-            return (
-                "Please send your model provider API key now "
-                "(stored in OPENROUTER_API_KEY)."
-            )
-        return "Core key is already set. Use /set KEY VALUE for additional keys."
-
-    if pending_key:
-        if not is_admin:
-            return "Only the bot admin can set keys."
-        value = ctx.text.strip()
-        if not value:
-            return f"Please send the value for {pending_key}."
-        try:
-            upsert_env_key(pending_key, value)
-        except Exception as exc:
-            return f"Failed to save {pending_key}: {exc}"
-
-        def _clear_pending_after_save(state: dict[str, Any]) -> None:
-            pending_map = state.get("pending_key_by_chat")
-            if not isinstance(pending_map, dict):
-                pending_map = {}
-            pending_map.pop(str(ctx.chat_id), None)
-            state["pending_key_by_chat"] = pending_map
-
-        STATE_STORE.update(_clear_pending_after_save)
-        return f"Saved {pending_key}={mask_secret(value)}.\nRestart OpenTulpa to apply."
-
-    kv = extract_set_command(ctx.text) or extract_inline_key_value(ctx.text)
-    if kv:
-        key, value = kv
-        if not is_admin:
-            return "Only the bot admin can set keys."
-        try:
-            upsert_env_key(key, value)
-        except Exception as exc:
-            return f"Failed to save {key}: {exc}"
-        return f"Saved {key}={mask_secret(value)}."
 
     if not os.environ.get("OPENROUTER_API_KEY"):
         return missing_key_prompt()

@@ -33,9 +33,13 @@ def test_ensure_telegram_webhook_secret_generates_when_missing(monkeypatch) -> N
     assert os.environ.get("TELEGRAM_WEBHOOK_SECRET") == generated
 
 
-def test_telegram_bot_commands_include_fresh() -> None:
+def test_telegram_bot_commands_only_include_start_status_and_fresh() -> None:
     commands = entry._telegram_bot_commands()
-    assert any(str(item.get("command", "")).strip() == "fresh" for item in commands)
+    assert [str(item.get("command", "")).strip() for item in commands] == [
+        "start",
+        "status",
+        "fresh",
+    ]
 
 
 def test_bootstrap_persistent_storage_aliases_runtime_dirs(tmp_path: Path) -> None:

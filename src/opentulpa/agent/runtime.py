@@ -97,6 +97,7 @@ STREAM_EMPTY_REPLY_FALLBACK = (
     "I couldn't produce a visible user-facing reply for that step. "
     "Please retry, and I will continue from the latest state."
 )
+STREAM_PRECOMMIT_SECONDS = 15.0
 
 APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "memory_search",
@@ -1465,6 +1466,7 @@ class OpenTulpaLangGraphRuntime:
                 str(os.environ.get("AGENT_STREAM_NO_VISIBLE_PROGRESS_SECONDS", "210")).strip()
                 or "210"
             )
+            stream_precommit_seconds = STREAM_PRECOMMIT_SECONDS
             stream_total_chunks = 0
             stream_agent_chunks = 0
             stream_tool_chunks = 0
@@ -1473,21 +1475,28 @@ class OpenTulpaLangGraphRuntime:
             stream_filtered_empty = 0
             stream_filtered_blank_expanded = 0
             first_visible_yield_ms: int | None = None
+            buffered_visible = ""
             self.log_behavior_event(
                 event="turn_stream_loop_start",
                 trace_id=turn_trace_id,
                 thread_id=thread_id,
                 customer_id=customer_id,
                 stream_no_visible_timeout_s=stream_no_visible_timeout_s,
+                stream_precommit_seconds=stream_precommit_seconds,
                 turn_mode=normalized_turn_mode,
             )
 
-            def _finalize_segment() -> None:
+            def _precommit_active() -> bool:
+                if stream_precommit_seconds <= 0 or yielded_any:
+                    return False
+                return (time.monotonic() - stream_started_at) < stream_precommit_seconds
+
+            def _finalize_segment(*, register_links: bool = True) -> None:
                 nonlocal segment_accumulated
                 if not segment_accumulated:
                     return
                 cleaned_segment = segment_accumulated
-                if cleaned_segment.strip():
+                if register_links and cleaned_segment.strip():
                     self.register_links_from_text(
                         customer_id=customer_id,
                         text=cleaned_segment,
@@ -1528,18 +1537,31 @@ class OpenTulpaLangGraphRuntime:
                         )
                     if saw_agent_output and not in_tool_phase:
                         in_tool_phase = True
-                        stream_wait_signals += 1
-                        self.log_behavior_event(
-                            event="turn_stream_wait_signal",
-                            trace_id=turn_trace_id,
-                            thread_id=thread_id,
-                            customer_id=customer_id,
-                            stream_wait_signals=stream_wait_signals,
-                            stream_total_chunks=stream_total_chunks,
-                            turn_mode=normalized_turn_mode,
-                        )
-                        _finalize_segment()
-                        yield STREAM_WAIT_SIGNAL
+                        if buffered_visible and not yielded_any:
+                            self.log_behavior_event(
+                                event="turn_stream_precommit_discarded",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                output_chars=len(buffered_visible.strip()),
+                                reason="tool_phase",
+                                turn_mode=normalized_turn_mode,
+                            )
+                            buffered_visible = ""
+                            _finalize_segment(register_links=False)
+                        else:
+                            stream_wait_signals += 1
+                            self.log_behavior_event(
+                                event="turn_stream_wait_signal",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                stream_wait_signals=stream_wait_signals,
+                                stream_total_chunks=stream_total_chunks,
+                                turn_mode=normalized_turn_mode,
+                            )
+                            _finalize_segment()
+                            yield STREAM_WAIT_SIGNAL
                     if (
                         not yielded_any
                         and stream_no_visible_timeout_s > 0
@@ -1580,6 +1602,10 @@ class OpenTulpaLangGraphRuntime:
                     expanded = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
                     if expanded.strip():
                         expanded, truncated = self._truncate_user_visible_reply(expanded)
+                        if _precommit_active():
+                            buffered_visible = expanded
+                            continue
+                        buffered_visible = ""
                         yielded_any = True
                         stream_visible_yields += 1
                         if first_visible_yield_ms is None:
@@ -1635,6 +1661,22 @@ class OpenTulpaLangGraphRuntime:
             if prepared.through_id is not None and self._context_events is not None:
                 self._context_events.clear_events(customer_id, through_id=prepared.through_id)
             _finalize_segment()
+            if buffered_visible and not yielded_any and not approval_handoff_detected:
+                yielded_any = True
+                stream_visible_yields += 1
+                if first_visible_yield_ms is None:
+                    first_visible_yield_ms = int((time.monotonic() - stream_started_at) * 1000)
+                self.log_behavior_event(
+                    event="turn_stream_precommit_flushed",
+                    trace_id=turn_trace_id,
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    output_chars=len(buffered_visible.strip()),
+                    elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
+                    turn_mode=normalized_turn_mode,
+                )
+                yield buffered_visible
+                buffered_visible = ""
             if not yielded_any and approval_handoff_detected:
                 yielded_any = True
                 self.log_behavior_event(

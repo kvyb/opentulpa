@@ -53,6 +53,10 @@ _DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION = (
     "Use this skill for interactive browser tasks that require real page navigation, "
     "JavaScript rendering, or multi-step website workflows."
 )
+_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_DESCRIPTION = (
+    "Use this skill when setting up inbound webhooks/signals and outbound reply adapters "
+    "for channels that should feed events into OpenTulpa."
+)
 _LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
     "## Purpose\n"
     "Use Browser Use tools safely and cost-effectively for tasks normal link fetch/search "
@@ -97,6 +101,36 @@ _DEFAULT_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
     "- Avoid autonomous long runs without explicit user request.\n"
     "- Prefer ordinary web tools for simple fetch/search tasks.\n"
     "- Reuse idle sessions to avoid spawning unnecessary browsers and wasting RAM."
+)
+_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_INSTRUCTIONS = (
+    "## Purpose\n"
+    "Create channel-specific webhook/reply glue without rebuilding queueing, wake rules, or turn orchestration.\n\n"
+    "## Core boundary\n"
+    "1. Keep channel glue in `tulpa_stuff/`.\n"
+    "2. Use OpenTulpa core routes for signal ingestion, wake rules, and outbound replies.\n"
+    "3. Do not reimplement queueing, batching, wake classification, or conversation orchestration inside the connector.\n\n"
+    "## Connector contract\n"
+    "1. Public webhook routes should live in a tulpa module `public_router` and are mounted at `/webhook/tulpa/<module_name>/...`.\n"
+    "2. Internal helper routes can stay in the normal `router` mounted at `/tulpa/<module_name>/...`.\n"
+    "3. Verify webhook secrets before accepting payloads.\n"
+    "4. By default, keep `customer_id` as the OpenTulpa owner/operator identity, not the external sender identity.\n"
+    "5. When using `/internal/signals/ingest`, pass `owner_customer_id` and optional `owner_thread_id`; do not derive `customer_id` from the external sender.\n"
+    "6. Use generic metadata such as `external_subject_id` and `external_conversation_id`, not provider-specific field names.\n"
+    "7. Treat the incoming webhook JSON as generic. Keep only the small routing envelope explicit; arbitrary extra fields can pass through as payload metadata.\n"
+    "8. Prefer `await request.app.state.signal_ingest({...})` inside public tulpa routes; it wires owner identity, generic external IDs, wake enqueueing, and stores non-envelope fields as payload metadata automatically.\n"
+    "9. If you cannot use `request.app.state.signal_ingest`, send normalized events to `/internal/signals/ingest`; it applies the same wiring.\n"
+    "10. Read pending outbound replies from `/internal/signals/outbox` and mark sent with `/internal/signals/outbox/{id}/sent` after successful delivery.\n\n"
+    "## Wake rules\n"
+    "1. Configure behavior through `/internal/signals/rules/upsert` or the `signal_rule_upsert` tool instead of hardcoding per-connector logic.\n"
+    "2. Use `wake_mode=always` for immediate processing, `classifier` for model-decided wakeups, and `never` for backlog-only collection.\n"
+    "3. Use `batch_window_seconds` to debounce bursty channels.\n"
+    "4. Put durable answering guidance in rule `guidance_text` or normal OpenTulpa context/skills, not in ad-hoc connector prompts.\n\n"
+    "## Workflow\n"
+    "1. Clarify the external channel, auth method, webhook payload shape, and outbound API.\n"
+    "2. Write or update one tulpa module for the adapter.\n"
+    "3. Validate the file, reload tulpa routes, and test with a sample payload.\n"
+    "4. Create or update the matching signal wake rule, then verify it with `/internal/signals/rules` or the `signal_rule_list` tool before claiming success.\n"
+    "5. Keep the connector thin and channel-specific."
 )
 
 
@@ -608,4 +642,9 @@ class SkillStoreService:
                 "2. Ensure instruction references required scripts/files/keys source as needed.\n"
                 "3. Ensure implementation_command is concrete (executable + args), not natural language.\n"
             ),
+        )
+        self._ensure_global_skill(
+            name="signal-integration-operator",
+            description=_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_DESCRIPTION,
+            instructions=_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_INSTRUCTIONS,
         )
