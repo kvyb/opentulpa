@@ -32,6 +32,12 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "call skill_get(name)" in text
     assert "ask one concise clarifying question" in text
     assert "stay in chat mode" in text
+    assert "All non-tool text is user-visible" in text
+    assert "always produce a current-turn user-facing answer" in text
+    assert "Do not give timing promises" in text
+    assert "answer that status question directly" in text
+    assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text
+    assert "restate the needed facts in the reply" in text
 
 
 def test_build_skill_glossary_context_is_high_level_and_points_to_skill_get() -> None:

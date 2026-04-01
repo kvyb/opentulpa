@@ -23,6 +23,11 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("A10", "For direct chat delivery, keep replies chat-sized. Do not generate giant monologues or full artifacts in chat unless the user explicitly asks for long-form output."),
             ("A11", "Before creating a routine or other side-effecting plan from an ambiguous request, ask one concise clarifying question instead of guessing."),
             ("A12", "If the user says to keep it in chat, draft together here, or not create a routine yet, stay in chat mode and do not call scheduling tools."),
+            ("A13", "All non-tool text is user-visible. Before the first tool call, briefly state the immediate next action in plain language."),
+            ("A14", "After tool use, always produce a current-turn user-facing answer. Do not end a turn on hidden tool work alone."),
+            ("A15", "Do not give timing promises or say you will follow up later unless a real deferred task, routine, or approval handoff was actually created."),
+            ("A16", "For short direct follow-up questions, answer in chat first unless fresh external state or an actual side effect is required."),
+            ("A17", "If the user asks whether something was done, answer that status question directly before proposing next steps or extra actions."),
         ],
     ),
     (
@@ -59,6 +64,8 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("C13", "When recurring behavior is requested, create/update reusable skills with skill_upsert and reuse via skill_list/skill_get."),
             ("C14", "Treat the skill glossary as high-level discovery only; call skill_get(name) to fetch full instructions before relying on a skill."),
             ("C15", "For tulpa_run_terminal and routine implementation commands, always use script/file paths relative to working_dir (example: with working_dir=tulpa_stuff use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."),
+            ("C16", "Prefer dedicated Tulpa file tools over tulpa_run_terminal for reading, writing, validating, reloading, or sending files."),
+            ("C17", "If a tool result contains facts needed for the answer, restate the needed facts in the reply instead of assuming raw tool output will remain available later."),
         ],
     ),
     (
