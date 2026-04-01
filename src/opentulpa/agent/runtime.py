@@ -906,18 +906,24 @@ class OpenTulpaLangGraphRuntime:
         selected.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return selected[: max(1, min(int(max_skills), 3))]
 
-    async def _resolve_skill_context(self, customer_id: str, user_text: str) -> dict[str, Any]:
+    async def _resolve_skill_context(
+        self,
+        customer_id: str,
+        user_text: str,
+        *,
+        candidates: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         cid = str(customer_id or "").strip()
         query = str(user_text or "").strip()
         if not cid or not query:
             return {"skill_names": [], "context": ""}
-        candidates = await self._list_available_skills(cid)
-        if not candidates:
+        available = candidates if isinstance(candidates, list) else await self._list_available_skills(cid)
+        if not available:
             return {"skill_names": [], "context": ""}
         selected = await self._select_relevant_skills(
             customer_id=cid,
             query=query,
-            candidates=candidates,
+            candidates=available,
             max_skills=1,
         )
         if not selected:
@@ -1132,8 +1138,14 @@ class OpenTulpaLangGraphRuntime:
                 "active_skill_query": "",
                 "active_skill_context": "",
                 "active_skill_names": [],
+                "active_available_skills": [],
             }
-        resolved = await self._resolve_skill_context(customer_id, query)
+        available_skills = await self._list_available_skills(customer_id)
+        resolved = await self._resolve_skill_context(
+            customer_id,
+            query,
+            candidates=available_skills,
+        )
         context = str(resolved.get("context", "")).strip()
         names_raw = resolved.get("skill_names", [])
         names = [str(n).strip() for n in names_raw if str(n).strip()] if isinstance(names_raw, list) else []
@@ -1141,6 +1153,7 @@ class OpenTulpaLangGraphRuntime:
             "active_skill_query": query,
             "active_skill_context": context,
             "active_skill_names": names,
+            "active_available_skills": available_skills,
         }
 
     async def start(self) -> None:

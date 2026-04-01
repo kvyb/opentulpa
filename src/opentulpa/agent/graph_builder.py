@@ -498,23 +498,29 @@ def build_runtime_graph(runtime: Any):
         cached_query = str(state.get("active_skill_query", "")).strip()
         cached_context = str(state.get("active_skill_context", "")).strip()
         cached_names = state.get("active_skill_names", []) or []
+        cached_available = state.get("active_available_skills", []) or []
         skill_query = cached_query
         skill_context = cached_context
         skill_names = cached_names if isinstance(cached_names, list) else []
+        available_skills = cached_available if isinstance(cached_available, list) else []
         if latest_user and latest_user != cached_query:
-            resolved = await runtime._resolve_skill_context(customer_id, latest_user)
+            if not available_skills:
+                list_skills = getattr(runtime, "_list_available_skills", None)
+                if callable(list_skills):
+                    try:
+                        available_skills = await list_skills(customer_id)
+                    except Exception:
+                        available_skills = []
+            resolved = await runtime._resolve_skill_context(
+                customer_id,
+                latest_user,
+                candidates=available_skills,
+            )
             skill_context = str(resolved.get("context", "")).strip()
             names = resolved.get("skill_names", [])
             skill_names = [str(n).strip() for n in names if str(n).strip()] if isinstance(names, list) else []
             skill_query = latest_user
-        skill_glossary_context = ""
-        list_skills = getattr(runtime, "_list_available_skills", None)
-        if callable(list_skills):
-            try:
-                available_skills = await list_skills(customer_id)
-            except Exception:
-                available_skills = []
-            skill_glossary_context = _build_skill_glossary_context(available_skills)
+        skill_glossary_context = _build_skill_glossary_context(available_skills)
         active_directive = await runtime._load_active_directive(customer_id)
         thread_rollup = runtime._load_thread_rollup(thread_id)
         live_time = await runtime._build_live_time_context(customer_id)
@@ -682,6 +688,7 @@ def build_runtime_graph(runtime: Any):
             update["active_skill_query"] = skill_query
             update["active_skill_context"] = skill_context
             update["active_skill_names"] = skill_names
+            update["active_available_skills"] = available_skills
         goto: Literal["validate_tools", "claim_check"] = (
             "validate_tools"
             if isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
