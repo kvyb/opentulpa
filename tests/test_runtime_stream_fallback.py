@@ -51,6 +51,29 @@ class _BufferedRepairGraph:
         return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
 
 
+class _StaleFallbackGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(content=""), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {
+            "messages": [
+                HumanMessage(content="old user"),
+                AIMessage(content="old assistant reply"),
+                HumanMessage(content="current user"),
+                AIMessage(content=""),
+            ]
+        }
+
+
 @pytest.mark.asyncio
 async def test_astream_text_emits_fallback_when_no_visible_output(tmp_path) -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
@@ -207,3 +230,43 @@ async def test_astream_text_holds_early_schedule_claim_until_repair_finishes(
     events = [json.loads(line)["event"] for line in lines if line.strip()]
     assert "turn_stream_precommit_discarded" in events
     assert "turn_stream_precommit_flushed" in events
+
+
+@pytest.mark.asyncio
+async def test_astream_text_does_not_reuse_stale_prior_ai_message_in_fallback(
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _StaleFallbackGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_stale_fallback.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-stale-fallback",
+        customer_id="telegram_stale",
+        text="current user",
+    ):
+        chunks.append(chunk)
+
+    assert chunks == [STREAM_EMPTY_REPLY_FALLBACK]

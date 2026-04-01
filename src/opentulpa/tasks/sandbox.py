@@ -128,6 +128,16 @@ def get_allowed_read_roots() -> list[str]:
     return roots
 
 
+def _normalize_redundant_allowed_root_prefix(relative_path: str) -> str:
+    rel = str(relative_path or "").strip()
+    for key in ALLOWED_READ_DIRS:
+        prefix = _WORKING_DIR_PREFIXES.get(key, key).strip("/")
+        duplicate = f"{prefix}/{prefix}/"
+        if rel.startswith(duplicate):
+            return f"{prefix}/{rel[len(duplicate):]}"
+    return rel
+
+
 def resolve_allowed_write_path(relative_path: str) -> Path:
     rel = relative_path.strip()
     if not rel:
@@ -268,7 +278,7 @@ def validate_generated_file(relative_path: str) -> dict[str, Any]:
 
 
 def read_file(relative_path: str, max_chars: int = 12000) -> str:
-    rel = relative_path.strip()
+    rel = _normalize_redundant_allowed_root_prefix(relative_path)
     if not rel:
         raise ValueError("path is required")
     if Path(rel).is_absolute():

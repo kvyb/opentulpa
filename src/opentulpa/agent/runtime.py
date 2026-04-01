@@ -1750,7 +1750,11 @@ class OpenTulpaLangGraphRuntime:
                             turn_mode=normalized_turn_mode,
                         )
                         yield fallback_text.strip()
-                for message in reversed(fallback_messages):
+                latest_human_index = -1
+                for index, message in enumerate(fallback_messages):
+                    if isinstance(message, HumanMessage):
+                        latest_human_index = index
+                for message in reversed(fallback_messages[latest_human_index + 1 :]):
                     if fallback_yielded:
                         break
                     if isinstance(message, AIMessage) and (message.content or "").strip():

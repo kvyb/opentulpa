@@ -265,6 +265,22 @@ def test_validate_model_tool_call_rejects_redundant_tulpa_prefix_for_routine_com
     assert "should be relative to working_dir=tulpa_stuff" in err
 
 
+def test_validate_model_tool_call_rejects_duplicate_tulpa_root_prefix_for_read_file() -> None:
+    err = _validate_model_tool_call(
+        call_name="tulpa_read_file",
+        args={
+            "path": "tulpa_stuff/tulpa_stuff/solana_trading_wallet.json",
+        },
+        latest_user_text="read the wallet file",
+        turn_mode="interactive",
+        required_args={"tulpa_read_file": ("path",)},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+    assert "duplicated allowed-root prefix" in err
+    assert "tulpa_stuff/tulpa_stuff" in err
+
+
 def test_validate_model_tool_call_allows_routine_create_during_routine_wake() -> None:
     err = _validate_model_tool_call(
         call_name="routine_create",

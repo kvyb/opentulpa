@@ -157,6 +157,17 @@ def _has_redundant_working_dir_prefix(command: str, working_dir: str) -> bool:
     return False
 
 
+def _has_duplicate_allowed_root_prefix(path: str) -> str | None:
+    text = str(path or "").strip()
+    if not text:
+        return None
+    for prefix in _WORKING_DIR_PREFIXES.values():
+        normalized = str(prefix or "").strip("/")
+        if normalized and text.startswith(f"{normalized}/{normalized}/"):
+            return normalized
+    return None
+
+
 def _normalize_user_intent_text(text: str) -> str:
     return " ".join(str(text or "").split()).strip().lower()
 
@@ -249,6 +260,15 @@ def _validate_model_tool_call(
                 "TOOL_VALIDATION_ERROR: command includes a redundant working-dir path prefix. "
                 "When working_dir is set, use paths relative to that directory "
                 "(example: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."
+            )
+
+    if call_name in {"tulpa_read_file", "tulpa_write_file", "tulpa_validate_file", "tulpa_file_send"}:
+        path_arg = str(args.get("path", "")).strip()
+        duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
+        if duplicate_prefix:
+            return (
+                "TOOL_VALIDATION_ERROR: path includes a duplicated allowed-root prefix. "
+                f"Use `{duplicate_prefix}/...`, not `{duplicate_prefix}/{duplicate_prefix}/...`."
             )
 
     if call_name == "routine_create":
