@@ -33,7 +33,8 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "ask one concise clarifying question" in text
     assert "stay in chat mode" in text
     assert "All non-tool text is user-visible" in text
-    assert "always produce a current-turn user-facing answer" in text
+    assert "Do not use assistant text as a placeholder progress update" in text
+    assert "concrete result or a plain blocker/failure report" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
     assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text

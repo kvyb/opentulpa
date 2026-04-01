@@ -13,6 +13,7 @@ from typing import Any
 
 from opentulpa.agent.runtime import (
     STREAM_APPROVAL_HANDOFF_SIGNAL,
+    STREAM_PROGRESS_PREFIX,
     STREAM_WAIT_SIGNAL,
     MergedInputSuppressedError,
 )
@@ -22,6 +23,8 @@ from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_R
 
 logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
+PROGRESS_STATUS_TEXT = "Working on it…"
+PROGRESS_MESSAGE_DELAY_SECONDS = 0.75
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -44,6 +47,15 @@ def is_low_signal_reply(text: str) -> bool:
     if not normalized:
         return True
     return normalized in LOW_SIGNAL_REPLIES
+
+
+def _progress_text_from_signal(partial: str) -> str | None:
+    if partial == STREAM_WAIT_SIGNAL:
+        return PROGRESS_STATUS_TEXT
+    if partial.startswith(STREAM_PROGRESS_PREFIX):
+        candidate = partial[len(STREAM_PROGRESS_PREFIX) :].strip()
+        return candidate or PROGRESS_STATUS_TEXT
+    return None
 
 
 def debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
@@ -87,6 +99,7 @@ async def stream_langgraph_reply_to_telegram(
 ) -> tuple[str | None, bool]:
     stream_message_id: int | None = None
     progress_message_id: int | None = None
+    pending_progress_text: str | None = None
     last_streamed = ""
     final_reply = None
     delivered_any = False
@@ -106,6 +119,7 @@ async def stream_langgraph_reply_to_telegram(
     consecutive_timeouts = 0
     max_consecutive_timeouts = 2
     next_chunk_task: asyncio.Task[Any] | None = None
+    progress_task: asyncio.Task[None] | None = None
     logger.info(
         "telegram.stream start chat_id=%s thread_id=%s customer_id=%s text_chars=%s",
         chat_id,
@@ -133,6 +147,51 @@ async def stream_langgraph_reply_to_telegram(
         if not safe or is_low_signal_reply(safe):
             return None
         return safe
+
+    async def _clear_progress_message() -> None:
+        nonlocal progress_message_id, progress_task, pending_progress_text
+        if progress_task is not None:
+            progress_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await progress_task
+            progress_task = None
+        pending_progress_text = None
+        if progress_message_id is None:
+            return
+        with suppress(Exception):
+            await client.delete_message(chat_id=chat_id, message_id=progress_message_id)
+        if stream_state.get("message_id") == progress_message_id:
+            stream_state["message_id"] = None
+        progress_message_id = None
+
+    async def _show_or_update_progress(text: str) -> None:
+        nonlocal progress_message_id, pending_progress_text
+        pending_progress_text = text
+        progress_message_id = (
+            await client.upsert_stream_message(
+                chat_id=chat_id,
+                text=text,
+                message_id=progress_message_id,
+                parse_mode="HTML",
+            )
+            or progress_message_id
+        )
+
+    async def _schedule_progress(text: str) -> None:
+        nonlocal progress_task, pending_progress_text
+        pending_progress_text = text
+        if progress_message_id is not None:
+            await _show_or_update_progress(text)
+            return
+        if progress_task is not None and not progress_task.done():
+            return
+
+        async def _runner() -> None:
+            await asyncio.sleep(PROGRESS_MESSAGE_DELAY_SECONDS)
+            latest = str(pending_progress_text or PROGRESS_STATUS_TEXT).strip() or PROGRESS_STATUS_TEXT
+            await _show_or_update_progress(latest)
+
+        progress_task = asyncio.create_task(_runner())
 
     try:
         stream = agent_runtime.astream_text(
@@ -212,11 +271,8 @@ async def stream_langgraph_reply_to_telegram(
                         "first_token" if not last_streamed else "idle",
                     )
                     if progress_message_id is not None:
-                        with suppress(Exception):
-                            await client.delete_message(chat_id=chat_id, message_id=progress_message_id)
-                        progress_message_id = None
+                        await _clear_progress_message()
                         stream_message_id = None
-                        stream_state["message_id"] = None
                     stream_message_id = (
                         await client.upsert_stream_message(
                             chat_id=chat_id,
@@ -260,7 +316,12 @@ async def stream_langgraph_reply_to_telegram(
                 else:
                     final_reply = None
                 break
-            if isinstance(partial, str) and partial == STREAM_WAIT_SIGNAL:
+            progress_text = partial if isinstance(partial, str) else ""
+            progress_text = _progress_text_from_signal(progress_text) if progress_text else None
+            if progress_text is not None:
+                await _schedule_progress(progress_text)
+                if progress_message_id is None:
+                    progress_notified = True
                 if not waiting_for_segment:
                     waiting_for_segment = True
                     last_streamed = ""
@@ -278,11 +339,7 @@ async def stream_langgraph_reply_to_telegram(
             if not current or is_low_signal_reply(current) or current == last_streamed:
                 continue
             if progress_message_id is not None:
-                with suppress(Exception):
-                    await client.delete_message(chat_id=chat_id, message_id=progress_message_id)
-                if stream_state.get("message_id") == progress_message_id:
-                    stream_state["message_id"] = None
-                progress_message_id = None
+                await _clear_progress_message()
             # Defensive boundary handling for streams that reset partial text without explicit signal.
             if last_streamed and not current.startswith(last_streamed):
                 waiting_for_segment = True
@@ -333,6 +390,7 @@ async def stream_langgraph_reply_to_telegram(
         typing_stop.set()
     with suppress(Exception):
         await typing_task
+    await _clear_progress_message()
     if not suppressed and final_reply and not delivered_any:
         final_reply = None
     if not suppressed and not final_reply:

@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage
-from opentulpa.agent.runtime import STREAM_EMPTY_REPLY_FALLBACK, OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime import (
+    STREAM_EMPTY_REPLY_FALLBACK,
+    STREAM_PROGRESS_PREFIX,
+    OpenTulpaLangGraphRuntime,
+)
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 
 
@@ -72,6 +76,44 @@ class _StaleFallbackGraph:
                 AIMessage(content=""),
             ]
         }
+
+
+class _ProvisionalOnlyGraph:
+    _TEXT = "I can also search for the ManyChat API documentation to get the exact payload shape."
+
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(content=self._TEXT), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {
+            "final_response_text": self._TEXT,
+            "messages": [HumanMessage(content="user"), AIMessage(content=self._TEXT)],
+        }
+
+
+class _ToolThenAnswerGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
+        yield AIMessage(content="Done checking. 3 priority emails found."), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
 
 
 @pytest.mark.asyncio
@@ -224,7 +266,9 @@ async def test_astream_text_holds_early_schedule_claim_until_repair_finishes(
     ):
         chunks.append(chunk)
 
-    assert chunks == ["I need one clarification before scheduling this."]
+    assert len(chunks) == 2
+    assert chunks[0].startswith(STREAM_PROGRESS_PREFIX)
+    assert chunks[1] == "I need one clarification before scheduling this."
 
     lines = runtime._behavior_log_path.read_text(encoding="utf-8").strip().splitlines()
     events = [json.loads(line)["event"] for line in lines if line.strip()]
@@ -270,3 +314,91 @@ async def test_astream_text_does_not_reuse_stale_prior_ai_message_in_fallback(
         chunks.append(chunk)
 
     assert chunks == [STREAM_EMPTY_REPLY_FALLBACK]
+
+
+@pytest.mark.asyncio
+async def test_astream_text_discards_provisional_only_reply_and_emits_fallback(
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _ProvisionalOnlyGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_provisional_only.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-provisional-only",
+        customer_id="telegram_provisional_only",
+        text="manychat?",
+    ):
+        chunks.append(chunk)
+
+    assert chunks == [STREAM_EMPTY_REPLY_FALLBACK]
+
+    lines = runtime._behavior_log_path.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line)["event"] for line in lines if line.strip()]
+    assert "turn_stream_precommit_discarded" in events
+    assert "turn_stream_fallback_discarded" in events
+    assert "turn_stream_fallback_empty" in events
+
+
+@pytest.mark.asyncio
+async def test_astream_text_emits_wait_signal_before_tool_first_result(
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _ToolThenAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_tool_first_wait.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-tool-first",
+        customer_id="telegram_tool_first",
+        text="check inbox",
+    ):
+        chunks.append(chunk)
+
+    assert len(chunks) == 2
+    assert chunks[0].startswith(STREAM_PROGRESS_PREFIX)
+    assert chunks[1] == "Done checking. 3 priority emails found."

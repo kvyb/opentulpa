@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from opentulpa.agent.runtime import STREAM_WAIT_SIGNAL
+from opentulpa.agent.runtime import STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL
 from opentulpa.interfaces.telegram import relay as relay_module
 
 
@@ -16,12 +16,35 @@ class _SegmentedRuntime:
         yield "I checked your inbox. 3 priority emails found."
 
 
+class _ToolFirstRuntime:
+    async def astream_text(self, **kwargs):
+        yield STREAM_WAIT_SIGNAL
+        await asyncio.sleep(0.02)
+        yield "I checked the inbox. 3 priority emails found."
+
+
+class _ResultThenWaitRuntime:
+    async def astream_text(self, **kwargs):
+        yield "Here is the finished result."
+        yield STREAM_WAIT_SIGNAL
+
+
+class _UpdatingProgressRuntime:
+    async def astream_text(self, **kwargs):
+        yield f"{STREAM_PROGRESS_PREFIX}Searching the web…"
+        await asyncio.sleep(0.01)
+        yield f"{STREAM_PROGRESS_PREFIX}Fetching a webpage…"
+        await asyncio.sleep(0.01)
+        yield "Here is the result."
+
+
 class _FakeTelegramClient:
     def __init__(self, bot_token: str) -> None:
         self.bot_token = bot_token
         self.calls: list[tuple[int | str, str, int | None, str | None]] = []
         self._next_id = 100
         self.chat_actions: list[tuple[int | str, str]] = []
+        self.deleted_messages: list[tuple[int | str, int]] = []
 
     async def upsert_stream_message(
         self,
@@ -48,6 +71,10 @@ class _FakeTelegramClient:
         self.chat_actions.append((chat_id, action))
         return True
 
+    async def delete_message(self, *, chat_id: int | str, message_id: int) -> bool:
+        self.deleted_messages.append((chat_id, message_id))
+        return True
+
 
 @pytest.mark.asyncio
 async def test_stream_creates_new_message_for_new_meaningful_segment(
@@ -55,6 +82,7 @@ async def test_stream_creates_new_message_for_new_meaningful_segment(
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "PROGRESS_MESSAGE_DELAY_SECONDS", 0.0)
 
     final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
         agent_runtime=_SegmentedRuntime(),
@@ -72,4 +100,83 @@ async def test_stream_creates_new_message_for_new_meaningful_segment(
     # New semantic segments should start a fresh message (message_id=None send path).
     assert fake_client.calls[0][2] is None
     assert fake_client.calls[-1][2] is None
+    assert any("working on it" in text.lower() for _, text, _, _ in fake_client.calls)
+    assert fake_client.deleted_messages
     assert fake_client.chat_actions
+
+
+@pytest.mark.asyncio
+async def test_stream_wait_signal_creates_separate_progress_message_before_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "PROGRESS_MESSAGE_DELAY_SECONDS", 0.0)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_ToolFirstRuntime(),
+        thread_id="chat-1",
+        customer_id="telegram_1",
+        text="check inbox",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert "priority emails" in str(final or "").lower()
+    assert fake_client.calls[0][1] == relay_module.PROGRESS_STATUS_TEXT
+    assert fake_client.calls[0][2] is None
+    assert fake_client.calls[-1][1].startswith("I checked the inbox")
+    assert fake_client.calls[-1][2] is None
+    assert fake_client.deleted_messages
+
+
+@pytest.mark.asyncio
+async def test_progress_message_is_deleted_when_stream_ends_after_wait_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_ResultThenWaitRuntime(),
+        thread_id="chat-1",
+        customer_id="telegram_1",
+        text="finish",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert final == "Here is the finished result."
+    assert fake_client.calls[0][1] == "Here is the finished result."
+    assert not any(text == relay_module.PROGRESS_STATUS_TEXT for _, text, _, _ in fake_client.calls)
+    assert not fake_client.deleted_messages
+
+
+@pytest.mark.asyncio
+async def test_progress_updates_edit_one_message_before_final_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "PROGRESS_MESSAGE_DELAY_SECONDS", 0.0)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_UpdatingProgressRuntime(),
+        thread_id="chat-1",
+        customer_id="telegram_1",
+        text="search",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert final == "Here is the result."
+    assert fake_client.calls[0][1] == "Searching the web…"
+    assert fake_client.calls[0][2] is None
+    assert fake_client.calls[1][1] == "Fetching a webpage…"
+    assert fake_client.calls[1][2] is not None
+    assert fake_client.calls[-1][1] == "Here is the result."
+    assert fake_client.calls[-1][2] is None
+    assert fake_client.deleted_messages

@@ -93,11 +93,33 @@ logger = logging.getLogger(__name__)
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
 STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
+STREAM_PROGRESS_PREFIX = "__TULPA_STREAM_PROGRESS__:"
 STREAM_EMPTY_REPLY_FALLBACK = (
     "I couldn't produce a visible user-facing reply for that step. "
     "Please retry, and I will continue from the latest state."
 )
 STREAM_PRECOMMIT_SECONDS = 15.0
+_PROVISIONAL_REPLY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*i can also\s+", re.IGNORECASE),
+    re.compile(r"^\s*i can (?:search|check|look|fetch|inspect|try)\b", re.IGNORECASE),
+    re.compile(r"^\s*let me\b", re.IGNORECASE),
+    re.compile(r"^\s*i(?:'| a)?ll\b", re.IGNORECASE),
+    re.compile(r"^\s*i will\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:one sec|one second|still working|working on it)\b", re.IGNORECASE),
+    re.compile(r"\bthis will take\b", re.IGNORECASE),
+)
+_PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
+    "tulpa_read_file": "Reading a file",
+    "tulpa_write_file": "Writing a file",
+    "tulpa_validate_file": "Validating a file",
+    "tulpa_run_terminal": "Running a terminal command",
+    "skill_get": "Loading a skill",
+    "skill_list": "Checking available skills",
+    "web_search": "Searching the web",
+    "fetch_url_content": "Fetching a webpage",
+    "fetch_file_content": "Fetching a file",
+    "browser_use_run": "Using the browser",
+}
 
 APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "memory_search",
@@ -323,6 +345,39 @@ class OpenTulpaLangGraphRuntime:
         self._model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
+
+    @staticmethod
+    def _looks_like_provisional_reply(text: str) -> bool:
+        candidate = " ".join(str(text or "").split()).strip()
+        if not candidate:
+            return False
+        return any(pattern.search(candidate) for pattern in _PROVISIONAL_REPLY_PATTERNS)
+
+    @staticmethod
+    def _build_progress_signal(text: str) -> str:
+        cleaned = " ".join(str(text or "").split()).strip() or "Working on it…"
+        return f"{STREAM_PROGRESS_PREFIX}{cleaned}"
+
+    @staticmethod
+    def _describe_tool_calls_for_progress(tool_calls: list[Any]) -> str:
+        names: list[str] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name", "")).strip()
+            if name:
+                names.append(name)
+        if not names:
+            return "Working on it…"
+        labels: list[str] = []
+        for name in names[:2]:
+            label = _PROGRESS_TOOL_NAME_ALIASES.get(name)
+            if label is None:
+                label = name.replace("tulpa_", "").replace("browser_use_", "").replace("_", " ").strip().capitalize()
+            labels.append(label)
+        if len(names) == 1:
+            return f"{labels[0]}…"
+        return f"{labels[0]}, then {labels[1].lower()}…"
 
     def get_browser_use_local_manager(self) -> Any:
         if self._browser_use_local_manager is None:
@@ -1476,6 +1531,7 @@ class OpenTulpaLangGraphRuntime:
             stream_filtered_blank_expanded = 0
             first_visible_yield_ms: int | None = None
             buffered_visible = ""
+            pending_progress_text = "Working on it…"
             self.log_behavior_event(
                 event="turn_stream_loop_start",
                 trace_id=turn_trace_id,
@@ -1535,7 +1591,7 @@ class OpenTulpaLangGraphRuntime:
                             stream_total_chunks=stream_total_chunks,
                             turn_mode=normalized_turn_mode,
                         )
-                    if saw_agent_output and not in_tool_phase:
+                    if not in_tool_phase:
                         in_tool_phase = True
                         if buffered_visible and not yielded_any:
                             self.log_behavior_event(
@@ -1549,19 +1605,19 @@ class OpenTulpaLangGraphRuntime:
                             )
                             buffered_visible = ""
                             _finalize_segment(register_links=False)
-                        else:
-                            stream_wait_signals += 1
-                            self.log_behavior_event(
-                                event="turn_stream_wait_signal",
-                                trace_id=turn_trace_id,
-                                thread_id=thread_id,
-                                customer_id=customer_id,
-                                stream_wait_signals=stream_wait_signals,
-                                stream_total_chunks=stream_total_chunks,
-                                turn_mode=normalized_turn_mode,
-                            )
-                            _finalize_segment()
-                            yield STREAM_WAIT_SIGNAL
+                        stream_wait_signals += 1
+                        self.log_behavior_event(
+                            event="turn_stream_wait_signal",
+                            trace_id=turn_trace_id,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            stream_wait_signals=stream_wait_signals,
+                            stream_total_chunks=stream_total_chunks,
+                            progress_text=pending_progress_text,
+                            turn_mode=normalized_turn_mode,
+                        )
+                        _finalize_segment()
+                        yield self._build_progress_signal(pending_progress_text)
                     if (
                         not yielded_any
                         and stream_no_visible_timeout_s > 0
@@ -1583,6 +1639,9 @@ class OpenTulpaLangGraphRuntime:
                         break
                     continue
                 stream_agent_chunks += 1
+                tool_calls = getattr(message_chunk, "tool_calls", []) or []
+                if tool_calls:
+                    pending_progress_text = self._describe_tool_calls_for_progress(tool_calls)
                 if in_tool_phase:
                     in_tool_phase = False
                     stream_key = ""
@@ -1662,21 +1721,34 @@ class OpenTulpaLangGraphRuntime:
                 self._context_events.clear_events(customer_id, through_id=prepared.through_id)
             _finalize_segment()
             if buffered_visible and not yielded_any and not approval_handoff_detected:
-                yielded_any = True
-                stream_visible_yields += 1
-                if first_visible_yield_ms is None:
-                    first_visible_yield_ms = int((time.monotonic() - stream_started_at) * 1000)
-                self.log_behavior_event(
-                    event="turn_stream_precommit_flushed",
-                    trace_id=turn_trace_id,
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    output_chars=len(buffered_visible.strip()),
-                    elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
-                    turn_mode=normalized_turn_mode,
-                )
-                yield buffered_visible
-                buffered_visible = ""
+                buffered_candidate = buffered_visible.strip()
+                if self._looks_like_provisional_reply(buffered_candidate):
+                    self.log_behavior_event(
+                        event="turn_stream_precommit_discarded",
+                        trace_id=turn_trace_id,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        output_chars=len(buffered_candidate),
+                        reason="provisional_only",
+                        turn_mode=normalized_turn_mode,
+                    )
+                    buffered_visible = ""
+                else:
+                    yielded_any = True
+                    stream_visible_yields += 1
+                    if first_visible_yield_ms is None:
+                        first_visible_yield_ms = int((time.monotonic() - stream_started_at) * 1000)
+                    self.log_behavior_event(
+                        event="turn_stream_precommit_flushed",
+                        trace_id=turn_trace_id,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        output_chars=len(buffered_candidate),
+                        elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
+                        turn_mode=normalized_turn_mode,
+                    )
+                    yield buffered_visible
+                    buffered_visible = ""
             if not yielded_any and approval_handoff_detected:
                 yielded_any = True
                 self.log_behavior_event(
@@ -1728,7 +1800,7 @@ class OpenTulpaLangGraphRuntime:
                 fallback_messages = fallback_result.get("messages", [])
                 fallback_yielded = False
                 fallback_text = str(fallback_result.get("final_response_text", "")).strip()
-                if fallback_text:
+                if fallback_text and not self._looks_like_provisional_reply(fallback_text):
                     self.register_links_from_text(
                         customer_id=customer_id,
                         text=fallback_text,
@@ -1750,6 +1822,16 @@ class OpenTulpaLangGraphRuntime:
                             turn_mode=normalized_turn_mode,
                         )
                         yield fallback_text.strip()
+                elif fallback_text:
+                    self.log_behavior_event(
+                        event="turn_stream_fallback_discarded",
+                        trace_id=turn_trace_id,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        output_chars=len(fallback_text),
+                        reason="provisional_only",
+                        turn_mode=normalized_turn_mode,
+                    )
                 latest_human_index = -1
                 for index, message in enumerate(fallback_messages):
                     if isinstance(message, HumanMessage):
@@ -1759,7 +1841,7 @@ class OpenTulpaLangGraphRuntime:
                         break
                     if isinstance(message, AIMessage) and (message.content or "").strip():
                         cleaned = str(message.content)
-                        if cleaned.strip():
+                        if cleaned.strip() and not self._looks_like_provisional_reply(cleaned):
                             self.register_links_from_text(
                                 customer_id=customer_id,
                                 text=cleaned,
@@ -1781,6 +1863,16 @@ class OpenTulpaLangGraphRuntime:
                             )
                             yield cleaned.strip()
                             break
+                        if cleaned.strip():
+                            self.log_behavior_event(
+                                event="turn_stream_fallback_discarded",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                output_chars=len(cleaned.strip()),
+                                reason="provisional_only",
+                                turn_mode=normalized_turn_mode,
+                            )
                 if not fallback_yielded:
                     logger.error(
                         "runtime.astream_text fallback_no_ai_message thread_id=%s customer_id=%s messages_count=%s",
