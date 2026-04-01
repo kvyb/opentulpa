@@ -334,3 +334,96 @@ async def test_local_manager_lists_sessions_and_expires_idle_ones(
     await asyncio.sleep(0)
     assert "sess_idle" not in manager._sessions
     assert session.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_local_manager_background_cleanup_expires_idle_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import opentulpa.agent.browser_use_local as browser_use_local
+
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(browser_use_local, "_SESSION_CLEANUP_POLL_SECONDS", 0.01)
+
+    session = _FakeBrowserSession()
+    manager._sessions["sess_bg"] = browser_use_local._BrowserUseSessionState(session=session)
+    manager._sessions["sess_bg"].updated_monotonic = time.monotonic() - 3700
+
+    async with manager._lock:
+        manager._ensure_cleanup_task_locked()
+
+    for _ in range(50):
+        if "sess_bg" not in manager._sessions:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("idle session was not cleaned up by background loop")
+
+    assert session.stopped is True
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_local_manager_reuses_idle_session_when_at_session_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    for session_id in ("sess_1", "sess_2"):
+        created = await manager.start_task(task=session_id, max_steps=2, llm="", session_id=session_id)
+        task_id = str(created["id"])
+        for _ in range(50):
+            payload = await manager.get_task(task_id)
+            if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+                break
+            await asyncio.sleep(0.01)
+
+    created = await manager.start_task(task="third", max_steps=2, llm="")
+    assert created.get("sessionId") in {"sess_1", "sess_2"}
+    assert len(manager._sessions) == 2
+
+
+@pytest.mark.asyncio
+async def test_local_manager_rejects_third_explicit_session_at_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    for session_id in ("sess_1", "sess_2"):
+        created = await manager.start_task(task=session_id, max_steps=2, llm="", session_id=session_id)
+        task_id = str(created["id"])
+        for _ in range(50):
+            payload = await manager.get_task(task_id)
+            if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+                break
+            await asyncio.sleep(0.01)
+
+    blocked = await manager.start_task(task="third", max_steps=2, llm="", session_id="sess_3")
+    assert "error" in blocked
+    assert "session capacity reached" in str(blocked["error"])
+    assert blocked["sessionLimit"] == 2
+    assert len(manager._sessions) == 2

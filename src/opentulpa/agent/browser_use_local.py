@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = {"finished", "stopped", "failed"}
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
+_SESSION_CLEANUP_POLL_SECONDS = 60.0
+_MAX_BROWSER_USE_SESSIONS = 2
 
 
 def _utc_now_iso() -> str:
@@ -79,6 +81,7 @@ class BrowserUseLocalManager:
         self._sessions: dict[str, _BrowserUseSessionState] = {}
         self._preflight_checked = False
         self._preflight_error: str | None = None
+        self._cleanup_task: asyncio.Task[Any] | None = None
 
     async def preflight(self) -> str | None:
         if self._preflight_checked:
@@ -156,12 +159,15 @@ class BrowserUseLocalManager:
                 )
             }
 
-        safe_session_id = str(session_id or "").strip() or new_short_id("bses")
+        explicit_session_id = str(session_id or "").strip()
+        safe_session_id = explicit_session_id or new_short_id("bses")
         safe_max_steps = max(1, min(int(max_steps), 120))
         safe_start_url = str(start_url or "").strip()
         safe_domains = self._sanitize_domains(allowed_domains)
 
+        session_to_close: Any | None = None
         async with self._lock:
+            self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             active_task = self._active_task_for_session_locked(safe_session_id)
             if active_task is not None:
@@ -174,6 +180,25 @@ class BrowserUseLocalManager:
                     "activeTaskId": active_task.task_id,
                 }
             session_state = self._sessions.get(safe_session_id)
+            if session_state is None:
+                reusable_session_id = None
+                if not explicit_session_id:
+                    reusable_session_id = self._pick_reusable_session_id_locked()
+                if reusable_session_id is not None:
+                    safe_session_id = reusable_session_id
+                    session_state = self._sessions.get(safe_session_id)
+                    if session_state is not None:
+                        session_state.updated_monotonic = time.monotonic()
+                elif len(self._sessions) >= _MAX_BROWSER_USE_SESSIONS:
+                    return {
+                        "error": (
+                            "browser_use_run session capacity reached: "
+                            f"maximum {_MAX_BROWSER_USE_SESSIONS} sessions. "
+                            "Reuse an existing session or stop one first."
+                        ),
+                        "sessionLimit": _MAX_BROWSER_USE_SESSIONS,
+                        "sessions": self._session_summaries_locked(),
+                    }
             if session_state is None:
                 browser_session = self._new_browser_session(
                     allowed_domains=safe_domains,
@@ -203,13 +228,18 @@ class BrowserUseLocalManager:
             )
             state.runner = runner
             self._tasks[task_id] = state
-            return self._state_to_payload(state)
+            payload = self._state_to_payload(state)
+
+        if session_to_close is not None:
+            await self._close_session(session_to_close)
+        return payload
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return None
         async with self._lock:
+            self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
@@ -219,6 +249,7 @@ class BrowserUseLocalManager:
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         async with self._lock:
+            self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             now = time.monotonic()
             out: list[dict[str, Any]] = []
@@ -264,6 +295,7 @@ class BrowserUseLocalManager:
 
         session_to_close: Any | None = None
         async with self._lock:
+            self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
@@ -325,6 +357,7 @@ class BrowserUseLocalManager:
             return {"error": "browser_use_task_screenshot requires task_id"}
 
         async with self._lock:
+            self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
@@ -385,8 +418,15 @@ class BrowserUseLocalManager:
         async with self._lock:
             task_states = list(self._tasks.values())
             sessions = [item.session for item in self._sessions.values()]
+            cleanup_task = self._cleanup_task
+            self._cleanup_task = None
             self._tasks.clear()
             self._sessions.clear()
+
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
 
         runners: list[asyncio.Task[Any]] = []
         for state in task_states:
@@ -702,6 +742,23 @@ class BrowserUseLocalManager:
             with suppress(Exception):
                 await session.kill()
 
+    def _ensure_cleanup_task_locked(self) -> None:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+        self._cleanup_task = asyncio.create_task(
+            self._cleanup_loop(),
+            name="browser_use_local_cleanup",
+        )
+
+    async def _cleanup_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(_SESSION_CLEANUP_POLL_SECONDS)
+                async with self._lock:
+                    self._cleanup_locked()
+        except asyncio.CancelledError:
+            raise
+
     def _cleanup_locked(self) -> None:
         now = time.monotonic()
         expired: list[str] = []
@@ -745,6 +802,32 @@ class BrowserUseLocalManager:
         session_state = self._sessions.get(safe_session)
         if session_state is not None:
             session_state.updated_monotonic = time.monotonic()
+
+    def _pick_reusable_session_id_locked(self) -> str | None:
+        reusable: list[tuple[float, str]] = []
+        for session_id, session_state in self._sessions.items():
+            if self._session_has_active_tasks_locked(session_id):
+                continue
+            reusable.append((float(session_state.updated_monotonic or 0.0), session_id))
+        if not reusable:
+            return None
+        reusable.sort(reverse=True)
+        return reusable[0][1]
+
+    def _session_summaries_locked(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for session_id, session_state in self._sessions.items():
+            active_task = self._active_task_for_session_locked(session_id)
+            out.append(
+                {
+                    "session_id": session_id,
+                    "reusable": active_task is None,
+                    "active_task_id": active_task.task_id if active_task is not None else None,
+                    "last_used_monotonic": float(session_state.updated_monotonic or 0.0),
+                }
+            )
+        out.sort(key=lambda item: item["last_used_monotonic"], reverse=True)
+        return out
 
     def _session_has_active_tasks_locked(self, session_id: str) -> bool:
         safe_session = str(session_id or "").strip()
