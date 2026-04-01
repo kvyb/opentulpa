@@ -54,7 +54,7 @@ Useful `.env` knobs:
 
 ## Docker
 
-The included `Dockerfile` already installs Python dependencies and Playwright Chromium:
+The included `Dockerfile` already installs Python dependencies, Node.js/npm, and Playwright Chromium:
 
 ```bash
 docker build -t opentulpa .

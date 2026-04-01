@@ -111,7 +111,7 @@ Browser Use runs locally inside OpenTulpa. It does not require Browser Use Cloud
 
 ### Docker
 
-The Docker image already installs Python dependencies and Playwright Chromium:
+The Docker image already installs Python dependencies, Node.js/npm, and Playwright Chromium:
 
 ```bash
 docker build -t opentulpa .
@@ -120,7 +120,7 @@ docker run --rm -p 8000:8000 --env-file .env opentulpa
 
 ### Railway
 
-Railway uses the included `Dockerfile`, so it installs app dependencies and Playwright automatically.
+Railway uses the included `Dockerfile`, so it installs app dependencies, Node.js/npm, and Playwright automatically.
 
 Minimum setup:
 

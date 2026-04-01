@@ -42,6 +42,32 @@ def test_internal_tulpa_run_terminal_uses_threadpool(monkeypatch) -> None:
     ]
 
 
+def test_internal_tulpa_run_terminal_returns_400_for_missing_binary(monkeypatch) -> None:
+    app = FastAPI()
+    tulpa.register_tulpa_routes(app, get_tulpa_loader=lambda: object())
+
+    async def _fake_run_in_threadpool(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+        del func, args, kwargs
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'phantom-cli'")
+
+    monkeypatch.setattr(tulpa, "run_in_threadpool", _fake_run_in_threadpool)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/tulpa/run_terminal",
+            json={
+                "command": "phantom-cli status",
+                "working_dir": "tulpa_stuff",
+                "timeout_seconds": 45,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["command"] == "phantom-cli status"
+    assert response.json()["working_dir"] == "tulpa_stuff"
+    assert "No such file or directory" in response.json()["detail"]
+
+
 def test_internal_tulpa_read_file_returns_404_for_missing_file(monkeypatch) -> None:
     app = FastAPI()
     tulpa.register_tulpa_routes(app, get_tulpa_loader=lambda: object())

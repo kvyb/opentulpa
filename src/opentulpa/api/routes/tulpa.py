@@ -141,6 +141,24 @@ def register_tulpa_routes(
                     "allowed_working_dirs": sorted(ALLOWED_TERMINAL_DIRS.keys()),
                 },
             )
+        except FileNotFoundError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": str(exc),
+                    "command": command,
+                    "working_dir": working_dir_key,
+                },
+            )
+        except OSError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": str(exc),
+                    "command": command,
+                    "working_dir": working_dir_key,
+                },
+            )
         except RuntimeError as exc:
             return JSONResponse(status_code=500, content={"detail": str(exc)})
 
