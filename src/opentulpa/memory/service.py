@@ -1,8 +1,31 @@
 """mem0-backed memory service for the agent."""
 
+import logging
 from typing import Any
 
 from mem0 import Memory
+
+_MEM0_NOOP_MESSAGES = frozenset(
+    {
+        "NOOP for Memory.",
+        "NOOP for Memory (async).",
+    }
+)
+
+
+class _Mem0NoopFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage() not in _MEM0_NOOP_MESSAGES
+
+
+_MEM0_NOOP_FILTER = _Mem0NoopFilter()
+
+
+def _install_mem0_noop_filter() -> None:
+    logger = logging.getLogger("mem0.memory.main")
+    if any(existing is _MEM0_NOOP_FILTER for existing in logger.filters):
+        return
+    logger.addFilter(_MEM0_NOOP_FILTER)
 
 
 class MemoryService:
@@ -13,6 +36,7 @@ class MemoryService:
         config: dict[str, Any] | None = None,
         user_id: str = "default",
     ) -> None:
+        _install_mem0_noop_filter()
         self._config = config
         self._memory: Memory | None = None
         self._user_id = user_id

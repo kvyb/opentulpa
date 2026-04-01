@@ -150,11 +150,7 @@ def _telegram_bot_commands() -> list[dict[str, str]]:
     return [
         {"command": "start", "description": "Show quick help and onboarding"},
         {"command": "status", "description": "Check bot and agent status"},
-        {"command": "setup", "description": "Start key setup flow"},
-        {"command": "set", "description": "Set env key: /set KEY VALUE"},
-        {"command": "setenv", "description": "Set env key: /setenv KEY VALUE"},
         {"command": "fresh", "description": "Start a fresh chat context"},
-        {"command": "cancel", "description": "Cancel pending setup"},
     ]
 
 

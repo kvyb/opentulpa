@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -66,3 +67,33 @@ async def test_fresh_creates_session_when_missing(monkeypatch: pytest.MonkeyPatc
     assert str(slot.get("customer_id")) == "telegram_42"
     assert str(slot.get("thread_id", "")).startswith("chat_")
     assert str(slot.get("wake_thread_id", "")).startswith("wake_")
+
+
+@pytest.mark.asyncio
+async def test_removed_setup_and_set_commands_do_not_write_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    setup_text = await chat_module.handle_telegram_text(
+        body={"message": {"chat": {"id": 1}, "from": {"id": 100}, "text": "/setup"}},
+        bot_token=None,
+        agent_runtime=None,
+    )
+    set_text = await chat_module.handle_telegram_text(
+        body={
+            "message": {
+                "chat": {"id": 1},
+                "from": {"id": 100},
+                "text": "/set OPENROUTER_API_KEY secret",
+            }
+        },
+        bot_token=None,
+        agent_runtime=None,
+    )
+
+    assert "Set OPENROUTER_API_KEY" in str(setup_text)
+    assert "Set OPENROUTER_API_KEY" in str(set_text)
+    assert os.environ.get("OPENROUTER_API_KEY") is None

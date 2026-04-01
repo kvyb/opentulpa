@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shlex
 from datetime import datetime, timedelta
@@ -61,6 +62,8 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     safe_json as _safe_json,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _compute_claim_check_retry_limit(runtime: Any) -> int:
@@ -332,6 +335,41 @@ def _normalize_approval_id(value: Any) -> str:
     return text
 
 
+def _summarize_tool_validation_errors(messages: list[ToolMessage]) -> str:
+    seen: set[str] = set()
+    parts: list[str] = []
+    for message in messages:
+        text = _content_to_text(getattr(message, "content", "")).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+    return " | ".join(parts[:3])
+
+
+def _build_tool_validation_repair_message(messages: list[ToolMessage]) -> str:
+    summary = _summarize_tool_validation_errors(messages)
+    if not summary:
+        return (
+            "VALIDATION_REPAIR_REQUIRED: Your previous tool call was blocked. Do not claim success. "
+            "Repair the tool call or clearly state that the action was not completed yet."
+        )
+    if any(
+        marker in summary
+        for marker in ("ACTION_CLARIFICATION_REQUIRED", "CHAT_MODE_LOCKED", "TURN_MODE_MISMATCH")
+    ):
+        return (
+            "VALIDATION_REPAIR_REQUIRED: The schedule was not created. Do not say it was scheduled. "
+            "Ask one concise clarifying question or continue in chat if automation is not explicit. "
+            f"Reason={summary}"
+        )
+    return (
+        "VALIDATION_REPAIR_REQUIRED: The schedule was not created yet. Do not claim success. "
+        "Repair the tool call arguments and retry only if you can satisfy the validation error exactly. "
+        f"Reason={summary}"
+    )
+
+
 def build_runtime_graph(runtime: Any):
     assert runtime._model_with_tools is not None
     assert runtime._checkpointer is not None
@@ -339,6 +377,7 @@ def build_runtime_graph(runtime: Any):
     required_args: dict[str, tuple[str, ...]] = {
         "tulpa_write_file": ("path", "content"),
         "tulpa_validate_file": ("path",),
+        "tulpa_reload": (),
         "tulpa_read_file": ("path",),
         "tulpa_run_terminal": ("command",),
         "fetch_url_content": ("url",),
@@ -352,6 +391,8 @@ def build_runtime_graph(runtime: Any):
         "skill_get": ("name",),
         "skill_upsert": ("name", "description", "instructions"),
         "skill_delete": ("name",),
+        "signal_rule_upsert": ("source",),
+        "signal_rule_list": (),
         "directive_set": ("directive",),
         "lessons_learnt": ("action",),
         "time_profile_set": ("utc_offset",),
@@ -660,18 +701,31 @@ def build_runtime_graph(runtime: Any):
                 validation_errors.append(ToolMessage(content=validation_error, tool_call_id=call_id))
                 continue
         if validation_errors:
+            error_summary = _summarize_tool_validation_errors(validation_errors)
+            repair_message = _build_tool_validation_repair_message(validation_errors)
             _log(
                 state,
                 "graph.validate_tools.failed",
                 error_count=len(validation_errors),
+                error_summary=error_summary,
+                repair_message=repair_message,
                 turn_mode=turn_mode,
+            )
+            logger.warning(
+                "graph.validate_tools.failed thread_id=%s customer_id=%s errors=%s",
+                str(state.get("thread_id", "")).strip(),
+                str(state.get("customer_id", "")).strip(),
+                error_summary or len(validation_errors),
             )
             return Command(
                 update={
-                    "messages": validation_errors,
+                    "messages": [
+                        *validation_errors,
+                        SystemMessage(content=repair_message),
+                    ],
                     "tool_validation_passed": False,
                     "tool_error_count": int(state.get("tool_error_count", 0)) + 1,
-                    "last_tool_error": "tool validation failed",
+                    "last_tool_error": error_summary or "tool validation failed",
                     "turn_status": "running",
                 },
                 goto="agent",

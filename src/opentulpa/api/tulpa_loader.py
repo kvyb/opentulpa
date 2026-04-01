@@ -17,15 +17,31 @@ logger = logging.getLogger(__name__)
 class TulpaRouterLoader:
     """Load and hot-reload APIRouter objects from the tulpa_stuff package."""
 
-    def __init__(self, project_root: Path, mount_router: APIRouter) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        mount_router: APIRouter,
+        public_mount_router: APIRouter | None = None,
+    ) -> None:
         self.project_root = project_root.resolve()
         self.mount_router = mount_router
+        self.public_mount_router = public_mount_router
         self.package_name = "tulpa_stuff"
         self.package_dir = self.project_root / self.package_name
 
     def _ensure_importable(self) -> None:
         if str(self.project_root) not in sys.path:
             sys.path.insert(0, str(self.project_root))
+        existing = sys.modules.get(self.package_name)
+        if existing is not None:
+            module_file = str(getattr(existing, "__file__", "") or "").strip()
+            module_path = Path(module_file).resolve() if module_file else None
+            if module_path is None or not (
+                module_path == self.package_dir / "__init__.py" or self.project_root in module_path.parents
+            ):
+                for name in list(sys.modules):
+                    if name == self.package_name or name.startswith(f"{self.package_name}."):
+                        sys.modules.pop(name, None)
         self.package_dir.mkdir(parents=True, exist_ok=True)
         init_file = self.package_dir / "__init__.py"
         if not init_file.exists():
@@ -53,8 +69,11 @@ class TulpaRouterLoader:
         """Reload all tulpa_stuff module routers onto the mount router."""
         self._ensure_importable()
         self.mount_router.routes.clear()
+        if self.public_mount_router is not None:
+            self.public_mount_router.routes.clear()
 
         loaded: list[str] = []
+        public_loaded: list[str] = []
         errors: list[dict[str, str]] = []
         warnings: list[dict[str, str]] = []
 
@@ -62,13 +81,24 @@ class TulpaRouterLoader:
             try:
                 module = self._import_module(module_name)
                 router = getattr(module, "router", None)
-                if not isinstance(router, APIRouter):
-                    raise TypeError("missing APIRouter 'router' export")
-                self.mount_router.include_router(
-                    router,
-                    prefix=f"/{module_name}",
-                    tags=["tulpa"],
-                )
+                public_router = getattr(module, "public_router", None)
+                has_internal = isinstance(router, APIRouter)
+                has_public = isinstance(public_router, APIRouter)
+                if not has_internal and not has_public:
+                    raise TypeError("missing APIRouter 'router' or 'public_router' export")
+                if has_internal:
+                    self.mount_router.include_router(
+                        router,
+                        prefix=f"/{module_name}",
+                        tags=["tulpa"],
+                    )
+                if has_public and self.public_mount_router is not None:
+                    self.public_mount_router.include_router(
+                        public_router,
+                        prefix=f"/{module_name}",
+                        tags=["tulpa-public"],
+                    )
+                    public_loaded.append(module_name)
                 loaded.append(module_name)
             except ModuleNotFoundError as exc:  # pragma: no cover - runtime guard
                 missing = str(getattr(exc, "name", "")).strip() or str(exc)
@@ -93,4 +123,6 @@ class TulpaRouterLoader:
             "warnings": warnings,
             "errors": errors,
             "mount_prefix": "/tulpa/<module_name>",
+            "public_mount_prefix": "/webhook/tulpa/<module_name>",
+            "public_loaded": public_loaded,
         }

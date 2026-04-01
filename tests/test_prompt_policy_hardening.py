@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from opentulpa.agent.graph_builder import (
+    _build_tool_validation_repair_message,
     _build_skill_glossary_context,
     _build_system_prompt_message,
     _enforce_tool_message_protocol,
     _normalize_approval_id,
     _sanitize_history_messages_for_model,
+    _summarize_tool_validation_errors,
     _validate_model_tool_call,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
@@ -151,6 +153,47 @@ def test_validate_model_tool_call_rejects_ambiguous_routine_create_request() -> 
     )
     assert err is not None
     assert "ACTION_CLARIFICATION_REQUIRED" in err
+
+
+def test_summarize_tool_validation_errors_keeps_distinct_error_text() -> None:
+    summary = _summarize_tool_validation_errors(
+        [
+            ToolMessage(content="ACTION_CLARIFICATION_REQUIRED: ask one concise question.", tool_call_id="a"),
+            ToolMessage(content="ACTION_CLARIFICATION_REQUIRED: ask one concise question.", tool_call_id="b"),
+            ToolMessage(content="ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: provide command.", tool_call_id="c"),
+        ]
+    )
+    assert "ACTION_CLARIFICATION_REQUIRED" in summary
+    assert "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED" in summary
+    assert summary.count("ACTION_CLARIFICATION_REQUIRED") == 1
+
+
+def test_build_tool_validation_repair_message_blocks_false_schedule_claims() -> None:
+    message = _build_tool_validation_repair_message(
+        [
+            ToolMessage(
+                content="ACTION_CLARIFICATION_REQUIRED: routine_create is only for explicit reminders.",
+                tool_call_id="a",
+            )
+        ]
+    )
+    assert "schedule was not created" in message
+    assert "Do not say it was scheduled" in message
+    assert "clarifying question" in message
+
+
+def test_build_tool_validation_repair_message_requests_exact_argument_repair() -> None:
+    message = _build_tool_validation_repair_message(
+        [
+            ToolMessage(
+                content="ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create needs implementation_command.",
+                tool_call_id="a",
+            )
+        ]
+    )
+    assert "schedule was not created yet" in message
+    assert "Do not claim success" in message
+    assert "Repair the tool call arguments and retry" in message
 
 
 def test_validate_model_tool_call_rejects_routine_create_when_user_wants_chat_only() -> None:

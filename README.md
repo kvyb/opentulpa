@@ -49,47 +49,110 @@ That makes it useful for workflows developers actually care about:
 - assistants that need memory, tools, and execution in one runtime
 - personal or team agents that must stay self-hosted and inspectable
 
-## 30-Second Start (Local API Mode)
+## Quick Start
 
-Prereqs: Python `3.12+`, [`uv`](https://docs.astral.sh/uv/), and access to an OpenAI-compatible API endpoint.
+### Local API
+
+Requirements:
+- Python `3.12+`
+- [`uv`](https://docs.astral.sh/uv/)
+- an OpenAI-compatible API key
+
+Setup:
 
 ```bash
+git clone <repo-url>
+cd opentulpa
 cp .env.example .env
-# edit .env and set OPENROUTER_API_KEY=...
-uv run python -m opentulpa
+```
+
+Set this in `.env`:
+
+```bash
+OPENROUTER_API_KEY=...
+```
+
+Install and run:
+
+```bash
+./start.sh --app
 ```
 
 Health checks:
 - `http://127.0.0.1:8000/healthz`
 - `http://127.0.0.1:8000/agent/healthz`
 
-Send your first turn:
+### Local Telegram
 
-```bash
-curl -s http://127.0.0.1:8000/internal/chat \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "customer_id":"demo_user",
-    "thread_id":"chat-demo_user",
-    "text":"Turn this repeated workflow into a reusable skill and a daily routine: review an API changelog every morning, summarize important changes, and draft a short team update."
-  }'
-```
+If you want to use Telegram locally:
 
-Note: setup is ~30 seconds once prerequisites are installed. First dependency install can take longer.
-
-The current env names use `OPENROUTER_*` for compatibility, and the default example points at OpenRouter because the recommended out-of-the-box model is `google/gemini-3-flash-preview`. You can also set `OPENROUTER_BASE_URL` to another OpenAI-compatible endpoint and use that provider's API key.
-
-## Optional: Telegram in 2 Minutes
-
-1. Create a bot via `@BotFather`.
-2. Add `TELEGRAM_BOT_TOKEN` to `.env`.
-3. Run:
+1. Create a bot with `@BotFather`.
+2. Put `TELEGRAM_BOT_TOKEN` in `.env`.
+3. Install `cloudflared`.
+4. Run:
 
 ```bash
 ./start.sh
 ```
 
-For cloud deploys with a public URL (`PUBLIC_BASE_URL` or `RAILWAY_PUBLIC_DOMAIN`), startup can auto-register the webhook.
+`start.sh` installs Python deps, installs Playwright Chromium by default, installs `cloudflared` when manager mode needs it, and then starts the app.
+
+### Browser Use
+
+Browser Use is installed by default when you use `./start.sh`.
+
+If you want to skip the Chromium install:
+
+```bash
+./start.sh --no-browser-use
+```
+
+Browser Use runs locally inside OpenTulpa. It does not require Browser Use Cloud.
+
+### Docker
+
+The Docker image already installs Python dependencies and Playwright Chromium:
+
+```bash
+docker build -t opentulpa .
+docker run --rm -p 8000:8000 --env-file .env opentulpa
+```
+
+### Railway
+
+Railway uses the included `Dockerfile`, so it installs app dependencies and Playwright automatically.
+
+Minimum setup:
+
+1. Create a Railway project from this repo.
+2. Add one volume at `/app/opentulpa_data`.
+3. Set:
+   - `OPENROUTER_API_KEY`
+   - `TELEGRAM_BOT_TOKEN`
+   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+4. Optionally set:
+   - `TELEGRAM_WEBHOOK_SECRET`
+   - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
+5. Deploy.
+
+See [Deployment](docs/DEPLOYMENT.md) for the exact checklist.
+
+### Script Modes
+
+`start.sh` supports:
+- `./start.sh`
+  installs what it needs and runs quick-tunnel manager mode
+- `./start.sh --app`
+  installs what it needs and runs direct app mode
+- `./start.sh install`
+  install/setup only
+- `./start.sh run --app`
+  run only, no install step
+
+You can also control it through `.env`:
+- `START_MODE=auto|app|manager`
+- `INSTALL_BROWSER_USE=1|0`
+- `INSTALL_CLOUDFLARED=auto|1|0`
 
 ## What Makes It Different
 
@@ -164,6 +227,7 @@ Core pieces:
 
 - **Telegram interface (optional):** chat, files, voice notes, approval buttons, `/setup`, `/fresh`, `/status`
 - **Slack integration (optional):** list channels, read history, post messages after user consent
+- **Self-built webhook inboxes:** OpenTulpa can set up its own thin channel adapters in `tulpa_stuff/`, accept inbound webhooks, queue normalized signals, wake on saved rules, and draft or send replies through the adapter's outbound API
 - **Web intelligence:** web search plus URL/file fetching for HTML, PDF, DOCX, and image analysis
 - **Browser automation (optional):** local Browser Use tasks for dynamic websites
 - **Skills:** reusable `SKILL.md` capabilities with user/global scope and persistence
@@ -197,7 +261,7 @@ Use it as a ready-to-run agent or as a reference architecture you can extend.
 
 - Dockerfile included.
 - Railway-ready config included.
-- For durability across redeploys, mount `/app/.opentulpa`.
+- For durability across redeploys, use `OPENTULPA_DATA_ROOT` with one mounted volume.
 
 ## Docs
 
