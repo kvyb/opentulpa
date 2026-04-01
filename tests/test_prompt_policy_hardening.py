@@ -10,7 +10,7 @@ from opentulpa.agent.graph_builder import (
     _summarize_tool_validation_errors,
     _validate_model_tool_call,
 )
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message,
     execution_origin_for_turn_mode,
@@ -339,6 +339,18 @@ def test_sanitize_history_keeps_tool_response_shape_for_approval_handoff() -> No
     assert str(getattr(sanitized[2], "tool_call_id", "")) == "call_1"
 
 
+def test_sanitize_history_drops_internal_system_messages() -> None:
+    messages = [
+        HumanMessage(content="run login"),
+        SystemMessage(content="SELF_CHECK_FAILED: internal repair note."),
+        AIMessage(content="done"),
+    ]
+    sanitized = _sanitize_history_messages_for_model(messages)
+    assert len(sanitized) == 2
+    assert isinstance(sanitized[0], HumanMessage)
+    assert isinstance(sanitized[1], AIMessage)
+
+
 def test_enforce_tool_message_protocol_drops_incomplete_tool_call_segment() -> None:
     messages = [
         HumanMessage(content="run login"),
@@ -352,6 +364,27 @@ def test_enforce_tool_message_protocol_drops_incomplete_tool_call_segment() -> N
     assert len(repaired) == 2
     assert isinstance(repaired[0], HumanMessage)
     assert isinstance(repaired[1], HumanMessage)
+
+
+def test_enforce_tool_message_protocol_keeps_complete_tool_segment_after_system_drop() -> None:
+    messages = [
+        HumanMessage(content="read the file"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "call_1", "name": "tulpa_read_file", "args": {"path": "tulpa_stuff/a.txt"}}],
+        ),
+        ToolMessage(content="hello", tool_call_id="call_1"),
+        SystemMessage(content="VALIDATION_REPAIR_REQUIRED: internal note."),
+        AIMessage(content="The file says hello."),
+    ]
+    sanitized = _sanitize_history_messages_for_model(messages)
+    repaired = _enforce_tool_message_protocol(sanitized)
+    assert len(repaired) == 4
+    assert isinstance(repaired[0], HumanMessage)
+    assert isinstance(repaired[1], AIMessage)
+    assert bool(getattr(repaired[1], "tool_calls", []))
+    assert isinstance(repaired[2], ToolMessage)
+    assert isinstance(repaired[3], AIMessage)
 
 
 def test_normalize_approval_id_rejects_none_and_null_strings() -> None:

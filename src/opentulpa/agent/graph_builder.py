@@ -647,6 +647,7 @@ def build_runtime_graph(runtime: Any):
             )
         history_budget = max(800, prompt_budget - prompt_overhead_tokens)
         sanitized_history = _sanitize_history_messages_for_model(messages)
+        sanitized_history = _enforce_tool_message_protocol(sanitized_history)
         bounded_messages = _tail_messages_to_token_budget(
             sanitized_history,
             token_budget=history_budget,

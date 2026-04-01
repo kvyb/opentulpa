@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from opentulpa.agent.lc_messages import AIMessage, AnyMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )
@@ -57,6 +57,8 @@ def compact_approval_pending_tool_message(message: ToolMessage) -> ToolMessage |
 def sanitize_history_messages_for_model(messages: list[AnyMessage]) -> list[AnyMessage]:
     sanitized: list[AnyMessage] = []
     for msg in messages:
+        if isinstance(msg, SystemMessage):
+            continue
         if isinstance(msg, ToolMessage):
             compact = compact_approval_pending_tool_message(msg)
             if compact is not None:
