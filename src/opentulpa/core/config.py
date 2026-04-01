@@ -132,6 +132,14 @@ class Settings(BaseSettings):
             "Default is the OpenRouter slug google/gemini-3-flash-preview."
         ),
     )
+    llm_reasoning_effort: str | None = Field(
+        default=None,
+        description=(
+            "Optional reasoning effort for providers/models that support it "
+            "(for example: low, medium, high). If unset, no reasoning_effort "
+            "parameter is sent."
+        ),
+    )
     wake_classifier_model: str | None = Field(
         default=None,
         description=(

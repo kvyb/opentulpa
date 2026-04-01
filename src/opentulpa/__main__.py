@@ -283,6 +283,7 @@ def main() -> None:
             openrouter_api_key=openrouter_api_key,
             openrouter_base_url=settings.openrouter_base_url,
             model_name=settings.llm_model,
+            reasoning_effort=settings.llm_reasoning_effort,
             wake_classifier_model_name=settings.wake_classifier_model,
             guardrail_classifier_model_name=settings.guardrail_classifier_model,
             checkpoint_db_path=settings.agent_checkpoint_db_path,

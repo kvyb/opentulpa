@@ -184,6 +184,7 @@ class OpenTulpaLangGraphRuntime:
         app_url: str,
         openrouter_api_key: str,
         model_name: str,
+        reasoning_effort: str | None = None,
         openrouter_base_url: str = "https://openrouter.ai/api/v1",
         wake_classifier_model_name: str | None = None,
         guardrail_classifier_model_name: str | None = None,
@@ -212,6 +213,7 @@ class OpenTulpaLangGraphRuntime:
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_base_url = str(openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
         self.model_name = _normalize_model_name(model_name)
+        self._reasoning_effort = str(reasoning_effort or "").strip() or None
         self._max_completion_tokens = max(128, min(int(max_completion_tokens), 32768))
         self._max_user_reply_chars = max(500, min(int(max_user_reply_chars), 20000))
         self._wake_classifier_model_name = (
@@ -266,13 +268,19 @@ class OpenTulpaLangGraphRuntime:
         )
         self._active_customer_id = ""
 
+        model_init_kwargs: dict[str, Any] = {
+            "model_provider": "openai",
+            "api_key": openrouter_api_key,
+            "base_url": self.openrouter_base_url,
+            "temperature": 0,
+            "max_completion_tokens": self._max_completion_tokens,
+        }
+        if self._reasoning_effort:
+            model_init_kwargs["reasoning_effort"] = self._reasoning_effort
+
         self._model = init_chat_model(
             self.model_name,
-            model_provider="openai",
-            api_key=openrouter_api_key,
-            base_url=self.openrouter_base_url,
-            temperature=0,
-            max_completion_tokens=self._max_completion_tokens,
+            **model_init_kwargs,
         )
         if self._wake_classifier_model_name == self.model_name:
             self._wake_classifier_model = self._model
@@ -280,11 +288,7 @@ class OpenTulpaLangGraphRuntime:
             try:
                 self._wake_classifier_model = init_chat_model(
                     self._wake_classifier_model_name,
-                    model_provider="openai",
-                    api_key=openrouter_api_key,
-                    base_url=self.openrouter_base_url,
-                    temperature=0,
-                    max_completion_tokens=self._max_completion_tokens,
+                    **model_init_kwargs,
                 )
             except Exception:
                 logger.exception(
@@ -301,11 +305,7 @@ class OpenTulpaLangGraphRuntime:
             try:
                 self._guardrail_classifier_model = init_chat_model(
                     self._guardrail_classifier_model_name,
-                    model_provider="openai",
-                    api_key=openrouter_api_key,
-                    base_url=self.openrouter_base_url,
-                    temperature=0,
-                    max_completion_tokens=self._max_completion_tokens,
+                    **model_init_kwargs,
                 )
             except Exception:
                 logger.exception(
