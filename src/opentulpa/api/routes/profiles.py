@@ -27,6 +27,16 @@ def register_profile_routes(
             "directive": profiles.get_directive(customer_id),
         }
 
+    @app.post("/internal/style_directive/get")
+    async def internal_style_directive_get(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        return {
+            "customer_id": customer_id,
+            "style_directive": profiles.get_style_directive(customer_id),
+        }
+
     @app.post("/internal/directive/set")
     async def internal_directive_set(request: Request) -> Any:
         profiles = get_profiles()
@@ -65,6 +75,24 @@ def register_profile_routes(
                     metadata={"kind": "directive_profile", "source": "agent"},
                 )
 
+        return {"ok": True, "customer_id": customer_id, "cleared": cleared}
+
+    @app.post("/internal/style_directive/set")
+    async def internal_style_directive_set(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        directive = str(body.get("style_directive", "")).strip()
+        source = str(body.get("source", "agent") or "agent")
+        profiles.set_style_directive(customer_id, directive, source=source)
+        return {"ok": True, "customer_id": customer_id}
+
+    @app.post("/internal/style_directive/clear")
+    async def internal_style_directive_clear(request: Request) -> Any:
+        profiles = get_profiles()
+        body = await request.json()
+        customer_id = str(body.get("customer_id", "")).strip()
+        cleared = profiles.clear_style_directive(customer_id, source="agent")
         return {"ok": True, "customer_id": customer_id, "cleared": cleared}
 
     @app.post("/internal/time_profile/get")

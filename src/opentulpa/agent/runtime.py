@@ -40,6 +40,9 @@ from opentulpa.agent.context_compaction import (
     persist_rollup_memory as _persist_rollup_memory,
 )
 from opentulpa.agent.context_compaction import (
+    split_rollup_sections as _split_rollup_sections,
+)
+from opentulpa.agent.context_compaction import (
     split_text_chunks as _split_text_chunks,
 )
 from opentulpa.agent.file_analysis import (
@@ -63,6 +66,7 @@ from opentulpa.agent.file_analysis import (
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.internal_api_client import InternalApiClient
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.prompt_classifier import classify_prompt_mode as _classify_prompt_mode
 from opentulpa.agent.runtime_input import (
     MergedInputSuppressedError,
     ThreadInputCoordinator,
@@ -79,6 +83,9 @@ from opentulpa.agent.utils import (
 )
 from opentulpa.agent.utils import (
     normalize_model_name as _normalize_model_name,
+)
+from opentulpa.agent.utils import (
+    html_to_text as _html_to_text,
 )
 from opentulpa.agent.utils import (
     utc_offset_to_minutes as _utc_offset_to_minutes,
@@ -107,6 +114,10 @@ _PROVISIONAL_REPLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*i will\b", re.IGNORECASE),
     re.compile(r"^\s*(?:one sec|one second|still working|working on it)\b", re.IGNORECASE),
     re.compile(r"\bthis will take\b", re.IGNORECASE),
+)
+_STYLE_NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:manychat|solana|bali|kristian|vyb[ií]ral)\b", re.IGNORECASE),
+    re.compile(r"\b(?:project|company|work|interests?)\b.{0,40}\b(?:mention|refer|personal)\b", re.IGNORECASE),
 )
 _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "tulpa_read_file": "Reading a file",
@@ -352,6 +363,18 @@ class OpenTulpaLangGraphRuntime:
         if not candidate:
             return False
         return any(pattern.search(candidate) for pattern in _PROVISIONAL_REPLY_PATTERNS)
+
+    @staticmethod
+    def _stream_chunk_is_tool_phase(node_name: str, message_chunk: Any) -> bool:
+        normalized = str(node_name or "").strip().lower()
+        if normalized != "tools":
+            return False
+        if isinstance(message_chunk, ToolMessage):
+            return True
+        tool_calls = getattr(message_chunk, "tool_calls", None)
+        if isinstance(tool_calls, list) and tool_calls:
+            return True
+        return True
 
     @staticmethod
     def _build_progress_signal(text: str) -> str:
@@ -778,6 +801,31 @@ class OpenTulpaLangGraphRuntime:
         except Exception:
             return None
 
+    async def _load_style_directive(self, customer_id: str) -> str | None:
+        cid = str(customer_id or "").strip()
+        if not cid:
+            return None
+        if self._customer_profile_service is not None:
+            try:
+                return self._customer_profile_service.get_style_directive(cid)
+            except Exception:
+                pass
+        try:
+            r = await self._request_with_backoff(
+                "POST",
+                "/internal/style_directive/get",
+                json_body={"customer_id": cid},
+                timeout=5.0,
+                retries=1,
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            directive = str(data.get("style_directive") or "").strip()
+            return directive or None
+        except Exception:
+            return None
+
     async def _load_user_utc_offset(self, customer_id: str) -> str | None:
         cid = str(customer_id or "").strip()
         if not cid:
@@ -800,6 +848,132 @@ class OpenTulpaLangGraphRuntime:
             return offset or None
         except Exception:
             return None
+
+    @staticmethod
+    def _sanitize_style_text(raw_text: str) -> str:
+        text = _html_to_text(str(raw_text or "")).strip()
+        if not text:
+            return ""
+        for pattern in _STYLE_NOISE_PATTERNS:
+            text = pattern.sub("", text)
+        text = re.sub(r"\([^)]*\)", " ", text)
+        text = re.sub(r"\s+", " ", text).strip(" .,-")
+        if not text:
+            return ""
+        keep_phrases: list[str] = []
+        lowered = text.lower()
+        phrase_map = [
+            ("concise", "be concise"),
+            ("brief", "be brief"),
+            ("warm", "keep a warm tone"),
+            ("friendly", "keep a friendly tone"),
+            ("supportive", "keep a supportive tone"),
+            ("direct", "be direct"),
+            ("playful", "allow light playfulness when it fits"),
+            ("romantic", "keep warmth without forcing intimacy"),
+            ("not overly formal", "avoid overly formal phrasing"),
+            ("no emojis", "avoid emojis unless the user asks"),
+            ("use 'kristian' occasionally", "light personalization is okay"),
+            ("use kristian occasionally", "light personalization is okay"),
+        ]
+        for needle, phrase in phrase_map:
+            if needle in lowered and phrase not in keep_phrases:
+                keep_phrases.append(phrase)
+        if not keep_phrases:
+            keep_phrases = ["be concise", "keep a warm, direct tone"]
+        return "Style preferences:\n- " + "\n- ".join(keep_phrases[:5])
+
+    async def _build_style_card(
+        self,
+        *,
+        customer_id: str,
+        available_skills: list[dict[str, Any]] | None = None,
+    ) -> str:
+        cid = str(customer_id or "").strip()
+        if not cid:
+            return "Style preferences:\n- be concise\n- keep a warm, direct tone"
+        style_directive = await self._load_style_directive(cid)
+        if style_directive:
+            sanitized = self._sanitize_style_text(style_directive)
+            if sanitized:
+                return sanitized
+        candidates = available_skills if isinstance(available_skills, list) else await self._list_available_skills(cid)
+        style_skill_names = {
+            "personal-assistant-persona",
+            "concise-prompter",
+        }
+        raw_parts: list[str] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            desc = str(item.get("description", "")).strip()
+            if not name:
+                continue
+            lowered = name.lower()
+            desc_lower = desc.lower()
+            if lowered not in style_skill_names and not any(
+                token in desc_lower for token in ("tone", "style", "concise", "persona", "friendly", "warm")
+            ):
+                continue
+            try:
+                r = await self._request_with_backoff(
+                    "POST",
+                    "/internal/skills/get",
+                    json_body={
+                        "customer_id": cid,
+                        "name": name,
+                        "include_files": False,
+                        "include_global": True,
+                    },
+                    timeout=8.0,
+                    retries=1,
+                )
+                if r.status_code != 200:
+                    continue
+                payload = r.json()
+                skill = payload.get("skill", {})
+                if not isinstance(skill, dict):
+                    continue
+                skill_md = str(skill.get("skill_markdown", "")).strip()
+                if skill_md:
+                    raw_parts.append(skill_md[:1200])
+            except Exception:
+                continue
+        sanitized = self._sanitize_style_text("\n\n".join(raw_parts))
+        return sanitized or "Style preferences:\n- be concise\n- keep a warm, direct tone"
+
+    @staticmethod
+    def _has_retrieval_evidence(
+        *,
+        user_text: str,
+        prompt_mode: str,
+        skill_candidates: list[dict[str, Any]] | None = None,
+        thread_rollup_sections: dict[str, str] | None = None,
+    ) -> bool:
+        mode = str(prompt_mode or "").strip().lower()
+        if mode == "literal_chat":
+            return False
+        text = str(user_text or "").strip().lower()
+        if not text:
+            return False
+        if mode == "execution":
+            return True
+        tokens = {tok for tok in re.findall(r"[a-z0-9][a-z0-9._-]{2,}", text)}
+        if not tokens:
+            return False
+        if isinstance(skill_candidates, list):
+            for item in skill_candidates:
+                if not isinstance(item, dict):
+                    continue
+                hay = f"{item.get('name', '')} {item.get('description', '')}".lower()
+                if any(tok in hay for tok in tokens):
+                    return True
+        if isinstance(thread_rollup_sections, dict):
+            hay = " ".join(str(thread_rollup_sections.get(k) or "").lower() for k in ("conversation_summary", "open_loops", "durable_facts"))
+            if any(tok in hay for tok in tokens):
+                return True
+        return False
 
     async def _list_available_skills(self, customer_id: str) -> list[dict[str, Any]]:
         cid = str(customer_id or "").strip()
@@ -848,10 +1022,13 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str,
         query: str,
         candidates: list[dict[str, Any]],
+        prompt_mode: str = "task_chat",
         max_skills: int = 2,
     ) -> list[dict[str, Any]]:
         prompt_query = str(query or "").strip()
         if not prompt_query or not candidates:
+            return []
+        if str(prompt_mode or "").strip().lower() == "literal_chat":
             return []
         shortlist = candidates[:80]
         catalog = "\n".join(
@@ -870,6 +1047,7 @@ class OpenTulpaLangGraphRuntime:
                         "Return strict JSON object with key 'selected', an array of objects:\n"
                         "  {\"name\": string, \"score\": number, \"reason\": string}\n"
                         "Choose only skills that materially improve answer quality.\n"
+                        "Never select persona, tone, or style-only skills for literal definitions, acronym expansions, translations, or short factual clarifications.\n"
                         "If the request is about reminders, schedules, recurring jobs, cron, or automations, "
                         "prefer selecting routine-schedule-composer when available.\n"
                         "Prioritize skills that improve execution reliability and claim accuracy over style-only skills.\n"
@@ -911,6 +1089,7 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str,
         user_text: str,
         *,
+        prompt_mode: str = "task_chat",
         candidates: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         cid = str(customer_id or "").strip()
@@ -924,6 +1103,7 @@ class OpenTulpaLangGraphRuntime:
             customer_id=cid,
             query=query,
             candidates=available,
+            prompt_mode=prompt_mode,
             max_skills=1,
         )
         if not selected:
@@ -1013,13 +1193,41 @@ class OpenTulpaLangGraphRuntime:
         except Exception:
             return None
 
+    def _load_thread_rollup_sections(self, thread_id: str) -> dict[str, str]:
+        tid = str(thread_id or "").strip()
+        empty = {
+            "conversation_summary": "",
+            "open_loops": "",
+            "durable_facts": "",
+            "sensitive_refs": "",
+            "style_notes": "",
+        }
+        if not tid or self._thread_rollup_service is None:
+            return empty
+        try:
+            getter = getattr(self._thread_rollup_service, "get_rollup_payload", None)
+            payload = getter(tid) if callable(getter) else None
+            if isinstance(payload, dict):
+                return {key: self._cap_rollup_text(str(payload.get(key) or "")) for key in empty}
+            legacy = self._thread_rollup_service.get_rollup(tid)
+            return {
+                key: self._cap_rollup_text(value)
+                for key, value in _split_rollup_sections(legacy or "").items()
+            }
+        except Exception:
+            return empty
+
     def _save_thread_rollup(self, thread_id: str, rollup: str) -> None:
         tid = str(thread_id or "").strip()
         text = self._cap_rollup_text(rollup)
         if not tid or not text or self._thread_rollup_service is None:
             return
         with suppress(Exception):
-            self._thread_rollup_service.set_rollup(tid, text)
+            setter = getattr(self._thread_rollup_service, "set_rollup_payload", None)
+            if callable(setter):
+                setter(tid, _split_rollup_sections(text))
+            else:
+                self._thread_rollup_service.set_rollup(tid, text)
 
     def _cap_rollup_text(self, text: str | None) -> str:
         raw = str(text or "").strip()
@@ -1131,29 +1339,56 @@ class OpenTulpaLangGraphRuntime:
         *,
         customer_id: str,
         user_text: str,
+        prompt_mode: str,
     ) -> dict[str, Any]:
         query = str(user_text or "").strip()
+        available_skills = await self._list_available_skills(customer_id)
+        style_card = await self._build_style_card(
+            customer_id=customer_id,
+            available_skills=available_skills,
+        )
         if not query:
             return {
+                "prompt_mode": prompt_mode,
+                "style_card": style_card,
                 "active_skill_query": "",
-                "active_skill_context": "",
                 "active_skill_names": [],
-                "active_available_skills": [],
+                "active_available_skills": available_skills,
+                "active_skill_discovery_context": "",
+                "active_invoked_skill_context": "",
+                "active_invoked_skill_names": [],
+                "active_skill_context": "",
             }
-        available_skills = await self._list_available_skills(customer_id)
-        resolved = await self._resolve_skill_context(
-            customer_id,
-            query,
+        if prompt_mode == "literal_chat":
+            return {
+                "prompt_mode": prompt_mode,
+                "style_card": style_card,
+                "active_skill_query": query,
+                "active_skill_names": [],
+                "active_available_skills": available_skills,
+                "active_skill_discovery_context": "",
+                "active_invoked_skill_context": "",
+                "active_invoked_skill_names": [],
+                "active_skill_context": "",
+            }
+        selected = await self._select_relevant_skills(
+            customer_id=customer_id,
+            query=query,
             candidates=available_skills,
+            prompt_mode=prompt_mode,
+            max_skills=3,
         )
-        context = str(resolved.get("context", "")).strip()
-        names_raw = resolved.get("skill_names", [])
-        names = [str(n).strip() for n in names_raw if str(n).strip()] if isinstance(names_raw, list) else []
+        names = [str(item.get("name", "")).strip() for item in selected if str(item.get("name", "")).strip()]
         return {
+            "prompt_mode": prompt_mode,
+            "style_card": style_card,
             "active_skill_query": query,
-            "active_skill_context": context,
             "active_skill_names": names,
             "active_available_skills": available_skills,
+            "active_skill_discovery_context": "",
+            "active_invoked_skill_context": "",
+            "active_invoked_skill_names": [],
+            "active_skill_context": "",
         }
 
     async def start(self) -> None:
@@ -1203,6 +1438,7 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str,
         thread_id: str,
         turn_mode: str,
+        prompt_mode: str,
         pending_context_summary: str,
         trace_id: str,
         skill_state: dict[str, Any],
@@ -1212,6 +1448,7 @@ class OpenTulpaLangGraphRuntime:
             "customer_id": customer_id,
             "thread_id": thread_id,
             "turn_mode": _normalize_turn_mode(turn_mode),
+            "prompt_mode": prompt_mode,
             "turn_status": "running",
             "final_response_text": "",
             "pending_context_summary": pending_context_summary,
@@ -1249,10 +1486,18 @@ class OpenTulpaLangGraphRuntime:
             customer_id=customer_id,
             include_pending_context=include_pending_context,
         )
-        skill_state = await self._pre_resolve_skill_state(
-            customer_id=customer_id,
-            user_text=user_text,
-        )
+        prompt_mode = _classify_prompt_mode(user_text, turn_mode=turn_mode)
+        try:
+            skill_state = await self._pre_resolve_skill_state(
+                customer_id=customer_id,
+                user_text=user_text,
+                prompt_mode=prompt_mode,
+            )
+        except TypeError:
+            skill_state = await self._pre_resolve_skill_state(
+                customer_id=customer_id,
+                user_text=user_text,
+            )
         config = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
@@ -1262,6 +1507,7 @@ class OpenTulpaLangGraphRuntime:
             customer_id=customer_id,
             thread_id=thread_id,
             turn_mode=turn_mode,
+            prompt_mode=prompt_mode,
             pending_context_summary=pending_context_summary,
             trace_id=trace_id,
             skill_state=skill_state,
@@ -1604,7 +1850,7 @@ class OpenTulpaLangGraphRuntime:
                             stream_total_chunks=stream_total_chunks,
                             turn_mode=normalized_turn_mode,
                         )
-                    if not in_tool_phase:
+                    if self._stream_chunk_is_tool_phase(node_name, message_chunk) and not in_tool_phase:
                         in_tool_phase = True
                         if buffered_visible and not yielded_any:
                             self.log_behavior_event(

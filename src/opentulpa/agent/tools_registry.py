@@ -862,6 +862,52 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return payload
 
     @tool
+    async def style_directive_get() -> Any:
+        """Get the user's persistent style/tone preferences."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/style_directive/get",
+            json_body={"customer_id": customer_id},
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"style_directive_get failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def style_directive_set(style_directive: str) -> Any:
+        """Set or overwrite the user's persistent style/tone preferences."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/style_directive/set",
+            json_body={
+                "customer_id": customer_id,
+                "style_directive": style_directive,
+                "source": "langgraph_tool",
+            },
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"style_directive_set failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def style_directive_clear() -> Any:
+        """Clear the user's persistent style/tone preferences."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/style_directive/clear",
+            json_body={"customer_id": customer_id},
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"style_directive_clear failed: {r.text}"}
+        return r.json()
+
+    @tool
     async def lessons_learnt(
         action: str,
         lesson: str = "",

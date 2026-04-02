@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage
 from opentulpa.agent.graph_builder import build_runtime_graph
@@ -166,11 +167,12 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
         return {"usable": True, "mismatch": False, "applies": True}
 
     runtime._model_with_tools = model
-    runtime._checkpointer = _FakeCheckpointer()
+    runtime._checkpointer = InMemorySaver()
     runtime._list_available_skills = _unexpected_list  # type: ignore[method-assign]
     runtime._resolve_skill_context = _unexpected_resolve  # type: ignore[method-assign]
     runtime._load_active_directive = _directive  # type: ignore[method-assign]
     runtime._load_thread_rollup = lambda thread_id: None  # type: ignore[assignment]
+    runtime._thread_rollup_service = None
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
     runtime._tools = {}

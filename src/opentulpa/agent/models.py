@@ -25,12 +25,18 @@ class AgentState(TypedDict, total=False):
     customer_id: str
     thread_id: str
     turn_mode: Literal["interactive", "routine_wake", "approval_recovery", "event_notification"]
+    prompt_mode: Literal["literal_chat", "task_chat", "execution"]
     turn_status: Literal["running", "approval_pending", "completed", "failed"]
     final_response_text: str
     pending_context_summary: str
+    style_card: str
     active_skill_query: str
-    active_skill_context: str
     active_skill_names: list[str]
+    active_available_skills: list[dict[str, Any]]
+    active_skill_discovery_context: str
+    active_invoked_skill_context: str
+    active_invoked_skill_names: list[str]
+    active_skill_context: str
     tool_outcomes: list[ToolOutcome]
     tool_validation_passed: bool
     tool_error_count: int

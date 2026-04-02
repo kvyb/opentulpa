@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+import re
 from typing import Any
 
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
@@ -14,6 +15,12 @@ from opentulpa.agent.utils import (
 )
 from opentulpa.agent.utils import (
     message_to_text as _message_to_text,
+)
+
+_SECRET_PATTERNS = (
+    r"\b(?:api[_-]?key|api[_-]?hash|client[_-]?secret|access[_-]?token|refresh[_-]?token|stringsession|session[_-]?token)\b\s*[:=]\s*[^\s,;]+",
+    r"\bmlsn\.[A-Za-z0-9._-]+",
+    r"\bGOCSPX-[A-Za-z0-9._-]+",
 )
 
 
@@ -74,6 +81,41 @@ def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
     return raw[:max_chars].strip()
 
 
+def _sanitize_rollup_text(text: str) -> str:
+    cleaned = str(text or "")
+    for pattern in _SECRET_PATTERNS:
+        cleaned = re.sub(pattern, "[redacted secret reference]", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def split_rollup_sections(text: str) -> dict[str, str]:
+    raw = _sanitize_rollup_text(text)
+    if not raw:
+        return {
+            "conversation_summary": "",
+            "open_loops": "",
+            "durable_facts": "",
+            "sensitive_refs": "",
+            "style_notes": "",
+        }
+    lowered = raw.lower()
+    return {
+        "conversation_summary": raw[:4000].strip(),
+        "open_loops": (
+            raw[:1500].strip()
+            if any(token in lowered for token in ("unresolved", "open loop", "next step", "follow-up"))
+            else ""
+        ),
+        "durable_facts": raw[:2500].strip(),
+        "sensitive_refs": "",
+        "style_notes": (
+            raw[:500].strip()
+            if any(token in lowered for token in ("tone", "style", "concise", "formal", "friendly", "warm"))
+            else ""
+        ),
+    }
+
+
 def _select_split_index(message_tokens: list[int], *, tokens_to_compact: int) -> int:
     if not message_tokens or len(message_tokens) <= 1 or tokens_to_compact <= 0:
         return 0
@@ -121,9 +163,9 @@ def split_text_chunks(text: str, *, approx_tokens_per_chunk: int = 25000) -> lis
 
 async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: str) -> str:
     rollup_budget = _rollup_token_budget(runtime)
-    running = _trim_text_to_token_budget(str(existing_rollup or "").strip(), rollup_budget)
+    running = _trim_text_to_token_budget(_sanitize_rollup_text(str(existing_rollup or "").strip()), rollup_budget)
     chunk_budget = min(25000, _compaction_source_budget(runtime))
-    chunks = split_text_chunks(additional_text, approx_tokens_per_chunk=chunk_budget)
+    chunks = split_text_chunks(_sanitize_rollup_text(additional_text), approx_tokens_per_chunk=chunk_budget)
     if not chunks:
         return running
     existing_chars = max(4000, rollup_budget * 4)
@@ -153,9 +195,9 @@ async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: s
                 ),
             ]
         )
-        running = _content_to_text(getattr(response, "content", "")).strip() or running
+        running = _sanitize_rollup_text(_content_to_text(getattr(response, "content", "")).strip() or running)
         running = _trim_text_to_token_budget(running, rollup_budget)
-    return _trim_text_to_token_budget(running, rollup_budget)
+    return _trim_text_to_token_budget(_sanitize_rollup_text(running), rollup_budget)
 
 
 async def persist_rollup_memory(
@@ -178,7 +220,7 @@ async def persist_rollup_memory(
                         "role": "user",
                         "content": (
                             f"Thread context rollup updated for {thread_id}: "
-                            f"{str(rollup or '')[:12000]}"
+                            f"{_sanitize_rollup_text(str(rollup or ''))[:12000]}"
                         ),
                     }
                 ],

@@ -23,6 +23,18 @@ from opentulpa.agent.models import AgentState
 from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
 )
+from opentulpa.agent.prompt_sections import (
+    build_core_policy_message as _build_core_policy_message,
+)
+from opentulpa.agent.prompt_sections import (
+    build_prompt_mode_message as _build_prompt_mode_message,
+)
+from opentulpa.agent.prompt_sections import (
+    build_retrieved_context_message as _build_retrieved_context_message,
+)
+from opentulpa.agent.prompt_sections import (
+    build_style_card_message as _build_style_card_message,
+)
 from opentulpa.agent.tool_message_protocol import (
     enforce_tool_message_protocol as _enforce_tool_message_protocol,
 )
@@ -348,6 +360,68 @@ def _build_skill_glossary_context(available_skills: Any) -> str:
     return "\n".join(lines)
 
 
+def _build_relevant_skill_discovery_context(
+    *,
+    available_skills: Any,
+    selected_names: list[str] | None,
+) -> str:
+    if not isinstance(available_skills, list) or not selected_names:
+        return ""
+    wanted = {str(name).strip() for name in selected_names if str(name).strip()}
+    if not wanted:
+        return ""
+    lines = [
+        "Skills relevant to this task:",
+        "These are discovery hints only. Use skill_get(name) before relying on a skill's actual instructions.",
+    ]
+    seen: set[str] = set()
+    for item in available_skills:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name or name not in wanted or name in seen:
+            continue
+        seen.add(name)
+        description = " ".join(str(item.get("description", "")).split()).strip()
+        scope = str(item.get("scope", "")).strip() or "user"
+        if description:
+            lines.append(f"- {name} ({scope}): {description[:220]}")
+        else:
+            lines.append(f"- {name} ({scope})")
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
+def _extract_invoked_skill_snapshot(result: Any, *, requested_name: str) -> tuple[str, str] | None:
+    if not isinstance(result, dict):
+        return None
+    name = str(result.get("name", "")).strip() or str(requested_name or "").strip()
+    if not name:
+        return None
+    description = str(result.get("description", "")).strip()
+    scope = str(result.get("scope", "")).strip() or "user"
+    skill_markdown = str(result.get("skill_markdown", "")).strip()
+    if not skill_markdown:
+        instructions = str(result.get("instructions", "")).strip()
+        supporting = result.get("supporting_files")
+        if instructions:
+            skill_markdown = instructions
+        elif isinstance(supporting, dict) and supporting:
+            skill_markdown = "\n\n".join(
+                f"[{key}]\n{str(value).strip()}"
+                for key, value in supporting.items()
+                if str(key).strip() and str(value).strip()
+            ).strip()
+    if not skill_markdown:
+        return None
+    header = [f"Skill: {name}", f"Scope: {scope}"]
+    if description:
+        header.append(f"Description: {description}")
+    content = "\n".join(header) + f"\n\nSKILL.md:\n{skill_markdown[:3500]}"
+    return name, content
+
+
 def _normalize_approval_id(value: Any) -> str:
     text = str(value or "").strip()
     if text.lower() in {"none", "null"}:
@@ -462,7 +536,7 @@ def build_runtime_graph(runtime: Any):
     forbidden_tool_args: dict[str, set[str]] = {name: {"customer_id"} for name in customer_scoped_tools}
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}
 
-    system_prompt = _build_system_prompt_message()
+    system_prompt = _build_core_policy_message()
 
     def _log(state: AgentState | None, event: str, **fields: Any) -> None:
         log_event = getattr(runtime, "log_behavior_event", None)
@@ -486,6 +560,7 @@ def build_runtime_graph(runtime: Any):
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
+        prompt_mode = str(state.get("prompt_mode", "task_chat")).strip().lower() or "task_chat"
         messages = state.get("messages", [])
         latest_user = _latest_user_text(messages)
         _log(
@@ -496,14 +571,30 @@ def build_runtime_graph(runtime: Any):
             turn_mode=turn_mode,
         )
         cached_query = str(state.get("active_skill_query", "")).strip()
-        cached_context = str(state.get("active_skill_context", "")).strip()
         cached_names = state.get("active_skill_names", []) or []
         cached_available = state.get("active_available_skills", []) or []
+        cached_discovery = str(state.get("active_skill_discovery_context", "")).strip()
+        cached_invoked_names = state.get("active_invoked_skill_names", []) or []
+        cached_invoked_context = str(state.get("active_invoked_skill_context", "")).strip()
+        legacy_cached_context = str(state.get("active_skill_context", "")).strip()
         skill_query = cached_query
-        skill_context = cached_context
         skill_names = cached_names if isinstance(cached_names, list) else []
+        skill_discovery_context = cached_discovery
+        invoked_skill_names = (
+            [str(n).strip() for n in cached_invoked_names if str(n).strip()]
+            if isinstance(cached_invoked_names, list)
+            else []
+        )
+        invoked_skill_context = cached_invoked_context or legacy_cached_context
         available_skills = cached_available if isinstance(cached_available, list) else []
-        if latest_user and latest_user != cached_query:
+        rollup_sections = runtime._load_thread_rollup_sections(thread_id) if prompt_mode != "literal_chat" else {}
+        should_retrieve = runtime._has_retrieval_evidence(
+            user_text=latest_user,
+            prompt_mode=prompt_mode,
+            skill_candidates=available_skills,
+            thread_rollup_sections=rollup_sections,
+        )
+        if should_retrieve and latest_user and latest_user != cached_query:
             if not available_skills:
                 list_skills = getattr(runtime, "_list_available_skills", None)
                 if callable(list_skills):
@@ -511,20 +602,41 @@ def build_runtime_graph(runtime: Any):
                         available_skills = await list_skills(customer_id)
                     except Exception:
                         available_skills = []
-            resolved = await runtime._resolve_skill_context(
-                customer_id,
-                latest_user,
+            selected = await runtime._select_relevant_skills(
+                customer_id=customer_id,
+                query=latest_user,
                 candidates=available_skills,
+                prompt_mode=prompt_mode,
+                max_skills=3,
             )
-            skill_context = str(resolved.get("context", "")).strip()
-            names = resolved.get("skill_names", [])
-            skill_names = [str(n).strip() for n in names if str(n).strip()] if isinstance(names, list) else []
+            skill_names = [
+                str(item.get("name", "")).strip()
+                for item in selected
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            ]
             skill_query = latest_user
-        skill_glossary_context = _build_skill_glossary_context(available_skills)
-        active_directive = await runtime._load_active_directive(customer_id)
-        thread_rollup = runtime._load_thread_rollup(thread_id)
+        skill_discovery_context = _build_relevant_skill_discovery_context(
+            available_skills=available_skills,
+            selected_names=skill_names,
+        )
+        style_card = str(state.get("style_card", "")).strip()
+        active_directive = await runtime._load_active_directive(customer_id) if prompt_mode != "literal_chat" else None
+        thread_rollup = (
+            "\n\n".join(
+                part for part in (
+                    str(rollup_sections.get("open_loops") or "").strip(),
+                    str(rollup_sections.get("durable_facts") or "").strip(),
+                ) if part
+            ).strip()
+            if prompt_mode != "literal_chat" and should_retrieve
+            else None
+        )
         live_time = await runtime._build_live_time_context(customer_id)
-        pending_context_summary = str(state.get("pending_context_summary", "")).strip()
+        pending_context_summary = (
+            str(state.get("pending_context_summary", "")).strip()
+            if prompt_mode == "execution"
+            else ""
+        )
         link_alias_context = runtime._build_link_alias_context(
             customer_id=customer_id,
             user_text=latest_user,
@@ -534,6 +646,7 @@ def build_runtime_graph(runtime: Any):
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
         prompt_messages_base: list[AnyMessage] = [
             system_prompt,
+            _build_prompt_mode_message(prompt_mode),  # type: ignore[arg-type]
             _build_turn_mode_system_message(turn_mode),
             SystemMessage(
                 content=(
@@ -554,6 +667,11 @@ def build_runtime_graph(runtime: Any):
                 )
             ),
         ]
+        style_message = _build_style_card_message(style_card)
+        prompt_section_names = ["core_policy", f"prompt_mode:{prompt_mode}", f"turn_mode:{turn_mode}", "customer_scope", "live_time"]
+        if style_message is not None:
+            prompt_messages_base.append(style_message)
+            prompt_section_names.append("style_card")
         optional_messages: list[AnyMessage] = []
         if pending_context_summary:
             pending_text = _trim_text_to_token_budget(
@@ -562,14 +680,15 @@ def build_runtime_graph(runtime: Any):
             )
             if pending_text:
                 optional_messages.append(
-                    SystemMessage(
-                        content=(
-                            "Background system events summary (not user-authored).\n"
+                    _build_retrieved_context_message(
+                        title="Background system events summary (not user-authored).",
+                        body=(
                             "Use this only to reconcile hidden state and never quote event lines directly.\n"
                             f"{pending_text}"
-                        )
+                        ),
                     )
                 )
+                prompt_section_names.append("pending_context")
         if active_directive:
             directive_text = _trim_text_to_token_budget(
                 active_directive,
@@ -577,14 +696,15 @@ def build_runtime_graph(runtime: Any):
             )
             if directive_text:
                 optional_messages.append(
-                    SystemMessage(
-                        content=(
-                            "Active persistent directive profile for this user. "
-                            "Treat this as a high-priority preference unless user overrides it now:\n"
+                    _build_retrieved_context_message(
+                        title="Active persistent task/profile directive.",
+                        body=(
+                            "Treat this as relevant task context, not conversational topic guidance.\n"
                             f"{directive_text}"
-                        )
+                        ),
                     )
                 )
+                prompt_section_names.append("task_directive")
         if thread_rollup:
             rollup_text = _trim_text_to_token_budget(
                 thread_rollup,
@@ -592,42 +712,50 @@ def build_runtime_graph(runtime: Any):
             )
             if rollup_text:
                 optional_messages.append(
-                    SystemMessage(
-                        content=(
-                            "Compressed older thread context (already summarized):\n"
-                            f"{rollup_text}"
-                        )
+                    _build_retrieved_context_message(
+                        title="Compressed older thread context.",
+                        body=rollup_text,
                     )
                 )
-        if skill_context:
-            skill_text = _trim_text_to_token_budget(
-                skill_context,
+                prompt_section_names.append("thread_rollup")
+        if skill_discovery_context and prompt_mode != "literal_chat":
+            discovery_text = _trim_text_to_token_budget(
+                skill_discovery_context,
+                token_budget=max(160, min(620, int(low_budget * 0.18))),
+            )
+            if discovery_text:
+                optional_messages.append(
+                    _build_retrieved_context_message(
+                        title="Relevant skill discovery for this turn.",
+                        body=discovery_text,
+                    )
+                )
+                prompt_section_names.append("skill_discovery")
+        if invoked_skill_context and prompt_mode != "literal_chat":
+            invoked_text = _trim_text_to_token_budget(
+                invoked_skill_context,
                 token_budget=max(400, min(1800, int(low_budget * 0.45))),
             )
-            if skill_text:
+            if invoked_text:
                 optional_messages.append(
-                    SystemMessage(
-                        content=(
-                            "Matched reusable skills for this user request "
-                            f"(selected: {', '.join(skill_names) if skill_names else 'unknown'}):\n\n"
-                            f"{skill_text}"
-                        )
+                    _build_retrieved_context_message(
+                        title=(
+                            "Previously invoked skill instructions still relevant in this session "
+                            f"(skills: {', '.join(invoked_skill_names) if invoked_skill_names else 'unknown'})."
+                        ),
+                        body=invoked_text,
                     )
                 )
-        if skill_glossary_context:
-            glossary_text = _trim_text_to_token_budget(
-                skill_glossary_context,
-                token_budget=max(180, min(620, int(low_budget * 0.18))),
-            )
-            if glossary_text:
-                optional_messages.append(SystemMessage(content=glossary_text))
-        if link_alias_context:
+                prompt_section_names.append("invoked_skills")
+        if link_alias_context and prompt_mode != "literal_chat":
             aliases_text = _trim_text_to_token_budget(
                 link_alias_context,
                 token_budget=max(120, min(320, int(low_budget * 0.08))),
             )
             if aliases_text:
                 optional_messages.append(SystemMessage(content=aliases_text))
+                prompt_section_names.append("link_aliases")
+        optional_messages = [msg for msg in optional_messages if msg is not None]
 
         prompt_messages: list[AnyMessage] = [*prompt_messages_base]
         if optional_messages:
@@ -667,6 +795,7 @@ def build_runtime_graph(runtime: Any):
             history_budget=history_budget,
             history_message_count=len(bounded_messages),
             optional_context_messages=max(0, len(prompt_messages) - len(prompt_messages_base)),
+            prompt_sections=",".join(prompt_section_names),
             turn_mode=turn_mode,
         )
         response = await runtime._model_with_tools.ainvoke(
@@ -686,9 +815,12 @@ def build_runtime_graph(runtime: Any):
         update: dict[str, Any] = {"messages": [response], "turn_status": "running"}
         if skill_query:
             update["active_skill_query"] = skill_query
-            update["active_skill_context"] = skill_context
             update["active_skill_names"] = skill_names
             update["active_available_skills"] = available_skills
+            update["active_skill_discovery_context"] = skill_discovery_context
+            update["active_invoked_skill_context"] = invoked_skill_context
+            update["active_invoked_skill_names"] = invoked_skill_names
+            update["active_skill_context"] = invoked_skill_context
         goto: Literal["validate_tools", "claim_check"] = (
             "validate_tools"
             if isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
@@ -799,6 +931,15 @@ def build_runtime_graph(runtime: Any):
         tool_outcomes: list[dict[str, Any]] = []
         approval_handoff = False
         had_error = False
+        invoked_skill_names = state.get("active_invoked_skill_names", []) or []
+        invoked_skill_list = (
+            [str(n).strip() for n in invoked_skill_names if str(n).strip()]
+            if isinstance(invoked_skill_names, list)
+            else []
+        )
+        invoked_skill_context = str(state.get("active_invoked_skill_context", "")).strip() or str(
+            state.get("active_skill_context", "")
+        ).strip()
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
@@ -911,6 +1052,19 @@ def build_runtime_graph(runtime: Any):
                             "result_text": result_text,
                         }
                     )
+                    if call_name == "skill_get":
+                        requested_name = str(args.get("name", "")).strip()
+                        snapshot = _extract_invoked_skill_snapshot(result, requested_name=requested_name)
+                        if snapshot is not None:
+                            skill_name, skill_text = snapshot
+                            merged_names = [*invoked_skill_list]
+                            if skill_name not in merged_names:
+                                merged_names.append(skill_name)
+                            invoked_skill_list = merged_names[-3:]
+                            if invoked_skill_context:
+                                invoked_skill_context = f"{invoked_skill_context}\n\n---\n\n{skill_text}"
+                            else:
+                                invoked_skill_context = skill_text
             except Exception as exc:
                 had_error = True
                 error_text = f"TOOL_ERROR: {call_name} failed: {exc}"
@@ -947,6 +1101,9 @@ def build_runtime_graph(runtime: Any):
             "tool_outcomes": tool_outcomes,
             "approval_handoff": approval_handoff,
             "turn_status": "approval_pending" if approval_handoff else "running",
+            "active_invoked_skill_names": invoked_skill_list,
+            "active_invoked_skill_context": invoked_skill_context,
+            "active_skill_context": invoked_skill_context,
         }
         if had_error:
             update["tool_error_count"] = int(state.get("tool_error_count", 0)) + 1

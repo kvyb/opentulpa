@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from opentulpa.agent.graph_builder import (
+    _build_relevant_skill_discovery_context,
     _build_tool_validation_repair_message,
     _build_skill_glossary_context,
+    _extract_invoked_skill_snapshot,
     _build_system_prompt_message,
     _enforce_tool_message_protocol,
     _normalize_approval_id,
@@ -10,6 +12,13 @@ from opentulpa.agent.graph_builder import (
     _summarize_tool_validation_errors,
     _validate_model_tool_call,
 )
+from opentulpa.agent.prompt_classifier import classify_prompt_mode
+from opentulpa.agent.prompt_sections import (
+    build_core_policy_message,
+    build_prompt_mode_message,
+    build_style_card_message,
+)
+from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message,
@@ -53,6 +62,37 @@ def test_build_skill_glossary_context_is_high_level_and_points_to_skill_get() ->
     assert "- routine-schedule-composer (global): Compose robust routine instructions" in text
 
 
+def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
+    text = _build_relevant_skill_discovery_context(
+        available_skills=[
+            {"name": "signal-integration-operator", "description": "Create thin webhook connectors.", "scope": "global"},
+            {"name": "routine-schedule-composer", "description": "Compose robust routine instructions", "scope": "global"},
+        ],
+        selected_names=["signal-integration-operator"],
+    )
+    assert "Skills relevant to this task:" in text
+    assert "Use skill_get(name) before relying on a skill's actual instructions." in text
+    assert "signal-integration-operator" in text
+    assert "routine-schedule-composer" not in text
+
+
+def test_extract_invoked_skill_snapshot_prefers_skill_markdown() -> None:
+    result = _extract_invoked_skill_snapshot(
+        {
+            "name": "signal-integration-operator",
+            "scope": "global",
+            "description": "Create thin webhook connectors.",
+            "skill_markdown": "# Steps\nUse the inbound signal bridge.",
+        },
+        requested_name="signal-integration-operator",
+    )
+    assert result is not None
+    name, text = result
+    assert name == "signal-integration-operator"
+    assert "SKILL.md:" in text
+    assert "Use the inbound signal bridge." in text
+
+
 def test_turn_mode_policy_messages_are_mode_specific() -> None:
     interactive = str(build_turn_mode_system_message("interactive").content)
     routine_wake = str(build_turn_mode_system_message("routine_wake").content)
@@ -69,6 +109,21 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert execution_origin_for_turn_mode("approval_recovery") == "interactive"
     assert execution_origin_for_turn_mode("interactive", thread_id="wake_legacy") == "scheduled"
     assert execution_origin_for_turn_mode("event_notification", thread_id="wake_legacy") == "interactive"
+
+
+def test_core_policy_message_includes_skill_grounding_rule() -> None:
+    text = str(build_core_policy_message().content)
+    assert "Treat discovered skills as high-level hints" in text
+    assert "call skill_get(name)" in text
+
+
+def test_literal_chat_prompt_mode_discourages_random_follow_up_questions() -> None:
+    literal_chat = str(build_prompt_mode_message("literal_chat").content)
+
+    assert "Answer the visible user question directly." in literal_chat
+    assert "If the user asks a greeting or how-you-are question" in literal_chat
+    assert "Do not pivot into a new topic" in literal_chat
+    assert "follow-up question" in literal_chat
 
 
 def test_validate_model_tool_call_rejects_runtime_managed_args() -> None:
@@ -392,3 +447,44 @@ def test_normalize_approval_id_rejects_none_and_null_strings() -> None:
     assert _normalize_approval_id("None") == ""
     assert _normalize_approval_id("null") == ""
     assert _normalize_approval_id("apr_123") == "apr_123"
+
+
+def test_prompt_mode_classifier_prefers_literal_chat_for_short_definition_question() -> None:
+    assert (
+        classify_prompt_mode("what does remote fte mean?", turn_mode="interactive")
+        == "literal_chat"
+    )
+
+
+def test_prompt_mode_classifier_prefers_execution_for_action_request() -> None:
+    assert (
+        classify_prompt_mode("search the web and check the latest pricing", turn_mode="interactive")
+        == "execution"
+    )
+
+
+def test_style_sanitizer_removes_domain_content_and_keeps_tone_only() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    text = runtime._sanitize_style_text(
+        "Maintain a friendly, supportive, and proactive tone. "
+        "Balance technical expertise with personal context by mentioning his work at ManyChat "
+        "or his interests in Bali. Avoid being overly formal. No emojis unless specifically requested."
+    )
+    assert "ManyChat" not in text
+    assert "Bali" not in text
+    assert "warm" in text or "friendly" in text
+    assert "avoid emojis" in text
+
+
+def test_style_card_message_is_explicitly_low_salience() -> None:
+    message = build_style_card_message("Style preferences:\n- be concise\n- keep a warm, direct tone")
+    assert message is not None
+    text = str(message.content or "")
+    assert "tone only" in text.lower()
+    assert "Do not use it to introduce project, company, or domain content." in text
+
+
+def test_prompt_mode_message_blocks_hidden_context_for_literal_chat() -> None:
+    text = str(build_prompt_mode_message("literal_chat").content or "")
+    assert "Answer the visible user question directly." in text
+    assert "Do not pull in hidden project context" in text
