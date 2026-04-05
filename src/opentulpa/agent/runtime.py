@@ -97,6 +97,29 @@ from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.ids import new_short_id
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_prompt_cache_invoke_extras(
+    *,
+    enabled: bool,
+    model_name: str,
+    ttl_1h: bool,
+) -> dict[str, Any]:
+    """
+    Provider-specific request extras for prompt caching.
+
+    Currently this enables OpenRouter request-level cache_control for Anthropic
+    Claude models and no-ops for other models/providers.
+    """
+    if not enabled:
+        return {}
+    slug = (model_name or "").strip().lower()
+    if "anthropic/" not in slug and "claude" not in slug:
+        return {}
+    cc: dict[str, Any] = {"type": "ephemeral"}
+    if ttl_1h:
+        cc["ttl"] = "1h"
+    return {"extra_body": {"cache_control": cc}}
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
 STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
@@ -241,6 +264,8 @@ class OpenTulpaLangGraphRuntime:
         browser_use_model_override: str | None = None,
         browser_use_max_concurrent_tasks: int = 2,
         browser_use_task_retention_seconds: int = 1800,
+        prompt_caching_enabled: bool = True,
+        prompt_cache_ttl_1h: bool = False,
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
@@ -294,6 +319,11 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_model_override = str(browser_use_model_override or "").strip()
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
+        self._model_invoke_extras: dict[str, Any] = _provider_prompt_cache_invoke_extras(
+            enabled=bool(prompt_caching_enabled),
+            model_name=self.model_name,
+            ttl_1h=bool(prompt_cache_ttl_1h),
+        )
         self._browser_use_local_manager: Any | None = None
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_customer_id",
@@ -356,6 +386,10 @@ class OpenTulpaLangGraphRuntime:
         self._model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
+
+    def model_invoke_extras(self) -> dict[str, Any]:
+        """Extra kwargs for main agent model.ainvoke (e.g. OpenRouter prompt cache_control)."""
+        return dict(self._model_invoke_extras)
 
     @staticmethod
     def _looks_like_provisional_reply(text: str) -> bool:

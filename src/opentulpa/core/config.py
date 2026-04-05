@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -197,6 +197,26 @@ class Settings(BaseSettings):
         ge=60,
         le=86400,
         description="How long completed local Browser Use task records remain queryable in memory.",
+    )
+    agent_prompt_caching_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AGENT_PROMPT_CACHING_ENABLED",
+            "AGENT_ANTHROPIC_PROMPT_CACHING",
+        ),
+        description=(
+            "When True, enable provider-specific request prompt caching when supported by "
+            "the current model/provider. Unsupported models silently no-op. "
+            "See https://openrouter.ai/docs/guides/best-practices/prompt-caching"
+        ),
+    )
+    agent_prompt_cache_ttl_1h: bool = Field(
+        default=False,
+        description=(
+            "When prompt caching is enabled, request 1-hour cache TTL instead of the "
+            "default 5-minute TTL where supported (higher cache write cost, better for "
+            "long sessions)."
+        ),
     )
 
     # The OPENROUTER_* env names are kept for compatibility even when pointing at

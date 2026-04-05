@@ -24,7 +24,7 @@ from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
 )
 from opentulpa.agent.prompt_sections import (
-    build_core_policy_message as _build_core_policy_message,
+    PROMPT_DYNAMIC_BOUNDARY,
 )
 from opentulpa.agent.prompt_sections import (
     build_prompt_mode_message as _build_prompt_mode_message,
@@ -536,7 +536,7 @@ def build_runtime_graph(runtime: Any):
     forbidden_tool_args: dict[str, set[str]] = {name: {"customer_id"} for name in customer_scoped_tools}
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}
 
-    system_prompt = _build_core_policy_message()
+    stable_system_message = _build_system_prompt_message()
 
     def _log(state: AgentState | None, event: str, **fields: Any) -> None:
         log_event = getattr(runtime, "log_behavior_event", None)
@@ -644,33 +644,42 @@ def build_runtime_graph(runtime: Any):
         prompt_budget = max(4000, int(getattr(runtime, "_context_token_limit", 12000)))
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
-        prompt_messages_base: list[AnyMessage] = [
-            system_prompt,
-            _build_prompt_mode_message(prompt_mode),  # type: ignore[arg-type]
-            _build_turn_mode_system_message(turn_mode),
-            SystemMessage(
-                content=(
-                    f"customer_id={customer_id}. "
-                    "Customer scope for customer-scoped tools is resolved automatically from runtime state."
-                )
+        style_message = _build_style_card_message(style_card)
+        volatile_parts: list[str] = [
+            PROMPT_DYNAMIC_BOUNDARY,
+            _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
+            _content_to_text(_build_turn_mode_system_message(turn_mode).content),
+            (
+                f"customer_id={customer_id}. "
+                "Customer scope for customer-scoped tools is resolved automatically from runtime state."
             ),
-            SystemMessage(
-                content=(
-                    "Live time context (auto-injected this turn):\n"
-                    f"- server_time_local_iso: {live_time['server_time_local_iso']}\n"
-                    f"- server_time_utc_iso: {live_time['server_time_utc_iso']}\n"
-                    f"- server_utc_offset: {live_time['server_utc_offset']}\n"
-                    f"- user_time_local_iso: {live_time['user_time_local_iso']}\n"
-                    f"- user_utc_offset: {live_time['user_utc_offset']}\n"
-                    f"- user_time_source: {live_time['user_time_source']}\n"
-                    "Use these concrete values for all relative-time reasoning in this turn."
-                )
+            (
+                "Live time context (auto-injected this turn):\n"
+                f"- server_time_local_iso: {live_time['server_time_local_iso']}\n"
+                f"- server_time_utc_iso: {live_time['server_time_utc_iso']}\n"
+                f"- server_utc_offset: {live_time['server_utc_offset']}\n"
+                f"- user_time_local_iso: {live_time['user_time_local_iso']}\n"
+                f"- user_utc_offset: {live_time['user_utc_offset']}\n"
+                f"- user_time_source: {live_time['user_time_source']}\n"
+                "Use these concrete values for all relative-time reasoning in this turn."
             ),
         ]
-        style_message = _build_style_card_message(style_card)
-        prompt_section_names = ["core_policy", f"prompt_mode:{prompt_mode}", f"turn_mode:{turn_mode}", "customer_scope", "live_time"]
         if style_message is not None:
-            prompt_messages_base.append(style_message)
+            volatile_parts.append(_content_to_text(style_message.content))
+        volatile_system_message = SystemMessage(content="\n\n".join(volatile_parts))
+        prompt_messages_base: list[AnyMessage] = [
+            stable_system_message,
+            volatile_system_message,
+        ]
+        prompt_section_names = [
+            "stable_core_policy",
+            "volatile_injected",
+            f"prompt_mode:{prompt_mode}",
+            f"turn_mode:{turn_mode}",
+            "customer_scope",
+            "live_time",
+        ]
+        if style_message is not None:
             prompt_section_names.append("style_card")
         optional_messages: list[AnyMessage] = []
         if pending_context_summary:
@@ -798,11 +807,19 @@ def build_runtime_graph(runtime: Any):
             prompt_sections=",".join(prompt_section_names),
             turn_mode=turn_mode,
         )
+        invoke_extras: dict[str, Any] = {}
+        extras_fn = getattr(runtime, "model_invoke_extras", None)
+        if callable(extras_fn):
+            try:
+                invoke_extras = extras_fn()
+            except Exception:
+                invoke_extras = {}
         response = await runtime._model_with_tools.ainvoke(
             [
                 *prompt_messages,
                 *bounded_messages,
-            ]
+            ],
+            **invoke_extras,
         )
         response_text = _content_to_text(getattr(response, "content", ""))
         _log(

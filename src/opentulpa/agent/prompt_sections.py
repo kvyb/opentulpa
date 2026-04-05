@@ -8,6 +8,15 @@ from opentulpa.agent.lc_messages import SystemMessage
 
 PromptMode = Literal["literal_chat", "task_chat", "execution"]
 
+# Placed between stable policy and per-turn injected context. Keeps the prefix
+# before this marker byte-stable for provider prompt caching (OpenAI/Gemini
+# implicit; Anthropic explicit / automatic via OpenRouter).
+PROMPT_DYNAMIC_BOUNDARY = (
+    "[OPENTULPA_PROMPT_DYNAMIC_BOUNDARY]\n"
+    "Below this marker, injected context may change every turn (modes, time, "
+    "retrieval, skills, aliases)."
+)
+
 
 def build_core_policy_message() -> SystemMessage:
     text = (

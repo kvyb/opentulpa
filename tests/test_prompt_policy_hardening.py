@@ -5,13 +5,13 @@ from opentulpa.agent.graph_builder import (
     _build_tool_validation_repair_message,
     _build_skill_glossary_context,
     _extract_invoked_skill_snapshot,
-    _build_system_prompt_message,
     _enforce_tool_message_protocol,
     _normalize_approval_id,
     _sanitize_history_messages_for_model,
     _summarize_tool_validation_errors,
     _validate_model_tool_call,
 )
+from opentulpa.agent.prompt_policy import build_system_prompt_message as _build_system_prompt_message
 from opentulpa.agent.prompt_classifier import classify_prompt_mode
 from opentulpa.agent.prompt_sections import (
     build_core_policy_message,
