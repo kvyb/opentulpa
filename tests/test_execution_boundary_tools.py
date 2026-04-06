@@ -375,8 +375,30 @@ async def test_routine_create_requires_non_empty_implementation_command() -> Non
 async def test_signal_rule_upsert_and_tulpa_reload_call_internal_routes() -> None:
     runtime = _DummyRuntime(
         [
-            _Response(200, {"ok": True, "rule": {"source": "manychat", "wake_mode": "always"}}),
-            _Response(200, {"ok": True, "rules": [{"source": "manychat", "wake_mode": "always"}]}),
+            _Response(
+                200,
+                {
+                    "ok": True,
+                    "rule": {
+                        "source": "manychat",
+                        "wake_mode": "always",
+                        "handler_skill_name": "manychat-incoming-handler",
+                    },
+                },
+            ),
+            _Response(
+                200,
+                {
+                    "ok": True,
+                    "rules": [
+                        {
+                            "source": "manychat",
+                            "wake_mode": "always",
+                            "handler_skill_name": "manychat-incoming-handler",
+                        }
+                    ],
+                },
+            ),
             _Response(200, {"ok": True, "public_loaded": ["manychat_live"]}),
         ]
     )
@@ -390,6 +412,7 @@ async def test_signal_rule_upsert_and_tulpa_reload_call_internal_routes() -> Non
             "thread_id": "thread_1",
             "batch_window_seconds": 0,
             "auto_reply": True,
+            "handler_skill_name": "manychat-incoming-handler",
             "guidance_text": "Reply briefly.",
         }
     )
@@ -397,7 +420,9 @@ async def test_signal_rule_upsert_and_tulpa_reload_call_internal_routes() -> Non
     reload_result = await tools["tulpa_reload"].ainvoke({})
 
     assert rule["source"] == "manychat"
+    assert rule["handler_skill_name"] == "manychat-incoming-handler"
     assert listed[0]["source"] == "manychat"
+    assert listed[0]["handler_skill_name"] == "manychat-incoming-handler"
     assert reload_result["public_loaded"] == ["manychat_live"]
     assert runtime.calls[0][1] == "/internal/signals/rules/upsert"
     assert runtime.calls[1][1] == "/internal/signals/rules"

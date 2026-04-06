@@ -8,13 +8,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.core.config import get_openai_compatible_api_key_from_env
+from opentulpa.core.debug_logs import read_debug_log_bytes
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.attachments import (
     build_uploaded_files_context,
     extract_attachments,
     ingest_attachments,
 )
-from opentulpa.interfaces.telegram.client import parse_telegram_update
+from opentulpa.interfaces.telegram.client import TelegramClient, parse_telegram_update
 from opentulpa.interfaces.telegram.constants import STATE_PATH
 from opentulpa.interfaces.telegram.env_management import (
     missing_key_prompt,
@@ -70,7 +72,8 @@ def _format_agent_error_for_user(exc: Exception) -> str:
     ):
         return (
             "Model authentication failed (the configured provider key is invalid or revoked). "
-            "Set a valid OPENROUTER_API_KEY for your OpenAI-compatible endpoint and restart OpenTulpa."
+            "Set a valid OPENAI_COMPATIBLE_API_KEY for your OpenAI-compatible endpoint and restart OpenTulpa. "
+            "OPENROUTER_API_KEY is still accepted as a legacy alias."
         )
     if "429" in lowered or "rate limit" in lowered:
         return "The model provider is rate-limiting requests right now. Please try again shortly."
@@ -139,8 +142,36 @@ def _start_help_text() -> str:
         "Commands:\n"
         "/start\n"
         "/status\n"
-        "/fresh"
+        "/fresh\n"
+        "/debug_logs"
     )
+
+
+def _telegram_command_name(text: str) -> str:
+    head = str(text or "").strip().split(None, 1)[0].lower()
+    if not head.startswith("/"):
+        return ""
+    return head.split("@", 1)[0]
+
+
+async def _send_debug_logs_file(*, chat_id: int, bot_token: str | None) -> str | None:
+    if not str(bot_token or "").strip():
+        return "Telegram file sending is unavailable because the bot token is not configured."
+    raw_bytes = read_debug_log_bytes()
+    if raw_bytes is None:
+        return "Debug log file is not available yet."
+    sent = await TelegramClient(str(bot_token)).send_file(
+        chat_id=chat_id,
+        filename="app.log",
+        raw_bytes=raw_bytes,
+        kind="document",
+        mime_type="text/plain",
+        caption="OpenTulpa debug log dump",
+        parse_mode="HTML",
+    )
+    if not sent:
+        return "I couldn't send the debug log file right now."
+    return None
 
 
 async def relay_task_event_via_main_agent(
@@ -226,13 +257,13 @@ async def handle_telegram_text(
     admin_user_id = STATE_STORE.update(_ensure_admin)
     _ = int(admin_user_id) == int(ctx.user_id)
 
-    text_lower = ctx.text.lower()
-    if text_lower in {"/start", "/help"}:
+    command_name = _telegram_command_name(ctx.text)
+    if command_name in {"/start", "/help"}:
         return _start_help_text()
-    if text_lower == "/status":
+    if command_name == "/status":
         agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
         return status_text(agent_up)
-    if text_lower == "/fresh":
+    if command_name == "/fresh":
         thread_id, _ = STATE_STORE.update(
             lambda state: _reset_chat_session_context(
                 state,
@@ -245,8 +276,10 @@ async def handle_telegram_text(
             f"New thread: {thread_id}. "
             "Your long-term memory is unchanged."
         )
+    if command_name == "/debug_logs":
+        return await _send_debug_logs_file(chat_id=ctx.chat_id, bot_token=bot_token)
 
-    if not os.environ.get("OPENROUTER_API_KEY"):
+    if not get_openai_compatible_api_key_from_env():
         return missing_key_prompt()
     if agent_runtime is None:
         return "Agent runtime is unavailable. Restart OpenTulpa and try again."

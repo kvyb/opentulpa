@@ -438,7 +438,7 @@ class OpenTulpaLangGraphRuntime:
 
     def get_browser_use_local_manager(self) -> Any:
         if self._browser_use_local_manager is None:
-            from opentulpa.agent.browser_use_local import BrowserUseLocalManager
+            from opentulpa.agent.integrations.browser_use_local import BrowserUseLocalManager
 
             self._browser_use_local_manager = BrowserUseLocalManager(
                 openrouter_api_key=self.openrouter_api_key,

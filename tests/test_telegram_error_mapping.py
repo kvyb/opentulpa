@@ -6,7 +6,7 @@ def test_format_agent_error_authentication() -> None:
         RuntimeError("openai.AuthenticationError: Error code: 401 - User not found.")
     )
     assert "Model authentication failed" in msg
-    assert "OPENROUTER_API_KEY" in msg
+    assert "OPENAI_COMPATIBLE_API_KEY" in msg
 
 
 def test_format_agent_error_rate_limit() -> None:

@@ -14,13 +14,13 @@ from fastapi.responses import JSONResponse
 from opentulpa.api.routes import (
     register_approval_routes,
     register_chat_routes,
+    register_debug_log_routes,
     register_file_routes,
     register_health_routes,
     register_memory_routes,
     register_profile_routes,
     register_scheduler_routes,
     register_skill_routes,
-    register_slack_routes,
     register_task_routes,
     register_telegram_webhook_routes,
     register_tulpa_routes,
@@ -41,7 +41,6 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.signals import SignalInboxService
 from opentulpa.core.config import get_settings
-from opentulpa.integrations.slack_client import grant_slack_write_consent, has_slack_write_consent
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.memory.service import MemoryService
@@ -77,7 +76,6 @@ def _is_trusted_server_client(host: str) -> bool:
 def create_app(
     memory: MemoryService | None = None,
     scheduler: SchedulerService | None = None,
-    slack_client: Any | None = None,
     task_service: TaskService | None = None,
     agent_runtime: Any | None = None,
     context_events: EventContextService | None = None,
@@ -90,7 +88,6 @@ def create_app(
     """Create FastAPI app with internal API, webhook, and agent runtime."""
     memory_service = memory
     scheduler_service = scheduler
-    slack_service = slack_client
     task_runner = task_service
     runtime = agent_runtime
     settings = get_settings()
@@ -137,9 +134,6 @@ def create_app(
 
     def get_scheduler() -> SchedulerService:
         return _require(scheduler_service, "SchedulerService")
-
-    def get_slack() -> Any:
-        return _require(slack_service, "Slack")
 
     def get_tasks() -> TaskService:
         return _require(task_runner, "TaskService")
@@ -243,6 +237,7 @@ def create_app(
         get_agent_runtime=get_agent_runtime,
         get_approvals=get_approvals,
         get_signal_inbox=get_signal_inbox,
+        get_skill_store=get_skill_store,
     )
 
     async def process_wake_event(body: dict[str, Any]) -> None:
@@ -322,6 +317,7 @@ def create_app(
     tulpa_loader.reload()
 
     register_health_routes(app, get_agent_runtime=get_agent_runtime)
+    register_debug_log_routes(app)
     register_chat_routes(app, get_turn_orchestrator=get_turn_orchestrator)
     register_memory_routes(app, get_memory=get_memory)
     register_file_routes(
@@ -358,6 +354,7 @@ def create_app(
         app,
         get_wake_queue=get_wake_queue,
         get_signal_inbox=get_signal_inbox,
+        get_skill_store=get_skill_store,
         llm_model=settings.llm_model,
     )
     register_tulpa_routes(
@@ -366,14 +363,6 @@ def create_app(
         refresh_tulpa_mounts=refresh_tulpa_mounts,
     )
     register_task_routes(app, get_tasks=get_tasks)
-
-    if slack_service is not None:
-        register_slack_routes(
-            app,
-            get_slack=get_slack,
-            has_write_consent=has_slack_write_consent,
-            grant_write_consent=grant_slack_write_consent,
-        )
 
     register_telegram_webhook_routes(
         app,

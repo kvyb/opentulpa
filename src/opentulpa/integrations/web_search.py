@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from opentulpa.core.config import get_openai_compatible_api_key_from_env
+
 logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
@@ -131,9 +133,12 @@ async def web_search(query: str) -> dict[str, object] | str:
     """
     Run a web-backed completion and return cleaned answer + extracted sources.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = get_openai_compatible_api_key_from_env()
     if not api_key:
-        return "Web search is not configured (OPENROUTER_API_KEY missing)."
+        return (
+            "Web search is not configured "
+            "(OPENAI_COMPATIBLE_API_KEY missing; OPENROUTER_API_KEY also accepted)."
+        )
 
     use_model = _default_search_model()
     url = f"{OPENROUTER_BASE}/chat/completions"

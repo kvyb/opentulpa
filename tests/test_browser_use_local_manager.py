@@ -8,7 +8,10 @@ from typing import Any
 
 import pytest
 
-from opentulpa.agent.browser_use_local import BrowserUseLocalManager, _BrowserUseTaskState
+from opentulpa.agent.integrations.browser_use_local import (
+    BrowserUseLocalManager,
+    _BrowserUseTaskState,
+)
 
 
 class _FakeChatOpenAI:
@@ -263,7 +266,7 @@ async def test_local_manager_capture_screenshot_writes_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import opentulpa.agent.browser_use_local as browser_use_local
+    import opentulpa.agent.integrations.browser_use_local as browser_use_local
 
     manager = BrowserUseLocalManager(
         openrouter_api_key="sk-test",
@@ -340,7 +343,7 @@ async def test_local_manager_lists_sessions_and_expires_idle_ones(
 async def test_local_manager_background_cleanup_expires_idle_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import opentulpa.agent.browser_use_local as browser_use_local
+    import opentulpa.agent.integrations.browser_use_local as browser_use_local
 
     manager = BrowserUseLocalManager(
         openrouter_api_key="sk-test",

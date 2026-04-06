@@ -1,31 +1,32 @@
 """API route registrars."""
 
-from opentulpa.api.routes.approvals import register_approval_routes
-from opentulpa.api.routes.chat import register_chat_routes
-from opentulpa.api.routes.files import register_file_routes
-from opentulpa.api.routes.health import register_health_routes
-from opentulpa.api.routes.memory import register_memory_routes
-from opentulpa.api.routes.profiles import register_profile_routes
-from opentulpa.api.routes.scheduler import register_scheduler_routes
-from opentulpa.api.routes.skills import register_skill_routes
-from opentulpa.api.routes.slack import register_slack_routes
-from opentulpa.api.routes.tasks import register_task_routes
-from opentulpa.api.routes.telegram_webhook import register_telegram_webhook_routes
-from opentulpa.api.routes.tulpa import register_tulpa_routes
-from opentulpa.api.routes.wake_search import register_wake_and_search_routes
+from __future__ import annotations
 
-__all__ = [
-    "register_approval_routes",
-    "register_chat_routes",
-    "register_file_routes",
-    "register_health_routes",
-    "register_memory_routes",
-    "register_profile_routes",
-    "register_scheduler_routes",
-    "register_skill_routes",
-    "register_slack_routes",
-    "register_task_routes",
-    "register_telegram_webhook_routes",
-    "register_tulpa_routes",
-    "register_wake_and_search_routes",
-]
+from importlib import import_module
+from typing import Any
+
+_ROUTE_IMPORTS = {
+    "register_approval_routes": "opentulpa.api.routes.approvals",
+    "register_chat_routes": "opentulpa.api.routes.chat",
+    "register_debug_log_routes": "opentulpa.api.routes.debug_logs",
+    "register_file_routes": "opentulpa.api.routes.files",
+    "register_health_routes": "opentulpa.api.routes.health",
+    "register_memory_routes": "opentulpa.api.routes.memory",
+    "register_profile_routes": "opentulpa.api.routes.profiles",
+    "register_scheduler_routes": "opentulpa.api.routes.scheduler",
+    "register_skill_routes": "opentulpa.api.routes.skills",
+    "register_task_routes": "opentulpa.api.routes.tasks",
+    "register_telegram_webhook_routes": "opentulpa.api.routes.telegram_webhook",
+    "register_tulpa_routes": "opentulpa.api.routes.tulpa",
+    "register_wake_and_search_routes": "opentulpa.api.routes.wake_search",
+}
+
+__all__ = list(_ROUTE_IMPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _ROUTE_IMPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    module = import_module(module_name)
+    return getattr(module, name)

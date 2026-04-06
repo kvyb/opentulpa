@@ -757,6 +757,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         thread_id: str = "",
         batch_window_seconds: int = 0,
         auto_reply: bool = True,
+        handler_skill_name: str = "",
         guidance_text: str = "",
     ) -> Any:
         """Create or update signal wake handling rules for an external inbox source."""
@@ -770,6 +771,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 "thread_id": thread_id,
                 "batch_window_seconds": max(0, int(batch_window_seconds)),
                 "auto_reply": bool(auto_reply),
+                "handler_skill_name": handler_skill_name,
                 "guidance_text": guidance_text,
             },
             timeout=10.0,

@@ -76,6 +76,7 @@ async def test_removed_setup_and_set_commands_do_not_write_env(
     fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
     monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
 
     setup_text = await chat_module.handle_telegram_text(
         body={"message": {"chat": {"id": 1}, "from": {"id": 100}, "text": "/setup"}},
@@ -87,13 +88,14 @@ async def test_removed_setup_and_set_commands_do_not_write_env(
             "message": {
                 "chat": {"id": 1},
                 "from": {"id": 100},
-                "text": "/set OPENROUTER_API_KEY secret",
+                "text": "/set OPENAI_COMPATIBLE_API_KEY secret",
             }
         },
         bot_token=None,
         agent_runtime=None,
     )
 
-    assert "Set OPENROUTER_API_KEY" in str(setup_text)
-    assert "Set OPENROUTER_API_KEY" in str(set_text)
+    assert "OPENAI_COMPATIBLE_API_KEY" in str(setup_text)
+    assert "OPENAI_COMPATIBLE_API_KEY" in str(set_text)
     assert os.environ.get("OPENROUTER_API_KEY") is None
+    assert os.environ.get("OPENAI_COMPATIBLE_API_KEY") is None

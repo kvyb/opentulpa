@@ -58,6 +58,7 @@ class SignalInboxService:
                     wake_mode TEXT NOT NULL,
                     batch_window_seconds INTEGER NOT NULL DEFAULT 0,
                     auto_reply INTEGER NOT NULL DEFAULT 1,
+                    handler_skill_name TEXT NOT NULL DEFAULT '',
                     guidance_text TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (source, customer_id, thread_id)
@@ -80,6 +81,18 @@ class SignalInboxService:
                     ON signal_outbox(source, status, id);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(signal_rules)").fetchall()
+            }
+            if "handler_skill_name" not in columns:
+                conn.execute(
+                    """
+                    ALTER TABLE signal_rules
+                    ADD COLUMN handler_skill_name TEXT NOT NULL DEFAULT ''
+                    """
+                )
+                conn.commit()
 
     @staticmethod
     def _json_dict(value: Any) -> dict[str, Any]:
@@ -155,7 +168,7 @@ class SignalInboxService:
             rows = conn.execute(
                 """
                 SELECT source, customer_id, thread_id, wake_mode, batch_window_seconds,
-                       auto_reply, guidance_text, updated_at
+                       auto_reply, handler_skill_name, guidance_text, updated_at
                 FROM signal_rules
                 WHERE source=?
                   AND customer_id IN ('', ?)
@@ -171,6 +184,7 @@ class SignalInboxService:
                 "wake_mode": "classifier",
                 "batch_window_seconds": 0,
                 "auto_reply": True,
+                "handler_skill_name": "",
                 "guidance_text": "",
                 "updated_at": "",
             }
@@ -189,6 +203,7 @@ class SignalInboxService:
             "wake_mode": str(best["wake_mode"]),
             "batch_window_seconds": int(best["batch_window_seconds"]),
             "auto_reply": bool(int(best["auto_reply"])),
+            "handler_skill_name": str(best["handler_skill_name"] or ""),
             "guidance_text": str(best["guidance_text"] or ""),
             "updated_at": str(best["updated_at"] or ""),
         }
@@ -202,6 +217,7 @@ class SignalInboxService:
         thread_id: str = "",
         batch_window_seconds: int = 0,
         auto_reply: bool = True,
+        handler_skill_name: str = "",
         guidance_text: str = "",
     ) -> dict[str, Any]:
         safe_source = self._normalize_text(source)
@@ -214,19 +230,21 @@ class SignalInboxService:
         safe_thread = self._normalize_text(thread_id)
         updated_at = _utc_now_iso()
         safe_batch_window = max(0, min(int(batch_window_seconds), 3600))
+        safe_handler_skill_name = self._normalize_text(handler_skill_name)[:128]
         safe_guidance = str(guidance_text or "").strip()[:4000]
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO signal_rules (
                     source, customer_id, thread_id, wake_mode,
-                    batch_window_seconds, auto_reply, guidance_text, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    batch_window_seconds, auto_reply, handler_skill_name, guidance_text, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, customer_id, thread_id)
                 DO UPDATE SET
                     wake_mode=excluded.wake_mode,
                     batch_window_seconds=excluded.batch_window_seconds,
                     auto_reply=excluded.auto_reply,
+                    handler_skill_name=excluded.handler_skill_name,
                     guidance_text=excluded.guidance_text,
                     updated_at=excluded.updated_at
                 """,
@@ -237,6 +255,7 @@ class SignalInboxService:
                     safe_mode,
                     safe_batch_window,
                     1 if auto_reply else 0,
+                    safe_handler_skill_name,
                     safe_guidance,
                     updated_at,
                 ),
@@ -254,7 +273,7 @@ class SignalInboxService:
     ) -> list[dict[str, Any]]:
         query = (
             "SELECT source, customer_id, thread_id, wake_mode, batch_window_seconds, "
-            "auto_reply, guidance_text, updated_at FROM signal_rules WHERE 1=1"
+            "auto_reply, handler_skill_name, guidance_text, updated_at FROM signal_rules WHERE 1=1"
         )
         params: list[Any] = []
         safe_source = self._normalize_text(source)
@@ -281,6 +300,7 @@ class SignalInboxService:
                 "wake_mode": str(row["wake_mode"]),
                 "batch_window_seconds": int(row["batch_window_seconds"]),
                 "auto_reply": bool(int(row["auto_reply"])),
+                "handler_skill_name": str(row["handler_skill_name"] or ""),
                 "guidance_text": str(row["guidance_text"] or ""),
                 "updated_at": str(row["updated_at"] or ""),
             }

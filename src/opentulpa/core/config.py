@@ -1,9 +1,23 @@
 """Configuration from environment."""
 
 from functools import lru_cache
+import os
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
+LEGACY_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+
+
+def get_openai_compatible_api_key_from_env() -> str | None:
+    value = (
+        os.environ.get(PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV)
+        or os.environ.get(LEGACY_OPENROUTER_API_KEY_ENV)
+        or ""
+    )
+    text = str(value).strip()
+    return text or None
 
 
 class Settings(BaseSettings):
@@ -90,10 +104,6 @@ class Settings(BaseSettings):
         description="Optional CSV allowlist of Telegram numeric user IDs.",
     )
 
-    # Slack (for Slack skill: list channels, read history, post)
-    slack_bot_token: str | None = Field(
-        default=None, description="Slack Bot OAuth token (xoxb-...)"
-    )
     telegram_webhook_secret: str | None = Field(
         default=None,
         description="Optional secret for webhook path",
@@ -111,11 +121,16 @@ class Settings(BaseSettings):
     )
 
     # LLM: single OpenAI-compatible model backend used for agent calls and mem0.
-    openrouter_api_key: str | None = Field(
+    openai_compatible_api_key: str | None = Field(
         default=None,
+        validation_alias=AliasChoices(
+            PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV,
+            LEGACY_OPENROUTER_API_KEY_ENV,
+        ),
         description=(
             "API key for the configured OpenAI-compatible model endpoint "
-            "(loaded from OPENROUTER_API_KEY in env/.env)."
+            f"(loaded from {PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV} in env/.env; "
+            f"{LEGACY_OPENROUTER_API_KEY_ENV} is accepted as a backward-compatible alias)."
         ),
     )
     openrouter_base_url: str = Field(
@@ -221,6 +236,11 @@ class Settings(BaseSettings):
 
     # The OPENROUTER_* env names are kept for compatibility even when pointing at
     # another OpenAI-compatible endpoint via OPENROUTER_BASE_URL.
+
+    @property
+    def openrouter_api_key(self) -> str | None:
+        """Backward-compatible alias for older code/tests."""
+        return self.openai_compatible_api_key
 
 @lru_cache
 def get_settings() -> Settings:

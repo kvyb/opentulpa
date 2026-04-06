@@ -11,11 +11,43 @@ from fastapi.responses import JSONResponse
 from opentulpa.integrations.web_search import web_search as run_web_search
 
 
+def _sanitize_signal_thread_segment(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in raw)
+    cleaned = cleaned.strip("_")
+    return cleaned[:80]
+
+
+def _derive_signal_thread_id(
+    *,
+    source: str,
+    customer_id: str,
+    owner_thread_id: str,
+    thread_id: str,
+    external_subject_id: str,
+    external_conversation_id: str,
+) -> str:
+    if owner_thread_id:
+        return owner_thread_id
+    if thread_id:
+        return thread_id
+    safe_source = str(source or "").strip().lower()
+    if safe_source == "manychat":
+        subject_segment = _sanitize_signal_thread_segment(external_subject_id)
+        if subject_segment:
+            return f"inbox_manychat_{subject_segment}"
+        conversation_segment = _sanitize_signal_thread_segment(external_conversation_id)
+        if conversation_segment:
+            return f"inbox_manychat_conv_{conversation_segment}"
+    return f"chat-{customer_id}" if customer_id else ""
+
+
 def register_wake_and_search_routes(
     app: FastAPI,
     *,
     get_wake_queue: Callable[[], Any],
     get_signal_inbox: Callable[[], Any],
+    get_skill_store: Callable[[], Any],
     llm_model: str | None,
 ) -> None:
     """Register wake queue APIs and OpenRouter-backed web search endpoint."""
@@ -40,9 +72,7 @@ def register_wake_and_search_routes(
         owner_customer_id = str(body.get("owner_customer_id", "")).strip()
         owner_thread_id = str(body.get("owner_thread_id", "")).strip()
         customer_id = owner_customer_id or str(body.get("customer_id", "")).strip()
-        thread_id = owner_thread_id or str(body.get("thread_id", "")).strip() or (
-            f"chat-{customer_id}" if customer_id else ""
-        )
+        raw_thread_id = str(body.get("thread_id", "")).strip()
         event_type = str(body.get("event_type", "message")).strip() or "message"
         text = str(body.get("text", "")).strip()
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else None
@@ -51,6 +81,14 @@ def register_wake_and_search_routes(
         dispatch = body.get("dispatch") if isinstance(body.get("dispatch"), dict) else {}
         external_subject_id = str(body.get("external_subject_id", "")).strip()
         external_conversation_id = str(body.get("external_conversation_id", "")).strip()
+        thread_id = _derive_signal_thread_id(
+            source=source,
+            customer_id=customer_id,
+            owner_thread_id=owner_thread_id,
+            thread_id=raw_thread_id,
+            external_subject_id=external_subject_id,
+            external_conversation_id=external_conversation_id,
+        )
         if external_subject_id and not str(payload.get("external_subject_id", "")).strip():
             payload = {**payload, "external_subject_id": external_subject_id}
         if external_conversation_id and not str(payload.get("external_conversation_id", "")).strip():
@@ -134,7 +172,33 @@ def register_wake_and_search_routes(
         thread_id = str(body.get("thread_id", "")).strip()
         batch_window_seconds = body.get("batch_window_seconds", 0)
         auto_reply = body.get("auto_reply", True)
+        auto_reply_enabled = not (
+            auto_reply is False
+            or str(auto_reply).strip().lower() in {"0", "false", "no", "off"}
+        )
+        handler_skill_name = str(body.get("handler_skill_name", "")).strip()
         guidance_text = str(body.get("guidance_text", "")).strip()
+        if auto_reply_enabled and not handler_skill_name:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "handler_skill_name is required when auto_reply is enabled"},
+            )
+        if handler_skill_name:
+            handler_skill = get_skill_store().get_skill(
+                customer_id=customer_id,
+                name=handler_skill_name,
+                include_files=False,
+                include_global=True,
+            )
+            if handler_skill is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": (
+                            "handler_skill_name does not resolve to an existing user/global skill"
+                        )
+                    },
+                )
         try:
             rule = get_signal_inbox().upsert_rule(
                 source=source,
@@ -142,10 +206,8 @@ def register_wake_and_search_routes(
                 customer_id=customer_id,
                 thread_id=thread_id,
                 batch_window_seconds=int(batch_window_seconds),
-                auto_reply=not (
-                    auto_reply is False
-                    or str(auto_reply).strip().lower() in {"0", "false", "no", "off"}
-                ),
+                auto_reply=auto_reply_enabled,
+                handler_skill_name=handler_skill_name,
                 guidance_text=guidance_text,
             )
         except Exception as exc:

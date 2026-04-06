@@ -96,7 +96,7 @@ class _ClassifierRuntime:
                 "confidence": 0.85,
                 "reason": "routine is internal research/summarization",
             }
-        if action_name in {"slack_post", "email_send"}:
+        if action_name in {"whatsapp_send", "email_send"}:
             return {
                 "ok": True,
                 "gate": "require_approval",
@@ -283,8 +283,8 @@ async def test_external_action_requires_approval_and_reuses_pending(
     request = {
         "customer_id": "telegram_42",
         "thread_id": "chat-42",
-        "action_name": "slack_post",
-        "action_args": {"channel_id": "C123", "text": "hello"},
+        "action_name": "email_send",
+        "action_args": {"to": "a@example.com", "subject": "Hello", "text": "hello"},
     }
     first = await broker.evaluate_action(**request)
     second = await broker.evaluate_action(**request)
@@ -307,8 +307,8 @@ async def test_external_action_can_defer_challenge_delivery(tmp_path: Path) -> N
     result = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
-        action_name="slack_post",
-        action_args={"channel_id": "C123", "text": "hello"},
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "Hello", "text": "hello"},
         defer_challenge_delivery=True,
     )
 
@@ -385,8 +385,8 @@ async def test_exact_duplicate_after_executed_requests_new_approval(
     request = {
         "customer_id": "telegram_42",
         "thread_id": "chat-42",
-        "action_name": "slack_post",
-        "action_args": {"channel_id": "C123", "text": "hello"},
+        "action_name": "email_send",
+        "action_args": {"to": "a@example.com", "subject": "Hello", "text": "hello"},
     }
 
     first = await broker.evaluate_action(**request)
@@ -437,8 +437,8 @@ async def test_failed_execution_requests_new_approval_on_retry(
     request = {
         "customer_id": "telegram_42",
         "thread_id": "chat-42",
-        "action_name": "slack_post",
-        "action_args": {"channel_id": "C123", "text": "hello"},
+        "action_name": "email_send",
+        "action_args": {"to": "a@example.com", "subject": "Hello", "text": "hello"},
     }
 
     first = await broker.evaluate_action(**request)
@@ -490,8 +490,8 @@ async def test_background_thread_external_actions_allow_without_per_run_prompt(
     first = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="wake_abcd12",
-        action_name="slack_post",
-        action_args={"channel_id": "C123", "text": "hello"},
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "Hello", "text": "hello"},
     )
     assert first["gate"] == "allow"
     assert first["reason"] == "background_preauthorized_execution"
@@ -670,8 +670,8 @@ async def test_multiple_approvals_are_independent(
     first = await broker.evaluate_action(
         customer_id="telegram_42",
         thread_id="chat-42",
-        action_name="slack_post",
-        action_args={"channel_id": "C1", "text": "one"},
+        action_name="whatsapp_send",
+        action_args={"to": "+1234567890", "text": "one"},
     )
     second = await broker.evaluate_action(
         customer_id="telegram_42",

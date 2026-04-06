@@ -22,6 +22,7 @@ class WakeOrchestrator:
         get_agent_runtime: Callable[[], Any],
         get_approvals: Callable[[], Any] | None = None,
         get_signal_inbox: Callable[[], Any] | None = None,
+        get_skill_store: Callable[[], Any] | None = None,
     ) -> None:
         self._settings = settings
         self._get_context_events = get_context_events
@@ -30,6 +31,7 @@ class WakeOrchestrator:
         self._get_agent_runtime = get_agent_runtime
         self._get_approvals = get_approvals
         self._get_signal_inbox = get_signal_inbox
+        self._get_skill_store = get_skill_store
 
     def _backlog(self, *, customer_id: str, source: str, event_type: str, payload: dict[str, Any]) -> None:
         self._get_context_events().add_event(
@@ -49,15 +51,27 @@ class WakeOrchestrator:
             )
 
     @staticmethod
-    def _signal_prompt(*, source: str, signals: list[dict[str, Any]], guidance_text: str) -> str:
+    def _signal_prompt(
+        *,
+        source: str,
+        signals: list[dict[str, Any]],
+        guidance_text: str,
+        handler_skill_name: str,
+        handler_skill_markdown: str,
+    ) -> str:
         lines = [
             "External messages/signals arrived for this conversation.",
             "Treat the normalized message texts below as the latest inbound user content.",
-            "Reply naturally and concisely if a reply is appropriate.",
+            "Follow the wired incoming-handler playbook below when deciding how to reply and which operations to perform.",
             f"source={source}",
         ]
+        if handler_skill_name:
+            lines.append(f"handler_skill={handler_skill_name}")
         if guidance_text:
             lines.append(f"guidance={guidance_text[:2000]}")
+        lines.append("")
+        lines.append("Incoming-handler playbook:")
+        lines.append(handler_skill_markdown[:6000] if handler_skill_markdown else "(missing)")
         lines.append("")
         lines.append("Signals:")
         for idx, item in enumerate(signals[:20], start=1):
@@ -73,6 +87,27 @@ class WakeOrchestrator:
         lines.append("")
         lines.append("Use the existing thread context and any stored business context when answering.")
         return "\n".join(lines)
+
+    def _load_signal_handler_skill(
+        self,
+        *,
+        customer_id: str,
+        handler_skill_name: str,
+    ) -> dict[str, Any] | None:
+        if self._get_skill_store is None:
+            return None
+        safe_name = str(handler_skill_name or "").strip()
+        if not safe_name:
+            return None
+        try:
+            return self._get_skill_store().get_skill(
+                customer_id=customer_id,
+                name=safe_name,
+                include_files=False,
+                include_global=True,
+            )
+        except Exception:
+            return None
 
     @staticmethod
     def _pick_dispatch(signals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -117,6 +152,14 @@ class WakeOrchestrator:
         wake_mode = str(rule.get("wake_mode", "classifier")).strip().lower() or "classifier"
         guidance_text = str(rule.get("guidance_text", "")).strip()
         auto_reply = bool(rule.get("auto_reply", True))
+        handler_skill_name = str(rule.get("handler_skill_name", "")).strip()
+        handler_skill = self._load_signal_handler_skill(
+            customer_id=customer_id,
+            handler_skill_name=handler_skill_name,
+        )
+        handler_skill_markdown = str(
+            (handler_skill or {}).get("skill_markdown", "")
+        ).strip()
 
         runtime = self._get_agent_runtime()
         should_wake = wake_mode == "always"
@@ -158,6 +201,22 @@ class WakeOrchestrator:
             inbox.mark_done(signal_ids)
             return
 
+        if not handler_skill_name or not handler_skill_markdown:
+            self._backlog(
+                customer_id=customer_id,
+                source=f"signal:{source}",
+                event_type="missing_handler_playbook",
+                payload={
+                    "thread_id": thread_id,
+                    "signal_ids": signal_ids,
+                    "signal_count": len(signals),
+                    "handler_skill_name": handler_skill_name,
+                    "auto_reply": auto_reply,
+                },
+            )
+            inbox.mark_done(signal_ids)
+            return
+
         try:
             reply_text = await runtime.ainvoke_text(
                 thread_id=thread_id,
@@ -166,6 +225,8 @@ class WakeOrchestrator:
                     source=source,
                     signals=signals,
                     guidance_text=guidance_text,
+                    handler_skill_name=handler_skill_name,
+                    handler_skill_markdown=handler_skill_markdown,
                 ),
                 turn_mode="interactive",
                 include_pending_context=True,

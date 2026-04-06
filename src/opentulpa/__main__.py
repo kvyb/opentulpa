@@ -16,8 +16,7 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
-from opentulpa.core.config import get_settings
-from opentulpa.integrations.slack_client import SlackClient
+from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -151,6 +150,7 @@ def _telegram_bot_commands() -> list[dict[str, str]]:
         {"command": "start", "description": "Show quick help and onboarding"},
         {"command": "status", "description": "Check bot and agent status"},
         {"command": "fresh", "description": "Start a fresh chat context"},
+        {"command": "debug_logs", "description": "Send the current app log file"},
     ]
 
 
@@ -228,7 +228,9 @@ def main() -> None:
     settings = get_settings()
     project_root = Path(__file__).resolve().parents[2]
     _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
-    openrouter_api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+    openrouter_api_key = (
+        settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env()
+    )
     qdrant_path = Path(settings.mem0_qdrant_path)
     if not qdrant_path.is_absolute():
         qdrant_path = project_root / qdrant_path
@@ -274,8 +276,6 @@ def main() -> None:
         db_path=project_root / ".opentulpa" / "tasks.db",
         wake_callback=_wake_callback,
     )
-    slack_client = SlackClient(settings.slack_bot_token) if settings.slack_bot_token else None
-
     agent_runtime: OpenTulpaLangGraphRuntime | None = None
     if openrouter_api_key:
         agent_runtime = OpenTulpaLangGraphRuntime(
@@ -310,15 +310,14 @@ def main() -> None:
         )
     else:
         print(
-            "OPENROUTER_API_KEY is not set; starting FastAPI without AI chat backend. "
-            "Set key and restart to enable full chat.",
+            "OPENAI_COMPATIBLE_API_KEY is not set; starting FastAPI without AI chat backend. "
+            "OPENROUTER_API_KEY is still accepted as a legacy alias. Set key and restart to enable full chat.",
             file=sys.stderr,
         )
 
     app = create_app(
         memory=memory,
         scheduler=scheduler,
-        slack_client=slack_client,
         task_service=task_service,
         agent_runtime=agent_runtime,
         context_events=context_events,

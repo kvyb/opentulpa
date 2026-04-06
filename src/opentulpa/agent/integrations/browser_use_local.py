@@ -144,7 +144,12 @@ class BrowserUseLocalManager:
         if preflight_error:
             return {"error": preflight_error}
         if not self._openrouter_api_key:
-            return {"error": "browser_use_run unavailable: OPENROUTER_API_KEY missing"}
+            return {
+                "error": (
+                    "browser_use_run unavailable: OPENAI_COMPATIBLE_API_KEY missing "
+                    "(OPENROUTER_API_KEY also accepted)"
+                )
+            }
 
         task_text = str(task or "").strip()
         if not task_text:

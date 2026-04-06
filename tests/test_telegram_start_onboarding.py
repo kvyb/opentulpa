@@ -12,6 +12,7 @@ def test_start_help_text_includes_capabilities_and_onboarding_questions() -> Non
     assert "/start" in text
     assert "/status" in text
     assert "/fresh" in text
+    assert "/debug_logs" in text
     assert "/setup" not in text
     assert "/set " not in text
     assert "/setenv" not in text

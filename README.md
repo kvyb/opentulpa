@@ -40,7 +40,7 @@ OpenTulpa:
 
 Most agent demos stop at the prompt boundary. They can answer a request, maybe call a tool, and then discard the operational state that would make the next run easier. OpenTulpa persists the reusable parts of work: context, artifacts, skills, routines, approvals, and thread rollups.
 
-It exposes a direct internal chat API for programmatic use, supports Telegram as a natural interface, and can be extended with Slack, browser automation, web retrieval, and generated task code.
+It exposes a direct internal chat API for programmatic use, supports Telegram as a natural interface, and can be extended with browser automation, web retrieval, and generated task code.
 
 That makes it useful for workflows developers actually care about:
 
@@ -69,7 +69,7 @@ cp .env.example .env
 Set this in `.env`:
 
 ```bash
-OPENROUTER_API_KEY=...
+OPENAI_COMPATIBLE_API_KEY=...
 ```
 
 Install and run:
@@ -127,7 +127,7 @@ Minimum setup:
 1. Create a Railway project from this repo.
 2. Add one volume at `/app/opentulpa_data`.
 3. Set:
-   - `OPENROUTER_API_KEY`
+   - `OPENAI_COMPATIBLE_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
    - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
 4. Optionally set:
@@ -162,7 +162,7 @@ You can also control it through `.env`:
 
 2. **Execution, not just generation**
 
-   It is designed to act through tools: web retrieval, files, browser sessions, Slack, internal APIs, generated scripts, and scheduled routines. Artifacts are saved locally so the system stays inspectable instead of disappearing into prompts.
+   It is designed to act through tools: web retrieval, files, browser sessions, internal APIs, generated scripts, and scheduled routines. Artifacts are saved locally so the system stays inspectable instead of disappearing into prompts.
 
 3. **Skills that compound**
 
@@ -177,7 +177,7 @@ You can also control it through `.env`:
 OpenTulpa is a strong fit for:
 
 - recurring market and competitive monitoring
-- Slack or inbox triage with draft generation
+- inbox triage with draft generation
 - document review that extracts decisions and remembers them
 - API integration scaffolding and scheduled automation
 - recurring project, status, or executive briefs
@@ -185,7 +185,7 @@ OpenTulpa is a strong fit for:
 
 Example requests:
 
-- "Summarize the most important unread items from Slack and draft replies."
+- "Summarize the most important unread items from my inbox and draft replies."
 - "Monitor this market every morning and send me a concise brief."
 - "Read this PDF, extract the decisions, and remember them for future work."
 - "Build an integration for this API, save it as a reusable skill, and schedule it."
@@ -226,7 +226,6 @@ Core pieces:
 ## What You Can Connect
 
 - **Telegram interface (optional):** chat, files, voice notes, approval buttons, `/setup`, `/fresh`, `/status`
-- **Slack integration (optional):** list channels, read history, post messages after user consent
 - **Self-built webhook inboxes:** OpenTulpa can set up its own thin channel adapters in `tulpa_stuff/`, accept inbound webhooks, queue normalized signals, wake on saved rules, and draft or send replies through the adapter's outbound API
 - **Web intelligence:** web search plus URL/file fetching for HTML, PDF, DOCX, and image analysis
 - **Browser automation (optional):** local Browser Use tasks for dynamic websites

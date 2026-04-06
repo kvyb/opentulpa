@@ -2,7 +2,60 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 from types import SimpleNamespace
+import types
+
+apscheduler_module = types.ModuleType("apscheduler")
+schedulers_module = types.ModuleType("apscheduler.schedulers")
+asyncio_module = types.ModuleType("apscheduler.schedulers.asyncio")
+triggers_module = types.ModuleType("apscheduler.triggers")
+cron_module = types.ModuleType("apscheduler.triggers.cron")
+date_module = types.ModuleType("apscheduler.triggers.date")
+mem0_module = types.ModuleType("mem0")
+
+
+class _DummyAsyncIOScheduler:
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+
+
+class _DummyCronTrigger:
+    @classmethod
+    def from_crontab(cls, value: str) -> "_DummyCronTrigger":
+        _ = value
+        return cls()
+
+
+class _DummyDateTrigger:
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+
+
+class _DummyMemory:
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+
+
+asyncio_module.AsyncIOScheduler = _DummyAsyncIOScheduler
+cron_module.CronTrigger = _DummyCronTrigger
+date_module.DateTrigger = _DummyDateTrigger
+apscheduler_module.schedulers = schedulers_module
+apscheduler_module.triggers = triggers_module
+schedulers_module.asyncio = asyncio_module
+triggers_module.cron = cron_module
+triggers_module.date = date_module
+mem0_module.Memory = _DummyMemory
+sys.modules.setdefault("apscheduler", apscheduler_module)
+sys.modules.setdefault("apscheduler.schedulers", schedulers_module)
+sys.modules.setdefault("apscheduler.schedulers.asyncio", asyncio_module)
+sys.modules.setdefault("apscheduler.triggers", triggers_module)
+sys.modules.setdefault("apscheduler.triggers.cron", cron_module)
+sys.modules.setdefault("apscheduler.triggers.date", date_module)
+sys.modules.setdefault("mem0", mem0_module)
 
 from opentulpa import __main__ as entry
 
@@ -33,12 +86,13 @@ def test_ensure_telegram_webhook_secret_generates_when_missing(monkeypatch) -> N
     assert os.environ.get("TELEGRAM_WEBHOOK_SECRET") == generated
 
 
-def test_telegram_bot_commands_only_include_start_status_and_fresh() -> None:
+def test_telegram_bot_commands_include_debug_logs() -> None:
     commands = entry._telegram_bot_commands()
     assert [str(item.get("command", "")).strip() for item in commands] == [
         "start",
         "status",
         "fresh",
+        "debug_logs",
     ]
 
 
@@ -116,3 +170,8 @@ def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> 
     commands = payload.get("commands", [])
     assert isinstance(commands, list)
     assert any(str(item.get("command", "")).strip() == "fresh" for item in commands if isinstance(item, dict))
+    assert any(
+        str(item.get("command", "")).strip() == "debug_logs"
+        for item in commands
+        if isinstance(item, dict)
+    )

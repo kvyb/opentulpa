@@ -1,10 +1,63 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Any
+import types
 
 import pytest
 from fastapi.testclient import TestClient
+
+apscheduler_module = types.ModuleType("apscheduler")
+schedulers_module = types.ModuleType("apscheduler.schedulers")
+asyncio_module = types.ModuleType("apscheduler.schedulers.asyncio")
+triggers_module = types.ModuleType("apscheduler.triggers")
+cron_module = types.ModuleType("apscheduler.triggers.cron")
+date_module = types.ModuleType("apscheduler.triggers.date")
+mem0_module = types.ModuleType("mem0")
+
+
+class _DummyAsyncIOScheduler:
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+
+
+class _DummyCronTrigger:
+    @classmethod
+    def from_crontab(cls, value: str) -> "_DummyCronTrigger":
+        _ = value
+        return cls()
+
+
+class _DummyDateTrigger:
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+
+
+class _DummyMemory:
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+
+
+asyncio_module.AsyncIOScheduler = _DummyAsyncIOScheduler
+cron_module.CronTrigger = _DummyCronTrigger
+date_module.DateTrigger = _DummyDateTrigger
+apscheduler_module.schedulers = schedulers_module
+apscheduler_module.triggers = triggers_module
+schedulers_module.asyncio = asyncio_module
+triggers_module.cron = cron_module
+triggers_module.date = date_module
+mem0_module.Memory = _DummyMemory
+sys.modules.setdefault("apscheduler", apscheduler_module)
+sys.modules.setdefault("apscheduler.schedulers", schedulers_module)
+sys.modules.setdefault("apscheduler.schedulers.asyncio", asyncio_module)
+sys.modules.setdefault("apscheduler.triggers", triggers_module)
+sys.modules.setdefault("apscheduler.triggers.cron", cron_module)
+sys.modules.setdefault("apscheduler.triggers.date", date_module)
+sys.modules.setdefault("mem0", mem0_module)
 
 from opentulpa.api.app import create_app
 from opentulpa.core.config import get_settings
@@ -173,8 +226,8 @@ def test_background_actions_are_preauthorized_without_runtime_grant_lookup(
         json={
             "customer_id": "cust_9",
             "thread_id": "wake_123abc",
-            "action_name": "slack_post",
-            "action_args": {"channel_id": "C1", "text": "hi"},
+            "action_name": "email_send",
+            "action_args": {"to": "a@example.com", "text": "hi"},
             "origin_interface": "unknown",
             "origin_user_id": "99",
             "origin_conversation_id": "",

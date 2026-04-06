@@ -15,7 +15,7 @@ from opentulpa.api.app import create_app
 from opentulpa.context.signals import SignalInboxService
 from opentulpa.core.config import get_settings
 from opentulpa.scheduler.service import SchedulerService
-from opentulpa.skills.service import SkillStoreService
+from opentulpa.skills.service import SkillStoreService, build_skill_markdown
 from opentulpa.tasks import sandbox as sandbox_module
 
 
@@ -154,6 +154,7 @@ def test_live_signal_webhook_to_outbox_flow(tmp_path: Path, monkeypatch: pytest.
         wake_mode="always",
         batch_window_seconds=0,
         auto_reply=True,
+        handler_skill_name="manychat-incoming-handler",
         guidance_text=(
             "Use the business info for this reply. "
             "Reply in one sentence. "
@@ -163,6 +164,22 @@ def test_live_signal_webhook_to_outbox_flow(tmp_path: Path, monkeypatch: pytest.
     skills = SkillStoreService(
         db_path=tmp_path / "skills.db",
         root_dir=tmp_path / "skills",
+    )
+    skills.upsert_skill(
+        scope="user",
+        customer_id=OWNER_CUSTOMER_ID,
+        name="manychat-incoming-handler",
+        skill_markdown=build_skill_markdown(
+            name="manychat-incoming-handler",
+            description="Handle manychat business-hours questions.",
+            instructions=(
+                "Use the business info for this reply. "
+                "Reply in one sentence. "
+                "State that the business is open Monday through Friday, 9 AM to 5 PM Pacific."
+            ),
+        ),
+        source="test",
+        enabled=True,
     )
     behavior_log = tmp_path / "signal_behavior.jsonl"
     runtime = OpenTulpaLangGraphRuntime(
@@ -264,14 +281,15 @@ def test_live_agent_can_create_connector_then_process_signal(
         "8. The connector must not derive customer_id from the external sender.\n"
         "9. It must return JSON with ok, signal_id, and queue_id.\n"
         "10. After writing, call tulpa_validate_file and tulpa_reload.\n"
-        "11. Then call signal_rule_upsert with source='manychat_live', "
+        "11. Create or update a user skill named 'manychat-live-incoming-handler' that says the business is open Monday through Friday, 9 AM to 5 PM Pacific and replies in one sentence.\n"
+        "12. Then call signal_rule_upsert with source='manychat_live', "
         f"customer_id='{OWNER_CUSTOMER_ID}', thread_id='manychat_conv_live_002', "
-        "wake_mode='always', batch_window_seconds=0, auto_reply=true, and guidance_text "
-        "that says the business is open Monday through Friday, 9 AM to 5 PM Pacific.\n"
-        "12. Then call signal_rule_list and confirm the matching rule exists before you finish.\n"
-        "13. Do not use tulpa_run_terminal.\n"
-        "14. Keep the connector thin; do not reimplement batching or orchestration.\n"
-        "15. Reply with one short success sentence only after the connector is written, validated, reloaded, and the rule is saved and verified."
+        "wake_mode='always', batch_window_seconds=0, auto_reply=true, handler_skill_name='manychat-live-incoming-handler', "
+        "and optional concise guidance_text.\n"
+        "13. Then call signal_rule_list and confirm the matching rule exists before you finish.\n"
+        "14. Do not use tulpa_run_terminal.\n"
+        "15. Keep the connector thin; do not reimplement batching or orchestration.\n"
+        "16. Reply with one short success sentence only after the connector is written, validated, reloaded, the handler skill is saved, and the rule is saved and verified."
     )
 
     with TestClient(app) as client:

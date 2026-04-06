@@ -21,6 +21,8 @@ def test_skill_store_default_skill_and_user_override(tmp_path: Path) -> None:
     assert "skill-creator" in names
     assert "browser-use-operator" in names
     assert "routine-schedule-composer" in names
+    assert "signal-integration-operator" in names
+    assert "incoming-signal-handler-designer" in names
 
     global_md = build_skill_markdown(
         name="weather-report",
@@ -144,3 +146,27 @@ def test_signal_integration_operator_default_mentions_signal_core_routes(tmp_pat
     assert "owner_customer_id" in skill["skill_markdown"]
     assert "request.app.state.signal_ingest" in skill["skill_markdown"]
     assert "incoming webhook JSON as generic" in skill["skill_markdown"]
+    assert "Before enabling a new inbound signal channel" in skill["skill_markdown"]
+    assert "incoming-signal-handler-designer" in skill["skill_markdown"]
+    assert "handler_skill_name" in skill["skill_markdown"]
+    assert "upstream webhook provider" in skill["skill_markdown"]
+    assert "suggest ManyChat" in skill["skill_markdown"]
+
+
+def test_incoming_signal_handler_designer_default_mentions_owner_playbook(tmp_path: Path) -> None:
+    store = _mk_service(tmp_path)
+    store.ensure_default_skill()
+
+    skill = store.get_skill(
+        customer_id="",
+        name="incoming-signal-handler-designer",
+        include_files=False,
+    )
+    assert skill is not None
+    assert "user-scoped skill" in skill["skill_markdown"]
+    assert "`manychat-incoming-handler`" in skill["skill_markdown"]
+    assert "Google Sheet" in skill["skill_markdown"]
+    assert "scripts, sandbox actions, APIs" in skill["skill_markdown"]
+    assert "If the owner later amends the behavior through chat" in skill["skill_markdown"]
+    assert "handler_skill_name" in skill["skill_markdown"]
+    assert "required for live signal handling" in skill["skill_markdown"]
