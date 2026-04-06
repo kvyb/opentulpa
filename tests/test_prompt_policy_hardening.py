@@ -65,32 +65,32 @@ def test_build_skill_glossary_context_is_high_level_and_points_to_skill_get() ->
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
     text = _build_relevant_skill_discovery_context(
         available_skills=[
-            {"name": "signal-integration-operator", "description": "Create thin webhook connectors.", "scope": "global"},
+            {"name": "browser-use-operator", "description": "Use browser steps for dynamic websites.", "scope": "global"},
             {"name": "routine-schedule-composer", "description": "Compose robust routine instructions", "scope": "global"},
         ],
-        selected_names=["signal-integration-operator"],
+        selected_names=["browser-use-operator"],
     )
     assert "Skills relevant to this task:" in text
     assert "Use skill_get(name) before relying on a skill's actual instructions." in text
-    assert "signal-integration-operator" in text
+    assert "browser-use-operator" in text
     assert "routine-schedule-composer" not in text
 
 
 def test_extract_invoked_skill_snapshot_prefers_skill_markdown() -> None:
     result = _extract_invoked_skill_snapshot(
         {
-            "name": "signal-integration-operator",
+            "name": "browser-use-operator",
             "scope": "global",
-            "description": "Create thin webhook connectors.",
-            "skill_markdown": "# Steps\nUse the inbound signal bridge.",
+            "description": "Use browser steps for dynamic websites.",
+            "skill_markdown": "# Steps\nReuse browser sessions before starting a new one.",
         },
-        requested_name="signal-integration-operator",
+        requested_name="browser-use-operator",
     )
     assert result is not None
     name, text = result
-    assert name == "signal-integration-operator"
+    assert name == "browser-use-operator"
     assert "SKILL.md:" in text
-    assert "Use the inbound signal bridge." in text
+    assert "Reuse browser sessions before starting a new one." in text
 
 
 def test_turn_mode_policy_messages_are_mode_specific() -> None:

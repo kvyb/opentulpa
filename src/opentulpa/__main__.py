@@ -17,6 +17,7 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
+from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -76,16 +77,7 @@ def _mem0_config_openrouter(
 
 
 def _resolve_public_base_url() -> str:
-    raw = str(os.environ.get("PUBLIC_BASE_URL", "")).strip()
-    if not raw:
-        railway_domain = str(os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")).strip()
-        if railway_domain:
-            raw = f"https://{railway_domain}"
-    if not raw:
-        return ""
-    if not raw.startswith(("http://", "https://")):
-        raw = f"https://{raw}"
-    return raw.rstrip("/")
+    return resolve_public_base_url()
 
 
 def _seed_missing_directory_entries(source_dir: Path, target_dir: Path) -> None:

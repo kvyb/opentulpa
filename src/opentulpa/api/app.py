@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from opentulpa.api.routes import (
     register_approval_routes,
     register_chat_routes,
+    register_composio_routes,
     register_debug_log_routes,
     register_file_routes,
     register_health_routes,
@@ -21,6 +22,7 @@ from opentulpa.api.routes import (
     register_profile_routes,
     register_scheduler_routes,
     register_skill_routes,
+    register_system_routes,
     register_task_routes,
     register_telegram_webhook_routes,
     register_tulpa_routes,
@@ -39,8 +41,8 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
-from opentulpa.context.signals import SignalInboxService
 from opentulpa.core.config import get_settings
+from opentulpa.integrations import ComposioService
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.memory.service import MemoryService
@@ -83,7 +85,7 @@ def create_app(
     file_vault_service: FileVaultService | None = None,
     link_alias_service: LinkAliasService | None = None,
     skill_store_service: SkillStoreService | None = None,
-    signal_inbox_service: SignalInboxService | None = None,
+    composio_service: ComposioService | None = None,
 ) -> FastAPI:
     """Create FastAPI app with internal API, webhook, and agent runtime."""
     memory_service = memory
@@ -109,8 +111,9 @@ def create_app(
         db_path=PROJECT_ROOT / ".opentulpa" / "skills.db",
         root_dir=PROJECT_ROOT / ".opentulpa" / "skills",
     )
-    signals_service = signal_inbox_service or SignalInboxService(
-        db_path=PROJECT_ROOT / ".opentulpa" / "signals.db",
+    composio = composio_service or ComposioService(
+        api_key=str(settings.composio_api_key or "").strip(),
+        default_callback_url=str(settings.composio_default_callback_url or "").strip() or None,
     )
     skill_service.ensure_default_skill()
     if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
@@ -149,6 +152,9 @@ def create_app(
 
     def get_skill_store() -> SkillStoreService:
         return _require(skill_service, "SkillStoreService")
+
+    def get_composio() -> ComposioService:
+        return _require(composio, "ComposioService")
 
     def get_telegram_chat() -> TelegramChatService:
         return _require(telegram_chat, "TelegramChatService")
@@ -218,16 +224,12 @@ def create_app(
     wake_queue_service: WakeQueueService | None = None
     tulpa_loader: TulpaRouterLoader | None = None
     tulpa_router = APIRouter()
-    tulpa_public_router = APIRouter()
 
     def get_wake_queue() -> WakeQueueService:
         return _require(wake_queue_service, "WakeQueueService")
 
     def get_tulpa_loader() -> TulpaRouterLoader:
         return _require(tulpa_loader, "TulpaRouterLoader")
-
-    def get_signal_inbox() -> SignalInboxService:
-        return _require(signals_service, "SignalInboxService")
 
     wake_orchestrator = WakeOrchestrator(
         settings=settings,
@@ -236,8 +238,6 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
         get_approvals=get_approvals,
-        get_signal_inbox=get_signal_inbox,
-        get_skill_store=get_skill_store,
     )
 
     async def process_wake_event(body: dict[str, Any]) -> None:
@@ -275,9 +275,9 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
-    app.state.signal_inbox = signals_service
     app.state.wake_queue = wake_queue_service
     app.state.turn_orchestrator = turn_orchestrator
+    app.state.composio = composio
 
     @app.middleware("http")
     async def enforce_public_route_boundary(
@@ -302,17 +302,15 @@ def create_app(
         kept_routes: list[Any] = []
         for route in app.router.routes:
             path = str(getattr(route, "path", "") or "")
-            if path.startswith("/tulpa/") or path.startswith("/webhook/tulpa/"):
+            if path.startswith("/tulpa/"):
                 continue
             kept_routes.append(route)
         app.router.routes[:] = kept_routes
         app.include_router(tulpa_router, prefix="/tulpa")
-        app.include_router(tulpa_public_router, prefix="/webhook/tulpa")
 
     tulpa_loader = TulpaRouterLoader(
         project_root=PROJECT_ROOT,
         mount_router=tulpa_router,
-        public_mount_router=tulpa_public_router,
     )
     tulpa_loader.reload()
 
@@ -338,6 +336,8 @@ def create_app(
         get_skill_store=get_skill_store,
         get_memory=lambda: memory_service,
     )
+    register_system_routes(app)
+    register_composio_routes(app, get_composio=get_composio)
 
     decide_approval_and_maybe_wake = register_approval_routes(
         app,
@@ -353,8 +353,6 @@ def create_app(
     register_wake_and_search_routes(
         app,
         get_wake_queue=get_wake_queue,
-        get_signal_inbox=get_signal_inbox,
-        get_skill_store=get_skill_store,
         llm_model=settings.llm_model,
     )
     register_tulpa_routes(

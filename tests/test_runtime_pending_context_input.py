@@ -187,7 +187,7 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
         {
-            "messages": [HumanMessage(content="use the saved webhook skill")],
+            "messages": [HumanMessage(content="use the saved browser skill")],
             "customer_id": "telegram_test",
             "thread_id": "chat_test",
             "turn_mode": "interactive",
@@ -195,13 +195,13 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
             "final_response_text": "",
             "pending_context_summary": "",
             "agent_trace_id": "turn_test",
-            "active_skill_query": "use the saved webhook skill",
+            "active_skill_query": "use the saved browser skill",
             "active_skill_context": "matched skill context",
-            "active_skill_names": ["signal-integration-operator"],
+            "active_skill_names": ["browser-use-operator"],
             "active_available_skills": [
                 {
-                    "name": "signal-integration-operator",
-                    "description": "Create thin webhook connectors.",
+                    "name": "browser-use-operator",
+                    "description": "Use browser steps for dynamic websites.",
                     "scope": "global",
                 }
             ],
@@ -214,6 +214,6 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     assert resolve_calls == 0
     assert model.seen_messages is not None
     assert any(
-        "signal-integration-operator" in str(getattr(msg, "content", ""))
+        "browser-use-operator" in str(getattr(msg, "content", ""))
         for msg in model.seen_messages
     )

@@ -53,13 +53,8 @@ _DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION = (
     "Use this skill for interactive browser tasks that require real page navigation, "
     "JavaScript rendering, or multi-step website workflows."
 )
-_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_DESCRIPTION = (
-    "Use this skill when setting up inbound webhooks/signals and outbound reply adapters "
-    "for channels that should feed events into OpenTulpa."
-)
-_DEFAULT_INCOMING_SIGNAL_HANDLER_DESIGNER_DESCRIPTION = (
-    "Use this skill when the OpenTulpa owner wants to define or amend how incoming "
-    "contact messages from signal/webhook channels should be handled."
+_DEFAULT_COMPOSIO_OPERATOR_DESCRIPTION = (
+    "Use this skill when connecting external apps through Composio or executing Composio-backed tools."
 )
 _LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
     "## Purpose\n"
@@ -106,118 +101,43 @@ _DEFAULT_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
     "- Prefer ordinary web tools for simple fetch/search tasks.\n"
     "- Reuse idle sessions to avoid spawning unnecessary browsers and wasting RAM."
 )
-_LEGACY_SIGNAL_INTEGRATION_OPERATOR_INSTRUCTIONS = (
+_DEFAULT_COMPOSIO_OPERATOR_INSTRUCTIONS = (
     "## Purpose\n"
-    "Create channel-specific webhook/reply glue without rebuilding queueing, wake rules, or turn orchestration.\n\n"
-    "## Core boundary\n"
-    "1. Keep channel glue in `tulpa_stuff/`.\n"
-    "2. Use OpenTulpa core routes for signal ingestion, wake rules, and outbound replies.\n"
-    "3. Do not reimplement queueing, batching, wake classification, or conversation orchestration inside the connector.\n\n"
-    "## Connector contract\n"
-    "1. Public webhook routes should live in a tulpa module `public_router` and are mounted at `/webhook/tulpa/<module_name>/...`.\n"
-    "2. Internal helper routes can stay in the normal `router` mounted at `/tulpa/<module_name>/...`.\n"
-    "3. Verify webhook secrets before accepting payloads.\n"
-    "4. By default, keep `customer_id` as the OpenTulpa owner/operator identity, not the external sender identity.\n"
-    "5. When using `/internal/signals/ingest`, pass `owner_customer_id` and optional `owner_thread_id`; do not derive `customer_id` from the external sender.\n"
-    "6. Use generic metadata such as `external_subject_id` and `external_conversation_id`, not provider-specific field names.\n"
-    "7. Treat the incoming webhook JSON as generic. Keep only the small routing envelope explicit; arbitrary extra fields can pass through as payload metadata.\n"
-    "8. Prefer `await request.app.state.signal_ingest({...})` inside public tulpa routes; it wires owner identity, generic external IDs, wake enqueueing, and stores non-envelope fields as payload metadata automatically.\n"
-    "9. If you cannot use `request.app.state.signal_ingest`, send normalized events to `/internal/signals/ingest`; it applies the same wiring.\n"
-    "10. Read pending outbound replies from `/internal/signals/outbox` and mark sent with `/internal/signals/outbox/{id}/sent` after successful delivery.\n\n"
-    "## Wake rules\n"
-    "1. Configure behavior through `/internal/signals/rules/upsert` or the `signal_rule_upsert` tool instead of hardcoding per-connector logic.\n"
-    "2. Use `wake_mode=always` for immediate processing, `classifier` for model-decided wakeups, and `never` for backlog-only collection.\n"
-    "3. Use `batch_window_seconds` to debounce bursty channels.\n"
-    "4. Put durable answering guidance in rule `guidance_text` or normal OpenTulpa context/skills, not in ad-hoc connector prompts.\n\n"
-    "## Workflow\n"
-    "1. Clarify the external channel, auth method, webhook payload shape, and outbound API.\n"
-    "2. Write or update one tulpa module for the adapter.\n"
-    "3. Validate the file, reload tulpa routes, and test with a sample payload.\n"
-    "4. Create or update the matching signal wake rule, then verify it with `/internal/signals/rules` or the `signal_rule_list` tool before claiming success.\n"
-    "5. Keep the connector thin and channel-specific."
+    "Use OpenTulpa's Composio tools to connect external SaaS accounts and execute Composio-backed actions safely.\n\n"
+    "## Available tools\n"
+    "1. `composio_status`: verify whether Composio is configured on this OpenTulpa instance.\n"
+    "2. `composio_authorize_toolkit`: create an auth link for a toolkit like `instagram`, `gmail`, or `slack`.\n"
+    "3. `composio_wait_for_connection`: wait for a pending connection to become active after the user completes OAuth.\n"
+    "4. `composio_toolkits`: inspect which toolkits are connected for the active user.\n"
+    "5. `composio_connected_accounts`: list connected accounts and statuses for the active user.\n"
+    "6. `composio_disable_connected_account`: disable a connected account without deleting it.\n"
+    "7. `composio_delete_connected_account`: permanently delete a connected account.\n"
+    "8. `composio_tool_search`: search for Composio tool slugs by capability or toolkit.\n"
+    "9. `composio_tool_schema`: fetch the input schema for a specific tool slug before execution.\n"
+    "10. `composio_instagram_reply_precheck`: verify the exact Instagram conversation, recipient_id, and latest inbound timestamp before attempting a DM send.\n"
+    "11. `composio_tool_execute`: execute one Composio tool with explicit JSON arguments.\n\n"
+    "## Connection workflow\n"
+    "1. Start with `composio_status` if configuration may be uncertain.\n"
+    "2. When a user needs to connect an app, call `composio_authorize_toolkit(toolkit=...)`.\n"
+    "3. Send the returned `redirect_url` or `message_for_user` to the user exactly and tell them to finish auth in the browser.\n"
+    "4. If needed, call `composio_wait_for_connection(connection_id=...)` after the user says they completed auth.\n"
+    "5. Confirm success with `composio_toolkits` or `composio_connected_accounts` before claiming the app is ready.\n\n"
+    "6. If the user wants to revoke access, prefer `composio_delete_connected_account`; use `composio_disable_connected_account` when they want a reversible pause.\n\n"
+    "## Tool execution workflow\n"
+    "1. If the exact tool slug is unknown, call `composio_tool_search` first.\n"
+    "2. Before calling an unfamiliar tool, fetch its schema with `composio_tool_schema`.\n"
+    "3. Build explicit JSON arguments that match the schema; do not guess hidden fields.\n"
+    "4. If multiple connected accounts exist, pass `connected_account_id` explicitly.\n"
+    "5. Before `INSTAGRAM_SEND_TEXT_MESSAGE`, call `composio_instagram_reply_precheck` with the same `recipient_id` or `conversation_id` and reuse the verified identifiers it returns.\n"
+    "6. Use `text` only as supplemental natural-language context, not as a replacement for structured arguments.\n\n"
+    "## Rules\n"
+    "1. Do not tell the user Composio is connected until a status/list call confirms it.\n"
+    "2. Do not invent Composio tool slugs; search first when uncertain.\n"
+    "3. Do not skip schema inspection for write actions unless the tool contract is already known from this conversation.\n"
+    "4. Do not claim an Instagram reply window is open unless `composio_instagram_reply_precheck` found the exact thread and surfaced the latest inbound timestamp from that same conversation.\n"
+    "5. When auth is required, prefer giving the user the link immediately rather than explaining the entire integration stack.\n"
+    "6. Keep the user-facing instructions short: what link to open, what to do next, and how success will be verified.\n"
 )
-_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_INSTRUCTIONS = (
-    "## Purpose\n"
-    "Create channel-specific webhook/reply glue without rebuilding queueing, wake rules, turn orchestration, or owner-defined handling policy.\n\n"
-    "## Identify the upstream provider first\n"
-    "1. When the owner asks to process inbound Instagram, Facebook, WhatsApp, Telegram, or other social messages, first determine which upstream webhook provider will actually deliver those messages into OpenTulpa.\n"
-    "2. If the owner has not chosen a provider yet and they want social-channel automation for Instagram, Facebook Messenger, WhatsApp, or Telegram, suggest ManyChat as the default option to evaluate first.\n"
-    "3. If the owner already has a different provider or a direct webhook integration, use that instead of forcing ManyChat.\n"
-    "4. Do not design the connector until the actual upstream provider, webhook path, auth method, and payload shape are clear.\n\n"
-    "## Owner guidance first\n"
-    "1. Before enabling a new inbound signal channel for live contact handling, ask the OpenTulpa owner how incoming contacts should be handled.\n"
-    "2. Clarify goals such as qualification, FAQ answering, booking, escalation, follow-up, and what data should be written to external systems.\n"
-    "3. If this handling policy is missing or ambiguous, do not claim the inbound connection is fully ready for autonomous replies.\n"
-    "4. After clarifying the policy, use the `incoming-signal-handler-designer` skill to create or update the owner's durable handling skill before finalizing the connector.\n\n"
-    "## Core boundary\n"
-    "1. Keep channel glue in `tulpa_stuff/`.\n"
-    "2. Use OpenTulpa core routes for signal ingestion, wake rules, and outbound replies.\n"
-    "3. Do not reimplement queueing, batching, wake classification, conversation orchestration, or owner policy inside the connector.\n\n"
-    "## Connector contract\n"
-    "1. Public webhook routes should live in a tulpa module `public_router` and are mounted at `/webhook/tulpa/<module_name>/...`.\n"
-    "2. Internal helper routes can stay in the normal `router` mounted at `/tulpa/<module_name>/...`.\n"
-    "3. Verify webhook secrets before accepting payloads.\n"
-    "4. By default, keep `customer_id` as the OpenTulpa owner/operator identity, not the external sender identity.\n"
-    "5. When using `/internal/signals/ingest`, pass `owner_customer_id` and optional `owner_thread_id`; do not derive `customer_id` from the external sender.\n"
-    "6. Use generic metadata such as `external_subject_id` and `external_conversation_id`, not provider-specific field names.\n"
-    "7. Treat the incoming webhook JSON as generic. Keep only the small routing envelope explicit; arbitrary extra fields can pass through as payload metadata.\n"
-    "8. Prefer `await request.app.state.signal_ingest({...})` inside public tulpa routes; it wires owner identity, generic external IDs, wake enqueueing, and stores non-envelope fields as payload metadata automatically.\n"
-    "9. If you cannot use `request.app.state.signal_ingest`, send normalized events to `/internal/signals/ingest`; it applies the same wiring.\n"
-    "10. Read pending outbound replies from `/internal/signals/outbox` and mark sent with `/internal/signals/outbox/{id}/sent` after successful delivery.\n\n"
-    "## Wake rules\n"
-    "1. Configure behavior through `/internal/signals/rules/upsert` or the `signal_rule_upsert` tool instead of hardcoding per-connector logic.\n"
-    "2. Use `wake_mode=always` for immediate processing, `classifier` for model-decided wakeups, and `never` for backlog-only collection.\n"
-    "3. Use `batch_window_seconds` to debounce bursty channels.\n"
-    "4. Set `handler_skill_name` in the signal rule to the saved incoming-handler playbook; this wiring is required for live signal handling.\n"
-    "5. Put durable answering guidance in rule `guidance_text` or in the owner's saved incoming-handler skill, not in ad-hoc connector prompts.\n\n"
-    "## Workflow\n"
-    "1. Identify the actual upstream webhook provider for the requested channel.\n"
-    "2. Clarify the auth method, webhook payload shape, and outbound API.\n"
-    "3. Confirm the owner-facing handling policy exists; if not, gather it and save it first.\n"
-    "4. Write or update one tulpa module for the adapter.\n"
-    "5. Validate the file, reload tulpa routes, and test with a sample payload.\n"
-    "6. Create or update the matching signal wake rule, including `handler_skill_name`, then verify it with `/internal/signals/rules` or the `signal_rule_list` tool before claiming success.\n"
-    "7. Keep the connector thin and channel-specific."
-)
-_DEFAULT_INCOMING_SIGNAL_HANDLER_DESIGNER_INSTRUCTIONS = (
-    "## Purpose\n"
-    "Capture and maintain the OpenTulpa owner's durable policy for how incoming contact messages from signal/webhook channels should be handled.\n\n"
-    "## When to use\n"
-    "1. Before setting up a new inbound signal connector that will talk to external contacts.\n"
-    "2. When the owner asks to change how incoming Instagram/ManyChat/WhatsApp/etc. conversations should be handled.\n"
-    "3. When the owner wants OpenTulpa to perform business operations in response to inbound messages, such as qualification, booking appointments, logging lead data, or updating tables/docs.\n\n"
-    "## Setup dependency\n"
-    "1. This playbook is required for live signal handling; the signal rule should wire it through `handler_skill_name`.\n"
-    "2. If the upstream provider is not chosen yet, coordinate with the signal integration flow first so the source and connector plan are clear.\n\n"
-    "## Required owner guidance\n"
-    "1. Ask the owner what outcome the assistant should drive for incoming contacts.\n"
-    "2. Clarify what questions OpenTulpa should ask contacts, in what order, and when to stop.\n"
-    "3. Clarify what data should be captured and where it should be written: custom fields, local files, Google Sheets, Google Docs tables, APIs, CRM rows, etc.\n"
-    "4. Clarify which operations are allowed during handling: terminal commands, scripts, browser tasks, API calls, file writes, scheduling, or human escalation.\n"
-    "5. Clarify tone, boundaries, disallowed claims, handoff rules, and when to notify the owner instead of replying automatically.\n\n"
-    "## Storage rule\n"
-    "1. Save the handling policy as a user-scoped skill so it persists and can be amended later through chat.\n"
-    "2. Prefer a stable source-specific name like `<source>-incoming-handler` such as `manychat-incoming-handler`.\n"
-    "3. Update the existing handler skill instead of creating duplicates when the owner is refining the same workflow.\n"
-    "4. Keep the skill focused on durable behavior, not one-off conversation context.\n"
-    "5. After saving or updating the skill, wire the exact skill name into the signal rule via `handler_skill_name`.\n\n"
-    "## What the saved handler skill should contain\n"
-    "1. Trigger condition: which source/channel and which kinds of contacts/messages it applies to.\n"
-    "2. Conversation workflow: what to ask, what to confirm, and when to escalate or stop.\n"
-    "3. Operational actions: which scripts, sandbox actions, APIs, docs, or tables may be used while handling the contact.\n"
-    "4. Data contract: what fields or rows to write and the expected success/failure behavior.\n"
-    "5. Reply policy: tone, brevity, language, and what must never be claimed without tool evidence.\n\n"
-    "## Example outcomes\n"
-    "1. Qualify an Instagram lead, ask scheduling questions, then append an appointment row into a Google Sheet via an approved script.\n"
-    "2. Answer FAQs from business context, collect contact details, and escalate complex requests to the owner.\n"
-    "3. Gather booking details, create/update a local queue or external table, then send a confirmation message.\n\n"
-    "## Workflow\n"
-    "1. Ask concise owner questions until the handling policy is operationally specific.\n"
-    "2. Create or update the user skill with `skill_upsert`.\n"
-    "3. Confirm the saved skill name and summarize how future incoming contacts will be handled.\n"
-    "4. If the owner later amends the behavior through chat, update the same user skill rather than inventing a new policy."
-)
-
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -695,36 +615,11 @@ class SkillStoreService:
                 enabled=True,
                 supporting_files=None,
             )
-        existing_signal_integration_operator = self.get_skill(
-            customer_id="",
-            name="signal-integration-operator",
-            include_files=False,
-            include_global=True,
+        self._ensure_global_skill(
+            name="composio-operator",
+            description=_DEFAULT_COMPOSIO_OPERATOR_DESCRIPTION,
+            instructions=_DEFAULT_COMPOSIO_OPERATOR_INSTRUCTIONS,
         )
-        desired_signal_integration_operator = build_skill_markdown(
-            name="signal-integration-operator",
-            description=_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_DESCRIPTION,
-            instructions=_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_INSTRUCTIONS,
-        )
-        legacy_signal_integration_operator = build_skill_markdown(
-            name="signal-integration-operator",
-            description=_DEFAULT_SIGNAL_INTEGRATION_OPERATOR_DESCRIPTION,
-            instructions=_LEGACY_SIGNAL_INTEGRATION_OPERATOR_INSTRUCTIONS,
-        )
-        if existing_signal_integration_operator is None or (
-            existing_signal_integration_operator["source"] == "system_bootstrap"
-            and existing_signal_integration_operator["skill_markdown"]
-            in {legacy_signal_integration_operator, desired_signal_integration_operator}
-        ):
-            self.upsert_skill(
-                scope="global",
-                customer_id="",
-                name="signal-integration-operator",
-                skill_markdown=desired_signal_integration_operator,
-                source="system_bootstrap",
-                enabled=True,
-                supporting_files=None,
-            )
         self._ensure_global_skill(
             name="routine-schedule-composer",
             description=(
@@ -757,9 +652,4 @@ class SkillStoreService:
                 "2. Ensure instruction references required scripts/files/keys source as needed.\n"
                 "3. Ensure implementation_command is concrete (executable + args), not natural language.\n"
             ),
-        )
-        self._ensure_global_skill(
-            name="incoming-signal-handler-designer",
-            description=_DEFAULT_INCOMING_SIGNAL_HANDLER_DESIGNER_DESCRIPTION,
-            instructions=_DEFAULT_INCOMING_SIGNAL_HANDLER_DESIGNER_INSTRUCTIONS,
         )

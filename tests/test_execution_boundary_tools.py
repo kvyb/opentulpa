@@ -369,61 +369,92 @@ async def test_routine_create_requires_non_empty_implementation_command() -> Non
     assert str(result.get("error", "")).startswith("ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED")
     assert runtime.calls == []
     assert runtime.guard_calls == []
-
-
 @pytest.mark.asyncio
-async def test_signal_rule_upsert_and_tulpa_reload_call_internal_routes() -> None:
+async def test_composio_tools_call_internal_routes_with_customer_scope() -> None:
     runtime = _DummyRuntime(
         [
             _Response(
                 200,
                 {
                     "ok": True,
-                    "rule": {
-                        "source": "manychat",
-                        "wake_mode": "always",
-                        "handler_skill_name": "manychat-incoming-handler",
-                    },
+                    "enabled": True,
+                    "callback_url_configured": True,
+                    "default_callback_url": "https://example.com/callback",
                 },
             ),
             _Response(
                 200,
                 {
                     "ok": True,
-                    "rules": [
-                        {
-                            "source": "manychat",
-                            "wake_mode": "always",
-                            "handler_skill_name": "manychat-incoming-handler",
-                        }
-                    ],
+                    "customer_id": "telegram_1",
+                    "toolkit": "instagram",
+                    "connection_id": "conn_1",
+                    "redirect_url": "https://connect.example.com/instagram",
+                    "message_for_user": "Connect your instagram account here: https://connect.example.com/instagram",
                 },
             ),
-            _Response(200, {"ok": True, "public_loaded": ["manychat_live"]}),
+            _Response(200, {"ok": True, "connection": {"id": "conn_1", "status": "ACTIVE"}}),
+            _Response(200, {"ok": True, "connected_account": {"id": "acct_1", "disabled": True}}),
+            _Response(200, {"ok": True, "connected_account": {"id": "acct_2", "deleted": True}}),
+            _Response(
+                200,
+                {
+                    "ok": True,
+                    "matched": True,
+                    "conversation_id": "conv_1",
+                    "recipient_id": "rcp_1",
+                    "recipient_id_verified": True,
+                    "latest_inbound_message_created_time": "2026-04-06T11:14:00+0000",
+                },
+            ),
+            _Response(
+                200,
+                {
+                    "ok": True,
+                    "tool_slug": "INSTAGRAM_LIST_ALL_MESSAGES",
+                    "successful": True,
+                    "data": {"items": []},
+                },
+            ),
         ]
     )
     tools = register_runtime_tools(runtime)
 
-    rule = await tools["signal_rule_upsert"].ainvoke(
+    status = await tools["composio_status"].ainvoke({})
+    auth = await tools["composio_authorize_toolkit"].ainvoke({"toolkit": "instagram"})
+    connected = await tools["composio_wait_for_connection"].ainvoke({"connection_id": "conn_1"})
+    disabled = await tools["composio_disable_connected_account"].ainvoke({"connected_account_id": "acct_1"})
+    deleted = await tools["composio_delete_connected_account"].ainvoke({"connected_account_id": "acct_2"})
+    precheck = await tools["composio_instagram_reply_precheck"].ainvoke(
         {
-            "source": "manychat",
-            "wake_mode": "always",
-            "customer_id": "cust_1",
-            "thread_id": "thread_1",
-            "batch_window_seconds": 0,
-            "auto_reply": True,
-            "handler_skill_name": "manychat-incoming-handler",
-            "guidance_text": "Reply briefly.",
+            "recipient_id": "rcp_1",
+            "connected_account_id": "acct_1",
         }
     )
-    listed = await tools["signal_rule_list"].ainvoke({"source": "manychat", "customer_id": "cust_1"})
-    reload_result = await tools["tulpa_reload"].ainvoke({})
+    executed = await tools["composio_tool_execute"].ainvoke(
+        {
+            "tool_slug": "INSTAGRAM_LIST_ALL_MESSAGES",
+            "arguments": {"conversation_id": "conv_1"},
+            "connected_account_id": "acct_1",
+            "text": "list messages",
+        }
+    )
 
-    assert rule["source"] == "manychat"
-    assert rule["handler_skill_name"] == "manychat-incoming-handler"
-    assert listed[0]["source"] == "manychat"
-    assert listed[0]["handler_skill_name"] == "manychat-incoming-handler"
-    assert reload_result["public_loaded"] == ["manychat_live"]
-    assert runtime.calls[0][1] == "/internal/signals/rules/upsert"
-    assert runtime.calls[1][1] == "/internal/signals/rules"
-    assert runtime.calls[2][1] == "/internal/tulpa/reload"
+    assert status["enabled"] is True
+    assert auth["redirect_url"] == "https://connect.example.com/instagram"
+    assert "Open this authorization link" in auth["message"]
+    assert connected["status"] == "ACTIVE"
+    assert disabled["disabled"] is True
+    assert deleted["deleted"] is True
+    assert precheck["recipient_id_verified"] is True
+    assert executed["successful"] is True
+    assert runtime.calls[0][1] == "/internal/composio/status"
+    assert runtime.calls[1][1] == "/internal/composio/authorize"
+    assert runtime.calls[1][2]["json_body"]["customer_id"] == "telegram_1"
+    assert runtime.calls[2][1] == "/internal/composio/wait_for_connection"
+    assert runtime.calls[3][1] == "/internal/composio/connected_accounts/disable"
+    assert runtime.calls[4][1] == "/internal/composio/connected_accounts/delete"
+    assert runtime.calls[5][1] == "/internal/composio/instagram/reply_precheck"
+    assert runtime.calls[5][2]["json_body"]["customer_id"] == "telegram_1"
+    assert runtime.calls[6][1] == "/internal/composio/tools/execute"
+    assert runtime.calls[6][2]["json_body"]["customer_id"] == "telegram_1"

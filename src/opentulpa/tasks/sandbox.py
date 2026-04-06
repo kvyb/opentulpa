@@ -268,9 +268,9 @@ def validate_generated_file(relative_path: str) -> dict[str, Any]:
 
     if _is_tulpa_router_module(target) and not _has_main_guard(tree):
         names = _extract_router_names(tree)
-        if "router" not in names and "public_router" not in names:
+        if "router" not in names:
             raise ValueError(
-                "tulpa_stuff module must define top-level 'router' or 'public_router' for FastAPI mounting. "
+                "tulpa_stuff module must define top-level 'router' for FastAPI mounting. "
                 "Use: from fastapi import APIRouter; router = APIRouter()."
             )
         result["router_contract_ok"] = True

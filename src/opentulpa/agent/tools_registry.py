@@ -750,58 +750,219 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return r.json()
 
     @tool
-    async def signal_rule_upsert(
-        source: str,
-        wake_mode: str = "classifier",
-        customer_id: str = "",
-        thread_id: str = "",
-        batch_window_seconds: int = 0,
-        auto_reply: bool = True,
-        handler_skill_name: str = "",
-        guidance_text: str = "",
-    ) -> Any:
-        """Create or update signal wake handling rules for an external inbox source."""
-        r = await runtime._request_with_backoff(
-            "POST",
-            "/internal/signals/rules/upsert",
-            json_body={
-                "source": source,
-                "wake_mode": wake_mode,
-                "customer_id": customer_id,
-                "thread_id": thread_id,
-                "batch_window_seconds": max(0, int(batch_window_seconds)),
-                "auto_reply": bool(auto_reply),
-                "handler_skill_name": handler_skill_name,
-                "guidance_text": guidance_text,
-            },
-            timeout=10.0,
-        )
-        if r.status_code != 200:
-            return {"error": f"signal_rule_upsert failed: {r.text}"}
-        return r.json().get("rule", {})
-
-    @tool
-    async def signal_rule_list(
-        source: str = "",
-        customer_id: str = "",
-        thread_id: str = "",
-        limit: int = 50,
-    ) -> Any:
-        """List stored signal wake handling rules."""
+    async def composio_status() -> Any:
+        """Check whether Composio is configured before trying auth or external tool execution."""
         r = await runtime._request_with_backoff(
             "GET",
-            "/internal/signals/rules",
-            params={
-                "source": source,
-                "customer_id": customer_id,
-                "thread_id": thread_id,
-                "limit": max(1, min(int(limit), 200)),
-            },
-            timeout=10.0,
+            "/internal/composio/status",
+            timeout=8.0,
         )
         if r.status_code != 200:
-            return {"error": f"signal_rule_list failed: {r.text}"}
-        return r.json().get("rules", [])
+            return {"error": f"composio_status failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def composio_authorize_toolkit(toolkit: str, callback_url: str = "") -> Any:
+        """Create a Composio auth link for the active user. Share redirect_url with the user so they can finish OAuth."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/composio/authorize",
+            json_body={
+                "customer_id": customer_id,
+                "toolkit": toolkit,
+                "callback_url": callback_url,
+            },
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_authorize_toolkit failed: {r.text}"}
+        payload = r.json()
+        redirect_url = str(payload.get("redirect_url", "") or "").strip()
+        if redirect_url:
+            payload["message"] = (
+                f"Open this authorization link to connect {toolkit}: {redirect_url}"
+            )
+        return payload
+
+    @tool
+    async def composio_wait_for_connection(
+        connection_id: str,
+        timeout_seconds: float = 60.0,
+    ) -> Any:
+        """Wait for a Composio connection to become active after the user finishes OAuth."""
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/composio/wait_for_connection",
+            json_body={
+                "connection_id": connection_id,
+                "timeout_seconds": max(1.0, min(float(timeout_seconds), 600.0)),
+            },
+            timeout=max(10.0, min(float(timeout_seconds) + 5.0, 605.0)),
+            retries=0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_wait_for_connection failed: {r.text}"}
+        return r.json().get("connection", {})
+
+    @tool
+    async def composio_toolkits(
+        toolkits: list[str] | None = None,
+        is_connected: str = "",
+        limit: int = 50,
+        search: str = "",
+    ) -> Any:
+        """List Composio toolkit connection state for the active user."""
+        customer_id = _require_customer_id(runtime)
+        params: dict[str, Any] = {
+            "customer_id": customer_id,
+            "toolkits": ",".join(toolkits or []),
+            "limit": max(1, min(int(limit), 100)),
+            "search": str(search or "").strip(),
+        }
+        if str(is_connected or "").strip():
+            params["is_connected"] = str(is_connected).strip()
+        r = await runtime._request_with_backoff(
+            "GET",
+            "/internal/composio/toolkits",
+            params=params,
+            timeout=15.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_toolkits failed: {r.text}"}
+        return r.json().get("items", [])
+
+    @tool
+    async def composio_connected_accounts(
+        toolkits: list[str] | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> Any:
+        """List Composio connected accounts for the active user."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "GET",
+            "/internal/composio/connected_accounts",
+            params={
+                "customer_id": customer_id,
+                "toolkits": ",".join(toolkits or []),
+                "statuses": ",".join(statuses or []),
+                "limit": max(1, min(int(limit), 100)),
+            },
+            timeout=15.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_connected_accounts failed: {r.text}"}
+        return r.json().get("items", [])
+
+    @tool
+    async def composio_disable_connected_account(connected_account_id: str) -> Any:
+        """Disable a Composio connected account so OpenTulpa stops using it."""
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/composio/connected_accounts/disable",
+            json_body={"connected_account_id": str(connected_account_id or "").strip()},
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_disable_connected_account failed: {r.text}"}
+        return r.json().get("connected_account", {})
+
+    @tool
+    async def composio_delete_connected_account(connected_account_id: str) -> Any:
+        """Delete a Composio connected account permanently."""
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/composio/connected_accounts/delete",
+            json_body={"connected_account_id": str(connected_account_id or "").strip()},
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_delete_connected_account failed: {r.text}"}
+        return r.json().get("connected_account", {})
+
+    @tool
+    async def composio_tool_search(
+        query: str = "",
+        toolkits: list[str] | None = None,
+        limit: int = 20,
+    ) -> Any:
+        """Search Composio tools and return candidate tool slugs, descriptions, and input schemas."""
+        r = await runtime._request_with_backoff(
+            "GET",
+            "/internal/composio/tools/search",
+            params={
+                "query": str(query or "").strip(),
+                "toolkits": ",".join(toolkits or []),
+                "limit": max(1, min(int(limit), 50)),
+            },
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_tool_search failed: {r.text}"}
+        return r.json().get("items", [])
+
+    @tool
+    async def composio_tool_schema(tool_slug: str) -> Any:
+        """Get the input schema for a single Composio tool slug."""
+        r = await runtime._request_with_backoff(
+            "GET",
+            f"/internal/composio/tools/{tool_slug}/schema",
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_tool_schema failed: {r.text}"}
+        return r.json().get("tool", {})
+
+    @tool
+    async def composio_instagram_reply_precheck(
+        recipient_id: str = "",
+        conversation_id: str = "",
+        connected_account_id: str = "",
+        scan_limit: int = 10,
+    ) -> Any:
+        """Verify the exact Instagram thread for a recipient and capture the latest inbound timestamp before attempting a DM send."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/composio/instagram/reply_precheck",
+            json_body={
+                "customer_id": customer_id,
+                "recipient_id": str(recipient_id or "").strip(),
+                "conversation_id": str(conversation_id or "").strip(),
+                "connected_account_id": str(connected_account_id or "").strip(),
+                "scan_limit": max(1, min(int(scan_limit), 25)),
+            },
+            timeout=60.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_instagram_reply_precheck failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def composio_tool_execute(
+        tool_slug: str,
+        arguments: dict[str, Any] | None = None,
+        connected_account_id: str = "",
+        text: str = "",
+    ) -> Any:
+        """Execute a Composio tool for the active user using explicit JSON arguments from the tool schema. For Instagram sends, verify the exact thread first with composio_instagram_reply_precheck."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/composio/tools/execute",
+            json_body={
+                "customer_id": customer_id,
+                "tool_slug": tool_slug,
+                "arguments": arguments if isinstance(arguments, dict) else {},
+                "connected_account_id": connected_account_id,
+                "text": text,
+            },
+            timeout=120.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"composio_tool_execute failed: {r.text}"}
+        return r.json()
 
     @tool
     async def directive_get() -> Any:
@@ -1824,8 +1985,17 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "skill_get": skill_get,
         "skill_upsert": skill_upsert,
         "skill_delete": skill_delete,
-        "signal_rule_upsert": signal_rule_upsert,
-        "signal_rule_list": signal_rule_list,
+        "composio_status": composio_status,
+        "composio_authorize_toolkit": composio_authorize_toolkit,
+        "composio_wait_for_connection": composio_wait_for_connection,
+        "composio_toolkits": composio_toolkits,
+        "composio_connected_accounts": composio_connected_accounts,
+        "composio_disable_connected_account": composio_disable_connected_account,
+        "composio_delete_connected_account": composio_delete_connected_account,
+        "composio_tool_search": composio_tool_search,
+        "composio_tool_schema": composio_tool_schema,
+        "composio_instagram_reply_precheck": composio_instagram_reply_precheck,
+        "composio_tool_execute": composio_tool_execute,
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,

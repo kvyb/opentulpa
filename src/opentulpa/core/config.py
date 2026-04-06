@@ -213,6 +213,14 @@ class Settings(BaseSettings):
         le=86400,
         description="How long completed local Browser Use task records remain queryable in memory.",
     )
+    composio_api_key: str | None = Field(
+        default=None,
+        description="Composio API key used for Tool Router sessions and auth flows.",
+    )
+    composio_default_callback_url: str | None = Field(
+        default=None,
+        description="Optional default callback URL used when starting Composio auth flows.",
+    )
     agent_prompt_caching_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(

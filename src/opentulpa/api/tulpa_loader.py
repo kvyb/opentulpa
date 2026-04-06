@@ -21,11 +21,9 @@ class TulpaRouterLoader:
         self,
         project_root: Path,
         mount_router: APIRouter,
-        public_mount_router: APIRouter | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.mount_router = mount_router
-        self.public_mount_router = public_mount_router
         self.package_name = "tulpa_stuff"
         self.package_dir = self.project_root / self.package_name
 
@@ -69,11 +67,8 @@ class TulpaRouterLoader:
         """Reload all tulpa_stuff module routers onto the mount router."""
         self._ensure_importable()
         self.mount_router.routes.clear()
-        if self.public_mount_router is not None:
-            self.public_mount_router.routes.clear()
 
         loaded: list[str] = []
-        public_loaded: list[str] = []
         errors: list[dict[str, str]] = []
         warnings: list[dict[str, str]] = []
 
@@ -81,24 +76,15 @@ class TulpaRouterLoader:
             try:
                 module = self._import_module(module_name)
                 router = getattr(module, "router", None)
-                public_router = getattr(module, "public_router", None)
                 has_internal = isinstance(router, APIRouter)
-                has_public = isinstance(public_router, APIRouter)
-                if not has_internal and not has_public:
-                    raise TypeError("missing APIRouter 'router' or 'public_router' export")
+                if not has_internal:
+                    raise TypeError("missing APIRouter 'router' export")
                 if has_internal:
                     self.mount_router.include_router(
                         router,
                         prefix=f"/{module_name}",
                         tags=["tulpa"],
                     )
-                if has_public and self.public_mount_router is not None:
-                    self.public_mount_router.include_router(
-                        public_router,
-                        prefix=f"/{module_name}",
-                        tags=["tulpa-public"],
-                    )
-                    public_loaded.append(module_name)
                 loaded.append(module_name)
             except ModuleNotFoundError as exc:  # pragma: no cover - runtime guard
                 missing = str(getattr(exc, "name", "")).strip() or str(exc)
@@ -123,6 +109,4 @@ class TulpaRouterLoader:
             "warnings": warnings,
             "errors": errors,
             "mount_prefix": "/tulpa/<module_name>",
-            "public_mount_prefix": "/webhook/tulpa/<module_name>",
-            "public_loaded": public_loaded,
         }

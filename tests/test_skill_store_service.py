@@ -20,9 +20,8 @@ def test_skill_store_default_skill_and_user_override(tmp_path: Path) -> None:
     names = {s["name"] for s in all_global}
     assert "skill-creator" in names
     assert "browser-use-operator" in names
+    assert "composio-operator" in names
     assert "routine-schedule-composer" in names
-    assert "signal-integration-operator" in names
-    assert "incoming-signal-handler-designer" in names
 
     global_md = build_skill_markdown(
         name="weather-report",
@@ -131,42 +130,15 @@ def test_browser_use_operator_default_mentions_session_reuse(tmp_path: Path) -> 
     assert "browser_use_task_screenshot" in skill["skill_markdown"]
 
 
-def test_signal_integration_operator_default_mentions_signal_core_routes(tmp_path: Path) -> None:
+def test_composio_operator_default_mentions_auth_and_schema_flow(tmp_path: Path) -> None:
     store = _mk_service(tmp_path)
     store.ensure_default_skill()
 
-    skill = store.get_skill(customer_id="", name="signal-integration-operator", include_files=False)
+    skill = store.get_skill(customer_id="", name="composio-operator", include_files=False)
     assert skill is not None
-    assert "/internal/signals/ingest" in skill["skill_markdown"]
-    assert "/internal/signals/rules/upsert" in skill["skill_markdown"]
-    assert "signal_rule_list" in skill["skill_markdown"]
-    assert "public_router" in skill["skill_markdown"]
-    assert "external_subject_id" in skill["skill_markdown"]
-    assert "owner/operator identity" in skill["skill_markdown"]
-    assert "owner_customer_id" in skill["skill_markdown"]
-    assert "request.app.state.signal_ingest" in skill["skill_markdown"]
-    assert "incoming webhook JSON as generic" in skill["skill_markdown"]
-    assert "Before enabling a new inbound signal channel" in skill["skill_markdown"]
-    assert "incoming-signal-handler-designer" in skill["skill_markdown"]
-    assert "handler_skill_name" in skill["skill_markdown"]
-    assert "upstream webhook provider" in skill["skill_markdown"]
-    assert "suggest ManyChat" in skill["skill_markdown"]
-
-
-def test_incoming_signal_handler_designer_default_mentions_owner_playbook(tmp_path: Path) -> None:
-    store = _mk_service(tmp_path)
-    store.ensure_default_skill()
-
-    skill = store.get_skill(
-        customer_id="",
-        name="incoming-signal-handler-designer",
-        include_files=False,
-    )
-    assert skill is not None
-    assert "user-scoped skill" in skill["skill_markdown"]
-    assert "`manychat-incoming-handler`" in skill["skill_markdown"]
-    assert "Google Sheet" in skill["skill_markdown"]
-    assert "scripts, sandbox actions, APIs" in skill["skill_markdown"]
-    assert "If the owner later amends the behavior through chat" in skill["skill_markdown"]
-    assert "handler_skill_name" in skill["skill_markdown"]
-    assert "required for live signal handling" in skill["skill_markdown"]
+    assert "composio_authorize_toolkit" in skill["skill_markdown"]
+    assert "composio_wait_for_connection" in skill["skill_markdown"]
+    assert "composio_tool_search" in skill["skill_markdown"]
+    assert "composio_tool_schema" in skill["skill_markdown"]
+    assert "composio_tool_execute" in skill["skill_markdown"]
+    assert "redirect_url" in skill["skill_markdown"]

@@ -8,6 +8,7 @@ from typing import Any
 _ROUTE_IMPORTS = {
     "register_approval_routes": "opentulpa.api.routes.approvals",
     "register_chat_routes": "opentulpa.api.routes.chat",
+    "register_composio_routes": "opentulpa.api.routes.composio",
     "register_debug_log_routes": "opentulpa.api.routes.debug_logs",
     "register_file_routes": "opentulpa.api.routes.files",
     "register_health_routes": "opentulpa.api.routes.health",
@@ -15,6 +16,7 @@ _ROUTE_IMPORTS = {
     "register_profile_routes": "opentulpa.api.routes.profiles",
     "register_scheduler_routes": "opentulpa.api.routes.scheduler",
     "register_skill_routes": "opentulpa.api.routes.skills",
+    "register_system_routes": "opentulpa.api.routes.system",
     "register_task_routes": "opentulpa.api.routes.tasks",
     "register_telegram_webhook_routes": "opentulpa.api.routes.telegram_webhook",
     "register_tulpa_routes": "opentulpa.api.routes.tulpa",
