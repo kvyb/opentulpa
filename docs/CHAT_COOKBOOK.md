@@ -1,12 +1,13 @@
 # OpenTulpa Chat Idea Bank
 
-Use this as a quick list of things you can ask OpenTulpa to do through chat.
+Use this as a quick list of things you can ask OpenTulpa to do through chat, usually through Telegram.
 
 ## Important Notes
 
 - You can pass env vars through chat during setup.
 - OpenTulpa stores generated scripts/config in the `tulpa_stuff` sandbox.
 - External write actions still use approval guardrails.
+- If Composio is configured, OpenTulpa can connect to supported third-party services and use those integrations for you.
 
 ## High-Value Ideas
 

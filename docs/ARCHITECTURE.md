@@ -13,7 +13,7 @@ This document describes the current runtime design, request flows, safety contro
 ## Layered modules
 
 - `src/opentulpa/api`: FastAPI composition and route registration.
-- `src/opentulpa/api/routes`: internal route surface (`/internal/*`) + Telegram webhook.
+- `src/opentulpa/api/routes`: internal route surface (`/internal/*`), Telegram webhook, and Composio callback/status routes.
 - `src/opentulpa/application`: orchestration use-cases (`TurnOrchestrator`, `WakeOrchestrator`, `ApprovalExecutionOrchestrator`).
 - `src/opentulpa/domain`: domain contracts (for example conversation turn request/result).
 - `src/opentulpa/agent`: LangGraph runtime, graph nodes, compaction, tool registry.
@@ -42,6 +42,13 @@ This document describes the current runtime design, request flows, safety contro
 2. `TurnOrchestrator` validates/normalizes the turn.
 3. Runtime executes `ainvoke_text(...)`.
 4. Route returns normalized `{ok, status, customer_id, thread_id, text}`.
+
+### Composio integration flow
+
+1. App startup checks whether `COMPOSIO_API_KEY` is configured.
+2. If present, `ComposioService` is initialized lazily and the internal Composio routes use the real SDK wrapper.
+3. If absent, OpenTulpa keeps the Composio status route available but reports `enabled: false` and does not load the SDK.
+4. When configured, auth/tool flows run through `/internal/composio/*` routes and execute on behalf of the active user.
 
 ### Approval decision + execution flow
 
@@ -81,6 +88,14 @@ Configured in `src/opentulpa/core/config.py`:
 
 Compaction is hysteresis-based: compact at high watermark, then reduce toward low watermark, while folding older history into a bounded rollup injected as system context.
 
+## Prompt caching behavior
+
+- Prompt caching is controlled by `AGENT_PROMPT_CACHING_ENABLED`.
+- Stable prompt prefix content is separated from turn-volatile context before model invocation.
+- Anthropic/Claude models use request-level cache control.
+- Gemini models use per-message cache breakpoints on the stable prefix.
+- OpenAI-compatible models that cache automatically do not receive explicit cache markers.
+
 ## Approval model details
 
 - Internal/read-oriented actions are deterministically allowed by policy.
@@ -91,11 +106,12 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
 
 ## Internal API boundary
 
-- `/webhook/*` is the public webhook ingress surface (Telegram and future integrations).
+- `/webhook/*` is the public webhook ingress surface for Telegram plus the Composio OAuth callback path.
 - Public internet clients are denied for all non-webhook routes except health checks
   (`/healthz`, `/agent/healthz`) for platform liveness probing.
 - `/webhook/telegram` requires Telegram secret header auth
   (`x-telegram-bot-api-secret-token`).
+- `/webhook/composio/callback` is a public landing/callback path used by Composio auth flows.
 - `/internal/*` routes are intended for server-local traffic only
   (`localhost`/private network).
 - `scripts/manager.py` auto-generates `TELEGRAM_WEBHOOK_SECRET` for tunnel runs

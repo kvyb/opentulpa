@@ -2,63 +2,70 @@
   <img src="docs/assets/opentulpa-logo.png" alt="OpenTulpa Logo" />
 </p>
 
-# OpenTulpa
+<h1 align="center">OpenTulpa</h1>
 
-**A self-hosted persistent agent runtime for developers.**
+<p align="center">
+  <strong>Your agent shouldn't forget everything the moment a conversation ends.</strong><br/>
+  A self-hosted persistent agent runtime for developers who build workflows, not just chatbots.
+</p>
 
-OpenTulpa is a self-hosted runtime for agents that need durable context, real execution, and reusable operational memory. It does not reset at the prompt boundary: it persists context, artifacts, skills, routines, approvals, and thread rollups so workflows become faster, safer, and more reusable over time.
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#how-it-works">How It Works</a> · <a href="#why-opentulpa">Why OpenTulpa</a> · <a href="docs/ARCHITECTURE.md">Architecture</a> · <a href="docs/DEPLOYMENT.md">Deploy</a> · <a href="docs/CHAT_COOKBOOK.md">Cookbook</a>
+</p>
 
-It is built for developers who want an agent that can:
+---
 
-- remember context across sessions
-- work through workflows, not just answer prompts
-- turn repeated tasks into reusable skills and routines
-- stay inspectable, editable, and local-first
-- operate with guardrails when actions have real-world side effects
+## The Problem
 
-## How It Works
+Every agent framework demos beautifully on the first request. Then the session ends, the state evaporates, and the next run starts from scratch. Context is gone. Decisions are forgotten. That workflow you just painstakingly walked through? You get to do it again.
 
-- ingest context from chat, files, and events
-- retrieve durable state such as profiles, rollups, artifacts, skills, and routines
-- plan and execute with tools
-- gate external side effects behind approval
-- persist outputs as artifacts, skills, routines, approvals, and updated thread context
+**OpenTulpa doesn't reset at the prompt boundary.**
 
-## Walkthrough
+It persists context, artifacts, skills, routines, approvals, and thread rollups across sessions — so your agent gets *better* over time instead of starting over every time.
 
-Request: "Monitor this market every morning, summarize changes, and send me a brief."
+---
 
-OpenTulpa:
+## What You Get
 
-1. fetches the relevant sources and prior context
-2. extracts and summarizes the important changes
-3. stores the brief as a durable artifact
-4. saves the workflow as a routine
-5. reuses prior context and preferences on the next run
+🧠 **Memory that actually persists** — context, preferences, and prior decisions survive across sessions and restarts
 
-## Why OpenTulpa
+⚙️ **Real execution, not just text generation** — web retrieval, browser automation, file handling, generated scripts, scheduled routines
 
-Most agent demos stop at the prompt boundary. They can answer a request, maybe call a tool, and then discard the operational state that would make the next run easier. OpenTulpa persists the reusable parts of work: context, artifacts, skills, routines, approvals, and thread rollups.
+🔁 **Skills that compound** — repeated workflows become reusable capabilities your agent can call on forever
 
-It exposes a direct internal chat API for programmatic use, supports Telegram as a natural interface, and can be extended with browser automation, web retrieval, and generated task code.
+🛡️ **Guardrails where it matters** — external-impact actions go through an approval broker with durable, single-use, time-limited gates
 
-That makes it useful for workflows developers actually care about:
+🔍 **Fully inspectable, fully local** — everything lives on your machine, in readable files and local storage. No black boxes.
 
-- research that should persist beyond one chat
-- repetitive operations that should become reusable automations
-- assistants that need memory, tools, and execution in one runtime
-- personal or team agents that must stay self-hosted and inspectable
+📡 **Telegram-native with an API escape hatch** — chat with it naturally through Telegram, or hit the internal API for programmatic control
+
+---
+
+## See It In Action
+
+> *"Monitor this market every morning, summarize changes, and send me a brief."*
+
+Here's what happens:
+
+1. **Fetches** relevant sources and prior context from durable state
+2. **Extracts** and summarizes the important changes
+3. **Stores** the brief as a durable artifact you can reference later
+4. **Saves** the entire workflow as a reusable routine
+5. **Improves** on the next run — reusing your context, preferences, and feedback
+
+No re-prompting. No copy-pasting old outputs. It just picks up where it left off.
+
+---
 
 ## Quick Start
 
-### Local API
+### Prerequisites
 
-Requirements:
 - Python `3.12+`
 - [`uv`](https://docs.astral.sh/uv/)
-- an OpenAI-compatible API key
+- An OpenAI-compatible API key
 
-Setup:
+### 30-Second Setup
 
 ```bash
 git clone <repo-url>
@@ -66,205 +73,257 @@ cd opentulpa
 cp .env.example .env
 ```
 
-Set this in `.env`:
+Add your key to `.env`:
 
 ```bash
 OPENAI_COMPATIBLE_API_KEY=...
 ```
 
-Install and run:
+Run it:
 
 ```bash
 ./start.sh --app
 ```
 
-Health checks:
-- `http://127.0.0.1:8000/healthz`
-- `http://127.0.0.1:8000/agent/healthz`
+That's it. Health checks at `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/agent/healthz`.
 
-### Local Telegram
+### Connect Telegram (Recommended)
 
-If you want to use Telegram locally:
+Telegram is the primary interface and where OpenTulpa really shines.
 
-1. Create a bot with `@BotFather`.
-2. Put `TELEGRAM_BOT_TOKEN` in `.env`.
-3. Install `cloudflared`.
+1. Create a bot via `@BotFather`
+2. Add `TELEGRAM_BOT_TOKEN` to `.env`
+3. Install `cloudflared`
 4. Run:
 
 ```bash
 ./start.sh
 ```
 
-`start.sh` installs Python deps, installs Playwright Chromium by default, installs `cloudflared` when manager mode needs it, and then starts the app.
-
-### Browser Use
-
-Browser Use is installed by default when you use `./start.sh`.
-
-If you want to skip the Chromium install:
-
-```bash
-./start.sh --no-browser-use
-```
-
-Browser Use runs locally inside OpenTulpa. It does not require Browser Use Cloud.
+`start.sh` handles Python deps, Playwright Chromium, and `cloudflared` tunnel setup automatically.
 
 ### Docker
-
-The Docker image already installs Python dependencies, Node.js/npm, and Playwright Chromium:
 
 ```bash
 docker build -t opentulpa .
 docker run --rm -p 8000:8000 --env-file .env opentulpa
 ```
 
+The image comes with Python dependencies, Node.js/npm, and Playwright pre-installed.
+
 ### Railway
 
-Railway uses the included `Dockerfile`, so it installs app dependencies, Node.js/npm, and Playwright automatically.
+1. Create a Railway project from this repo
+2. Add one volume at `/app/opentulpa_data`
+3. Set `OPENAI_COMPATIBLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+4. Optionally set `TELEGRAM_WEBHOOK_SECRET` and `PUBLIC_BASE_URL`
+5. Deploy
 
-Minimum setup:
+Full checklist in [Deployment docs](docs/DEPLOYMENT.md).
 
-1. Create a Railway project from this repo.
-2. Add one volume at `/app/opentulpa_data`.
-3. Set:
-   - `OPENAI_COMPATIBLE_API_KEY`
-   - `TELEGRAM_BOT_TOKEN`
-   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
-4. Optionally set:
-   - `TELEGRAM_WEBHOOK_SECRET`
-   - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
-5. Deploy.
+<details>
+<summary><strong>More setup options</strong></summary>
 
-See [Deployment](docs/DEPLOYMENT.md) for the exact checklist.
+#### Browser Automation
 
-### Script Modes
+Installed by default. Skip it with:
 
-`start.sh` supports:
-- `./start.sh`
-  installs what it needs and runs quick-tunnel manager mode
-- `./start.sh --app`
-  installs what it needs and runs direct app mode
-- `./start.sh install`
-  install/setup only
-- `./start.sh run --app`
-  run only, no install step
+```bash
+./start.sh --no-browser-use
+```
 
-You can also control it through `.env`:
-- `START_MODE=auto|app|manager`
-- `INSTALL_BROWSER_USE=1|0`
-- `INSTALL_CLOUDFLARED=auto|1|0`
+Runs locally inside OpenTulpa — no Browser Use Cloud required.
 
-## What Makes It Different
+#### Composio (Optional)
 
-1. **Durable operational state, not just chat history**
+Connect to external services through Composio by adding:
 
-   OpenTulpa stores and reuses the things that usually get lost between sessions: preferences, directives, files, prior decisions, context events, artifacts, skills, routines, thread rollups, approvals, and link aliases.
+```bash
+COMPOSIO_API_KEY=...
+```
 
-2. **Execution, not just generation**
+If not set, the Composio SDK never loads. When configured, OpenTulpa can authenticate against supported third-party services and use integrations on behalf of the active user.
 
-   It is designed to act through tools: web retrieval, files, browser sessions, internal APIs, generated scripts, and scheduled routines. Artifacts are saved locally so the system stays inspectable instead of disappearing into prompts.
+OpenTulpa computes the OAuth callback URL automatically. Override only if needed:
 
-3. **Skills that compound**
+```bash
+COMPOSIO_DEFAULT_CALLBACK_URL=https://your-public-base/webhook/composio/callback
+```
 
-   When a workflow repeats, OpenTulpa can save reusable capabilities as skills and routines. Your runtime becomes a growing library of working behavior instead of rediscovering the same solution each time.
+#### Script Modes
 
-4. **Guardrails around side effects**
+| Command | What it does |
+|---|---|
+| `./start.sh` | Install + run in quick-tunnel manager mode |
+| `./start.sh --app` | Install + run in direct app mode |
+| `./start.sh install` | Install/setup only |
+| `./start.sh run --app` | Run only, skip install |
 
-   Read-oriented and internal actions can proceed directly. External-impact actions can be routed through an approval broker with durable, single-use, time-limited approvals.
+Control via `.env`: `START_MODE`, `INSTALL_BROWSER_USE`, `INSTALL_CLOUDFLARED`
 
-## Good Use Cases
+</details>
 
-OpenTulpa is a strong fit for:
+---
 
-- recurring market and competitive monitoring
-- inbox triage with draft generation
-- document review that extracts decisions and remembers them
-- API integration scaffolding and scheduled automation
-- recurring project, status, or executive briefs
-- self-hosted developer assistants with guarded actions
+## Why OpenTulpa
 
-Example requests:
+### Most agent frameworks throw away the most valuable part of every interaction.
 
-- "Summarize the most important unread items from my inbox and draft replies."
-- "Monitor this market every morning and send me a concise brief."
-- "Read this PDF, extract the decisions, and remember them for future work."
-- "Build an integration for this API, save it as a reusable skill, and schedule it."
-- "Check what changed in this project since yesterday and draft a status update."
+They discard the operational state — the preferences learned, the decisions made, the context built up — that would make the next run faster, cheaper, and more accurate. You're left re-explaining things you already covered three sessions ago.
 
-## Architecture At A Glance
+OpenTulpa was built around a different assumption: **the reusable parts of work should persist.**
 
-Core loop: capture context -> retrieve durable state -> plan -> act with tools -> gate side effects -> persist outputs.
+| | Typical Agent | OpenTulpa |
+|---|---|---|
+| Context between sessions | ❌ Gone | ✅ Persisted and retrieved automatically |
+| Repeated workflows | Manual re-prompting | Saved as reusable skills and routines |
+| File outputs and artifacts | Lost in chat history | Stored locally, inspectable, referenceable |
+| Side effects | YOLO | Gated behind approval with audit trail |
+| Prompt costs | Full resend every turn | Provider-aware caching for stable prefixes |
+| Hosting | Someone else's servers | Your machine. Your data. |
+
+---
+
+## How It Works
+
+```
+capture context → retrieve durable state → plan → execute with tools → gate side effects → persist outputs
+```
 
 ```text
 Telegram / Internal API / Events
-              |
+              │
            FastAPI
-              |
+              │
   capture context + retrieve state
-              |
+              │
        LangGraph runtime
-              |
+              │
  plan + tool execution + validation
-              |
+              │
  approval gate for external actions
-              |
+              │
  persist artifacts / skills / routines / rollups
-              |
+              │
    local durable state (.opentulpa/, tulpa_stuff/)
 ```
 
-Core pieces:
+**Under the hood:**
 
-- FastAPI app for webhook and internal routes
-- LangGraph runtime for turn execution, validation, guardrails, and claim checking
-- Context services for profiles, files, event backlog, thread rollups, and aliases
-- Skill store for reusable capabilities
-- Scheduler/task service for one-off and recurring routines
-- Approval broker for external-impact actions
-- Local durable storage using SQLite plus embedded vector storage
+- **FastAPI** for webhook and internal routes
+- **LangGraph** runtime for turn execution, validation, guardrails, and claim checking
+- **Context services** for profiles, files, event backlog, thread rollups, and aliases
+- **Skill store** for reusable capabilities
+- **Scheduler** for one-off and recurring routines
+- **Approval broker** for external-impact actions
+- **Local storage** using SQLite + embedded Qdrant for vector search
+
+No external database required by default. Everything lives on disk.
+
+---
+
+## What You Can Build
+
+OpenTulpa is a strong fit for work that repeats, compounds, or has real-world consequences.
+
+### Core Workflows
+
+| Use Case | Example Request |
+|---|---|
+| **Market monitoring** | *"Monitor this market every morning and send me a concise brief."* |
+| **Inbox management** | *"Summarize the most important unread items and draft replies."* |
+| **Document intelligence** | *"Read this PDF, extract the decisions, and remember them for future work."* |
+| **API automation** | *"Build an integration for this API, save it as a reusable skill, and schedule it."* |
+| **Status reporting** | *"Check what changed in this project since yesterday and draft a status update."* |
+| **Developer assistants** | Any self-hosted agent that needs memory, tools, execution, and guardrails in one runtime |
+
+### With Composio Enabled
+
+When you connect Composio, OpenTulpa can authenticate against third-party services and run automations that actually touch your real accounts. This is where it starts to feel less like a chatbot and more like a digital employee.
+
+| Use Case | Example Request |
+|---|---|
+| **Social media management** | *"Check my Instagram every 5 minutes and reply to DMs about business collaborations or partnership inquiries on my behalf."* |
+| **CRM automation** | *"When a new lead comes in on HubSpot, research their company, score the lead, and draft a personalized outreach email."* |
+| **Calendar orchestration** | *"Look at my Google Calendar every morning, flag conflicts, and send me a Telegram summary with suggested reschedules."* |
+| **GitHub ops** | *"Watch this repo for new issues labeled 'bug', reproduce them if possible, and post a triage comment with severity and suggested fix."* |
+| **Slack delegation** | *"Monitor my Slack channels, summarize anything I'm tagged in, and draft responses I can approve before sending."* |
+| **Cross-platform reporting** | *"Pull this week's analytics from Google Analytics and Stripe, combine them into a brief, and push it to a Notion page every Monday."* |
+| **Email workflow** | *"Watch for emails from this client, extract any action items, add them to my Todoist, and send me a digest at end of day."* |
+
+These aren't theoretical — OpenTulpa persists the routine, remembers your preferences from last time, and improves with each run. The approval gate ensures nothing gets sent, posted, or purchased without your sign-off when you want it.
+
+---
 
 ## What You Can Connect
 
-- **Telegram interface (optional):** chat, files, voice notes, approval buttons, `/setup`, `/fresh`, `/status`
-- **Self-built webhook inboxes:** OpenTulpa can set up its own thin channel adapters in `tulpa_stuff/`, accept inbound webhooks, queue normalized signals, wake on saved rules, and draft or send replies through the adapter's outbound API
-- **Web intelligence:** web search plus URL/file fetching for HTML, PDF, DOCX, and image analysis
-- **Browser automation (optional):** local Browser Use tasks for dynamic websites
-- **Skills:** reusable `SKILL.md` capabilities with user/global scope and persistence
-- **Routines:** cron or one-time scheduled automations with durable storage
+- **Telegram** — chat, files, voice notes, approval buttons, `/setup`, `/fresh`, `/status`
+- **Internal API** — programmatic access to the runtime for custom integrations
+- **Web intelligence** — search, URL/file fetching (HTML, PDF, DOCX), image analysis
+- **Browser automation** — local Playwright sessions for dynamic websites
+- **Composio** — OAuth-based connections to third-party apps (optional)
+- **Skills** — reusable `SKILL.md` capabilities with user/global scope
+- **Routines** — cron or one-time scheduled automations with durable storage
 
-Generated scripts/artifacts are tracked under local storage (for example `tulpa_stuff/` and `.opentulpa/`), so your automation stack stays inspectable and editable.
+All generated scripts and artifacts are tracked under local storage (`tulpa_stuff/`, `.opentulpa/`) — inspectable and editable at all times.
 
-## Safety And Storage
+---
 
-- Internal and read-oriented actions can be allowed directly.
-- External writes, purchases, or costly actions can require approval.
-- Unknown recipient scope fails toward approval.
-- Approval records are durable, single-use, and time-limited.
-- Public exposure is limited to webhook and health routes; internal routes are intended for local or private traffic.
-- By default, OpenTulpa does not require an external database. It persists runtime state locally, and memory vectors are stored in an embedded local Qdrant setup.
-- For durable deploys, mount `/app/.opentulpa` so skills, approvals, checkpoints, and memory survive redeploys.
+## Safety Model
 
-## Developer Experience
+OpenTulpa doesn't assume every action is safe to execute blindly.
 
-OpenTulpa is a runnable reference architecture for persistent, guarded, tool-using agents. It is also meant to be hacked on.
+- **Read-only and internal actions** proceed directly
+- **External writes, purchases, or costly actions** require approval
+- **Unknown scope** defaults to requiring approval
+- **Approvals** are durable, single-use, and time-limited
+- **Public exposure** is limited to webhook and health routes; internal routes stay local/private
+- **Memory vectors** are stored in an embedded local Qdrant instance — nothing leaves your infrastructure
 
-- add tools in the tool registry
-- add new internal routes under `src/opentulpa/api/routes`
-- add interface adapters under `src/opentulpa/interfaces`
-- extend approval behavior through the policy and broker layers
-- add durable skills instead of hardcoding every workflow into prompts
+For durable deploys, mount `/app/.opentulpa` so skills, approvals, checkpoints, and memory survive redeploys.
 
-Use it as a ready-to-run agent or as a reference architecture you can extend.
+---
 
-## Deploy
+## Provider-Aware Prompt Caching
 
-- Dockerfile included.
-- Railway-ready config included.
-- For durability across redeploys, use `OPENTULPA_DATA_ROOT` with one mounted volume.
+OpenTulpa separates stable prompt prefixes from turn-specific context so supported providers can reuse cached segments instead of re-billing the same instructions every turn.
+
+| Provider | Caching Strategy |
+|---|---|
+| Anthropic/Claude | Request-level cache control |
+| Gemini | Per-message cache breakpoints on stable prefix |
+| OpenAI-compatible | Automatic caching (no explicit markers needed) |
+
+Controlled via `AGENT_PROMPT_CACHING_ENABLED`.
+
+---
+
+## Built To Be Hacked On
+
+OpenTulpa ships as a ready-to-run agent **and** a reference architecture you can extend.
+
+- **Add tools** in the tool registry
+- **Add routes** under `src/opentulpa/api/routes`
+- **Add interfaces** under `src/opentulpa/interfaces`
+- **Extend approval logic** through the policy and broker layers
+- **Add durable skills** instead of hardcoding workflows into prompts
+
+If you've been looking for a persistent, guarded, tool-using agent runtime that you can actually own and modify — this is it.
+
+---
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Deployment](docs/DEPLOYMENT.md)
-- [Chat Cookbook](docs/CHAT_COOKBOOK.md)
-- [External Tool Safety Checklist](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md)
+| | |
+|---|---|
+| 📐 [Architecture](docs/ARCHITECTURE.md) | How the internals fit together |
+| 🚀 [Deployment](docs/DEPLOYMENT.md) | Production deploy checklist |
+| 💬 [Chat Cookbook](docs/CHAT_COOKBOOK.md) | Example conversations and patterns |
+| 🛡️ [External Tool Safety Checklist](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md) | Guidelines for connecting external tools safely |
+
+---
+
+<p align="center">
+  <strong>Stop re-explaining. Start compounding.</strong><br/>
+  <a href="#quick-start">Get started in 30 seconds →</a>
+</p>

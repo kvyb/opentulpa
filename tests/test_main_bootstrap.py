@@ -19,6 +19,26 @@ class _DummyAsyncIOScheduler:
     def __init__(self, *args, **kwargs) -> None:
         _ = args
         _ = kwargs
+        self.started = False
+        self.jobs: dict[str, dict[str, object]] = {}
+
+    def add_job(self, func: object, trigger: object, *, id: str, args: list[object], **kwargs: object) -> None:
+        self.jobs[str(id)] = {
+            "func": func,
+            "trigger": trigger,
+            "args": list(args),
+            **kwargs,
+        }
+
+    def remove_job(self, job_id: str) -> None:
+        self.jobs.pop(str(job_id), None)
+
+    def start(self) -> None:
+        self.started = True
+
+    def shutdown(self, wait: bool = True) -> None:
+        _ = wait
+        self.started = False
 
 
 class _DummyCronTrigger:

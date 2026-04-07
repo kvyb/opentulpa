@@ -133,7 +133,6 @@ _EXPLICIT_ROUTINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bonce (?:a|per) (?:day|week|month)\b"),
 )
 
-
 def _is_iso_datetime_schedule(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
@@ -219,7 +218,7 @@ def _routine_create_clarification_error(latest_user_text: str, *, turn_mode: str
     if not _user_explicitly_requested_routine(latest_user_text):
         return (
             "ACTION_CLARIFICATION_REQUIRED: routine_create is only for explicit reminders, "
-            "schedules, or automations. The latest user message does not clearly request that. "
+            "schedules, or recurring jobs. The latest user message does not clearly request that. "
             "Ask one concise clarifying question or continue in chat instead of creating a routine."
         )
     return None
@@ -512,7 +511,6 @@ def build_runtime_graph(runtime: Any):
             "implementation_command",
         ),
         "routine_delete": ("routine_id",),
-        "automation_delete": ("routine_id",),
         "guardrail_execute_approved_action": ("approval_id",),
     }
     customer_scoped_tools: set[str] = {
@@ -547,7 +545,6 @@ def build_runtime_graph(runtime: Any):
         "routine_list",
         "routine_create",
         "routine_delete",
-        "automation_delete",
         "browser_use_run",
         "guardrail_execute_approved_action",
     }
@@ -663,6 +660,9 @@ def build_runtime_graph(runtime: Any):
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
         style_message = _build_style_card_message(style_card)
+        stable_prompt_messages: list[AnyMessage] = [stable_system_message]
+        if style_message is not None:
+            stable_prompt_messages.append(style_message)
         volatile_parts: list[str] = [
             PROMPT_DYNAMIC_BOUNDARY,
             _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
@@ -682,13 +682,7 @@ def build_runtime_graph(runtime: Any):
                 "Use these concrete values for all relative-time reasoning in this turn."
             ),
         ]
-        if style_message is not None:
-            volatile_parts.append(_content_to_text(style_message.content))
         volatile_system_message = SystemMessage(content="\n\n".join(volatile_parts))
-        prompt_messages_base: list[AnyMessage] = [
-            stable_system_message,
-            volatile_system_message,
-        ]
         prompt_section_names = [
             "stable_core_policy",
             "volatile_injected",
@@ -699,30 +693,15 @@ def build_runtime_graph(runtime: Any):
         ]
         if style_message is not None:
             prompt_section_names.append("style_card")
-        optional_messages: list[AnyMessage] = []
-        if pending_context_summary:
-            pending_text = _trim_text_to_token_budget(
-                pending_context_summary,
-                token_budget=max(140, min(520, int(low_budget * 0.15))),
-            )
-            if pending_text:
-                optional_messages.append(
-                    _build_retrieved_context_message(
-                        title="Background system events summary (not user-authored).",
-                        body=(
-                            "Use this only to reconcile hidden state and never quote event lines directly.\n"
-                            f"{pending_text}"
-                        ),
-                    )
-                )
-                prompt_section_names.append("pending_context")
+        stable_optional_messages: list[AnyMessage] = []
+        volatile_optional_messages: list[AnyMessage] = []
         if active_directive:
             directive_text = _trim_text_to_token_budget(
                 active_directive,
                 token_budget=max(120, min(420, int(low_budget * 0.12))),
             )
             if directive_text:
-                optional_messages.append(
+                stable_optional_messages.append(
                     _build_retrieved_context_message(
                         title="Active persistent task/profile directive.",
                         body=(
@@ -738,20 +717,36 @@ def build_runtime_graph(runtime: Any):
                 token_budget=max(300, min(1400, int(low_budget * 0.4))),
             )
             if rollup_text:
-                optional_messages.append(
+                volatile_optional_messages.append(
                     _build_retrieved_context_message(
                         title="Compressed older thread context.",
                         body=rollup_text,
                     )
                 )
                 prompt_section_names.append("thread_rollup")
+        if pending_context_summary:
+            pending_text = _trim_text_to_token_budget(
+                pending_context_summary,
+                token_budget=max(140, min(520, int(low_budget * 0.15))),
+            )
+            if pending_text:
+                volatile_optional_messages.append(
+                    _build_retrieved_context_message(
+                        title="Background system events summary (not user-authored).",
+                        body=(
+                            "Use this only to reconcile hidden state and never quote event lines directly.\n"
+                            f"{pending_text}"
+                        ),
+                    )
+                )
+                prompt_section_names.append("pending_context")
         if skill_discovery_context and prompt_mode != "literal_chat":
             discovery_text = _trim_text_to_token_budget(
                 skill_discovery_context,
                 token_budget=max(160, min(620, int(low_budget * 0.18))),
             )
             if discovery_text:
-                optional_messages.append(
+                volatile_optional_messages.append(
                     _build_retrieved_context_message(
                         title="Relevant skill discovery for this turn.",
                         body=discovery_text,
@@ -764,7 +759,7 @@ def build_runtime_graph(runtime: Any):
                 token_budget=max(400, min(1800, int(low_budget * 0.45))),
             )
             if invoked_text:
-                optional_messages.append(
+                volatile_optional_messages.append(
                     _build_retrieved_context_message(
                         title=(
                             "Previously invoked skill instructions still relevant in this session "
@@ -780,21 +775,34 @@ def build_runtime_graph(runtime: Any):
                 token_budget=max(120, min(320, int(low_budget * 0.08))),
             )
             if aliases_text:
-                optional_messages.append(SystemMessage(content=aliases_text))
+                volatile_optional_messages.append(SystemMessage(content=aliases_text))
                 prompt_section_names.append("link_aliases")
-        optional_messages = [msg for msg in optional_messages if msg is not None]
+        stable_optional_messages = [msg for msg in stable_optional_messages if msg is not None]
+        volatile_optional_messages = [msg for msg in volatile_optional_messages if msg is not None]
 
-        prompt_messages: list[AnyMessage] = [*prompt_messages_base]
-        if optional_messages:
-            kept_optional: list[AnyMessage] = []
-            used_optional_tokens = 0
-            for msg in optional_messages:
+        prompt_messages: list[AnyMessage] = [*stable_prompt_messages]
+        kept_stable_optional: list[AnyMessage] = []
+        used_optional_tokens = 0
+        if stable_optional_messages:
+            for msg in stable_optional_messages:
                 msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                if kept_optional and used_optional_tokens + msg_tokens > optional_context_budget:
+                if kept_stable_optional and used_optional_tokens + msg_tokens > optional_context_budget:
                     continue
-                kept_optional.append(msg)
+                kept_stable_optional.append(msg)
                 used_optional_tokens += msg_tokens
-            prompt_messages.extend(kept_optional)
+            prompt_messages.extend(kept_stable_optional)
+        stable_prompt_count = len(prompt_messages)
+        prompt_messages.append(volatile_system_message)
+        prompt_messages_base: list[AnyMessage] = [*prompt_messages]
+        if volatile_optional_messages:
+            kept_volatile_optional: list[AnyMessage] = []
+            for msg in volatile_optional_messages:
+                msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+                if (kept_stable_optional or kept_volatile_optional) and used_optional_tokens + msg_tokens > optional_context_budget:
+                    continue
+                kept_volatile_optional.append(msg)
+                used_optional_tokens += msg_tokens
+            prompt_messages.extend(kept_volatile_optional)
         prompt_overhead_tokens = sum(
             _approx_tokens(_content_to_text(getattr(msg, "content", "")))
             for msg in prompt_messages
@@ -806,6 +814,7 @@ def build_runtime_graph(runtime: Any):
                 _approx_tokens(_content_to_text(getattr(msg, "content", "")))
                 for msg in prompt_messages
             )
+        stable_prompt_count = min(stable_prompt_count, len(prompt_messages))
         history_budget = max(800, prompt_budget - prompt_overhead_tokens)
         sanitized_history = _sanitize_history_messages_for_model(messages)
         sanitized_history = _enforce_tool_message_protocol(sanitized_history)
@@ -814,6 +823,13 @@ def build_runtime_graph(runtime: Any):
             token_budget=history_budget,
         )
         bounded_messages = _enforce_tool_message_protocol(bounded_messages)
+        cache_profile: dict[str, Any] = {}
+        cache_profile_fn = getattr(runtime, "prompt_cache_profile", None)
+        if callable(cache_profile_fn):
+            try:
+                cache_profile = cache_profile_fn()
+            except Exception:
+                cache_profile = {}
         _log(
             state,
             "graph.agent.prompt_ready",
@@ -823,29 +839,46 @@ def build_runtime_graph(runtime: Any):
             history_message_count=len(bounded_messages),
             optional_context_messages=max(0, len(prompt_messages) - len(prompt_messages_base)),
             prompt_sections=",".join(prompt_section_names),
+            prompt_cache_strategy=str(cache_profile.get("strategy", "")),
+            prompt_cache_enabled=bool(cache_profile.get("enabled", False)),
+            prompt_cache_breakpoints=bool(cache_profile.get("supports_breakpoints", False)),
+            prompt_cache_top_level=bool(cache_profile.get("supports_top_level", False)),
             turn_mode=turn_mode,
         )
-        invoke_extras: dict[str, Any] = {}
-        extras_fn = getattr(runtime, "model_invoke_extras", None)
-        if callable(extras_fn):
-            try:
-                invoke_extras = extras_fn()
-            except Exception:
-                invoke_extras = {}
-        response = await runtime._model_with_tools.ainvoke(
+        model_with_tools = runtime.model_with_tools_for_turn_mode(turn_mode)
+        assert model_with_tools is not None
+        ainvoke_fn = getattr(runtime, "ainvoke_model", None)
+        if callable(ainvoke_fn):
+            response = await ainvoke_fn(
+                model_with_tools,
+                [
+                    *prompt_messages,
+                    *bounded_messages,
+                ],
+                stable_prefix_count=stable_prompt_count,
+            )
+        else:
+            response = await model_with_tools.ainvoke(
             [
                 *prompt_messages,
                 *bounded_messages,
-            ],
-            **invoke_extras,
-        )
+            ]
+            )
         response_text = _content_to_text(getattr(response, "content", ""))
+        usage_fields: dict[str, Any] = {}
+        usage_fields_fn = getattr(runtime, "extract_response_usage_fields", None)
+        if callable(usage_fields_fn):
+            try:
+                usage_fields = dict(usage_fields_fn(response))
+            except Exception:
+                usage_fields = {}
         _log(
             state,
             "graph.agent.response",
             response_chars=len(response_text.strip()),
             tool_call_count=len(getattr(response, "tool_calls", []) or []),
             turn_mode=turn_mode,
+            **usage_fields,
         )
         update: dict[str, Any] = {"messages": [response], "turn_status": "running"}
         if skill_query:
@@ -966,6 +999,8 @@ def build_runtime_graph(runtime: Any):
         tool_outcomes: list[dict[str, Any]] = []
         approval_handoff = False
         had_error = False
+        failed_tool_names: list[str] = []
+        failed_tool_errors: list[str] = []
         invoked_skill_names = state.get("active_invoked_skill_names", []) or []
         invoked_skill_list = (
             [str(n).strip() for n in invoked_skill_names if str(n).strip()]
@@ -1103,6 +1138,8 @@ def build_runtime_graph(runtime: Any):
             except Exception as exc:
                 had_error = True
                 error_text = f"TOOL_ERROR: {call_name} failed: {exc}"
+                failed_tool_names.append(call_name)
+                failed_tool_errors.append(str(exc).strip())
                 _log(
                     state,
                     "graph.tools.error",
@@ -1141,8 +1178,36 @@ def build_runtime_graph(runtime: Any):
             "active_skill_context": invoked_skill_context,
         }
         if had_error:
-            update["tool_error_count"] = int(state.get("tool_error_count", 0)) + 1
-            update["last_tool_error"] = "tool execution failed"
+            next_tool_error_count = int(state.get("tool_error_count", 0)) + 1
+            last_tool_error = next(
+                (item for item in reversed(failed_tool_errors) if item),
+                "tool execution failed",
+            )
+            update["tool_error_count"] = next_tool_error_count
+            update["last_tool_error"] = last_tool_error
+            if (
+                turn_mode == "routine_wake"
+                and next_tool_error_count >= 2
+                and "composio_tool_execute" in failed_tool_names
+            ):
+                failure_summary = (
+                    "AUTOMATION_EXECUTION_FAILED: repeated composio_tool_execute errors during "
+                    f"wake execution. Latest error: {last_tool_error[:500]}"
+                )
+                _log(
+                    state,
+                    "graph.tools.abort_after_repeated_error",
+                    tool_name="composio_tool_execute",
+                    tool_error_count=next_tool_error_count,
+                    error=last_tool_error[:500],
+                    turn_mode=turn_mode,
+                )
+                update["messages"] = [
+                    *tool_messages,
+                    AIMessage(content=failure_summary),
+                ]
+                update["turn_status"] = "failed"
+                return Command(update=update, goto="claim_check")
         _log(
             state,
             "graph.tools.complete",
@@ -1491,7 +1556,7 @@ def build_runtime_graph(runtime: Any):
     builder.add_node(
         "tools",
         tools_node,
-        retry_policy=RetryPolicy(max_attempts=2),
+        retry_policy=RetryPolicy(max_attempts=3),
         destinations=("agent", END),
     )
     builder.add_node(

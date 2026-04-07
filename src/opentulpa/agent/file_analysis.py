@@ -32,6 +32,13 @@ _VIDEO_INLINE_MAX_BYTES = 20_000_000
 _VIDEO_FALLBACK_DURATION_SECONDS = 120
 
 
+async def _ainvoke_runtime_model(runtime: Any, messages: list[Any]) -> Any:
+    ainvoke_model = getattr(runtime, "ainvoke_model", None)
+    if callable(ainvoke_model):
+        return await ainvoke_model(runtime._model, messages)
+    return await runtime._model.ainvoke(messages)
+
+
 def extract_docx_text(raw_bytes: bytes) -> str:
     try:
         with ZipFile(BytesIO(raw_bytes)) as zf:
@@ -191,7 +198,8 @@ async def _estimate_video_duration_seconds(
     if caption:
         prompt += f"\nUser caption: {caption[:400]}"
     try:
-        response = await runtime._model.ainvoke(
+        response = await _ainvoke_runtime_model(
+            runtime,
             [
                 SystemMessage(content="Return strict JSON only."),
                 HumanMessage(
@@ -200,7 +208,7 @@ async def _estimate_video_duration_seconds(
                         {"type": "video_url", "video_url": {"url": video_data_url}},
                     ]
                 ),
-            ]
+            ],
         )
     except Exception:
         return 0
@@ -243,7 +251,8 @@ async def _analyze_video_segment(
         prompt += f"\nUser caption: {caption[:500]}"
     if question:
         prompt += f"\nUser question focus: {question[:600]}"
-    response = await runtime._model.ainvoke(
+    response = await _ainvoke_runtime_model(
+        runtime,
         [
             SystemMessage(content="You are precise about timeline-based video analysis."),
             HumanMessage(
@@ -252,7 +261,7 @@ async def _analyze_video_segment(
                     {"type": "video_url", "video_url": {"url": video_data_url}},
                 ]
             ),
-        ]
+        ],
     )
     text = _content_to_text(getattr(response, "content", "")).strip()
     if not text:
@@ -284,7 +293,8 @@ async def _synthesize_video_segments(
     )
     if question:
         prompt += f"\nUser question to prioritize: {question[:800]}"
-    response = await runtime._model.ainvoke(
+    response = await _ainvoke_runtime_model(
+        runtime,
         [
             SystemMessage(content="Synthesize segment notes into one cohesive video report."),
             HumanMessage(
@@ -297,7 +307,7 @@ async def _synthesize_video_segments(
                     f"{compiled_notes[:24000]}"
                 )
             ),
-        ]
+        ],
     )
     final_text = _content_to_text(getattr(response, "content", "")).strip()
     return final_text[:6000]
@@ -494,7 +504,8 @@ async def summarize_uploaded_blob(
                 prompt_text += f"\nUser question about this file: {q}"
             if caption_text:
                 prompt_text += f"\nUser caption: {caption_text[:500]}"
-            response = await runtime._model.ainvoke(
+            response = await _ainvoke_runtime_model(
+                runtime,
                 [
                     SystemMessage(content="You analyze uploaded user files accurately."),
                     HumanMessage(
@@ -503,7 +514,7 @@ async def summarize_uploaded_blob(
                             {"type": "image_url", "image_url": {"url": data_url}},
                         ]
                     ),
-                ]
+                ],
             )
             vision_summary = _content_to_text(getattr(response, "content", "")).strip()
             if vision_summary:
@@ -527,7 +538,8 @@ async def summarize_uploaded_blob(
                 "Answer the user's question using only this uploaded file content. "
                 "If uncertain, say what is missing."
             )
-        response = await runtime._model.ainvoke(
+        response = await _ainvoke_runtime_model(
+            runtime,
             [
                 SystemMessage(content="You analyze uploaded file content accurately and concisely."),
                 HumanMessage(
@@ -542,7 +554,7 @@ async def summarize_uploaded_blob(
                         f"{extracted}"
                     )
                 ),
-            ]
+            ],
         )
         text_summary = _content_to_text(getattr(response, "content", "")).strip()
         if text_summary:

@@ -61,27 +61,6 @@ async def test_routine_delete_verifies_removed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_automation_delete_calls_delete_with_assets() -> None:
-    runtime = _DummyRuntime([_Response(200, {"ok": True, "deleted_routines": [{"id": "rtn_1"}]})])
-    tools = register_runtime_tools(runtime)
-
-    result = await tools["automation_delete"].ainvoke(
-        {
-            "routine_id": "rtn_1",
-            "delete_files": True,
-            "cleanup_paths": ["tulpa_stuff/scripts/weather.py"],
-        }
-    )
-    assert result["ok"] is True
-    assert runtime.calls[0][0] == "POST"
-    assert runtime.calls[0][1] == "/internal/scheduler/routine/delete_with_assets"
-    sent = runtime.calls[0][2]["json_body"]
-    assert sent["routine_id"] == "rtn_1"
-    assert sent["delete_files"] is True
-    assert sent["cleanup_paths"] == ["tulpa_stuff/scripts/weather.py"]
-
-
-@pytest.mark.asyncio
 async def test_lessons_learnt_get_action() -> None:
     runtime = _DummyRuntime([_Response(200, {"customer_id": "telegram_123", "lessons_learnt": "foo"})])
     tools = register_runtime_tools(runtime)

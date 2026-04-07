@@ -1917,32 +1917,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         }
 
     @tool
-    async def automation_delete(
-        routine_id: str,
-        delete_files: bool = True,
-        cleanup_paths: list[str] | None = None,
-    ) -> Any:
-        """Delete an automation by id, including optional script/file cleanup."""
-        customer_id = _require_customer_id(runtime)
-        rid = str(routine_id or "").strip()
-        if not rid:
-            return {"error": "automation_delete failed: routine_id is required"}
-        r = await runtime._request_with_backoff(
-            "POST",
-            "/internal/scheduler/routine/delete_with_assets",
-            json_body={
-                "customer_id": customer_id,
-                "routine_id": rid,
-                "delete_files": bool(delete_files),
-                "cleanup_paths": _normalize_cleanup_paths(cleanup_paths),
-            },
-            timeout=20.0,
-        )
-        if r.status_code != 200:
-            return {"error": f"automation_delete failed: {r.text}"}
-        return r.json()
-
-    @tool
     async def guardrail_execute_approved_action(approval_id: str) -> Any:
         """Execute a previously approved external-impact action exactly once."""
         customer_id = _require_customer_id(runtime)
@@ -2024,7 +1998,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "routine_create": routine_create,
         "routine_list": routine_list,
         "routine_delete": routine_delete,
-        "automation_delete": automation_delete,
         "guardrail_execute_approved_action": guardrail_execute_approved_action,
         "server_time": server_time,
     }

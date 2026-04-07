@@ -171,30 +171,33 @@ async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: s
     existing_chars = max(4000, rollup_budget * 4)
     chunk_chars = max(20000, _compaction_source_budget(runtime) * 4)
     for chunk in chunks:
-        response = await runtime._model.ainvoke(
-            [
-                SystemMessage(
-                    content=(
-                        "You compress long-running assistant conversations into durable context.\n"
-                        "Return plain text only. Preserve:\n"
-                        "- user preferences/directives\n"
-                        "- active goals and constraints\n"
-                        "- important decisions and why\n"
-                        "- unresolved tasks / follow-ups\n"
-                        "- key facts with dates, IDs, links, and paths\n"
-                        "Be concise and structured with short headings."
-                    )
-                ),
-                HumanMessage(
-                    content=(
-                        "Existing compressed context (may be empty):\n"
-                        f"{running[:existing_chars]}\n\n"
-                        "Older conversation segment to fold in:\n"
-                        f"{str(chunk or '')[:chunk_chars]}"
-                    )
-                ),
-            ]
-        )
+        messages = [
+            SystemMessage(
+                content=(
+                    "You compress long-running assistant conversations into durable context.\n"
+                    "Return plain text only. Preserve:\n"
+                    "- user preferences/directives\n"
+                    "- active goals and constraints\n"
+                    "- important decisions and why\n"
+                    "- unresolved tasks / follow-ups\n"
+                    "- key facts with dates, IDs, links, and paths\n"
+                    "Be concise and structured with short headings."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    "Existing compressed context (may be empty):\n"
+                    f"{running[:existing_chars]}\n\n"
+                    "Older conversation segment to fold in:\n"
+                    f"{str(chunk or '')[:chunk_chars]}"
+                )
+            ),
+        ]
+        ainvoke_model = getattr(runtime, "ainvoke_model", None)
+        if callable(ainvoke_model):
+            response = await ainvoke_model(runtime._model, messages)
+        else:
+            response = await runtime._model.ainvoke(messages)
         running = _sanitize_rollup_text(_content_to_text(getattr(response, "content", "")).strip() or running)
         running = _trim_text_to_token_budget(running, rollup_budget)
     return _trim_text_to_token_budget(_sanitize_rollup_text(running), rollup_budget)

@@ -41,8 +41,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("B05", "Scheduling protocol: decide bootstrap-now vs schedule-only, run/verify bootstrap if requested, create/update routine, then report present-vs-future behavior separately."),
             ("B06", "Never present concrete fetched data unless it exists in this turn's tool outputs."),
             ("B07", "To stop/cancel schedules: call routine_list, then routine_delete by routine_id, and claim success only after verified removal."),
-            ("B08", "To remove automation with assets: use automation_delete with delete_files=true and cleanup_paths when applicable."),
-            ("B09", "If user provides timezone/UTC offset, call time_profile_set."),
+            ("B08", "If user provides timezone/UTC offset, call time_profile_set."),
         ],
     ),
     (

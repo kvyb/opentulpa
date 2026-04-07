@@ -114,7 +114,7 @@ class _ClassifierRuntime:
                 "confidence": 0.9,
                 "reason": "self-targeted send",
             }
-        if action_name in {"routine_delete", "automation_delete"}:
+        if action_name == "routine_delete":
             return {
                 "ok": True,
                 "gate": "allow",

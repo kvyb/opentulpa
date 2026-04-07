@@ -6,7 +6,7 @@ import ipaddress
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -42,7 +42,6 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.core.config import get_settings
-from opentulpa.integrations import ComposioService
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.memory.service import MemoryService
@@ -55,11 +54,37 @@ from opentulpa.tasks.wake_queue import WakeQueueService
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from opentulpa.integrations.composio import ComposioService
+
 
 def _require(value: Any, name: str) -> Any:
     if value is None:
         raise RuntimeError(f"{name} not initialized")
     return value
+
+
+class _DisabledComposioService:
+    enabled = False
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "enabled": False,
+            "callback_url_configured": False,
+            "default_callback_url": None,
+            "resolved_callback_url": None,
+        }
+
+    def __getattr__(self, name: str) -> Any:
+        _ = name
+        raise RuntimeError("Composio is not configured")
+
+
+def _load_composio_service_class() -> type[Any]:
+    from opentulpa.integrations.composio import ComposioService
+
+    return ComposioService
 
 
 def _is_trusted_server_client(host: str) -> bool:
@@ -111,10 +136,18 @@ def create_app(
         db_path=PROJECT_ROOT / ".opentulpa" / "skills.db",
         root_dir=PROJECT_ROOT / ".opentulpa" / "skills",
     )
-    composio = composio_service or ComposioService(
-        api_key=str(settings.composio_api_key or "").strip(),
-        default_callback_url=str(settings.composio_default_callback_url or "").strip() or None,
-    )
+    composio_api_key = str(settings.composio_api_key or "").strip()
+    composio_default_callback_url = str(settings.composio_default_callback_url or "").strip() or None
+    if composio_service is not None:
+        composio: Any = composio_service
+    elif composio_api_key:
+        ComposioService = _load_composio_service_class()
+        composio = ComposioService(
+            api_key=composio_api_key,
+            default_callback_url=composio_default_callback_url,
+        )
+    else:
+        composio = _DisabledComposioService()
     skill_service.ensure_default_skill()
     if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
         runtime._link_alias_service = alias_service  # type: ignore[attr-defined]
@@ -153,8 +186,8 @@ def create_app(
     def get_skill_store() -> SkillStoreService:
         return _require(skill_service, "SkillStoreService")
 
-    def get_composio() -> ComposioService:
-        return _require(composio, "ComposioService")
+    def get_composio() -> Any:
+        return composio
 
     def get_telegram_chat() -> TelegramChatService:
         return _require(telegram_chat, "TelegramChatService")

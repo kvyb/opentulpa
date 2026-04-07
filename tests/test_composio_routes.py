@@ -7,6 +7,8 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from opentulpa.core.config import get_settings
+
 apscheduler_module = types.ModuleType("apscheduler")
 schedulers_module = types.ModuleType("apscheduler.schedulers")
 asyncio_module = types.ModuleType("apscheduler.schedulers.asyncio")
@@ -20,6 +22,26 @@ class _DummyAsyncIOScheduler:
     def __init__(self, *args, **kwargs) -> None:
         _ = args
         _ = kwargs
+        self.started = False
+        self.jobs: dict[str, dict[str, Any]] = {}
+
+    def add_job(self, func: Any, trigger: Any, *, id: str, args: list[Any], **kwargs: Any) -> None:
+        self.jobs[str(id)] = {
+            "func": func,
+            "trigger": trigger,
+            "args": list(args),
+            **kwargs,
+        }
+
+    def remove_job(self, job_id: str) -> None:
+        self.jobs.pop(str(job_id), None)
+
+    def start(self) -> None:
+        self.started = True
+
+    def shutdown(self, wait: bool = True) -> None:
+        _ = wait
+        self.started = False
 
 
 class _DummyCronTrigger:
@@ -379,6 +401,34 @@ def test_composio_service_status_uses_public_base_url_as_callback(monkeypatch) -
     assert payload["callback_url_configured"] is True
     assert payload["default_callback_url"] is None
     assert payload["resolved_callback_url"] == "https://example.com/webhook/composio/callback"
+
+
+def test_composio_status_route_returns_disabled_when_api_key_unset(tmp_path: Path, monkeypatch) -> None:
+    settings = get_settings().model_copy(
+        update={
+            "composio_api_key": None,
+            "composio_default_callback_url": None,
+        }
+    )
+    monkeypatch.setattr("opentulpa.api.app.get_settings", lambda: settings)
+
+    skills = SkillStoreService(
+        db_path=tmp_path / "skills.db",
+        root_dir=tmp_path / "skills",
+    )
+    app = create_app(skill_store_service=skills)
+
+    with TestClient(app) as client:
+        response = client.get("/internal/composio/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "enabled": False,
+        "callback_url_configured": False,
+        "default_callback_url": None,
+        "resolved_callback_url": None,
+    }
 
 
 def test_composio_execute_route_passes_customer_and_arguments(tmp_path: Path) -> None:

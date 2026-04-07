@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
 import json
 import logging
 import os
@@ -99,6 +100,81 @@ from opentulpa.core.ids import new_short_id
 logger = logging.getLogger(__name__)
 
 
+def _prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
+    cc: dict[str, Any] = {"type": "ephemeral"}
+    if ttl_1h:
+        cc["ttl"] = "1h"
+    return cc
+
+
+def _provider_prompt_cache_profile(
+    *,
+    enabled: bool,
+    model_name: str,
+    ttl_1h: bool,
+) -> dict[str, Any]:
+    slug = (model_name or "").strip().lower()
+    if not enabled:
+        return {
+            "enabled": False,
+            "strategy": "disabled",
+            "supports_top_level": False,
+            "supports_breakpoints": False,
+            "cache_control": {},
+            "model_name": model_name,
+        }
+    if "anthropic/" in slug or "claude" in slug:
+        return {
+            "enabled": True,
+            "strategy": "top_level",
+            "supports_top_level": True,
+            "supports_breakpoints": True,
+            "cache_control": _prompt_cache_control_payload(ttl_1h=ttl_1h),
+            "model_name": model_name,
+        }
+    if "gemini" in slug or slug.startswith("google/"):
+        return {
+            "enabled": True,
+            "strategy": "breakpoint",
+            "supports_top_level": False,
+            "supports_breakpoints": True,
+            "cache_control": _prompt_cache_control_payload(ttl_1h=ttl_1h),
+            "model_name": model_name,
+        }
+    if any(
+        marker in slug
+        for marker in (
+            "openai/",
+            "gpt-",
+            "o1",
+            "o3",
+            "o4",
+            "deepseek",
+            "grok",
+            "x-ai/",
+            "moonshot",
+            "kimi",
+            "groq/",
+        )
+    ):
+        return {
+            "enabled": True,
+            "strategy": "automatic",
+            "supports_top_level": False,
+            "supports_breakpoints": False,
+            "cache_control": {},
+            "model_name": model_name,
+        }
+    return {
+        "enabled": True,
+        "strategy": "unknown",
+        "supports_top_level": False,
+        "supports_breakpoints": False,
+        "cache_control": {},
+        "model_name": model_name,
+    }
+
+
 def _provider_prompt_cache_invoke_extras(
     *,
     enabled: bool,
@@ -108,18 +184,175 @@ def _provider_prompt_cache_invoke_extras(
     """
     Provider-specific request extras for prompt caching.
 
-    Currently this enables OpenRouter request-level cache_control for Anthropic
-    Claude models and no-ops for other models/providers.
+    OpenRouter currently accepts top-level `cache_control` for Anthropic Claude.
+    Other providers either cache automatically or require per-message breakpoints.
     """
-    if not enabled:
+    profile = _provider_prompt_cache_profile(
+        enabled=enabled,
+        model_name=model_name,
+        ttl_1h=ttl_1h,
+    )
+    if profile.get("strategy") != "top_level":
         return {}
-    slug = (model_name or "").strip().lower()
-    if "anthropic/" not in slug and "claude" not in slug:
+    return {"extra_body": {"cache_control": dict(profile.get("cache_control") or {})}}
+
+
+def _message_content_with_cache_breakpoint(
+    content: Any,
+    *,
+    cache_control: dict[str, Any],
+) -> Any:
+    if isinstance(content, str):
+        text = str(content)
+        if not text.strip():
+            return content
+        return [{"type": "text", "text": text, "cache_control": dict(cache_control)}]
+    if not isinstance(content, list):
+        return content
+    updated = list(content)
+    for idx in range(len(updated) - 1, -1, -1):
+        item = updated[idx]
+        if isinstance(item, str):
+            text = str(item)
+            if not text.strip():
+                continue
+            updated[idx] = {"type": "text", "text": text, "cache_control": dict(cache_control)}
+            return updated
+        if isinstance(item, dict):
+            item_type = str(item.get("type", "")).strip().lower()
+            if item_type != "text" or "cache_control" in item:
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            patched = dict(item)
+            patched["cache_control"] = dict(cache_control)
+            updated[idx] = patched
+            return updated
+    return content
+
+
+def _message_with_cache_breakpoint(message: Any, *, cache_control: dict[str, Any]) -> Any:
+    content = _message_content_with_cache_breakpoint(
+        getattr(message, "content", None),
+        cache_control=cache_control,
+    )
+    if content == getattr(message, "content", None):
+        return message
+    model_copy = getattr(message, "model_copy", None)
+    if callable(model_copy):
+        copied = model_copy(deep=True)
+    else:
+        copied = message.copy(deep=True)
+    copied.content = content
+    return copied
+
+
+def _supports_ainvoke_kwargs(target: Any, kwargs: dict[str, Any]) -> bool:
+    if not kwargs:
+        return False
+    ainvoke = getattr(target, "ainvoke", None)
+    if not callable(ainvoke):
+        return False
+    try:
+        sig = inspect.signature(ainvoke)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters.values()
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
+        return True
+    return all(key in sig.parameters for key in kwargs)
+
+
+def _maybe_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _usage_object_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is None:
         return {}
-    cc: dict[str, Any] = {"type": "ephemeral"}
-    if ttl_1h:
-        cc["ttl"] = "1h"
-    return {"extra_body": {"cache_control": cc}}
+    result: dict[str, Any] = {}
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "prompt_tokens_details",
+        "completion_tokens_details",
+        "input_tokens",
+        "output_tokens",
+    ):
+        item = getattr(value, key, None)
+        if item is not None:
+            result[key] = item
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        with suppress(Exception):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                result.update(dumped)
+    return result
+
+
+def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
+    usage = _usage_object_to_dict(getattr(response, "usage", None))
+    response_metadata = getattr(response, "response_metadata", None)
+    if not usage and isinstance(response_metadata, dict):
+        usage = _usage_object_to_dict(response_metadata.get("usage"))
+        token_usage = response_metadata.get("token_usage")
+        if not usage and isinstance(token_usage, dict):
+            usage = {
+                "prompt_tokens": token_usage.get("prompt_tokens"),
+                "completion_tokens": token_usage.get("completion_tokens"),
+                "total_tokens": token_usage.get("total_tokens"),
+                "prompt_tokens_details": token_usage.get("prompt_tokens_details"),
+                "completion_tokens_details": token_usage.get("completion_tokens_details"),
+            }
+    if not usage:
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if isinstance(usage_metadata, dict) and usage_metadata:
+            usage = {
+                "prompt_tokens": usage_metadata.get("input_tokens"),
+                "completion_tokens": usage_metadata.get("output_tokens"),
+                "total_tokens": usage_metadata.get("total_tokens"),
+                "input_tokens": usage_metadata.get("input_tokens"),
+                "output_tokens": usage_metadata.get("output_tokens"),
+            }
+
+    prompt_details = _usage_object_to_dict(usage.get("prompt_tokens_details"))
+    completion_details = _usage_object_to_dict(usage.get("completion_tokens_details"))
+    prompt_tokens = _maybe_int(usage.get("prompt_tokens"))
+    if prompt_tokens is None:
+        prompt_tokens = _maybe_int(usage.get("input_tokens"))
+    completion_tokens = _maybe_int(usage.get("completion_tokens"))
+    if completion_tokens is None:
+        completion_tokens = _maybe_int(usage.get("output_tokens"))
+    total_tokens = _maybe_int(usage.get("total_tokens"))
+    cached_tokens = _maybe_int(prompt_details.get("cached_tokens"))
+    cache_write_tokens = _maybe_int(prompt_details.get("cache_write_tokens"))
+    reasoning_tokens = _maybe_int(completion_details.get("reasoning_tokens"))
+
+    fields: dict[str, Any] = {}
+    if prompt_tokens is not None:
+        fields["native_tokens_prompt"] = prompt_tokens
+    if completion_tokens is not None:
+        fields["native_tokens_completion"] = completion_tokens
+    if total_tokens is not None:
+        fields["native_tokens_total"] = total_tokens
+    if cached_tokens is not None:
+        fields["native_tokens_cached"] = cached_tokens
+        fields["cache_hit"] = cached_tokens > 0
+    if cache_write_tokens is not None:
+        fields["native_tokens_cache_write"] = cache_write_tokens
+    if reasoning_tokens is not None:
+        fields["native_tokens_reasoning"] = reasoning_tokens
+    return fields
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
 STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
@@ -177,7 +410,6 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "routine_list",
     "routine_create",
     "routine_delete",
-    "automation_delete",
     "browser_use_run",
     "tulpa_run_terminal",
 }
@@ -243,6 +475,7 @@ class OpenTulpaLangGraphRuntime:
         reasoning_effort: str | None = None,
         openrouter_base_url: str = "https://openrouter.ai/api/v1",
         wake_classifier_model_name: str | None = None,
+        wake_execution_model_name: str | None = None,
         guardrail_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
         recursion_limit: int = 30,
@@ -277,6 +510,11 @@ class OpenTulpaLangGraphRuntime:
         self._wake_classifier_model_name = (
             _normalize_model_name(wake_classifier_model_name)
             if str(wake_classifier_model_name or "").strip()
+            else self.model_name
+        )
+        self._wake_execution_model_name = (
+            _normalize_model_name(wake_execution_model_name)
+            if str(wake_execution_model_name or "").strip()
             else self.model_name
         )
         guardrail_model = (
@@ -319,10 +557,12 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_model_override = str(browser_use_model_override or "").strip()
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
+        self._prompt_caching_enabled = bool(prompt_caching_enabled)
+        self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
         self._model_invoke_extras: dict[str, Any] = _provider_prompt_cache_invoke_extras(
-            enabled=bool(prompt_caching_enabled),
+            enabled=self._prompt_caching_enabled,
             model_name=self.model_name,
-            ttl_1h=bool(prompt_cache_ttl_1h),
+            ttl_1h=self._prompt_cache_ttl_1h,
         )
         self._browser_use_local_manager: Any | None = None
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -360,10 +600,29 @@ class OpenTulpaLangGraphRuntime:
                     self.model_name,
                 )
                 self._wake_classifier_model = self._model
+        if self._wake_execution_model_name == self.model_name:
+            self._wake_execution_model = self._model
+        elif self._wake_execution_model_name == self._wake_classifier_model_name:
+            self._wake_execution_model = self._wake_classifier_model
+        else:
+            try:
+                self._wake_execution_model = init_chat_model(
+                    self._wake_execution_model_name,
+                    **model_init_kwargs,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize wake execution model '%s'; falling back to main model '%s'.",
+                    self._wake_execution_model_name,
+                    self.model_name,
+                )
+                self._wake_execution_model = self._model
         if self._guardrail_classifier_model_name == self.model_name:
             self._guardrail_classifier_model = self._model
         elif self._guardrail_classifier_model_name == self._wake_classifier_model_name:
             self._guardrail_classifier_model = self._wake_classifier_model
+        elif self._guardrail_classifier_model_name == self._wake_execution_model_name:
+            self._guardrail_classifier_model = self._wake_execution_model
         else:
             try:
                 self._guardrail_classifier_model = init_chat_model(
@@ -384,12 +643,119 @@ class OpenTulpaLangGraphRuntime:
         self._graph = None
         self._tools: dict[str, Any] = {}
         self._model_with_tools = None
+        self._wake_execution_model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
 
-    def model_invoke_extras(self) -> dict[str, Any]:
+    def prompt_cache_profile(self, *, model_name: str | None = None) -> dict[str, Any]:
+        target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
+        return dict(
+            _provider_prompt_cache_profile(
+                enabled=bool(getattr(self, "_prompt_caching_enabled", False)),
+                model_name=target_model_name,
+                ttl_1h=bool(getattr(self, "_prompt_cache_ttl_1h", False)),
+            )
+        )
+
+    def model_invoke_extras(self, *, model_name: str | None = None) -> dict[str, Any]:
         """Extra kwargs for main agent model.ainvoke (e.g. OpenRouter prompt cache_control)."""
-        return dict(self._model_invoke_extras)
+        target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
+        return dict(
+            _provider_prompt_cache_invoke_extras(
+                enabled=bool(getattr(self, "_prompt_caching_enabled", False)),
+                model_name=target_model_name,
+                ttl_1h=bool(getattr(self, "_prompt_cache_ttl_1h", False)),
+            )
+        )
+
+    def _resolve_model_name_for_runtime_call(self, model: Any, explicit_name: str | None = None) -> str:
+        if explicit_name:
+            return str(explicit_name).strip()
+        if model is getattr(self, "_wake_classifier_model", None):
+            return str(getattr(self, "_wake_classifier_model_name", "") or "").strip()
+        if model is getattr(self, "_wake_execution_model", None):
+            return str(getattr(self, "_wake_execution_model_name", "") or "").strip()
+        if model is getattr(self, "_guardrail_classifier_model", None):
+            return str(getattr(self, "_guardrail_classifier_model_name", "") or "").strip()
+        if model is getattr(self, "_wake_execution_model_with_tools", None):
+            return str(getattr(self, "_wake_execution_model_name", "") or "").strip()
+        if model is getattr(self, "_model", None) or model is getattr(self, "_model_with_tools", None):
+            return str(getattr(self, "model_name", "") or "").strip()
+        model_name = getattr(model, "model_name", None)
+        if isinstance(model_name, str) and model_name.strip():
+            return model_name.strip()
+        return str(getattr(self, "model_name", "") or "").strip()
+
+    def model_with_tools_for_turn_mode(self, turn_mode: str) -> Any:
+        normalized_turn_mode = str(turn_mode or "").strip().lower()
+        if normalized_turn_mode == "routine_wake" and self._wake_execution_model_with_tools is not None:
+            return self._wake_execution_model_with_tools
+        return self._model_with_tools
+
+    def prepare_messages_for_prompt_cache(
+        self,
+        messages: list[Any],
+        *,
+        model_name: str | None = None,
+        stable_prefix_count: int = 0,
+    ) -> list[Any]:
+        profile = self.prompt_cache_profile(model_name=model_name)
+        if profile.get("strategy") != "breakpoint":
+            return messages
+        cache_control = dict(profile.get("cache_control") or {})
+        if not cache_control:
+            return messages
+        patched: list[Any] = list(messages)
+        if stable_prefix_count > 0:
+            target_index: int | None = None
+            for idx in range(min(stable_prefix_count, len(patched)) - 1, -1, -1):
+                if getattr(patched[idx], "content", None):
+                    target_index = idx
+                    break
+            if target_index is not None:
+                patched[target_index] = _message_with_cache_breakpoint(
+                    patched[target_index],
+                    cache_control=cache_control,
+                )
+                return patched
+        preferred_index: int | None = None
+        fallback_index: int | None = None
+        for idx in range(len(patched) - 1, -1, -1):
+            message = patched[idx]
+            if not getattr(message, "content", None):
+                continue
+            if preferred_index is None and isinstance(message, HumanMessage):
+                preferred_index = idx
+                break
+            if fallback_index is None and isinstance(message, SystemMessage):
+                fallback_index = idx
+        target_index = preferred_index if preferred_index is not None else fallback_index
+        if target_index is None:
+            return messages
+        patched[target_index] = _message_with_cache_breakpoint(
+            patched[target_index],
+            cache_control=cache_control,
+        )
+        return patched
+
+    async def ainvoke_model(
+        self,
+        model: Any,
+        messages: list[Any],
+        *,
+        model_name: str | None = None,
+        stable_prefix_count: int = 0,
+    ) -> Any:
+        resolved_model_name = self._resolve_model_name_for_runtime_call(model, explicit_name=model_name)
+        prepared_messages = self.prepare_messages_for_prompt_cache(
+            list(messages),
+            model_name=resolved_model_name,
+            stable_prefix_count=stable_prefix_count,
+        )
+        invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
+        if _supports_ainvoke_kwargs(model, invoke_extras):
+            return await model.ainvoke(prepared_messages, **invoke_extras)
+        return await model.ainvoke(prepared_messages)
 
     @staticmethod
     def _looks_like_provisional_reply(text: str) -> bool:
@@ -511,13 +877,23 @@ class OpenTulpaLangGraphRuntime:
         model: Any,
         messages: list[Any],
         schema: type[BaseModel],
+        model_name: str | None = None,
     ) -> tuple[BaseModel | None, str | None]:
         last_error: str | None = None
         structured = getattr(model, "with_structured_output", None)
+        resolved_model_name = self._resolve_model_name_for_runtime_call(model, explicit_name=model_name)
+        prepared_messages = self.prepare_messages_for_prompt_cache(
+            list(messages),
+            model_name=resolved_model_name,
+        )
+        invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
         if callable(structured):
             try:
                 runner = structured(schema)
-                payload = await runner.ainvoke(messages)
+                if _supports_ainvoke_kwargs(runner, invoke_extras):
+                    payload = await runner.ainvoke(prepared_messages, **invoke_extras)
+                else:
+                    payload = await runner.ainvoke(prepared_messages)
                 if isinstance(payload, schema):
                     return payload, None
                 if isinstance(payload, dict):
@@ -525,13 +901,20 @@ class OpenTulpaLangGraphRuntime:
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
         try:
-            response = await model.ainvoke(messages)
+            response = await self.ainvoke_model(
+                model,
+                prepared_messages,
+                model_name=resolved_model_name,
+            )
             raw = _content_to_text(getattr(response, "content", response)).strip()
             if raw:
                 return schema.model_validate_json(raw), None
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         return None, last_error
+
+    def extract_response_usage_fields(self, response: Any) -> dict[str, Any]:
+        return dict(_extract_response_usage_fields(response))
 
     @staticmethod
     def _tool_message_indicates_approval_handoff(message: Any) -> bool:
@@ -1082,7 +1465,7 @@ class OpenTulpaLangGraphRuntime:
                         "  {\"name\": string, \"score\": number, \"reason\": string}\n"
                         "Choose only skills that materially improve answer quality.\n"
                         "Never select persona, tone, or style-only skills for literal definitions, acronym expansions, translations, or short factual clarifications.\n"
-                        "If the request is about reminders, schedules, recurring jobs, cron, or automations, "
+                        "If the request is about reminders, schedules, recurring jobs, or cron, "
                         "prefer selecting routine-schedule-composer when available.\n"
                         "Prioritize skills that improve execution reliability and claim accuracy over style-only skills.\n"
                         "If none apply, return {\"selected\": []}."
@@ -1189,6 +1572,62 @@ class OpenTulpaLangGraphRuntime:
                 continue
         context = "\n\n---\n\n".join(sections).strip()
         return {"skill_names": skill_names, "context": context}
+
+    async def _load_skill_context_by_names(
+        self,
+        customer_id: str,
+        skill_names: list[str] | None,
+    ) -> dict[str, Any]:
+        cid = str(customer_id or "").strip()
+        normalized_names: list[str] = []
+        for item in skill_names or []:
+            name = str(item or "").strip()
+            if not name or name in normalized_names:
+                continue
+            normalized_names.append(name)
+        if not cid or not normalized_names:
+            return {"skill_names": [], "context": ""}
+
+        sections: list[str] = []
+        resolved_names: list[str] = []
+        total_chars = 0
+        max_total_chars = 12000
+        for name in normalized_names[:3]:
+            try:
+                r = await self._request_with_backoff(
+                    "POST",
+                    "/internal/skills/get",
+                    json_body={
+                        "customer_id": cid,
+                        "name": name,
+                        "include_files": False,
+                        "include_global": True,
+                    },
+                    timeout=8.0,
+                    retries=1,
+                )
+                if r.status_code != 200:
+                    continue
+                payload = r.json()
+                skill = payload.get("skill", {})
+                if not isinstance(skill, dict):
+                    continue
+                skill_md = str(skill.get("skill_markdown", "")).strip()
+                if not skill_md:
+                    continue
+                if total_chars + len(skill_md) > max_total_chars:
+                    break
+                sections.append(skill_md)
+                resolved_name = str(skill.get("name", "")).strip() or name
+                if resolved_name not in resolved_names:
+                    resolved_names.append(resolved_name)
+                total_chars += len(skill_md)
+            except Exception:
+                continue
+        return {
+            "skill_names": resolved_names,
+            "context": "\n\n---\n\n".join(sections).strip(),
+        }
 
     async def _build_live_time_context(self, customer_id: str) -> dict[str, str]:
         now_server = datetime.now().astimezone()
@@ -1374,6 +1813,7 @@ class OpenTulpaLangGraphRuntime:
         customer_id: str,
         user_text: str,
         prompt_mode: str,
+        forced_skill_names: list[str] | None = None,
     ) -> dict[str, Any]:
         query = str(user_text or "").strip()
         available_skills = await self._list_available_skills(customer_id)
@@ -1381,17 +1821,42 @@ class OpenTulpaLangGraphRuntime:
             customer_id=customer_id,
             available_skills=available_skills,
         )
+        forced_names = [
+            str(item or "").strip()
+            for item in (forced_skill_names or [])
+            if str(item or "").strip()
+        ]
+        forced_skill_context = (
+            await self._load_skill_context_by_names(
+                customer_id=customer_id,
+                skill_names=forced_names,
+            )
+            if forced_names
+            else {"skill_names": [], "context": ""}
+        )
         if not query:
             return {
                 "prompt_mode": prompt_mode,
                 "style_card": style_card,
                 "active_skill_query": "",
-                "active_skill_names": [],
+                "active_skill_names": forced_names,
                 "active_available_skills": available_skills,
                 "active_skill_discovery_context": "",
-                "active_invoked_skill_context": "",
-                "active_invoked_skill_names": [],
-                "active_skill_context": "",
+                "active_invoked_skill_context": str(forced_skill_context.get("context", "")).strip(),
+                "active_invoked_skill_names": list(forced_skill_context.get("skill_names", []) or []),
+                "active_skill_context": str(forced_skill_context.get("context", "")).strip(),
+            }
+        if forced_names:
+            return {
+                "prompt_mode": prompt_mode,
+                "style_card": style_card,
+                "active_skill_query": query,
+                "active_skill_names": forced_names,
+                "active_available_skills": available_skills,
+                "active_skill_discovery_context": "",
+                "active_invoked_skill_context": str(forced_skill_context.get("context", "")).strip(),
+                "active_invoked_skill_names": list(forced_skill_context.get("skill_names", []) or []),
+                "active_skill_context": str(forced_skill_context.get("context", "")).strip(),
             }
         if prompt_mode == "literal_chat":
             return {
@@ -1438,6 +1903,10 @@ class OpenTulpaLangGraphRuntime:
                 await maybe_coro
         self._register_tools()
         self._model_with_tools = self._model.bind_tools(list(self._tools.values()))
+        if self._wake_execution_model is self._model:
+            self._wake_execution_model_with_tools = self._model_with_tools
+        else:
+            self._wake_execution_model_with_tools = self._wake_execution_model.bind_tools(list(self._tools.values()))
         self._graph = self._build_graph()
         manager = self.get_browser_use_local_manager()
         with suppress(Exception):
@@ -1456,6 +1925,8 @@ class OpenTulpaLangGraphRuntime:
         self._checkpointer_cm = None
         self._checkpointer = None
         self._graph = None
+        self._model_with_tools = None
+        self._wake_execution_model_with_tools = None
 
     def healthy(self) -> bool:
         return self._graph is not None
@@ -1504,6 +1975,7 @@ class OpenTulpaLangGraphRuntime:
         include_pending_context: bool,
         trace_id: str,
         recursion_limit_override: int | None = None,
+        forced_skill_names: list[str] | None = None,
     ) -> _PreparedTurnContext | None:
         await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
         if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
@@ -1526,12 +1998,20 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=customer_id,
                 user_text=user_text,
                 prompt_mode=prompt_mode,
+                forced_skill_names=forced_skill_names,
             )
         except TypeError:
-            skill_state = await self._pre_resolve_skill_state(
-                customer_id=customer_id,
-                user_text=user_text,
-            )
+            try:
+                skill_state = await self._pre_resolve_skill_state(
+                    customer_id=customer_id,
+                    user_text=user_text,
+                    prompt_mode=prompt_mode,
+                )
+            except TypeError:
+                skill_state = await self._pre_resolve_skill_state(
+                    customer_id=customer_id,
+                    user_text=user_text,
+                )
         config = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
@@ -1561,6 +2041,7 @@ class OpenTulpaLangGraphRuntime:
         turn_mode: str = "interactive",
         include_pending_context: bool = True,
         recursion_limit_override: int | None = None,
+        forced_skill_names: list[str] | None = None,
     ) -> str:
         await self.start()
         assert self._graph is not None
@@ -1596,6 +2077,7 @@ class OpenTulpaLangGraphRuntime:
                 include_pending_context=include_pending_context,
                 trace_id=turn_trace_id,
                 recursion_limit_override=recursion_limit_override,
+                forced_skill_names=forced_skill_names,
             )
             if prepared is None:
                 self.log_behavior_event(
@@ -1742,6 +2224,7 @@ class OpenTulpaLangGraphRuntime:
         text: str,
         turn_mode: str = "interactive",
         include_pending_context: bool = True,
+        forced_skill_names: list[str] | None = None,
     ) -> AsyncIterator[str]:
         await self.start()
         assert self._graph is not None
@@ -1789,6 +2272,7 @@ class OpenTulpaLangGraphRuntime:
                 include_pending_context=include_pending_context,
                 trace_id=turn_trace_id,
                 recursion_limit_override=None,
+                forced_skill_names=forced_skill_names,
             )
             if prepared is None:
                 yielded_any = True
@@ -1824,6 +2308,8 @@ class OpenTulpaLangGraphRuntime:
             stream_filtered_blank_expanded = 0
             first_visible_yield_ms: int | None = None
             buffered_visible = ""
+            buffered_visible_truncated = False
+            buffered_visible_source_chars = 0
             pending_progress_text = "Working on it…"
             self.log_behavior_event(
                 event="turn_stream_loop_start",
@@ -1897,6 +2383,8 @@ class OpenTulpaLangGraphRuntime:
                                 turn_mode=normalized_turn_mode,
                             )
                             buffered_visible = ""
+                            buffered_visible_truncated = False
+                            buffered_visible_source_chars = 0
                             _finalize_segment(register_links=False)
                         stream_wait_signals += 1
                         self.log_behavior_event(
@@ -1956,8 +2444,12 @@ class OpenTulpaLangGraphRuntime:
                         expanded, truncated = self._truncate_user_visible_reply(expanded)
                         if _precommit_active():
                             buffered_visible = expanded
+                            buffered_visible_truncated = truncated
+                            buffered_visible_source_chars = len(cleaned.strip())
                             continue
                         buffered_visible = ""
+                        buffered_visible_truncated = False
+                        buffered_visible_source_chars = 0
                         yielded_any = True
                         stream_visible_yields += 1
                         if first_visible_yield_ms is None:
@@ -2026,6 +2518,8 @@ class OpenTulpaLangGraphRuntime:
                         turn_mode=normalized_turn_mode,
                     )
                     buffered_visible = ""
+                    buffered_visible_truncated = False
+                    buffered_visible_source_chars = 0
                 else:
                     yielded_any = True
                     stream_visible_yields += 1
@@ -2041,7 +2535,20 @@ class OpenTulpaLangGraphRuntime:
                         turn_mode=normalized_turn_mode,
                     )
                     yield buffered_visible
+                    if buffered_visible_truncated:
+                        self.log_behavior_event(
+                            event="turn_stream_reply_truncated",
+                            trace_id=turn_trace_id,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            max_chars=self._max_user_reply_chars,
+                            output_chars=buffered_visible_source_chars,
+                            truncated_chars=len(buffered_candidate),
+                            turn_mode=normalized_turn_mode,
+                        )
                     buffered_visible = ""
+                    buffered_visible_truncated = False
+                    buffered_visible_source_chars = 0
             if not yielded_any and approval_handoff_detected:
                 yielded_any = True
                 self.log_behavior_event(
