@@ -141,8 +141,8 @@ def create_app(
     if composio_service is not None:
         composio: Any = composio_service
     elif composio_api_key:
-        ComposioService = _load_composio_service_class()
-        composio = ComposioService(
+        composio_service_class = _load_composio_service_class()
+        composio = composio_service_class(
             api_key=composio_api_key,
             default_callback_url=composio_default_callback_url,
         )

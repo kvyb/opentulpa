@@ -6,10 +6,20 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from composio import Composio
-from composio_langchain import LangchainProvider
-
 from opentulpa.core.public_urls import build_public_composio_callback_url
+
+
+def _load_composio_sdk() -> tuple[type[Any], type[Any]]:
+    try:
+        from composio import Composio as ComposioClient
+        from composio_langchain import LangchainProvider
+    except ModuleNotFoundError as exc:
+        if str(getattr(exc, "name", "") or "") in {"composio", "composio_langchain"}:
+            raise RuntimeError(
+                "Composio SDK is not installed. Install optional Composio dependencies to enable this integration."
+            ) from exc
+        raise
+    return ComposioClient, LangchainProvider
 
 
 def _normalize_toolkit_slug(value: str) -> str:
@@ -81,7 +91,7 @@ class ComposioService:
 
     api_key: str
     default_callback_url: str | None = None
-    _client: Composio | None = field(default=None, init=False, repr=False)
+    _client: Any | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.api_key = str(self.api_key or "").strip()
@@ -114,12 +124,13 @@ class ComposioService:
         if not self.enabled:
             raise RuntimeError("Composio is not configured")
 
-    def _sdk(self) -> Composio:
+    def _sdk(self) -> Any:
         self._require_enabled()
         if self._client is None:
-            self._client = Composio(
+            composio_client, langchain_provider = _load_composio_sdk()
+            self._client = composio_client(
                 api_key=self.api_key,
-                provider=LangchainProvider(),
+                provider=langchain_provider(),
             )
         return self._client
 
