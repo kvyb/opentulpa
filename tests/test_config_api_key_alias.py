@@ -25,3 +25,23 @@ def test_env_helper_falls_back_to_legacy_name(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "legacy-key")
     assert get_openai_compatible_api_key_from_env() == "legacy-key"
+
+
+def test_settings_accepts_primary_openai_compatible_base_url_name() -> None:
+    settings = Settings(OPENAI_COMPATIBLE_BASE_URL="https://example.com/v1")
+    assert settings.openrouter_base_url == "https://example.com/v1"
+
+
+def test_settings_accepts_legacy_openrouter_base_url_alias() -> None:
+    settings = Settings(OPENROUTER_BASE_URL="https://legacy.example/v1")
+    assert settings.openrouter_base_url == "https://legacy.example/v1"
+
+
+def test_settings_accepts_primary_openai_compatible_embedding_model_name() -> None:
+    settings = Settings(OPENAI_COMPATIBLE_EMBEDDING_MODEL="text-embedding-x")
+    assert settings.openrouter_embedding_model == "text-embedding-x"
+
+
+def test_settings_accepts_legacy_openrouter_embedding_model_alias() -> None:
+    settings = Settings(OPENROUTER_EMBEDDING_MODEL="legacy-embedding-model")
+    assert settings.openrouter_embedding_model == "legacy-embedding-model"

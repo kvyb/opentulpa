@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
 LEGACY_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV = "OPENAI_COMPATIBLE_BASE_URL"
+LEGACY_OPENROUTER_BASE_URL_ENV = "OPENROUTER_BASE_URL"
+PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV = "OPENAI_COMPATIBLE_EMBEDDING_MODEL"
+LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV = "OPENROUTER_EMBEDDING_MODEL"
 
 
 def get_openai_compatible_api_key_from_env() -> str | None:
@@ -135,9 +139,15 @@ class Settings(BaseSettings):
     )
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
+        validation_alias=AliasChoices(
+            PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV,
+            LEGACY_OPENROUTER_BASE_URL_ENV,
+        ),
         description=(
             "Base URL for the configured OpenAI-compatible model endpoint. "
-            "Defaults to OpenRouter."
+            "Defaults to OpenRouter. "
+            f"{PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV} is the preferred env name; "
+            f"{LEGACY_OPENROUTER_BASE_URL_ENV} is accepted as a backward-compatible alias."
         ),
     )
     llm_model: str = Field(
@@ -185,9 +195,15 @@ class Settings(BaseSettings):
     )
     openrouter_embedding_model: str = Field(
         default="openai/text-embedding-3-small",
+        validation_alias=AliasChoices(
+            PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV,
+            LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV,
+        ),
         description=(
             "Embedding model identifier for mem0 via the configured "
-            "OpenAI-compatible embeddings endpoint."
+            "OpenAI-compatible embeddings endpoint. "
+            f"{PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV} is the preferred env name; "
+            f"{LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV} is accepted as a backward-compatible alias."
         ),
     )
     browser_use_headless: bool = Field(
@@ -243,7 +259,7 @@ class Settings(BaseSettings):
     )
 
     # The OPENROUTER_* env names are kept for compatibility even when pointing at
-    # another OpenAI-compatible endpoint via OPENROUTER_BASE_URL.
+    # another OpenAI-compatible endpoint.
 
     @property
     def openrouter_api_key(self) -> str | None:
