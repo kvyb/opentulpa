@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from pydantic import BaseModel, ConfigDict
 
@@ -16,17 +18,21 @@ class _Schema(BaseModel):
 class _StructuredRunner:
     def __init__(self, payload: object) -> None:
         self._payload = payload
+        self.messages: object | None = None
 
     async def ainvoke(self, _messages: object) -> object:
+        self.messages = _messages
         return self._payload
 
 
 class _StructuredModel:
     def __init__(self, payload: object) -> None:
         self._payload = payload
+        self.runner: _StructuredRunner | None = None
 
     def with_structured_output(self, _schema: type[BaseModel]) -> _StructuredRunner:
-        return _StructuredRunner(self._payload)
+        self.runner = _StructuredRunner(self._payload)
+        return self.runner
 
 
 class _FallbackResponse:
@@ -95,3 +101,128 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
     assert parsed is None
     assert isinstance(error, str)
     assert "ValidationError" in error
+
+
+@pytest.mark.asyncio
+async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.model_name = "google/gemini-3-flash-preview"
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
+    model = _StructuredModel(
+        {
+            "matches_workflow": False,
+            "confidence": 0.2,
+            "conversation_summary": "unrelated chat",
+            "extracted_fields": {},
+            "missing_fields": [],
+            "reply_action": "none",
+            "reply_text": "",
+            "ready_to_save": False,
+            "booking_action": "ignore",
+            "save_payload": {},
+            "reason": "not a booking",
+        }
+    )
+    runtime._model = model
+    runtime._wake_execution_model = model
+    runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
+
+    decision = await runtime.decide_intake_workflow(
+        customer_id="telegram_123",
+        workflow={
+            "workflow_id": "iwf_123",
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "field_guidance": {"wash_type": "interior, exterior, or both"},
+            "sink_type": "local_csv",
+        },
+        conversation={
+            "summary": {"conversation_id": "conv_1"},
+            "recent_messages": [{"sender_role": "customer", "text": "thanks"}],
+        },
+        active_booking=None,
+        recent_completed_booking=None,
+        execution_feedback=[
+            {
+                "phase": "reply_execution",
+                "error": "Invalid request data provided",
+                "prior_decision": {"reply_action": "send_reply"},
+            }
+        ],
+    )
+
+    assert decision["ok"] is True
+    assert model.runner is not None
+    messages = model.runner.messages
+    assert isinstance(messages, list)
+    system_text = str(messages[0].content)
+    assert isinstance(messages[0].content, list)
+    assert messages[0].content[0]["cache_control"] == {"type": "ephemeral"}
+    assert isinstance(messages[1].content, str)
+    assert "False positives are worse than ignoring an unrelated DM." in system_text
+    assert "If the message is ambiguous" in system_text
+    assert "If customer messages conflict, prefer the latest customer-provided value" in system_text
+    assert "Ask at most one compact question at a time" in system_text
+    assert "When ready_to_save=true, save_payload must contain the merged final field set" in system_text
+
+
+@pytest.mark.asyncio
+async def test_decide_intake_workflow_prefers_tool_enabled_wake_turn_when_available() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = object()
+    runtime._wake_execution_model_with_tools = object()
+    captured: dict[str, Any] = {}
+
+    async def _fake_ainvoke_text(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return (
+            '{"matches_workflow": true, "confidence": 0.95, "conversation_summary": '
+            '"Customer wants a car wash tomorrow at 4pm.", "extracted_fields": {"day": "tomorrow"}, '
+            '"missing_fields": ["time"], "reply_action": "send_reply", "reply_text": "What time works best?", '
+            '"ready_to_save": false, "booking_action": "create_new_booking", "save_payload": {}, '
+            '"reason": "Need time before save."}'
+        )
+
+    runtime.ainvoke_text = _fake_ainvoke_text
+
+    decision = await runtime.decide_intake_workflow(
+        customer_id="telegram_123",
+        workflow={
+            "workflow_id": "iwf_123",
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "field_guidance": {"wash_type": "interior, exterior, or both"},
+            "sink_type": "google_sheets_composio",
+            "sink_config": {"tool_slug": "GOOGLESHEETS_ADD_ROW", "field_mapping": {"day": "Date"}},
+        },
+        conversation={
+            "summary": {
+                "conversation_id": "conv_1",
+                "latest_inbound_message_id": "msg_1",
+            },
+            "recent_messages": [{"sender_role": "customer", "text": "Need a wash tomorrow."}],
+        },
+        active_booking=None,
+        recent_completed_booking=None,
+        execution_feedback=[
+            {
+                "phase": "reply_execution",
+                "error": "Invalid request data provided",
+                "prior_decision": {"reply_action": "send_reply"},
+            }
+        ],
+    )
+
+    assert decision["ok"] is True
+    assert captured["thread_id"] == "wake_intake_iwf_123_conv_1_msg_1"
+    assert captured["turn_mode"] == "routine_wake"
+    assert captured["include_pending_context"] is False
+    prompt = str(captured["text"])
+    assert "Operate like a real OpenTulpa background execution turn and use tools when needed." in prompt
+    assert "composio_tool_search" in prompt
+    assert "Do not send the outbound Instagram reply or perform the final booking write yourself" in prompt
+    assert "execution_feedback=" in prompt
+    assert "Invalid request data provided" in prompt

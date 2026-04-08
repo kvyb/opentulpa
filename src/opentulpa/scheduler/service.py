@@ -6,7 +6,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +75,12 @@ class SchedulerService:
 
     @staticmethod
     def _utc_now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     @staticmethod
     def _to_aware_datetime(value: datetime) -> datetime:
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+            return value.replace(tzinfo=UTC)
         return value
 
     def _upsert_routine(self, routine: Routine) -> None:
@@ -136,7 +136,7 @@ class SchedulerService:
             try:
                 created_at = datetime.fromisoformat(created_at_raw)
             except Exception:
-                created_at = datetime.now(timezone.utc)
+                created_at = datetime.now(UTC)
             payload_raw = row["payload_json"] or "{}"
             try:
                 payload = json.loads(payload_raw)
@@ -181,7 +181,7 @@ class SchedulerService:
         try:
             run_time = datetime.fromisoformat(routine.schedule.replace("Z", "+00:00"))
             run_time = self._to_aware_datetime(run_time)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if run_time <= now:
                 # Persist as disabled so missed one-off jobs are never replayed on restart.
                 routine.enabled = False

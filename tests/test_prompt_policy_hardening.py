@@ -2,24 +2,26 @@ from __future__ import annotations
 
 from opentulpa.agent.graph_builder import (
     _build_relevant_skill_discovery_context,
-    _build_tool_validation_repair_message,
     _build_skill_glossary_context,
-    _extract_invoked_skill_snapshot,
+    _build_tool_validation_repair_message,
     _enforce_tool_message_protocol,
+    _extract_invoked_skill_snapshot,
     _normalize_approval_id,
     _sanitize_history_messages_for_model,
     _summarize_tool_validation_errors,
     _validate_model_tool_call,
 )
-from opentulpa.agent.prompt_policy import build_system_prompt_message as _build_system_prompt_message
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.prompt_classifier import classify_prompt_mode
+from opentulpa.agent.prompt_policy import (
+    build_system_prompt_message as _build_system_prompt_message,
+)
 from opentulpa.agent.prompt_sections import (
     build_core_policy_message,
     build_prompt_mode_message,
     build_style_card_message,
 )
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message,
     execution_origin_for_turn_mode,
@@ -103,10 +105,11 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
     assert "previously approved action" in approval_recovery
+    assert "continuation of the approved execution" in approval_recovery
     assert "background event/status notification" in event_notification
     assert normalize_turn_mode("unexpected") == "interactive"
     assert execution_origin_for_turn_mode("routine_wake") == "scheduled"
-    assert execution_origin_for_turn_mode("approval_recovery") == "interactive"
+    assert execution_origin_for_turn_mode("approval_recovery") == "scheduled"
     assert execution_origin_for_turn_mode("interactive", thread_id="wake_legacy") == "scheduled"
     assert execution_origin_for_turn_mode("event_notification", thread_id="wake_legacy") == "interactive"
 

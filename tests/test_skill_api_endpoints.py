@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from opentulpa.api.app import create_app
-from opentulpa.skills.service import SkillStoreService
+from opentulpa.skills.service import SkillStoreService, _rmtree_ignore_missing
 
 
 def _mk_client(tmp_path: Path) -> TestClient:
@@ -57,3 +58,12 @@ def test_skills_endpoints_crud(tmp_path: Path) -> None:
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
+
+
+def test_rmtree_ignore_missing_accepts_python312_onexc_exception_object() -> None:
+    _rmtree_ignore_missing(lambda *_: None, "ignored", FileNotFoundError("gone"))
+
+
+def test_rmtree_ignore_missing_raises_non_missing_error() -> None:
+    with pytest.raises(PermissionError):
+        _rmtree_ignore_missing(lambda *_: None, "ignored", PermissionError("blocked"))

@@ -494,6 +494,85 @@ class ComposioService:
         summary["connected_account_id"] = safe_account
         return summary
 
+    def list_instagram_conversations(
+        self,
+        *,
+        customer_id: str,
+        connected_account_id: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        safe_customer = str(customer_id or "").strip()
+        if not safe_customer:
+            raise ValueError("customer_id is required")
+        safe_account = str(connected_account_id or "").strip() or None
+        response = self._sdk_execute_tool(
+            slug="INSTAGRAM_LIST_ALL_CONVERSATIONS",
+            arguments={"limit": max(1, min(int(limit), 25))},
+            connected_account_id=safe_account,
+            user_id=safe_customer,
+        )
+        if not bool(response.get("successful", False)):
+            raise RuntimeError(str(response.get("error") or "failed to list Instagram conversations"))
+        items = _safe_list(_safe_dict(response.get("data")).get("data"))
+        summaries: list[dict[str, Any]] = []
+        for item in items:
+            conversation_id = str(_safe_dict(item).get("id", "") or "").strip()
+            if not conversation_id:
+                continue
+            conversation = self._fetch_instagram_conversation(
+                customer_id=safe_customer,
+                conversation_id=conversation_id,
+                connected_account_id=safe_account,
+            )
+            summary = self._summarize_instagram_conversation(
+                conversation=conversation,
+                requested_recipient_id=None,
+            )
+            summary["ok"] = True
+            summary["customer_id"] = safe_customer
+            summary["connected_account_id"] = safe_account
+            summaries.append(summary)
+        return {
+            "ok": True,
+            "customer_id": safe_customer,
+            "connected_account_id": safe_account,
+            "items": summaries,
+        }
+
+    def get_instagram_conversation(
+        self,
+        *,
+        customer_id: str,
+        conversation_id: str,
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        safe_customer = str(customer_id or "").strip()
+        safe_conversation = str(conversation_id or "").strip()
+        safe_account = str(connected_account_id or "").strip() or None
+        if not safe_customer:
+            raise ValueError("customer_id is required")
+        if not safe_conversation:
+            raise ValueError("conversation_id is required")
+        conversation = self._fetch_instagram_conversation(
+            customer_id=safe_customer,
+            conversation_id=safe_conversation,
+            connected_account_id=safe_account,
+        )
+        summary = self._summarize_instagram_conversation(
+            conversation=conversation,
+            requested_recipient_id=None,
+        )
+        summary["ok"] = True
+        summary["customer_id"] = safe_customer
+        summary["connected_account_id"] = safe_account
+        return {
+            "ok": True,
+            "customer_id": safe_customer,
+            "connected_account_id": safe_account,
+            "conversation": conversation,
+            "summary": summary,
+        }
+
     def _sdk_execute_tool(
         self,
         *,

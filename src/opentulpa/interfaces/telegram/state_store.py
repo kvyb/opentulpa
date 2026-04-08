@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -108,7 +108,7 @@ class TelegramStateStore:
         }
 
     def touch_assistant_message(self, chat_id: int | str) -> None:
-        now_utc_iso = datetime.now(timezone.utc).isoformat()
+        now_utc_iso = datetime.now(UTC).isoformat()
         key = str(chat_id)
 
         def _touch(state: dict[str, Any]) -> None:

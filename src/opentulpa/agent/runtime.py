@@ -80,13 +80,13 @@ from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )
 from opentulpa.agent.utils import (
+    html_to_text as _html_to_text,
+)
+from opentulpa.agent.utils import (
     minutes_to_utc_offset as _minutes_to_utc_offset,
 )
 from opentulpa.agent.utils import (
     normalize_model_name as _normalize_model_name,
-)
-from opentulpa.agent.utils import (
-    html_to_text as _html_to_text,
 )
 from opentulpa.agent.utils import (
     utc_offset_to_minutes as _utc_offset_to_minutes,
@@ -240,12 +240,20 @@ def _message_with_cache_breakpoint(message: Any, *, cache_control: dict[str, Any
     if content == getattr(message, "content", None):
         return message
     model_copy = getattr(message, "model_copy", None)
-    if callable(model_copy):
-        copied = model_copy(deep=True)
-    else:
-        copied = message.copy(deep=True)
+    copied = model_copy(deep=True) if callable(model_copy) else message.copy(deep=True)
     copied.content = content
     return copied
+
+
+def _infer_stable_system_prefix_count(messages: list[Any]) -> int:
+    count = 0
+    for message in messages:
+        if not isinstance(message, SystemMessage):
+            break
+        if not _content_to_text(getattr(message, "content", "")).strip():
+            break
+        count += 1
+    return count
 
 
 def _supports_ainvoke_kwargs(target: Any, kwargs: dict[str, Any]) -> bool:
@@ -458,11 +466,176 @@ class _SkillSelectionDecision(BaseModel):
     selected: list[_SkillSelectionItem] = Field(default_factory=list)
 
 
+class _IntakeWorkflowDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    matches_workflow: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    conversation_summary: str = ""
+    extracted_fields: dict[str, Any] = Field(default_factory=dict)
+    missing_fields: list[str] = Field(default_factory=list)
+    reply_action: str = "none"
+    reply_text: str = ""
+    ready_to_save: bool = False
+    booking_action: str = "ignore"
+    save_payload: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+
+
 @dataclass(slots=True)
 class _PreparedTurnContext:
     through_id: int | None
     config: dict[str, Any]
     graph_input: dict[str, Any]
+
+
+def _build_intake_workflow_system_prompt() -> str:
+    return (
+        "You operate an autonomous business intake workflow over external DM conversations.\n"
+        "Your job is to classify whether the conversation matches the workflow, extract reliable fields, "
+        "decide whether to ask a follow-up question, decide whether the booking is ready to save, and "
+        "decide whether the latest customer message updates an active booking, edits a recent completed booking, "
+        "starts a new booking, or should be ignored.\n\n"
+        "Return strict JSON only with keys:\n"
+        "matches_workflow (bool), confidence (0..1), conversation_summary (string), "
+        "extracted_fields (object), missing_fields (string array), reply_action (string), "
+        "reply_text (string), ready_to_save (bool), booking_action (string), "
+        "save_payload (object), reason (string).\n\n"
+        "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
+        "Allowed reply_action values: none, send_reply, mark_cancelled.\n\n"
+        "Decision policy:\n"
+        "- Be precise. False positives are worse than ignoring an unrelated DM.\n"
+        "- Use matches_workflow=true only when the customer is clearly pursuing the workflow intent now.\n"
+        "- If the message is ambiguous, casual, social, or not clearly about the workflow, return matches_workflow=false, booking_action=ignore, reply_action=none.\n"
+        "- Confidence should reflect how certain you are in the match and booking decision.\n"
+        "- Confidence guide: 0.9+ very clear, 0.7-0.89 likely, 0.4-0.69 ambiguous, below 0.4 weak evidence.\n\n"
+        "Field extraction policy:\n"
+        "- Extract fields only from evidence in the conversation or saved state.\n"
+        "- Do not invent or infer missing business details unless the value is explicitly or near-explicitly stated.\n"
+        "- Light normalization is allowed: trim whitespace, standardize obvious time/date phrasing, preserve meaning.\n"
+        "- If customer messages conflict, prefer the latest customer-provided value unless the newer message is too vague to override the earlier one.\n"
+        "- Do not ask for a field that is already reliably known unless the value is conflicting or unclear.\n"
+        "- missing_fields must list only fields that are truly still needed before save.\n\n"
+        "Reply policy:\n"
+        "- If details are missing, set reply_action=send_reply with one concise, high-leverage follow-up question.\n"
+        "- Ask at most one compact question at a time unless a single sentence can naturally request two tightly related missing fields.\n"
+        "- reply_text should be plain outbound DM text, not explanations about JSON or system behavior.\n"
+        "- If no reply is needed, use reply_action=none and reply_text=\"\".\n"
+        "- Use mark_cancelled only when the customer clearly cancels, abandons, or says they no longer want the booking.\n"
+        "- Never ask for Telegram approval. This is background workflow execution.\n\n"
+        "Booking action policy:\n"
+        "- If there is an active booking and the customer is continuing the same request, use update_active.\n"
+        "- If there is a recent completed booking inside the edit window and the customer is correcting or changing that booking, use edit_recent_completed.\n"
+        "- If the previous booking is done and the customer is clearly starting another separate booking, use create_new_booking.\n"
+        "- If the conversation does not currently require workflow action, use ignore.\n\n"
+        "Recovery policy:\n"
+        "- execution_feedback, when present in the human message, describes a real failure from the last attempted action.\n"
+        "- Do not repeat the same failing action unchanged if execution_feedback shows it already failed.\n"
+        "- Replan using the error details. For example, change reply wording, avoid an invalid save, or ask a clarifying question instead.\n\n"
+        "Save policy:\n"
+        "- Set ready_to_save=true only when all required fields are available with enough clarity to create/update the booking.\n"
+        "- When ready_to_save=true, save_payload must contain the merged final field set that should be persisted now.\n"
+        "- When ready_to_save=false, save_payload should usually be empty.\n"
+        "- conversation_summary should be a short operational summary of what the customer currently wants.\n"
+        "- reason should briefly explain the match decision and booking_action.\n\n"
+        "Examples:\n"
+        "1. Customer asks for a wash, gives day and car type, but no time -> matches_workflow=true, booking_action=create_new_booking or update_active, reply_action=send_reply, missing_fields includes time, ready_to_save=false.\n"
+        "2. Customer says 'actually make it 4pm instead' after a recent completed booking -> matches_workflow=true, booking_action=edit_recent_completed, extracted_fields.time='4pm'.\n"
+        "3. Customer says 'also book my other car tomorrow evening' after an earlier finished booking -> matches_workflow=true, booking_action=create_new_booking.\n"
+        "4. Customer only reacts with 'thanks' or sends unrelated chat -> matches_workflow=false, booking_action=ignore, reply_action=none.\n"
+        "No markdown. No extra keys."
+    )
+
+
+def _build_intake_workflow_agent_prompt(
+    *,
+    customer_id: str,
+    workflow: dict[str, Any],
+    conversation: dict[str, Any],
+    active_booking: dict[str, Any] | None,
+    recent_completed_booking: dict[str, Any] | None,
+    execution_feedback: list[dict[str, Any]] | None = None,
+) -> str:
+    return (
+        "System update: an intake workflow wake fired for one external DM conversation.\n"
+        "Operate like a real OpenTulpa background execution turn and use tools when needed.\n\n"
+        "Primary goal:\n"
+        "- Decide whether this conversation is an active match for the workflow.\n"
+        "- Extract reliable booking fields.\n"
+        "- If necessary, inspect external state before deciding, especially for availability checks.\n"
+        "- Return strict JSON only as the final answer.\n\n"
+        "Tool-use guidance:\n"
+        "- You may use normal tools, especially composio_tool_search, composio_tool_schema, composio_tool_execute, "
+        "and composio_instagram_reply_precheck when they materially help.\n"
+        "- If the workflow uses a Google Sheets or generic Composio sink and availability matters, inspect the "
+        "relevant external state before setting ready_to_save=true.\n"
+        "- Prefer minimal read-only tool usage first.\n"
+        "- Do not create, update, delete, or run workflows/routines from inside this turn.\n"
+        "- Do not call intake_workflow_upsert, intake_workflow_delete, intake_workflow_run, routine_create, or routine_delete.\n"
+        "- Do not ask the user for approval. This is background execution.\n"
+        "- Do not send the outbound Instagram reply or perform the final booking write yourself in this turn; "
+        "the intake workflow service will do the final idempotent reply/save after your decision.\n\n"
+        "Final answer contract:\n"
+        "- Return strict JSON only with keys:\n"
+        "  matches_workflow, confidence, conversation_summary, extracted_fields, missing_fields, "
+        "reply_action, reply_text, ready_to_save, booking_action, save_payload, reason.\n"
+        "- booking_action must be one of: ignore, update_active, edit_recent_completed, create_new_booking.\n"
+        "- reply_action must be one of: none, send_reply, mark_cancelled.\n"
+        "- If availability is blocked or conflicting, do not set ready_to_save=true.\n"
+        "- If details are missing, ask one concise follow-up question in reply_text.\n"
+        "- If execution_feedback is present, you are replanning after a real tool or application error. "
+        "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
+        "- False positives are worse than ignoring unrelated DMs.\n\n"
+        f"customer_id={customer_id}\n"
+        f"workflow={json.dumps(workflow, ensure_ascii=False)}\n"
+        f"conversation={json.dumps(conversation, ensure_ascii=False)[:12000]}\n"
+        f"active_booking={json.dumps(active_booking or {}, ensure_ascii=False)}\n"
+        f"recent_completed_booking={json.dumps(recent_completed_booking or {}, ensure_ascii=False)}\n"
+        f"execution_feedback={json.dumps(execution_feedback or [], ensure_ascii=False)[:4000]}"
+    )
+
+
+def _build_intake_workflow_human_prompt(
+    *,
+    customer_id: str,
+    workflow: dict[str, Any],
+    conversation: dict[str, Any],
+    active_booking: dict[str, Any] | None,
+    recent_completed_booking: dict[str, Any] | None,
+    execution_feedback: list[dict[str, Any]] | None = None,
+) -> str:
+    return (
+        f"customer_id={customer_id}\n"
+        f"workflow={json.dumps(workflow, ensure_ascii=False)}\n"
+        f"conversation={json.dumps(conversation, ensure_ascii=False)[:12000]}\n"
+        f"active_booking={json.dumps(active_booking or {}, ensure_ascii=False)}\n"
+        f"recent_completed_booking={json.dumps(recent_completed_booking or {}, ensure_ascii=False)}\n"
+        f"execution_feedback={json.dumps(execution_feedback or [], ensure_ascii=False)[:4000]}"
+    )
+
+
+def _clean_json_text_block(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
+def _parse_schema_from_text(raw: str, schema: type[BaseModel]) -> BaseModel:
+    cleaned = _clean_json_text_block(raw)
+    try:
+        return schema.model_validate_json(cleaned)
+    except Exception:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return schema.model_validate_json(cleaned[start : end + 1])
+        raise
 
 
 class OpenTulpaLangGraphRuntime:
@@ -705,31 +878,19 @@ class OpenTulpaLangGraphRuntime:
         cache_control = dict(profile.get("cache_control") or {})
         if not cache_control:
             return messages
+        effective_stable_prefix_count = (
+            int(stable_prefix_count)
+            if int(stable_prefix_count) > 0
+            else _infer_stable_system_prefix_count(messages)
+        )
+        if effective_stable_prefix_count <= 0:
+            return messages
         patched: list[Any] = list(messages)
-        if stable_prefix_count > 0:
-            target_index: int | None = None
-            for idx in range(min(stable_prefix_count, len(patched)) - 1, -1, -1):
-                if getattr(patched[idx], "content", None):
-                    target_index = idx
-                    break
-            if target_index is not None:
-                patched[target_index] = _message_with_cache_breakpoint(
-                    patched[target_index],
-                    cache_control=cache_control,
-                )
-                return patched
-        preferred_index: int | None = None
-        fallback_index: int | None = None
-        for idx in range(len(patched) - 1, -1, -1):
-            message = patched[idx]
-            if not getattr(message, "content", None):
-                continue
-            if preferred_index is None and isinstance(message, HumanMessage):
-                preferred_index = idx
+        target_index: int | None = None
+        for idx in range(min(effective_stable_prefix_count, len(patched)) - 1, -1, -1):
+            if getattr(patched[idx], "content", None):
+                target_index = idx
                 break
-            if fallback_index is None and isinstance(message, SystemMessage):
-                fallback_index = idx
-        target_index = preferred_index if preferred_index is not None else fallback_index
         if target_index is None:
             return messages
         patched[target_index] = _message_with_cache_breakpoint(
@@ -878,6 +1039,7 @@ class OpenTulpaLangGraphRuntime:
         messages: list[Any],
         schema: type[BaseModel],
         model_name: str | None = None,
+        stable_prefix_count: int = 0,
     ) -> tuple[BaseModel | None, str | None]:
         last_error: str | None = None
         structured = getattr(model, "with_structured_output", None)
@@ -885,6 +1047,7 @@ class OpenTulpaLangGraphRuntime:
         prepared_messages = self.prepare_messages_for_prompt_cache(
             list(messages),
             model_name=resolved_model_name,
+            stable_prefix_count=stable_prefix_count,
         )
         invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
         if callable(structured):
@@ -903,8 +1066,9 @@ class OpenTulpaLangGraphRuntime:
         try:
             response = await self.ainvoke_model(
                 model,
-                prepared_messages,
+                list(messages),
                 model_name=resolved_model_name,
+                stable_prefix_count=stable_prefix_count,
             )
             raw = _content_to_text(getattr(response, "content", response)).strip()
             if raw:
@@ -1376,7 +1540,7 @@ class OpenTulpaLangGraphRuntime:
             return False
         if mode == "execution":
             return True
-        tokens = {tok for tok in re.findall(r"[a-z0-9][a-z0-9._-]{2,}", text)}
+        tokens = set(re.findall(r"[a-z0-9][a-z0-9._-]{2,}", text))
         if not tokens:
             return False
         if isinstance(skill_candidates, list):
@@ -2290,7 +2454,6 @@ class OpenTulpaLangGraphRuntime:
             segment_accumulated = ""
             stream_key = ""
             yielded_any = False
-            saw_agent_output = False
             in_tool_phase = False
             approval_handoff_detected = False
             stream_started_at = time.monotonic()
@@ -2433,7 +2596,6 @@ class OpenTulpaLangGraphRuntime:
                 if chunk_key:
                     stream_key = chunk_key
                 if message_chunk.content:
-                    saw_agent_output = True
                     segment_accumulated += str(message_chunk.content)
                     cleaned = segment_accumulated
                     if not cleaned.strip():
@@ -2774,6 +2936,96 @@ class OpenTulpaLangGraphRuntime:
             }
         return {
             "notify_user": bool(decision.notify_user),
+            "reason": str(decision.reason).strip()[:500],
+        }
+
+    async def decide_intake_workflow(
+        self,
+        *,
+        customer_id: str,
+        workflow: dict[str, Any],
+        conversation: dict[str, Any],
+        active_booking: dict[str, Any] | None,
+        recent_completed_booking: dict[str, Any] | None,
+        execution_feedback: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return a structured decision for one intake workflow conversation."""
+        invoke_error: str | None = None
+        decision: _IntakeWorkflowDecision | None = None
+        tool_enabled_runtime = (
+            getattr(self, "_graph", None) is not None
+            and getattr(self, "_wake_execution_model_with_tools", None) is not None
+            and callable(getattr(self, "ainvoke_text", None))
+        )
+        if tool_enabled_runtime:
+            workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
+            conversation_summary = conversation.get("summary") if isinstance(conversation, dict) else {}
+            conversation_id = str(
+                (conversation_summary or {}).get("conversation_id", "") if isinstance(conversation_summary, dict) else ""
+            ).strip() or "conversation"
+            latest_inbound_id = str(
+                (conversation_summary or {}).get("latest_inbound_message_id", "") if isinstance(conversation_summary, dict) else ""
+            ).strip() or "latest"
+            try:
+                raw = await self.ainvoke_text(
+                    thread_id=f"wake_intake_{workflow_id}_{conversation_id}_{latest_inbound_id}",
+                    customer_id=customer_id,
+                    text=_build_intake_workflow_agent_prompt(
+                        customer_id=customer_id,
+                        workflow=workflow,
+                        conversation=conversation,
+                        active_booking=active_booking,
+                        recent_completed_booking=recent_completed_booking,
+                        execution_feedback=execution_feedback,
+                    ),
+                    turn_mode="routine_wake",
+                    include_pending_context=False,
+                )
+                parsed = _parse_schema_from_text(raw, _IntakeWorkflowDecision)
+                if isinstance(parsed, _IntakeWorkflowDecision):
+                    decision = parsed
+            except Exception as exc:
+                invoke_error = f"{type(exc).__name__}: {exc}"
+        if decision is None:
+            model = getattr(self, "_wake_execution_model", None) or self._model
+            decision, invoke_error = await self._invoke_structured_model(
+                model=model,
+                schema=_IntakeWorkflowDecision,
+                messages=[
+                    SystemMessage(content=_build_intake_workflow_system_prompt()),
+                    HumanMessage(
+                        content=_build_intake_workflow_human_prompt(
+                            customer_id=customer_id,
+                            workflow=workflow,
+                            conversation=conversation,
+                            active_booking=active_booking,
+                            recent_completed_booking=recent_completed_booking,
+                            execution_feedback=execution_feedback,
+                        )
+                    ),
+                ],
+            )
+        if decision is None or not isinstance(decision, _IntakeWorkflowDecision):
+            return {
+                "ok": False,
+                "error": (
+                    f"intake_workflow_decision_error:{invoke_error}"
+                    if invoke_error
+                    else "intake_workflow_decision_error:invalid_output"
+                ),
+            }
+        return {
+            "ok": True,
+            "matches_workflow": bool(decision.matches_workflow),
+            "confidence": float(decision.confidence),
+            "conversation_summary": str(decision.conversation_summary).strip()[:500],
+            "extracted_fields": dict(decision.extracted_fields),
+            "missing_fields": [str(item).strip() for item in decision.missing_fields if str(item).strip()],
+            "reply_action": str(decision.reply_action).strip().lower() or "none",
+            "reply_text": str(decision.reply_text).strip(),
+            "ready_to_save": bool(decision.ready_to_save),
+            "booking_action": str(decision.booking_action).strip().lower() or "ignore",
+            "save_payload": dict(decision.save_payload),
             "reason": str(decision.reason).strip()[:500],
         }
 

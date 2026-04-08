@@ -1,7 +1,7 @@
 """Configuration from environment."""
 
-from functools import lru_cache
 import os
+from functools import lru_cache
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -170,6 +170,13 @@ class Settings(BaseSettings):
         description=(
             "Optional cheaper model for wake/heartbeat notify decisions. "
             "If unset, uses LLM_MODEL."
+        ),
+    )
+    wake_execution_model: str | None = Field(
+        default="google/gemini-3.1-pro-preview-customtools",
+        description=(
+            "Model used for wake/routine execution turns that need stronger reasoning "
+            "and tool use. Defaults to google/gemini-3.1-pro-preview-customtools."
         ),
     )
     guardrail_classifier_model: str = Field(

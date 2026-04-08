@@ -136,7 +136,11 @@ def register_approval_routes(
 
         async def _approved_executor(action_name: str, action_args: dict[str, Any], cid: str) -> Any:
             safe_args = action_args if isinstance(action_args, dict) else {}
-            if str(action_name or "").strip() in {"tulpa_run_terminal", "routine_create"}:
+            if str(action_name or "").strip() in {
+                "tulpa_run_terminal",
+                "routine_create",
+                "intake_workflow_upsert",
+            }:
                 safe_args = {**safe_args, "preapproved": True}
             if hasattr(agent_runtime, "execute_tool"):
                 return await agent_runtime.execute_tool(

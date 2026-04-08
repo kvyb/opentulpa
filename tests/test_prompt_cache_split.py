@@ -116,7 +116,7 @@ def test_prompt_cache_profile_openai_is_automatic() -> None:
     assert profile["supports_breakpoints"] is False
 
 
-def test_prepare_messages_for_prompt_cache_wraps_latest_human_message_for_gemini_by_default() -> None:
+def test_prepare_messages_for_prompt_cache_wraps_stable_system_message_for_gemini_by_default() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -131,12 +131,27 @@ def test_prepare_messages_for_prompt_cache_wraps_latest_human_message_for_gemini
 
     prepared = rt.prepare_messages_for_prompt_cache(messages)
 
-    assert prepared[0].content == "Stable system prompt"
-    assert isinstance(prepared[1].content, list)
-    last_block = prepared[1].content[0]
-    assert last_block["type"] == "text"
-    assert last_block["text"] == "Dynamic user question"
-    assert last_block["cache_control"] == {"type": "ephemeral"}
+    assert isinstance(prepared[0].content, list)
+    stable_block = prepared[0].content[0]
+    assert stable_block["type"] == "text"
+    assert stable_block["text"] == "Stable system prompt"
+    assert stable_block["cache_control"] == {"type": "ephemeral"}
+    assert prepared[1].content == "Dynamic user question"
+
+
+def test_prepare_messages_for_prompt_cache_skips_when_no_stable_system_prefix() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+    messages = [HumanMessage(content="Dynamic user question")]
+
+    prepared = rt.prepare_messages_for_prompt_cache(messages)
+
+    assert prepared[0].content == "Dynamic user question"
 
 
 def test_prepare_messages_for_prompt_cache_prefers_stable_prefix_when_provided() -> None:
@@ -202,7 +217,8 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
     assert call["kwargs"] == {}
     sent_messages = call["messages"]
     assert isinstance(sent_messages, list)
-    assert sent_messages[1].content[0]["cache_control"] == {"type": "ephemeral"}
+    assert sent_messages[0].content[0]["cache_control"] == {"type": "ephemeral"}
+    assert sent_messages[1].content == "Dynamic user question"
 
 
 def test_extract_response_usage_fields_normalizes_openrouter_usage() -> None:

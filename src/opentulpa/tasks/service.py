@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[st
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class TaskService:

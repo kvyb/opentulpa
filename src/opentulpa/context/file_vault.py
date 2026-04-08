@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -15,7 +15,7 @@ from opentulpa.core.ids import new_short_id
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _safe_filename(name: str) -> str:
@@ -162,7 +162,7 @@ class FileVaultService:
         safe_name = _safe_filename(original_filename or f"{kind}.bin")
         cid_dir = self.root_dir / re.sub(r"[^A-Za-z0-9._-]+", "_", cid)
         cid_dir.mkdir(parents=True, exist_ok=True)
-        stored_name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{fid}_{safe_name}"
+        stored_name = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}_{fid}_{safe_name}"
         stored_path = (cid_dir / stored_name).resolve()
         stored_path.write_bytes(raw_bytes)
 

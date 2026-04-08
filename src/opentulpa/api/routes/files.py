@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import mimetypes
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI, Request

@@ -5,9 +5,16 @@ from __future__ import annotations
 import re
 import shutil
 import sqlite3
-from datetime import datetime, timezone
+import threading
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 _DEFAULT_SKILL_CREATOR_DESCRIPTION = (
     "Use this skill when the user asks for recurring behavior/capabilities so the "
@@ -138,9 +145,36 @@ _DEFAULT_COMPOSIO_OPERATOR_INSTRUCTIONS = (
     "5. When auth is required, prefer giving the user the link immediately rather than explaining the entire integration stack.\n"
     "6. Keep the user-facing instructions short: what link to open, what to do next, and how success will be verified.\n"
 )
+_SKILL_FS_LOCK = threading.Lock()
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
+
+
+def _rmtree_ignore_missing(function: Any, path: str, excinfo: Any) -> None:
+    _ = (function, path)
+    if isinstance(excinfo, BaseException):
+        exc = excinfo
+    else:
+        _, exc, _ = excinfo
+    if isinstance(exc, FileNotFoundError):
+        return
+    raise exc
+
+
+@contextmanager
+def _skill_fs_lock(root_dir: Path):
+    lock_path = (root_dir.parent / ".skills.lock").resolve()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _SKILL_FS_LOCK, lock_path.open("a+", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                with suppress(Exception):
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _normalize_skill_name(name: str) -> str:
@@ -313,18 +347,19 @@ class SkillStoreService:
         files = self._validate_supporting_files(supporting_files)
 
         skill_dir = self._skill_dir(scope=safe_scope, customer_id=safe_customer, name=safe_name)
-        if skill_dir.exists():
-            shutil.rmtree(skill_dir)
-        skill_dir.mkdir(parents=True, exist_ok=True)
+        with _skill_fs_lock(self.root_dir):
+            if skill_dir.exists():
+                shutil.rmtree(skill_dir, onexc=_rmtree_ignore_missing)
+            skill_dir.mkdir(parents=True, exist_ok=True)
 
-        skill_md_path = (skill_dir / "SKILL.md").resolve()
-        skill_md_path.write_text(markdown, encoding="utf-8")
-        for rel_path, content in files.items():
-            path = (skill_dir / rel_path).resolve()
-            if skill_dir not in path.parents:
-                raise ValueError("supporting file path escapes skill directory")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            skill_md_path = (skill_dir / "SKILL.md").resolve()
+            skill_md_path.write_text(markdown, encoding="utf-8")
+            for rel_path, content in files.items():
+                path = (skill_dir / rel_path).resolve()
+                if skill_dir not in path.parents:
+                    raise ValueError("supporting file path escapes skill directory")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
 
         now = _utc_now()
         with self._conn() as conn:
