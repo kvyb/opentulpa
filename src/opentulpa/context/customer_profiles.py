@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +74,7 @@ class CustomerProfileService:
 
     @staticmethod
     def _utc_now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     def _upsert(
         self,

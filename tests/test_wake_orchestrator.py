@@ -101,6 +101,32 @@ class _FakeRuntime:
             }
         )
         return self.result
+
+
+class _FakeIntakeWorkflows:
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    async def run_workflow(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        event_type: str = "scheduled",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "customer_id": customer_id,
+                "workflow_id": workflow_id,
+                "event_type": event_type,
+                "force": force,
+            }
+        )
+        return self.result
+
+
 @pytest.mark.asyncio
 async def test_routine_event_flushes_deferred_approval_challenges() -> None:
     settings = SimpleNamespace(telegram_bot_token="test-token")
@@ -193,6 +219,60 @@ async def test_routine_event_silent_mode_still_executes_and_backlogs() -> None:
     payload = queued["payload"]
     assert payload["execution_status"] == "executed"
     assert "updated timelog" in payload["execution_summary"]
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_routine_uses_intake_runner_and_skips_runtime() -> None:
+    settings = SimpleNamespace(telegram_bot_token="test-token")
+    context_events = _FakeContextEvents()
+    chat = _FakeTelegramChat()
+    client = _FakeTelegramClient()
+    runtime = _FakeRuntime(result="should not run")
+    intake = _FakeIntakeWorkflows(
+        {
+            "ok": True,
+            "summary": "Booking saved for Car Wash Intake: contact=alice booking_id=bkg_123 sink=local_csv",
+        }
+    )
+
+    orchestrator = WakeOrchestrator(
+        settings=settings,
+        get_context_events=lambda: context_events,
+        get_telegram_chat=lambda: chat,
+        get_telegram_client=lambda: client,
+        get_agent_runtime=lambda: runtime,
+        get_approvals=None,
+        get_intake_workflows=lambda: intake,
+    )
+
+    await orchestrator.handle_event(
+        {
+            "type": "routine_event",
+            "event_type": "scheduled",
+            "customer_id": "telegram_166",
+            "routine_id": "rtn_ig",
+            "routine_name": "Car Wash Intake",
+            "notify_user": True,
+            "payload": {
+                "customer_id": "telegram_166",
+                "notify_user": True,
+                "workflow_type": "intake_workflow",
+                "workflow_id": "iwf_123",
+                "instruction": "run intake workflow",
+            },
+        }
+    )
+
+    assert intake.calls == [
+        {
+            "customer_id": "telegram_166",
+            "workflow_id": "iwf_123",
+            "event_type": "scheduled",
+            "force": False,
+        }
+    ]
+    assert runtime.calls == []
+    assert client.sent[0]["text"].startswith("Booking saved for Car Wash Intake:")
 
 
 @pytest.mark.asyncio

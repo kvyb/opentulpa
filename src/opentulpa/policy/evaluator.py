@@ -177,6 +177,17 @@ class ApprovalEvaluator:
                 f"create routine name={routine_name or 'unnamed'} "
                 f"schedule={schedule or 'unspecified'}"
             )
+        if action_name == "intake_workflow_upsert":
+            workflow_name = str(action_args.get("name", "")).strip()[:80]
+            schedule = str(action_args.get("schedule", "")).strip()[:60]
+            channel = str(action_args.get("channel", "")).strip()[:40]
+            provider = str(action_args.get("provider", "")).strip()[:40]
+            sink_type = str(action_args.get("sink_type", "")).strip()[:60]
+            return (
+                f"create intake workflow name={workflow_name or 'unnamed'} "
+                f"channel={channel or 'unspecified'} provider={provider or 'unspecified'} "
+                f"sink={sink_type or 'unspecified'} schedule={schedule or 'unspecified'}"
+            )
         return f"execute {action_name}"
 
     async def build_intent(

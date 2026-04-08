@@ -12,6 +12,7 @@ _ROUTE_IMPORTS = {
     "register_debug_log_routes": "opentulpa.api.routes.debug_logs",
     "register_file_routes": "opentulpa.api.routes.files",
     "register_health_routes": "opentulpa.api.routes.health",
+    "register_intake_workflow_routes": "opentulpa.api.routes.intake",
     "register_memory_routes": "opentulpa.api.routes.memory",
     "register_profile_routes": "opentulpa.api.routes.profiles",
     "register_scheduler_routes": "opentulpa.api.routes.scheduler",

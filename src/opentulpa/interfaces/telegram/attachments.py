@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import suppress
 from pathlib import Path
-import re
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.models import TelegramAttachment
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 

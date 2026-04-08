@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+
 from opentulpa.core.public_urls import resolve_public_base_url
 
 

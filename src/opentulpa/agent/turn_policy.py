@@ -37,8 +37,9 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
             content=(
                 "Turn mode: approval_recovery.\n"
                 "A previously approved action is being executed, repaired, or summarized.\n"
-                "You may use tools needed for low-risk repair or verification.\n"
-                "Do not ask the user to repeat the same approval flow unless a genuinely new external action is required."
+                "You may use tools needed to finish or repair the already-approved task.\n"
+                "Treat this as continuation of the approved execution, not a fresh interactive approval request.\n"
+                "Do not ask the user to repeat the same approval flow unless a genuinely unrelated new action is required."
             )
         )
     if normalized == "event_notification":
@@ -63,7 +64,9 @@ def execution_origin_for_turn_mode(turn_mode: str | None, *, thread_id: str | No
     normalized = normalize_turn_mode(turn_mode)
     if normalized == "routine_wake":
         return "scheduled"
-    if normalized in {"approval_recovery", "event_notification"}:
+    if normalized == "approval_recovery":
+        return "scheduled"
+    if normalized == "event_notification":
         return "interactive"
     safe_thread_id = str(thread_id or "").strip().lower()
     if safe_thread_id.startswith(("wake_", "wake-", "routine_", "routine-")):

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
 _SCHEDULED_ORIGINS = {"scheduled", "schedule", "routine", "wake", "background"}
 _SCHEDULED_THREAD_PREFIXES = ("wake_", "wake-", "routine_", "routine-")
 

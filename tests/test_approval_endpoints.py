@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
-from typing import Any
 import types
+from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,7 +45,7 @@ class _DummyAsyncIOScheduler:
 
 class _DummyCronTrigger:
     @classmethod
-    def from_crontab(cls, value: str) -> "_DummyCronTrigger":
+    def from_crontab(cls, value: str) -> _DummyCronTrigger:
         _ = value
         return cls()
 
@@ -79,8 +79,8 @@ sys.modules.setdefault("apscheduler.triggers.cron", cron_module)
 sys.modules.setdefault("apscheduler.triggers.date", date_module)
 sys.modules.setdefault("mem0", mem0_module)
 
-from opentulpa.api.app import create_app
-from opentulpa.core.config import get_settings
+from opentulpa.api.app import create_app  # noqa: E402
+from opentulpa.core.config import get_settings  # noqa: E402
 
 
 class _DummyTool:
@@ -96,7 +96,11 @@ class _DummyRuntime:
     def __init__(self) -> None:
         self.started = 0
         self.tool = _DummyTool()
-        self._tools = {"dummy_action": self.tool}
+        self.intake_tool = _DummyTool()
+        self._tools = {
+            "dummy_action": self.tool,
+            "intake_workflow_upsert": self.intake_tool,
+        }
 
     async def start(self) -> None:
         self.started += 1
@@ -258,6 +262,71 @@ def test_background_actions_are_preauthorized_without_runtime_grant_lookup(
     assert allowed_payload["gate"] == "allow"
     assert allowed_payload["reason"] == "background_preauthorized_execution"
     assert allowed_payload.get("approval_id") is None
+
+
+def test_approval_execute_replays_full_intake_workflow_args(
+    approvals_client: tuple[TestClient, _DummyRuntime],
+) -> None:
+    client, runtime = approvals_client
+    workflow_args = {
+        "name": "Car Wash Intake",
+        "intent_description": "Handle car wash bookings from Instagram DMs.",
+        "required_fields": ["date", "time", "car_type", "wash_type"],
+        "sink_type": "google_sheets_composio",
+        "sink_config": {
+            "spreadsheet_id": "sheet_123",
+            "field_mapping": {
+                "date": "Date",
+                "time": "Time",
+                "car_type": "Car Type",
+                "wash_type": "Wash Type",
+            },
+        },
+        "schedule": "*/5 * * * *",
+        "channel": "instagram_dm",
+        "provider": "composio",
+        "source_config": {"conversation_id": "conv_123"},
+        "field_guidance": {"wash_type": "full, outside, or interior"},
+        "notify_user": True,
+        "enabled": True,
+        "workflow_id": None,
+    }
+    evaluate = client.post(
+        "/internal/approvals/evaluate",
+        json={
+            "customer_id": "cust_9",
+            "thread_id": "chat-9",
+            "action_name": "intake_workflow_upsert",
+            "action_args": workflow_args,
+            "origin_interface": "unknown",
+            "origin_user_id": "99",
+            "origin_conversation_id": "",
+        },
+    )
+    assert evaluate.status_code == 200
+    payload = evaluate.json()
+    assert payload["gate"] == "require_approval"
+    approval_id = payload["approval_id"]
+
+    approved = client.post(
+        "/internal/approvals/decide",
+        json={
+            "approval_id": approval_id,
+            "decision": "approve",
+            "actor_interface": "unknown",
+            "actor_id": "99",
+        },
+    )
+    assert approved.status_code == 200
+    assert approved.json()["ok"] is True
+
+    executed = client.post(
+        "/internal/approvals/execute",
+        json={"approval_id": approval_id, "customer_id": "cust_9"},
+    )
+    assert executed.status_code == 200
+    assert executed.json()["ok"] is True
+    assert runtime.intake_tool.calls == [{**workflow_args, "preapproved": True}]
 
 
 def test_external_read_is_allow_even_if_classifier_requests_approval(

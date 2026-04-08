@@ -61,6 +61,112 @@ async def test_routine_delete_verifies_removed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_list_passes_customer_scope() -> None:
+    runtime = _DummyRuntime([_Response(200, {"workflows": [{"workflow_id": "iwf_abc"}]})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_list"].ainvoke({})
+    assert result == [{"workflow_id": "iwf_abc"}]
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/intake/workflows/list"
+    assert runtime.calls[0][2]["json_body"] == {
+        "customer_id": "telegram_123",
+        "include_disabled": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_upsert_posts_expected_payload() -> None:
+    runtime = _DummyRuntime([_Response(200, {"workflow": {"workflow_id": "iwf_abc"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        }
+    )
+    assert result["workflow_id"] == "iwf_abc"
+    method, path, kwargs = runtime.calls[0]
+    assert method == "POST"
+    assert path == "/internal/intake/workflows/upsert"
+    payload = kwargs["json_body"]
+    assert payload["customer_id"] == "telegram_123"
+    assert payload["name"] == "Car Wash Intake"
+    assert payload["schedule"] == "*/5 * * * *"
+    assert payload["channel"] == "instagram_dm"
+    assert payload["provider"] == "composio"
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_upsert_accepts_string_guidance_and_null_workflow_id() -> None:
+    runtime = _DummyRuntime([_Response(200, {"workflow": {"workflow_id": "iwf_new"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            "field_guidance": "Collect the date, time, car type, and wash type.",
+            "workflow_id": None,
+        }
+    )
+    assert result["workflow_id"] == "iwf_new"
+    payload = runtime.calls[0][2]["json_body"]
+    assert payload["field_guidance"] == {"notes": "Collect the date, time, car type, and wash type."}
+    assert payload["workflow_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_upsert_normalizes_string_none_workflow_id_to_null() -> None:
+    runtime = _DummyRuntime([_Response(200, {"workflow": {"workflow_id": "iwf_new"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            "workflow_id": "None",
+        }
+    )
+
+    assert result["workflow_id"] == "iwf_new"
+    payload = runtime.calls[0][2]["json_body"]
+    assert payload["workflow_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_upsert_rejects_google_sheets_shorthand_before_api_call() -> None:
+    runtime = _DummyRuntime([])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["date", "time", "car_type", "wash_type"],
+            "sink_type": "google_sheets",
+            "sink_config": {
+                "spreadsheet_id": "sheet_123",
+                "worksheet_name": "Bookings",
+            },
+        }
+    )
+
+    assert "sink_type=google_sheets is not supported here" in str(result.get("error", ""))
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
 async def test_lessons_learnt_get_action() -> None:
     runtime = _DummyRuntime([_Response(200, {"customer_id": "telegram_123", "lessons_learnt": "foo"})])
     tools = register_runtime_tools(runtime)

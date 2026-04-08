@@ -18,6 +18,7 @@ from opentulpa.api.routes import (
     register_debug_log_routes,
     register_file_routes,
     register_health_routes,
+    register_intake_workflow_routes,
     register_memory_routes,
     register_profile_routes,
     register_scheduler_routes,
@@ -42,6 +43,7 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.core.config import get_settings
+from opentulpa.intake import IntakeWorkflowService
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.memory.service import MemoryService
@@ -111,6 +113,7 @@ def create_app(
     link_alias_service: LinkAliasService | None = None,
     skill_store_service: SkillStoreService | None = None,
     composio_service: ComposioService | None = None,
+    intake_workflow_service: IntakeWorkflowService | None = None,
 ) -> FastAPI:
     """Create FastAPI app with internal API, webhook, and agent runtime."""
     memory_service = memory
@@ -189,6 +192,9 @@ def create_app(
     def get_composio() -> Any:
         return composio
 
+    def get_intake_workflows() -> IntakeWorkflowService:
+        return _require(intake_service, "IntakeWorkflowService")
+
     def get_telegram_chat() -> TelegramChatService:
         return _require(telegram_chat, "TelegramChatService")
 
@@ -197,6 +203,15 @@ def create_app(
 
     def get_agent_runtime() -> Any:
         return runtime
+
+    intake_service = intake_workflow_service or IntakeWorkflowService(
+        db_path=PROJECT_ROOT / ".opentulpa" / "intake_workflows.db",
+        project_root=PROJECT_ROOT,
+        scheduler=scheduler_service,
+        skill_store=skill_service,
+        composio=composio,
+        get_agent_runtime=get_agent_runtime if runtime is not None else (lambda: None),
+    )
 
     turn_orchestrator = TurnOrchestrator(agent_runtime=runtime)
 
@@ -271,6 +286,7 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
         get_approvals=get_approvals,
+        get_intake_workflows=get_intake_workflows,
     )
 
     async def process_wake_event(body: dict[str, Any]) -> None:
@@ -311,6 +327,7 @@ def create_app(
     app.state.wake_queue = wake_queue_service
     app.state.turn_orchestrator = turn_orchestrator
     app.state.composio = composio
+    app.state.intake_workflows = intake_service
 
     @app.middleware("http")
     async def enforce_public_route_boundary(
@@ -368,6 +385,10 @@ def create_app(
         app,
         get_skill_store=get_skill_store,
         get_memory=lambda: memory_service,
+    )
+    register_intake_workflow_routes(
+        app,
+        get_intake_workflows=get_intake_workflows,
     )
     register_system_routes(app)
     register_composio_routes(app, get_composio=get_composio)

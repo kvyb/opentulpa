@@ -21,6 +21,7 @@ class WakeOrchestrator:
         get_telegram_client: Callable[[], Any],
         get_agent_runtime: Callable[[], Any],
         get_approvals: Callable[[], Any] | None = None,
+        get_intake_workflows: Callable[[], Any] | None = None,
     ) -> None:
         self._settings = settings
         self._get_context_events = get_context_events
@@ -28,6 +29,7 @@ class WakeOrchestrator:
         self._get_telegram_client = get_telegram_client
         self._get_agent_runtime = get_agent_runtime
         self._get_approvals = get_approvals
+        self._get_intake_workflows = get_intake_workflows
 
     def _backlog(self, *, customer_id: str, source: str, event_type: str, payload: dict[str, Any]) -> None:
         self._get_context_events().add_event(
@@ -212,6 +214,74 @@ class WakeOrchestrator:
             )
             return
 
+        if str(payload.get("workflow_type", "")).strip() == "intake_workflow":
+            workflow_id = str(payload.get("workflow_id", "")).strip()
+            if not workflow_id or self._get_intake_workflows is None:
+                queue_payload["execution_status"] = "invalid"
+                queue_payload["execution_error"] = "intake workflow payload missing workflow_id"
+                self._backlog(
+                    customer_id=customer_id,
+                    source="routine",
+                    event_type=event_type,
+                    payload=queue_payload,
+                )
+                return
+            try:
+                result = await self._get_intake_workflows().run_workflow(
+                    customer_id=customer_id,
+                    workflow_id=workflow_id,
+                    event_type=event_type,
+                )
+            except Exception as exc:
+                queue_payload["execution_status"] = "failed"
+                queue_payload["execution_error"] = str(exc)[:500]
+                self._backlog(
+                    customer_id=customer_id,
+                    source="routine",
+                    event_type=event_type,
+                    payload=queue_payload,
+                )
+                return
+            execution_summary = str(result.get("summary", "") or "").strip() or NO_NOTIFY_TOKEN
+            queue_payload["execution_status"] = "executed" if bool(result.get("ok", False)) else "failed"
+            queue_payload["execution_summary"] = execution_summary[:2000]
+            queue_payload["execution_result"] = result
+            if queue_payload["execution_status"] != "executed":
+                queue_payload["execution_error"] = (
+                    " | ".join(str(item) for item in _safe_error_list(result.get("errors")))[:500]
+                    or "workflow execution failed"
+                )
+            if not notify_user or not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
+                self._backlog(
+                    customer_id=customer_id,
+                    source="routine",
+                    event_type=event_type,
+                    payload=queue_payload,
+                )
+                return
+            slots: list[dict[str, Any]] = []
+            with suppress(Exception):
+                slots = self._get_telegram_chat().find_session_slots(customer_id)
+            if not slots:
+                self._backlog(
+                    customer_id=customer_id,
+                    source="routine",
+                    event_type=event_type,
+                    payload=queue_payload,
+                )
+                return
+            for slot in slots:
+                chat_id = int(slot["chat_id"])
+                await self._get_telegram_client().send_message(
+                    chat_id=chat_id,
+                    text=execution_summary,
+                    parse_mode="HTML",
+                )
+                with suppress(Exception):
+                    self._get_telegram_chat().touch_assistant_message(chat_id)
+                await self._flush_deferred_challenges(chat_id=chat_id)
+            return
+
         routine_instruction = str(payload.get("instruction", "")).strip()
         if not routine_instruction:
             queue_payload["execution_status"] = "invalid"
@@ -299,3 +369,9 @@ class WakeOrchestrator:
             with suppress(Exception):
                 self._get_telegram_chat().touch_assistant_message(chat_id)
             await self._flush_deferred_challenges(chat_id=chat_id)
+
+
+def _safe_error_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]

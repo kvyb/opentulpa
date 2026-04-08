@@ -99,6 +99,62 @@ def _normalize_cleanup_paths(paths: list[str] | None) -> list[str]:
     return out
 
 
+def _unique_string_list(values: list[str] | None) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        folded = text.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        out.append(text)
+    return out
+
+
+def _normalize_optional_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null"}:
+        return ""
+    return text
+
+
+_INTAKE_ALLOWED_SINK_TYPES = {"local_csv", "google_sheets_composio", "generic_composio_write"}
+
+
+def _validate_intake_sink_request(*, sink_type: str, sink_config: dict[str, Any]) -> str | None:
+    safe_sink_type = str(sink_type or "").strip().lower()
+    safe_config = sink_config if isinstance(sink_config, dict) else {}
+    if safe_sink_type not in _INTAKE_ALLOWED_SINK_TYPES:
+        if safe_sink_type == "google_sheets":
+            return (
+                "sink_type=google_sheets is not supported here; use google_sheets_composio and "
+                "first determine tool_slug + field_mapping via composio_tool_search/composio_tool_schema"
+            )
+        return (
+            "sink_type must be one of local_csv|google_sheets_composio|generic_composio_write"
+        )
+    if safe_sink_type == "local_csv":
+        return None
+    tool_slug = str(safe_config.get("tool_slug", "") or "").strip()
+    if not tool_slug:
+        return (
+            "composio sink_config.tool_slug is required; inspect the concrete Google Sheets/CRM tool "
+            "with composio_tool_search and composio_tool_schema before calling intake_workflow_upsert"
+        )
+    field_mapping = safe_config.get("field_mapping")
+    if not isinstance(field_mapping, dict) or not field_mapping:
+        return (
+            "composio sink_config.field_mapping is required; map sink argument names to workflow fields "
+            "before calling intake_workflow_upsert"
+        )
+    return None
+
+
 _WORKING_DIR_PREFIXES: dict[str, str] = {
     "tulpa_stuff": "tulpa_stuff",
     "integrations": "src/opentulpa/integrations",
@@ -747,6 +803,241 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"skill_delete failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def intake_workflow_upsert(
+        name: str,
+        intent_description: str,
+        required_fields: list[str],
+        sink_type: str,
+        sink_config: dict[str, Any],
+        schedule: str = "*/5 * * * *",
+        channel: str = "instagram_dm",
+        provider: str = "composio",
+        source_config: dict[str, Any] | None | str = None,
+        field_guidance: dict[str, Any] | None | str = None,
+        notify_user: bool = True,
+        enabled: bool = True,
+        workflow_id: str | None = "",
+        thread_id: str = "",
+        execution_origin: str | None = None,
+        preapproved: bool = False,
+        guard_context: dict[str, Any] | None = None,
+    ) -> Any:
+        """Create or update a scheduled intake workflow.
+
+        Use this when the user wants OpenTulpa to monitor inbound messages, decide whether
+        they match a business workflow, ask follow-up questions, and save the result.
+
+        Important shaping rules:
+        - For a brand-new workflow, omit workflow_id or pass an empty string.
+        - For updates, pass the existing workflow_id.
+        - required_fields must be a list of plain field names like ["date", "time", "car_type"].
+        - field_guidance may be either:
+          - a dict keyed by field name, or
+          - a short plain-text note; it will be stored as general guidance.
+        - source_config is optional.
+        - If source_config.conversation_id is omitted, the workflow scans recent conversations
+          for the configured source instead of pinning one specific thread.
+        - channel should usually be instagram_dm and provider should usually be composio.
+        - sink_config must contain the concrete configuration needed by the chosen sink_type.
+        - Valid sink_type values here are local_csv, google_sheets_composio, or generic_composio_write.
+        - Never invent sink_type=google_sheets.
+        - For Google Sheets, first inspect Composio tools/schema and then pass:
+          sink_type=google_sheets_composio
+          sink_config={"tool_slug": "...", "field_mapping": {...}, "static_arguments": {...}}
+        - If the user only gives a Google Sheet URL, extract the spreadsheet ID and then determine the
+          concrete Composio append/update tool + argument mapping before calling this tool.
+        """
+        safe_customer = _require_customer_id(runtime)
+        safe_name = str(name or "").strip()
+        safe_intent = str(intent_description or "").strip()
+        safe_schedule = str(schedule or "").strip() or "*/5 * * * *"
+        safe_channel = str(channel or "").strip() or "instagram_dm"
+        safe_provider = str(provider or "").strip() or "composio"
+        safe_sink_type = str(sink_type or "").strip()
+        safe_workflow_id = _normalize_optional_id(workflow_id)
+        safe_required_fields = _unique_string_list(required_fields)
+        safe_sink_config = sink_config if isinstance(sink_config, dict) else {}
+        safe_source_config = source_config if isinstance(source_config, dict) else None
+        safe_field_guidance = (
+            field_guidance
+            if isinstance(field_guidance, dict)
+            else ({"notes": str(field_guidance).strip()} if str(field_guidance or "").strip() else None)
+        )
+        if not safe_name:
+            return {"error": "intake_workflow_upsert failed: name is required"}
+        if not safe_intent:
+            return {"error": "intake_workflow_upsert failed: intent_description is required"}
+        if not safe_required_fields:
+            return {"error": "intake_workflow_upsert failed: required_fields must contain at least one field"}
+        if not safe_sink_type:
+            return {"error": "intake_workflow_upsert failed: sink_type is required"}
+        if not safe_sink_config:
+            return {"error": "intake_workflow_upsert failed: sink_config is required"}
+        sink_error = _validate_intake_sink_request(
+            sink_type=safe_sink_type,
+            sink_config=safe_sink_config,
+        )
+        if sink_error:
+            return {"error": f"intake_workflow_upsert failed: {sink_error}"}
+
+        normalized_origin = _normalize_execution_origin(
+            thread_id=thread_id,
+            execution_origin=execution_origin,
+        )
+        guard_payload = guard_context if isinstance(guard_context, dict) else {}
+        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
+        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
+        approval_action_args = {
+            "name": safe_name,
+            "intent_description": safe_intent,
+            "required_fields": safe_required_fields,
+            "sink_type": safe_sink_type,
+            "sink_config": safe_sink_config,
+            "schedule": safe_schedule,
+            "channel": safe_channel,
+            "provider": safe_provider,
+            "source_config": safe_source_config,
+            "field_guidance": safe_field_guidance,
+            "notify_user": bool(notify_user),
+            "enabled": bool(enabled),
+            "workflow_id": safe_workflow_id,
+        }
+        decision = await boundary_guard.evaluate(
+            ExecutionBoundaryContext(
+                customer_id=safe_customer,
+                thread_id=str(thread_id or "").strip() or f"chat-{safe_customer}",
+                action_name="intake_workflow_upsert",
+                action_args=approval_action_args,
+                execution_origin=normalized_origin,
+                preapproved=bool(preapproved),
+                action_note=(
+                    "Persistent intake workflow creation/update with scheduled external reads and "
+                    "potential external writes via configured sink. "
+                    f"previous_user_message={previous_user[:800]} "
+                    f"previous_assistant_message={previous_assistant[:800]}"
+                ),
+            )
+        )
+        gate = str((decision or {}).get("gate", "allow")).strip().lower()
+        if gate == "require_approval":
+            return _approval_pending_payload(
+                action_name="intake_workflow_upsert",
+                command_preview=f"{safe_name} -> {safe_sink_type}",
+                decision=decision if isinstance(decision, dict) else {},
+            )
+        if gate == "deny":
+            return {
+                "ok": False,
+                "status": "denied",
+                "gate": "deny",
+                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
+            }
+
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/workflows/upsert",
+            json_body={
+                "customer_id": safe_customer,
+                "workflow_id": safe_workflow_id or None,
+                "name": safe_name,
+                "channel": safe_channel,
+                "provider": safe_provider,
+                "source_config": safe_source_config,
+                "intent_description": safe_intent,
+                "required_fields": safe_required_fields,
+                "field_guidance": safe_field_guidance,
+                "sink_type": safe_sink_type,
+                "sink_config": safe_sink_config,
+                "schedule": safe_schedule,
+                "notify_user": bool(notify_user),
+                "enabled": bool(enabled),
+            },
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_upsert failed: {r.text}"}
+        return r.json().get("workflow", {})
+
+    @tool
+    async def intake_workflow_list(include_disabled: bool = False) -> Any:
+        """List intake workflows for the current user."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/workflows/list",
+            json_body={
+                "customer_id": customer_id,
+                "include_disabled": bool(include_disabled),
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_list failed: {r.text}"}
+        return r.json().get("workflows", [])
+
+    @tool
+    async def intake_workflow_get(workflow_id: str) -> Any:
+        """Get one intake workflow by id."""
+        customer_id = _require_customer_id(runtime)
+        safe_workflow_id = str(workflow_id or "").strip()
+        if not safe_workflow_id:
+            return {"error": "intake_workflow_get failed: workflow_id is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/workflows/get",
+            json_body={
+                "customer_id": customer_id,
+                "workflow_id": safe_workflow_id,
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_get failed: {r.text}"}
+        return r.json().get("workflow", {})
+
+    @tool
+    async def intake_workflow_delete(workflow_id: str) -> Any:
+        """Delete one intake workflow and its scheduled routine."""
+        customer_id = _require_customer_id(runtime)
+        safe_workflow_id = str(workflow_id or "").strip()
+        if not safe_workflow_id:
+            return {"error": "intake_workflow_delete failed: workflow_id is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/workflows/delete",
+            json_body={
+                "customer_id": customer_id,
+                "workflow_id": safe_workflow_id,
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_delete failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def intake_workflow_run(workflow_id: str, force: bool = False) -> Any:
+        """Run one intake workflow immediately for the current user."""
+        customer_id = _require_customer_id(runtime)
+        safe_workflow_id = str(workflow_id or "").strip()
+        if not safe_workflow_id:
+            return {"error": "intake_workflow_run failed: workflow_id is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/workflows/run",
+            json_body={
+                "customer_id": customer_id,
+                "workflow_id": safe_workflow_id,
+                "force": bool(force),
+                "event_type": "manual",
+            },
+            timeout=60.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_run failed: {r.text}"}
         return r.json()
 
     @tool
@@ -1959,6 +2250,11 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "skill_get": skill_get,
         "skill_upsert": skill_upsert,
         "skill_delete": skill_delete,
+        "intake_workflow_upsert": intake_workflow_upsert,
+        "intake_workflow_list": intake_workflow_list,
+        "intake_workflow_get": intake_workflow_get,
+        "intake_workflow_delete": intake_workflow_delete,
+        "intake_workflow_run": intake_workflow_run,
         "composio_status": composio_status,
         "composio_authorize_toolkit": composio_authorize_toolkit,
         "composio_wait_for_connection": composio_wait_for_connection,

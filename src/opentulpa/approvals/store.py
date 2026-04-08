@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -59,14 +59,14 @@ class PendingApprovalStore:
 
     @staticmethod
     def _utc_now() -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def utc_now(self) -> datetime:
         return self._utc_now()
 
     @staticmethod
     def _utc_now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ApprovalRecord:
@@ -257,7 +257,7 @@ class PendingApprovalStore:
             except Exception:
                 continue
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
+                created = created.replace(tzinfo=UTC)
             if created >= cutoff:
                 return record
         return None
@@ -398,7 +398,7 @@ class PendingApprovalStore:
         except Exception:
             return []
         if anchor.tzinfo is None:
-            anchor = anchor.replace(tzinfo=timezone.utc)
+            anchor = anchor.replace(tzinfo=UTC)
         delta = timedelta(seconds=max(1, int(window_seconds)))
         start = (anchor - delta).isoformat()
         end = (anchor + delta).isoformat()

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 import re
+from contextlib import suppress
 from typing import Any
 
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
