@@ -20,7 +20,7 @@ class _StructuredRunner:
         self._payload = payload
         self.messages: object | None = None
 
-    async def ainvoke(self, _messages: object) -> object:
+    async def ainvoke(self, _messages: object, **_: Any) -> object:
         self.messages = _messages
         return self._payload
 
@@ -169,10 +169,85 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decide_intake_workflow_prefers_tool_enabled_wake_turn_when_available() -> None:
+async def test_decide_intake_workflow_prefers_compact_structured_path_even_when_tool_runtime_available() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.model_name = "google/gemini-3-flash-preview"
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
     runtime._graph = object()
     runtime._wake_execution_model_with_tools = object()
+    model = _StructuredModel(
+        {
+            "matches_workflow": True,
+            "confidence": 0.95,
+            "conversation_summary": "Customer wants a car wash tomorrow at 4pm.",
+            "extracted_fields": {"day": "tomorrow"},
+            "missing_fields": ["time"],
+            "reply_action": "send_reply",
+            "reply_text": "What time works best?",
+            "ready_to_save": False,
+            "booking_action": "create_new_booking",
+            "save_payload": {},
+            "reason": "Need time before save.",
+        }
+    )
+    runtime._model = model
+    runtime._wake_execution_model = model
+    runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
+    captured: dict[str, Any] = {"called": False}
+
+    async def _fake_ainvoke_text(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        captured["called"] = True
+        return "{}"
+
+    runtime.ainvoke_text = _fake_ainvoke_text
+
+    decision = await runtime.decide_intake_workflow(
+        customer_id="telegram_123",
+        workflow={
+            "workflow_id": "iwf_123",
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "field_guidance": {"wash_type": "interior, exterior, or both"},
+            "sink_type": "google_sheets_composio",
+            "sink_config": {"tool_slug": "GOOGLESHEETS_ADD_ROW", "field_mapping": {"day": "Date"}},
+        },
+        conversation={
+            "summary": {
+                "conversation_id": "conv_1",
+                "latest_inbound_message_id": "msg_1",
+            },
+            "recent_messages": [{"sender_role": "customer", "text": "Need a wash tomorrow."}],
+        },
+        active_booking=None,
+        recent_completed_booking=None,
+        execution_feedback=[
+            {
+                "phase": "reply_execution",
+                "error": "Invalid request data provided",
+                "prior_decision": {"reply_action": "send_reply"},
+            }
+        ],
+    )
+
+    assert decision["ok"] is True
+    assert captured["called"] is False
+    assert model.runner is not None
+
+
+@pytest.mark.asyncio
+async def test_decide_intake_workflow_escalates_to_tool_runtime_after_structured_failure_with_feedback() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.model_name = "google/gemini-3-flash-preview"
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
+    runtime._graph = object()
+    runtime._wake_execution_model_with_tools = object()
+    runtime._model = _BrokenStructuredThenFallbackModel("not json")
+    runtime._wake_execution_model = runtime._model
+    runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
     captured: dict[str, Any] = {}
 
     async def _fake_ainvoke_text(**kwargs: Any) -> str:
@@ -220,9 +295,94 @@ async def test_decide_intake_workflow_prefers_tool_enabled_wake_turn_when_availa
     assert captured["thread_id"] == "wake_intake_iwf_123_conv_1_msg_1"
     assert captured["turn_mode"] == "routine_wake"
     assert captured["include_pending_context"] is False
+    assert captured["prompt_mode_override"] == "literal_chat"
     prompt = str(captured["text"])
     assert "Operate like a real OpenTulpa background execution turn and use tools when needed." in prompt
     assert "composio_tool_search" in prompt
-    assert "Do not send the outbound Instagram reply or perform the final booking write yourself" in prompt
     assert "execution_feedback=" in prompt
     assert "Invalid request data provided" in prompt
+
+
+@pytest.mark.asyncio
+async def test_decide_intake_workflow_compacts_prompt_payload() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.model_name = "google/gemini-3-flash-preview"
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
+    long_text = "x" * 1000
+    model = _StructuredModel(
+        {
+            "matches_workflow": False,
+            "confidence": 0.2,
+            "conversation_summary": "unrelated chat",
+            "extracted_fields": {},
+            "missing_fields": [],
+            "reply_action": "none",
+            "reply_text": "",
+            "ready_to_save": False,
+            "booking_action": "ignore",
+            "save_payload": {},
+            "reason": "not a booking",
+        }
+    )
+    runtime._model = model
+    runtime._wake_execution_model = model
+    runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
+
+    recent_messages = [
+        {"id": f"m{i}", "created_time": f"2026-04-08T08:0{i}:00+00:00", "sender_role": "customer", "text": long_text}
+        for i in range(8)
+    ]
+    await runtime.decide_intake_workflow(
+        customer_id="telegram_123",
+        workflow={
+            "workflow_id": "iwf_123",
+            "name": "Car Wash Intake",
+            "intent_description": long_text,
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "field_guidance": {"wash_type": long_text},
+            "sink_type": "google_sheets_composio",
+            "sink_config": {
+                "tool_slug": "GOOGLESHEETS_ADD_ROW",
+                "field_mapping": {"day": "Date"},
+                "static_arguments": {"spreadsheet_id": long_text},
+            },
+        },
+        conversation={
+            "summary": {
+                "conversation_id": "conv_1",
+                "latest_inbound_message_id": "msg_1",
+                "latest_inbound_message_text_preview": long_text,
+            },
+            "recent_messages": recent_messages,
+        },
+        active_booking={"booking_id": "bkg_1", "status": "active", "extracted_fields": {"notes": long_text}},
+        recent_completed_booking=None,
+        execution_feedback=[
+            {"phase": "sink_execution", "error": long_text, "prior_decision": {"reply_action": "send_reply"}},
+            {"phase": "reply_execution", "error": long_text, "prior_decision": {"reply_action": "send_reply"}},
+            {"phase": "ignored", "error": long_text, "prior_decision": {"reply_action": "send_reply"}},
+        ],
+    )
+
+    assert model.runner is not None
+    messages = model.runner.messages
+    assert isinstance(messages, list)
+    human_text = str(messages[1].content)
+    assert human_text.count('"sender_role"') == 6
+    assert ('"text": "' + ("x" * 301)) not in human_text
+    assert human_text.count('"phase"') == 2
+
+
+def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
+
+    anth = runtime.prompt_cache_profile(model_name="anthropic/claude-sonnet-4.6")
+    gemini = runtime.prompt_cache_profile(model_name="google/gemini-3-flash-preview")
+    auto = runtime.prompt_cache_profile(model_name="openai/gpt-4.1")
+
+    assert anth["strategy"] == "top_level"
+    assert gemini["strategy"] == "breakpoint"
+    assert auto["strategy"] == "automatic"

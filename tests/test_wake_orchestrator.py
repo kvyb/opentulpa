@@ -98,6 +98,7 @@ class _FakeRuntime:
                 "text": text,
                 "turn_mode": turn_mode,
                 "include_pending_context": include_pending_context,
+                **_,
             }
         )
         return self.result
@@ -219,6 +220,53 @@ async def test_routine_event_silent_mode_still_executes_and_backlogs() -> None:
     payload = queued["payload"]
     assert payload["execution_status"] == "executed"
     assert "updated timelog" in payload["execution_summary"]
+
+
+@pytest.mark.asyncio
+async def test_routine_event_uses_compact_literal_chat_wake_prompt() -> None:
+    settings = SimpleNamespace(telegram_bot_token="test-token")
+    context_events = _FakeContextEvents()
+    chat = _FakeTelegramChat()
+    client = _FakeTelegramClient()
+    runtime = _FakeRuntime(result="done")
+
+    orchestrator = WakeOrchestrator(
+        settings=settings,
+        get_context_events=lambda: context_events,
+        get_telegram_chat=lambda: chat,
+        get_telegram_client=lambda: client,
+        get_agent_runtime=lambda: runtime,
+        get_approvals=None,
+    )
+
+    await orchestrator.handle_event(
+        {
+            "type": "routine_event",
+            "event_type": "scheduled",
+            "customer_id": "telegram_166",
+            "routine_id": "rtn_compact",
+            "routine_name": "Compact Routine",
+            "notify_user": False,
+            "payload": {
+                "customer_id": "telegram_166",
+                "notify_user": False,
+                "instruction": "Check for updates and summarize them.",
+                "source": "instagram",
+                "large_blob": "x" * 3000,
+            },
+        }
+    )
+
+    assert runtime.calls
+    call = runtime.calls[0]
+    assert call["turn_mode"] == "routine_wake"
+    assert call["prompt_mode_override"] == "literal_chat"
+    assert call["thread_id"].startswith("routine_rtn_compact_wake_")
+    assert "- payload_summary:" in call["text"]
+    assert "- payload: {" not in call["text"]
+    assert '"customer_id": "telegram_166"' in call["text"]
+    assert '"instruction"' not in call["text"]
+    assert ("x" * 1500) not in call["text"]
 
 
 @pytest.mark.asyncio

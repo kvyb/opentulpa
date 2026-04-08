@@ -6,6 +6,9 @@ import re
 from contextlib import suppress
 from typing import Any
 
+from opentulpa.agent.context_engineer import (
+    trim_text_to_token_budget as _ce_trim_text_to_token_budget,
+)
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
@@ -22,6 +25,10 @@ _SECRET_PATTERNS = (
     r"\bmlsn\.[A-Za-z0-9._-]+",
     r"\bGOCSPX-[A-Za-z0-9._-]+",
 )
+
+
+def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
+    return _ce_trim_text_to_token_budget(text, token_budget=token_budget)
 
 
 def _rollup_token_budget(runtime: Any) -> int:
@@ -56,29 +63,6 @@ def _compaction_source_budget(runtime: Any) -> int:
         _rollup_token_budget(runtime),
         int(getattr(runtime, "_context_compaction_source_tokens", 100000)),
     )
-
-
-def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    budget = max(1, int(token_budget))
-    if _approx_tokens(raw) <= budget:
-        return raw
-
-    max_chars = max(800, budget * 4)
-    if len(raw) <= max_chars:
-        return raw
-
-    # Keep both earliest and latest sections to preserve stable preferences and newest updates.
-    reserve = max(20, max_chars // 2 - 8)
-    compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
-    while _approx_tokens(compact) > budget and reserve > 64:
-        reserve = max(64, int(reserve * 0.85))
-        compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
-    if _approx_tokens(compact) <= budget:
-        return compact.strip()
-    return raw[:max_chars].strip()
 
 
 def _sanitize_rollup_text(text: str) -> str:

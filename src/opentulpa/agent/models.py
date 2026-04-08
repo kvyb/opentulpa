@@ -24,6 +24,7 @@ class AgentState(TypedDict, total=False):
     agent_trace_id: str
     customer_id: str
     thread_id: str
+    compact_wake: bool
     turn_mode: Literal["interactive", "routine_wake", "approval_recovery", "event_notification"]
     prompt_mode: Literal["literal_chat", "task_chat", "execution"]
     turn_status: Literal["running", "approval_pending", "completed", "failed"]

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import suppress
+import json
 from typing import Any
 
+from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 
 
@@ -38,6 +40,20 @@ class WakeOrchestrator:
             event_type=event_type,
             payload=payload,
         )
+
+    @staticmethod
+    def _compact_payload_summary(payload: dict[str, Any]) -> str:
+        if not isinstance(payload, dict) or not payload:
+            return "{}"
+        safe_payload = {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) not in {"instruction"}
+        }
+        text = json.dumps(safe_payload, ensure_ascii=False, sort_keys=True)
+        if len(text) <= 1200:
+            return text
+        return text[:1197].rstrip() + "..."
 
     async def _flush_deferred_challenges(self, *, chat_id: int | str) -> None:
         if self._get_approvals is None:
@@ -300,11 +316,15 @@ class WakeOrchestrator:
             f"- event: routine/{event_type}\n"
             f"- routine_id: {routine_id or 'unknown'}\n"
             f"- routine_name: {routine_name or 'unnamed'}\n"
-            f"- instruction: {routine_instruction[:3000]}\n"
-            f"- payload: {payload}\n\n"
+            f"- instruction: {routine_instruction[:1500]}\n"
+            f"- payload_summary: {self._compact_payload_summary(payload)}\n\n"
             "After execution, return a concise summary: what was done, outcome, and any blockers."
         )
-        execution_thread_id = f"routine_{routine_id}" if routine_id else f"routine_{customer_id}"
+        execution_thread_id = (
+            f"routine_{routine_id}_{new_short_id('wake')}"
+            if routine_id
+            else f"routine_{customer_id}_{new_short_id('wake')}"
+        )
         try:
             execution_text = await runtime.ainvoke_text(
                 thread_id=execution_thread_id,
@@ -312,6 +332,7 @@ class WakeOrchestrator:
                 text=execution_prompt,
                 turn_mode="routine_wake",
                 include_pending_context=False,
+                prompt_mode_override="literal_chat",
             )
         except Exception as exc:
             queue_payload["execution_status"] = "failed"

@@ -75,6 +75,45 @@ def _clean_mapping(value: Any) -> dict[str, str]:
     return out
 
 
+def _normalize_toolkit_slug(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "").replace("-", "")
+
+
+def _normalize_composio_tool_slug(value: Any) -> str:
+    safe = str(value or "").strip()
+    if not safe:
+        return ""
+    if "_" not in safe:
+        return safe
+    prefix, remainder = safe.split("_", 1)
+    if prefix and prefix == prefix.lower():
+        upper_prefix = prefix.upper()
+        if remainder.upper().startswith(f"{upper_prefix}_"):
+            return remainder
+    return safe
+
+
+def _infer_toolkit_from_tool_slug(value: Any) -> str:
+    safe = _normalize_composio_tool_slug(value)
+    if not safe:
+        return ""
+    if "_" not in safe:
+        return _normalize_toolkit_slug(safe)
+    prefix, _ = safe.split("_", 1)
+    return _normalize_toolkit_slug(prefix)
+
+
+def _infer_operation_hint_from_tool_slug(value: Any) -> str:
+    safe = _normalize_composio_tool_slug(value)
+    if not safe:
+        return ""
+    if "_" in safe:
+        _, remainder = safe.split("_", 1)
+    else:
+        remainder = safe
+    return str(remainder).replace("_", " ").strip().lower()
+
+
 def _unique_string_list(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -170,11 +209,55 @@ class IntakeWorkflowService:
                     conversation_id TEXT NOT NULL,
                     last_seen_inbound_message_id TEXT,
                     last_seen_inbound_message_time TEXT,
+                    last_seen_conversation_updated_time TEXT,
+                    last_seen_latest_outbound_message_id TEXT,
+                    last_agent_action_at TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (workflow_id, conversation_id)
                 );
                 """
             )
+            self._ensure_cursor_columns(conn)
+            self._migrate_legacy_sink_configs(conn)
+
+    @staticmethod
+    def _ensure_cursor_columns(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(intake_conversation_cursors)").fetchall()
+        existing = {str(row["name"] or "") for row in rows}
+        required_columns = {
+            "last_seen_conversation_updated_time": "TEXT",
+            "last_seen_latest_outbound_message_id": "TEXT",
+            "last_agent_action_at": "TEXT",
+        }
+        for column, column_type in required_columns.items():
+            if column in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE intake_conversation_cursors ADD COLUMN {column} {column_type}"
+            )
+        conn.commit()
+
+    def _migrate_legacy_sink_configs(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT workflow_id, customer_id, sink_type, sink_config_json FROM intake_workflows"
+        ).fetchall()
+        for row in rows:
+            sink_type = str(row["sink_type"] or "").strip().lower()
+            original = json.loads(row["sink_config_json"] or "{}")
+            normalized = self._normalize_sink_config(
+                sink_type=sink_type,
+                sink_config=original,
+                workflow_id=str(row["workflow_id"] or "").strip(),
+                customer_id=str(row["customer_id"] or "").strip(),
+                validate_target=False,
+            )
+            if normalized == original:
+                continue
+            conn.execute(
+                "UPDATE intake_workflows SET sink_config_json = ? WHERE workflow_id = ?",
+                (_json_dumps(normalized), str(row["workflow_id"] or "").strip()),
+            )
+        conn.commit()
 
     def _normalize_workflow_payload(
         self,
@@ -231,6 +314,7 @@ class IntakeWorkflowService:
             sink_type=safe_sink_type,
             sink_config=sink_config,
             workflow_id=safe_workflow_id,
+            customer_id=safe_customer,
         )
         safe_routine_id = (
             str(existing_record.get("routine_id", "")).strip()
@@ -261,6 +345,8 @@ class IntakeWorkflowService:
         sink_type: str,
         sink_config: dict[str, Any] | None,
         workflow_id: str,
+        customer_id: str,
+        validate_target: bool = True,
     ) -> dict[str, Any]:
         safe_config = _safe_dict(sink_config)
         if sink_type == "local_csv":
@@ -268,22 +354,69 @@ class IntakeWorkflowService:
             file_path = requested_path or f"tulpa_stuff/intake_{workflow_id or 'workflow'}.csv"
             return {"file_path": file_path}
 
-        tool_slug = str(safe_config.get("tool_slug", "") or "").strip()
-        if not tool_slug:
-            raise ValueError("sink_config.tool_slug is required for composio sink types")
         field_mapping = _clean_mapping(safe_config.get("field_mapping"))
         if not field_mapping:
             raise ValueError("sink_config.field_mapping is required for composio sink types")
         static_arguments = _safe_dict(safe_config.get("static_arguments"))
         connected_account_id = str(safe_config.get("connected_account_id", "") or "").strip()
+        legacy_tool_slug = str(safe_config.get("tool_slug", "") or "").strip()
+        toolkit = _normalize_toolkit_slug(safe_config.get("toolkit"))
+        operation_hint = str(safe_config.get("operation_hint", "") or "").strip().lower()
+        if sink_type == "google_sheets_composio":
+            toolkit = toolkit or _infer_toolkit_from_tool_slug(legacy_tool_slug) or "googlesheets"
+            operation_hint = operation_hint or _infer_operation_hint_from_tool_slug(legacy_tool_slug) or "upsert rows"
+        else:
+            toolkit = toolkit or _infer_toolkit_from_tool_slug(legacy_tool_slug)
+            operation_hint = operation_hint or _infer_operation_hint_from_tool_slug(legacy_tool_slug)
+            if not toolkit:
+                raise ValueError("sink_config.toolkit is required for generic_composio_write")
+            if not operation_hint:
+                raise ValueError(
+                    "sink_config.operation_hint is required for generic_composio_write"
+                )
         normalized = {
-            "tool_slug": tool_slug,
+            "toolkit": toolkit,
+            "operation_hint": operation_hint,
             "field_mapping": field_mapping,
             "static_arguments": static_arguments,
         }
         if connected_account_id:
             normalized["connected_account_id"] = connected_account_id
+        if validate_target:
+            self._validate_sink_target(
+                customer_id=customer_id,
+                sink_type=sink_type,
+                sink_config=normalized,
+            )
         return normalized
+
+    def _validate_sink_target(
+        self,
+        *,
+        customer_id: str,
+        sink_type: str,
+        sink_config: dict[str, Any],
+    ) -> None:
+        del customer_id
+        if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
+            return
+        toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
+        if not toolkit:
+            raise ValueError("sink_config.toolkit is required for composio sink types")
+        operation_hint = str(sink_config.get("operation_hint", "") or "").strip().lower()
+        try:
+            resolved_slug = self._resolve_composio_sink_tool_slug(
+                sink_type=sink_type,
+                sink_config=sink_config,
+            )
+        except Exception as exc:
+            raise ValueError(f"unable to resolve sink tool from toolkit={toolkit}: {exc}") from exc
+        if not resolved_slug:
+            raise ValueError(
+                f"unable to resolve sink tool from toolkit={toolkit}"
+            )
+        if sink_type == "generic_composio_write" and not operation_hint:
+            raise ValueError("sink_config.operation_hint is required for generic_composio_write")
 
     def _hydrate_workflow_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -633,7 +766,12 @@ class IntakeWorkflowService:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT last_seen_inbound_message_id, last_seen_inbound_message_time
+                SELECT
+                    last_seen_inbound_message_id,
+                    last_seen_inbound_message_time,
+                    last_seen_conversation_updated_time,
+                    last_seen_latest_outbound_message_id,
+                    last_agent_action_at
                 FROM intake_conversation_cursors
                 WHERE workflow_id = ? AND conversation_id = ?
                 """,
@@ -644,6 +782,13 @@ class IntakeWorkflowService:
         return {
             "last_seen_inbound_message_id": str(row["last_seen_inbound_message_id"] or ""),
             "last_seen_inbound_message_time": str(row["last_seen_inbound_message_time"] or ""),
+            "last_seen_conversation_updated_time": str(
+                row["last_seen_conversation_updated_time"] or ""
+            ),
+            "last_seen_latest_outbound_message_id": str(
+                row["last_seen_latest_outbound_message_id"] or ""
+            ),
+            "last_agent_action_at": str(row["last_agent_action_at"] or ""),
         }
 
     def _set_cursor(
@@ -653,17 +798,24 @@ class IntakeWorkflowService:
         conversation_id: str,
         latest_inbound_message_id: str,
         latest_inbound_message_time: str,
+        conversation_updated_time: str = "",
+        latest_outbound_message_id: str = "",
+        agent_action_at: str = "",
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO intake_conversation_cursors (
                     workflow_id, conversation_id, last_seen_inbound_message_id,
-                    last_seen_inbound_message_time, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    last_seen_inbound_message_time, last_seen_conversation_updated_time,
+                    last_seen_latest_outbound_message_id, last_agent_action_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id, conversation_id) DO UPDATE SET
                     last_seen_inbound_message_id=excluded.last_seen_inbound_message_id,
                     last_seen_inbound_message_time=excluded.last_seen_inbound_message_time,
+                    last_seen_conversation_updated_time=excluded.last_seen_conversation_updated_time,
+                    last_seen_latest_outbound_message_id=excluded.last_seen_latest_outbound_message_id,
+                    last_agent_action_at=excluded.last_agent_action_at,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -671,10 +823,44 @@ class IntakeWorkflowService:
                     conversation_id,
                     latest_inbound_message_id,
                     latest_inbound_message_time,
+                    conversation_updated_time,
+                    latest_outbound_message_id,
+                    agent_action_at,
                     _utc_now_iso(),
                 ),
             )
             conn.commit()
+
+    def _has_new_inbound_signal(
+        self,
+        *,
+        conversation_summary: dict[str, Any],
+        cursor: dict[str, str],
+        force: bool,
+    ) -> bool:
+        if force:
+            return True
+        latest_inbound_id = str(conversation_summary.get("latest_inbound_message_id", "") or "").strip()
+        if not latest_inbound_id:
+            return False
+        last_seen_inbound_id = str(cursor.get("last_seen_inbound_message_id", "")).strip()
+        if last_seen_inbound_id and latest_inbound_id == last_seen_inbound_id:
+            return False
+
+        latest_message_id = str(conversation_summary.get("latest_message_id", "") or "").strip()
+        latest_outbound_id = str(
+            conversation_summary.get("latest_outbound_message_id", "") or ""
+        ).strip()
+        latest_inbound_time = _parse_datetime(
+            conversation_summary.get("latest_inbound_message_created_time")
+        )
+        last_seen_inbound_time = _parse_datetime(cursor.get("last_seen_inbound_message_time"))
+        if latest_message_id and latest_outbound_id and latest_message_id == latest_outbound_id:
+            if last_seen_inbound_time and latest_inbound_time and latest_inbound_time <= last_seen_inbound_time:
+                return False
+            if not last_seen_inbound_id:
+                return False
+        return True
 
     def _normalize_conversation_messages(
         self,
@@ -799,16 +985,22 @@ class IntakeWorkflowService:
             latest_inbound_time = str(
                 conversation_summary.get("latest_inbound_message_created_time", "") or ""
             ).strip()
-            if not conversation_id or not latest_inbound_id:
+            conversation_updated_time = str(
+                conversation_summary.get("conversation_updated_time", "") or ""
+            ).strip()
+            latest_outbound_id = str(
+                conversation_summary.get("latest_outbound_message_id", "") or ""
+            ).strip()
+            if not conversation_id:
                 continue
             cursor = self._get_cursor(
                 workflow_id=str(workflow["workflow_id"]),
                 conversation_id=conversation_id,
             )
-            if (
-                not force
-                and latest_inbound_id
-                and latest_inbound_id == str(cursor.get("last_seen_inbound_message_id", "")).strip()
+            if not self._has_new_inbound_signal(
+                conversation_summary=conversation_summary,
+                cursor=cursor,
+                force=force,
             ):
                 continue
 
@@ -825,6 +1017,17 @@ class IntakeWorkflowService:
 
             detailed_summary = _safe_dict(detailed.get("summary"))
             conversation = _safe_dict(detailed.get("conversation"))
+            cursor_summary = detailed_summary or conversation_summary
+            latest_inbound_id = str(cursor_summary.get("latest_inbound_message_id", "") or "").strip()
+            latest_inbound_time = str(
+                cursor_summary.get("latest_inbound_message_created_time", "") or ""
+            ).strip()
+            conversation_updated_time = str(
+                cursor_summary.get("conversation_updated_time", "") or ""
+            ).strip()
+            latest_outbound_id = str(
+                cursor_summary.get("latest_outbound_message_id", "") or ""
+            ).strip()
             active_booking = self._get_active_booking(
                 customer_id=str(workflow["customer_id"]),
                 workflow_id=str(workflow["workflow_id"]),
@@ -837,7 +1040,7 @@ class IntakeWorkflowService:
             )
             decision, error = await self._decide_workflow_action(
                 workflow=workflow,
-                conversation_summary=detailed_summary or conversation_summary,
+                conversation_summary=cursor_summary,
                 conversation=conversation,
                 active_booking=active_booking,
                 recent_completed_booking=recent_completed_booking,
@@ -851,6 +1054,8 @@ class IntakeWorkflowService:
                     conversation_id=conversation_id,
                     latest_inbound_message_id=latest_inbound_id,
                     latest_inbound_message_time=latest_inbound_time,
+                    conversation_updated_time=conversation_updated_time,
+                    latest_outbound_message_id=latest_outbound_id,
                 )
                 result_items.append(
                     {
@@ -868,7 +1073,7 @@ class IntakeWorkflowService:
             for attempt in range(_MAX_DECISION_RECOVERY_ATTEMPTS + 1):
                 applied, apply_error, feedback = await self._apply_decision(
                     workflow=workflow,
-                    conversation_summary=detailed_summary or conversation_summary,
+                    conversation_summary=cursor_summary,
                     conversation=conversation,
                     active_booking=active_booking,
                     recent_completed_booking=recent_completed_booking,
@@ -876,7 +1081,11 @@ class IntakeWorkflowService:
                 )
                 if apply_error is None:
                     break
-                if attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS or feedback is None:
+                if (
+                    attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS
+                    or feedback is None
+                    or str(feedback.get("phase", "")).strip() == "sink_execution"
+                ):
                     break
                 recovery_feedback.append(feedback)
                 active_booking = self._get_active_booking(
@@ -891,7 +1100,7 @@ class IntakeWorkflowService:
                 )
                 decision, error = await self._decide_workflow_action(
                     workflow=workflow,
-                    conversation_summary=detailed_summary or conversation_summary,
+                    conversation_summary=cursor_summary,
                     conversation=conversation,
                     active_booking=active_booking,
                     recent_completed_booking=recent_completed_booking,
@@ -911,6 +1120,9 @@ class IntakeWorkflowService:
                 conversation_id=conversation_id,
                 latest_inbound_message_id=latest_inbound_id,
                 latest_inbound_message_time=latest_inbound_time,
+                conversation_updated_time=conversation_updated_time,
+                latest_outbound_message_id=latest_outbound_id,
+                agent_action_at=_utc_now_iso(),
             )
             result_items.append(applied)
             saved_summary = str(applied.get("saved_summary", "") or "").strip()
@@ -1009,12 +1221,14 @@ class IntakeWorkflowService:
 
         target_booking: dict[str, Any] | None = None
         normalized_booking_action = booking_action
-        if booking_action == "update_active":
+        if booking_action == "create_new_booking" and active_booking is not None:
+            normalized_booking_action = "update_active"
+        if normalized_booking_action == "update_active":
             if active_booking is None:
                 normalized_booking_action = "create_new_booking"
             else:
                 target_booking = dict(active_booking)
-        elif booking_action == "edit_recent_completed":
+        elif normalized_booking_action == "edit_recent_completed":
             if recent_completed_booking is None:
                 normalized_booking_action = "create_new_booking"
             else:
@@ -1057,22 +1271,9 @@ class IntakeWorkflowService:
             conversation_summary.get("latest_inbound_message_created_time", "") or ""
         ).strip()
 
+        ready_to_save = bool(decision.get("ready_to_save"))
         reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
         reply_text = str(decision.get("reply_text", "") or "").strip()
-        if reply_action == "send_reply":
-            reply_error = await self._send_instagram_reply(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                reply_text=reply_text,
-            )
-            if reply_error is not None:
-                return {}, reply_error, self._build_recovery_feedback(
-                    phase="reply_execution",
-                    error=reply_error,
-                    decision=decision,
-                )
-
-        ready_to_save = bool(decision.get("ready_to_save"))
         sink_ref = dict(_safe_dict(target_booking.get("sink_record_ref")))
         sink_status = str(target_booking.get("sink_write_status", "pending") or "pending").strip()
         saved_summary = ""
@@ -1133,6 +1334,19 @@ class IntakeWorkflowService:
             target_booking["sink_record_ref"] = sink_ref
             target_booking["updated_at"] = _utc_now_iso()
             self._upsert_booking(target_booking)
+
+        if reply_action == "send_reply":
+            reply_error = await self._send_instagram_reply(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                reply_text=reply_text,
+            )
+            if reply_error is not None:
+                return {}, reply_error, self._build_recovery_feedback(
+                    phase="reply_execution",
+                    error=reply_error,
+                    decision=decision,
+                )
 
         return {
             "conversation_id": str(conversation_summary.get("conversation_id", "") or ""),
@@ -1286,9 +1500,9 @@ class IntakeWorkflowService:
         if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
             return {}, "Composio is not available for sink execution"
         sink_config = _safe_dict(workflow.get("sink_config"))
+        sink_type = str(workflow.get("sink_type", "")).strip().lower()
         field_mapping = _clean_mapping(sink_config.get("field_mapping"))
         static_arguments = _safe_dict(sink_config.get("static_arguments"))
-        arguments: dict[str, Any] = dict(static_arguments)
         enriched_payload = {
             **payload,
             "booking_id": str(booking["booking_id"]),
@@ -1296,13 +1510,41 @@ class IntakeWorkflowService:
             "conversation_id": str(booking["conversation_id"]),
             "customer_id": str(workflow["customer_id"]),
         }
-        for target_key, source_key in field_mapping.items():
-            arguments[target_key] = enriched_payload.get(source_key)
+        toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
+        tool_slug = self._resolve_composio_sink_tool_slug(
+            sink_type=sink_type,
+            sink_config=sink_config,
+        )
+        if not tool_slug:
+            return {}, f"could not resolve a Composio tool for toolkit={toolkit or 'unknown'}"
+        arguments: dict[str, Any]
+        if sink_type == "google_sheets_composio":
+            key_source = "booking_id"
+            key_header = str(field_mapping.get(key_source, "Booking ID") or "Booking ID").strip()
+            headers = [key_header]
+            row = [enriched_payload.get(key_source)]
+            for source_key, header_name in field_mapping.items():
+                safe_source = str(source_key or "").strip()
+                safe_header = str(header_name or "").strip()
+                if not safe_source or not safe_header or safe_source == key_source:
+                    continue
+                headers.append(safe_header)
+                row.append(enriched_payload.get(safe_source))
+            arguments = {
+                **static_arguments,
+                "headers": headers,
+                "rows": [row],
+                "keyColumn": key_header,
+            }
+        else:
+            arguments = dict(static_arguments)
+            for target_key, source_key in field_mapping.items():
+                arguments[target_key] = enriched_payload.get(source_key)
         connected_account_id = str(sink_config.get("connected_account_id", "") or "").strip() or None
         try:
             result = self._composio.execute_tool(
                 customer_id=str(workflow["customer_id"]),
-                tool_slug=str(sink_config["tool_slug"]),
+                tool_slug=tool_slug,
                 arguments=arguments,
                 connected_account_id=connected_account_id,
             )
@@ -1312,10 +1554,118 @@ class IntakeWorkflowService:
             return {}, str(result.get("error") or "sink execution failed")
         return {
             "sink_type": str(workflow["sink_type"]),
-            "tool_slug": str(sink_config["tool_slug"]),
+            "toolkit": toolkit,
             "booking_id": str(booking["booking_id"]),
             "data": result.get("data"),
         }, None
+
+    def _resolve_composio_sink_tool_slug(
+        self,
+        *,
+        sink_type: str,
+        sink_config: dict[str, Any],
+    ) -> str:
+        if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
+            raise ValueError("Composio is not available for sink tool resolution")
+        toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
+        if not toolkit:
+            raise ValueError("sink_config.toolkit is required")
+        operation_hint = str(sink_config.get("operation_hint", "") or "").strip().lower()
+        queries: list[str] = []
+        if operation_hint:
+            queries.append(operation_hint)
+        if sink_type == "google_sheets_composio":
+            queries.extend(["upsert rows", "append rows", "add row", "rows"])
+        elif operation_hint:
+            queries.append("write")
+        seen_queries: set[str] = set()
+        candidates: list[dict[str, Any]] = []
+        for query in queries:
+            safe_query = str(query or "").strip().lower()
+            if not safe_query or safe_query in seen_queries:
+                continue
+            seen_queries.add(safe_query)
+            result = self._composio.search_tools(
+                query=safe_query,
+                toolkits=[toolkit],
+                limit=20,
+            )
+            if not bool(result.get("ok", False)):
+                continue
+            items = _safe_list(result.get("items"))
+            if not items:
+                continue
+            candidates.extend(item for item in items if isinstance(item, dict))
+            selected = self._select_composio_sink_candidate(
+                sink_type=sink_type,
+                toolkit=toolkit,
+                operation_hint=operation_hint or safe_query,
+                candidates=candidates,
+            )
+            if selected:
+                return selected
+        selected = self._select_composio_sink_candidate(
+            sink_type=sink_type,
+            toolkit=toolkit,
+            operation_hint=operation_hint,
+            candidates=candidates,
+        )
+        if selected:
+            return selected
+        raise ValueError(f"no matching tool found in toolkit={toolkit}")
+
+    @staticmethod
+    def _select_composio_sink_candidate(
+        *,
+        sink_type: str,
+        toolkit: str,
+        operation_hint: str,
+        candidates: list[dict[str, Any]],
+    ) -> str:
+        hint_tokens = {token for token in operation_hint.replace("_", " ").split() if token}
+        best_slug = ""
+        best_score = -1
+        for item in candidates:
+            slug = str(item.get("slug", "") or "").strip()
+            if not slug:
+                continue
+            item_toolkit = _normalize_toolkit_slug(item.get("toolkit_slug"))
+            if item_toolkit and item_toolkit != toolkit:
+                continue
+            haystack = " ".join(
+                [
+                    slug,
+                    str(item.get("name", "") or ""),
+                    str(item.get("description", "") or ""),
+                ]
+            ).lower()
+            score = 0
+            upper_slug = slug.upper()
+            if sink_type == "google_sheets_composio":
+                if "UPSERT_ROWS" in upper_slug:
+                    score += 100
+                if "APPEND_ROWS" in upper_slug:
+                    score += 80
+                if "ADD_ROW" in upper_slug:
+                    score += 60
+                if "ROW" in upper_slug:
+                    score += 15
+            for token in hint_tokens:
+                if token in haystack:
+                    score += 8
+            input_schema = item.get("input_schema")
+            if isinstance(input_schema, dict):
+                schema_text = json.dumps(input_schema, ensure_ascii=False).lower()
+                if "rows" in schema_text:
+                    score += 10
+                if "headers" in schema_text:
+                    score += 6
+                if "keycolumn" in schema_text:
+                    score += 6
+            if score > best_score:
+                best_score = score
+                best_slug = slug
+        return best_slug
 
     def _upsert_booking(self, booking: dict[str, Any]) -> None:
         now = _utc_now_iso()

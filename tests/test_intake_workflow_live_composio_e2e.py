@@ -299,7 +299,7 @@ def test_live_intake_workflow_external_sink_smoke(
         )
         assert bookings
         sink_ref = bookings[0]["sink_record_ref"]
-        assert sink_ref.get("tool_slug") == sink_tool_slug
+        assert sink_ref.get("toolkit") == "googlesheets"
 
         verify_tool = _optional_env(LIVE_WRITE_VERIFY_TOOL_ENV)
         if verify_tool:

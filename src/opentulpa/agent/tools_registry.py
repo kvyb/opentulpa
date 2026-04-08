@@ -133,24 +133,29 @@ def _validate_intake_sink_request(*, sink_type: str, sink_config: dict[str, Any]
         if safe_sink_type == "google_sheets":
             return (
                 "sink_type=google_sheets is not supported here; use google_sheets_composio and "
-                "first determine tool_slug + field_mapping via composio_tool_search/composio_tool_schema"
+                "provide toolkit/field_mapping/static_arguments instead"
             )
         return (
             "sink_type must be one of local_csv|google_sheets_composio|generic_composio_write"
         )
     if safe_sink_type == "local_csv":
         return None
-    tool_slug = str(safe_config.get("tool_slug", "") or "").strip()
-    if not tool_slug:
+    toolkit = str(safe_config.get("toolkit", "") or "").strip()
+    legacy_tool_slug = str(safe_config.get("tool_slug", "") or "").strip()
+    if safe_sink_type == "generic_composio_write" and not toolkit and not legacy_tool_slug:
         return (
-            "composio sink_config.tool_slug is required; inspect the concrete Google Sheets/CRM tool "
-            "with composio_tool_search and composio_tool_schema before calling intake_workflow_upsert"
+            "composio sink_config.toolkit is required for generic_composio_write"
         )
     field_mapping = safe_config.get("field_mapping")
     if not isinstance(field_mapping, dict) or not field_mapping:
         return (
             "composio sink_config.field_mapping is required; map sink argument names to workflow fields "
             "before calling intake_workflow_upsert"
+        )
+    operation_hint = str(safe_config.get("operation_hint", "") or "").strip()
+    if safe_sink_type == "generic_composio_write" and not operation_hint and not legacy_tool_slug:
+        return (
+            "generic_composio_write requires sink_config.operation_hint so the runtime can choose the right tool"
         )
     return None
 
@@ -844,11 +849,14 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         - sink_config must contain the concrete configuration needed by the chosen sink_type.
         - Valid sink_type values here are local_csv, google_sheets_composio, or generic_composio_write.
         - Never invent sink_type=google_sheets.
-        - For Google Sheets, first inspect Composio tools/schema and then pass:
+        - For Google Sheets, pass toolkit-level configuration, not a concrete tool slug:
           sink_type=google_sheets_composio
-          sink_config={"tool_slug": "...", "field_mapping": {...}, "static_arguments": {...}}
-        - If the user only gives a Google Sheet URL, extract the spreadsheet ID and then determine the
-          concrete Composio append/update tool + argument mapping before calling this tool.
+          sink_config={"toolkit": "googlesheets", "field_mapping": {...}, "static_arguments": {...}}
+        - OpenTulpa resolves the concrete Composio tool at execution time from the toolkit.
+        - If the user only gives a Google Sheet URL, extract the spreadsheet ID and pass it inside
+          sink_config.static_arguments.
+        - For generic_composio_write, prefer:
+          sink_config={"toolkit": "...", "operation_hint": "...", "field_mapping": {...}, "static_arguments": {...}}
         """
         safe_customer = _require_customer_id(runtime)
         safe_name = str(name or "").strip()

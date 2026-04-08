@@ -46,6 +46,7 @@ from opentulpa.agent.context_compaction import (
 from opentulpa.agent.context_compaction import (
     split_text_chunks as _split_text_chunks,
 )
+from opentulpa.agent.context_engineer import ContextEngineer
 from opentulpa.agent.file_analysis import (
     analyze_uploaded_file as _analyze_uploaded_file,
 )
@@ -547,6 +548,164 @@ def _build_intake_workflow_system_prompt() -> str:
     )
 
 
+def _trim_text_chars(value: Any, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max(0, int(limit)):
+        return text
+    if limit <= 3:
+        return text[: max(0, int(limit))]
+    return text[: max(0, int(limit) - 3)].rstrip() + "..."
+
+
+def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
+    safe_workflow = workflow if isinstance(workflow, dict) else {}
+    field_guidance = safe_workflow.get("field_guidance")
+    guidance_map = field_guidance if isinstance(field_guidance, dict) else {}
+    compact_guidance = {
+        str(key or "").strip(): _trim_text_chars(value, limit=120)
+        for key, value in guidance_map.items()
+        if str(key or "").strip()
+    }
+    sink_config = safe_workflow.get("sink_config")
+    safe_sink_config = sink_config if isinstance(sink_config, dict) else {}
+    compact_sink: dict[str, Any] = {}
+    toolkit = str(safe_sink_config.get("toolkit", "") or "").strip()
+    if toolkit:
+        compact_sink["toolkit"] = toolkit
+    operation_hint = str(safe_sink_config.get("operation_hint", "") or "").strip()
+    if operation_hint:
+        compact_sink["operation_hint"] = operation_hint
+    field_mapping = safe_sink_config.get("field_mapping")
+    if isinstance(field_mapping, dict) and field_mapping:
+        compact_sink["field_mapping_keys"] = [
+            str(key or "").strip()
+            for key in list(field_mapping.keys())[:8]
+            if str(key or "").strip()
+        ]
+    static_arguments = safe_sink_config.get("static_arguments")
+    if isinstance(static_arguments, dict) and static_arguments:
+        compact_sink["static_argument_keys"] = [
+            str(key or "").strip()
+            for key in list(static_arguments.keys())[:8]
+            if str(key or "").strip()
+        ]
+    return {
+        "workflow_id": str(safe_workflow.get("workflow_id", "") or "").strip(),
+        "name": _trim_text_chars(safe_workflow.get("name", ""), limit=80),
+        "intent_description": _trim_text_chars(
+            safe_workflow.get("intent_description", ""),
+            limit=500,
+        ),
+        "required_fields": [
+            str(item or "").strip()
+            for item in list(safe_workflow.get("required_fields") or [])[:12]
+            if str(item or "").strip()
+        ],
+        "field_guidance": compact_guidance,
+        "sink_type": str(safe_workflow.get("sink_type", "") or "").strip(),
+        "sink": compact_sink,
+        "policies": safe_workflow.get("policies", {})
+        if isinstance(safe_workflow.get("policies"), dict)
+        else {},
+    }
+
+
+def _compact_recent_messages(messages: Any) -> list[dict[str, str]]:
+    if not isinstance(messages, list):
+        return []
+    compact: list[dict[str, str]] = []
+    for item in messages[-6:]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                "id": _trim_text_chars(item.get("id", ""), limit=80),
+                "created_time": _trim_text_chars(item.get("created_time", ""), limit=64),
+                "sender_role": _trim_text_chars(item.get("sender_role", ""), limit=24),
+                "sender_username": _trim_text_chars(item.get("sender_username", ""), limit=48),
+                "text": _trim_text_chars(item.get("text", ""), limit=300),
+            }
+        )
+    return compact
+
+
+def _compact_booking_for_prompt(booking: dict[str, Any] | None) -> dict[str, Any]:
+    safe_booking = booking if isinstance(booking, dict) else {}
+    extracted_fields = safe_booking.get("extracted_fields")
+    safe_fields = extracted_fields if isinstance(extracted_fields, dict) else {}
+    compact_fields = {
+        str(key or "").strip(): _trim_text_chars(value, limit=80)
+        for key, value in list(safe_fields.items())[:12]
+        if str(key or "").strip()
+    }
+    return {
+        "booking_id": str(safe_booking.get("booking_id", "") or "").strip(),
+        "status": str(safe_booking.get("status", "") or "").strip(),
+        "opened_at": str(safe_booking.get("opened_at", "") or "").strip(),
+        "completed_at": str(safe_booking.get("completed_at", "") or "").strip(),
+        "edit_window_until": str(safe_booking.get("edit_window_until", "") or "").strip(),
+        "extracted_fields": compact_fields,
+    }
+
+
+def _compact_execution_feedback(feedback: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for item in list(feedback or [])[-2:]:
+        if not isinstance(item, dict):
+            continue
+        prior = item.get("prior_decision")
+        compact.append(
+            {
+                "phase": _trim_text_chars(item.get("phase", ""), limit=80),
+                "error": _trim_text_chars(item.get("error", ""), limit=400),
+                "prior_decision": prior if isinstance(prior, dict) else {},
+            }
+        )
+    return compact
+
+
+def _compact_conversation_for_prompt(conversation: dict[str, Any]) -> dict[str, Any]:
+    safe_conversation = conversation if isinstance(conversation, dict) else {}
+    summary = safe_conversation.get("summary")
+    safe_summary = summary if isinstance(summary, dict) else {}
+    compact_summary = {
+        "conversation_id": _trim_text_chars(safe_summary.get("conversation_id", ""), limit=120),
+        "recipient_id": _trim_text_chars(safe_summary.get("recipient_id", ""), limit=120),
+        "latest_inbound_message_id": _trim_text_chars(
+            safe_summary.get("latest_inbound_message_id", ""),
+            limit=120,
+        ),
+        "latest_inbound_message_created_time": _trim_text_chars(
+            safe_summary.get("latest_inbound_message_created_time", ""),
+            limit=64,
+        ),
+        "latest_inbound_sender_username": _trim_text_chars(
+            safe_summary.get("latest_inbound_sender_username", ""),
+            limit=64,
+        ),
+        "latest_inbound_message_text_preview": _trim_text_chars(
+            safe_summary.get("latest_inbound_message_text_preview", ""),
+            limit=180,
+        ),
+        "latest_outbound_message_id": _trim_text_chars(
+            safe_summary.get("latest_outbound_message_id", ""),
+            limit=120,
+        ),
+        "latest_outbound_message_created_time": _trim_text_chars(
+            safe_summary.get("latest_outbound_message_created_time", ""),
+            limit=64,
+        ),
+        "conversation_updated_time": _trim_text_chars(
+            safe_summary.get("conversation_updated_time", ""),
+            limit=64,
+        ),
+    }
+    return {
+        "summary": compact_summary,
+        "recent_messages": _compact_recent_messages(safe_conversation.get("recent_messages")),
+    }
+
+
 def _build_intake_workflow_agent_prompt(
     *,
     customer_id: str,
@@ -556,6 +715,11 @@ def _build_intake_workflow_agent_prompt(
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
 ) -> str:
+    compact_workflow = _compact_workflow_for_prompt(workflow)
+    compact_conversation = _compact_conversation_for_prompt(conversation)
+    compact_active_booking = _compact_booking_for_prompt(active_booking)
+    compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
+    compact_feedback = _compact_execution_feedback(execution_feedback)
     return (
         "System update: an intake workflow wake fired for one external DM conversation.\n"
         "Operate like a real OpenTulpa background execution turn and use tools when needed.\n\n"
@@ -587,11 +751,11 @@ def _build_intake_workflow_agent_prompt(
         "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
         "- False positives are worse than ignoring unrelated DMs.\n\n"
         f"customer_id={customer_id}\n"
-        f"workflow={json.dumps(workflow, ensure_ascii=False)}\n"
-        f"conversation={json.dumps(conversation, ensure_ascii=False)[:12000]}\n"
-        f"active_booking={json.dumps(active_booking or {}, ensure_ascii=False)}\n"
-        f"recent_completed_booking={json.dumps(recent_completed_booking or {}, ensure_ascii=False)}\n"
-        f"execution_feedback={json.dumps(execution_feedback or [], ensure_ascii=False)[:4000]}"
+        f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
+        f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
+        f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
+        f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
+        f"execution_feedback={json.dumps(compact_feedback, ensure_ascii=False)}"
     )
 
 
@@ -604,13 +768,18 @@ def _build_intake_workflow_human_prompt(
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
 ) -> str:
+    compact_workflow = _compact_workflow_for_prompt(workflow)
+    compact_conversation = _compact_conversation_for_prompt(conversation)
+    compact_active_booking = _compact_booking_for_prompt(active_booking)
+    compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
+    compact_feedback = _compact_execution_feedback(execution_feedback)
     return (
         f"customer_id={customer_id}\n"
-        f"workflow={json.dumps(workflow, ensure_ascii=False)}\n"
-        f"conversation={json.dumps(conversation, ensure_ascii=False)[:12000]}\n"
-        f"active_booking={json.dumps(active_booking or {}, ensure_ascii=False)}\n"
-        f"recent_completed_booking={json.dumps(recent_completed_booking or {}, ensure_ascii=False)}\n"
-        f"execution_feedback={json.dumps(execution_feedback or [], ensure_ascii=False)[:4000]}"
+        f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
+        f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
+        f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
+        f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
+        f"execution_feedback={json.dumps(compact_feedback, ensure_ascii=False)}"
     )
 
 
@@ -732,11 +901,7 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
-        self._model_invoke_extras: dict[str, Any] = _provider_prompt_cache_invoke_extras(
-            enabled=self._prompt_caching_enabled,
-            model_name=self.model_name,
-            ttl_1h=self._prompt_cache_ttl_1h,
-        )
+        self._context_engineer = ContextEngineer()
         self._browser_use_local_manager: Any | None = None
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_customer_id",
@@ -2140,6 +2305,7 @@ class OpenTulpaLangGraphRuntime:
         trace_id: str,
         recursion_limit_override: int | None = None,
         forced_skill_names: list[str] | None = None,
+        prompt_mode_override: str | None = None,
     ) -> _PreparedTurnContext | None:
         await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
         if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
@@ -2156,7 +2322,10 @@ class OpenTulpaLangGraphRuntime:
             customer_id=customer_id,
             include_pending_context=include_pending_context,
         )
-        prompt_mode = _classify_prompt_mode(user_text, turn_mode=turn_mode)
+        prompt_mode = (
+            str(prompt_mode_override or "").strip().lower()
+            or _classify_prompt_mode(user_text, turn_mode=turn_mode)
+        )
         try:
             skill_state = await self._pre_resolve_skill_state(
                 customer_id=customer_id,
@@ -2206,6 +2375,7 @@ class OpenTulpaLangGraphRuntime:
         include_pending_context: bool = True,
         recursion_limit_override: int | None = None,
         forced_skill_names: list[str] | None = None,
+        prompt_mode_override: str | None = None,
     ) -> str:
         await self.start()
         assert self._graph is not None
@@ -2242,6 +2412,7 @@ class OpenTulpaLangGraphRuntime:
                 trace_id=turn_trace_id,
                 recursion_limit_override=recursion_limit_override,
                 forced_skill_names=forced_skill_names,
+                prompt_mode_override=prompt_mode_override,
             )
             if prepared is None:
                 self.log_behavior_event(
@@ -2389,6 +2560,7 @@ class OpenTulpaLangGraphRuntime:
         turn_mode: str = "interactive",
         include_pending_context: bool = True,
         forced_skill_names: list[str] | None = None,
+        prompt_mode_override: str | None = None,
     ) -> AsyncIterator[str]:
         await self.start()
         assert self._graph is not None
@@ -2437,6 +2609,7 @@ class OpenTulpaLangGraphRuntime:
                 trace_id=turn_trace_id,
                 recursion_limit_override=None,
                 forced_skill_names=forced_skill_names,
+                prompt_mode_override=prompt_mode_override,
             )
             if prepared is None:
                 yielded_any = True
@@ -2957,7 +3130,31 @@ class OpenTulpaLangGraphRuntime:
             and getattr(self, "_wake_execution_model_with_tools", None) is not None
             and callable(getattr(self, "ainvoke_text", None))
         )
-        if tool_enabled_runtime:
+        model = getattr(self, "_wake_execution_model", None) or self._model
+        decision, invoke_error = await self._invoke_structured_model(
+            model=model,
+            schema=_IntakeWorkflowDecision,
+            messages=[
+                SystemMessage(content=_build_intake_workflow_system_prompt()),
+                HumanMessage(
+                    content=_build_intake_workflow_human_prompt(
+                        customer_id=customer_id,
+                        workflow=workflow,
+                        conversation=conversation,
+                        active_booking=active_booking,
+                        recent_completed_booking=recent_completed_booking,
+                        execution_feedback=execution_feedback,
+                    )
+                ),
+            ],
+            stable_prefix_count=1,
+        )
+        should_escalate = (
+            decision is None
+            and tool_enabled_runtime
+            and bool(execution_feedback)
+        )
+        if should_escalate:
             workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
             conversation_summary = conversation.get("summary") if isinstance(conversation, dict) else {}
             conversation_id = str(
@@ -2980,31 +3177,14 @@ class OpenTulpaLangGraphRuntime:
                     ),
                     turn_mode="routine_wake",
                     include_pending_context=False,
+                    prompt_mode_override="literal_chat",
                 )
                 parsed = _parse_schema_from_text(raw, _IntakeWorkflowDecision)
                 if isinstance(parsed, _IntakeWorkflowDecision):
                     decision = parsed
+                    invoke_error = None
             except Exception as exc:
                 invoke_error = f"{type(exc).__name__}: {exc}"
-        if decision is None:
-            model = getattr(self, "_wake_execution_model", None) or self._model
-            decision, invoke_error = await self._invoke_structured_model(
-                model=model,
-                schema=_IntakeWorkflowDecision,
-                messages=[
-                    SystemMessage(content=_build_intake_workflow_system_prompt()),
-                    HumanMessage(
-                        content=_build_intake_workflow_human_prompt(
-                            customer_id=customer_id,
-                            workflow=workflow,
-                            conversation=conversation,
-                            active_booking=active_booking,
-                            recent_completed_booking=recent_completed_booking,
-                            execution_feedback=execution_feedback,
-                        )
-                    ),
-                ],
-            )
         if decision is None or not isinstance(decision, _IntakeWorkflowDecision):
             return {
                 "ok": False,

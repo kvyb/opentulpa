@@ -19,6 +19,10 @@ from opentulpa.agent.lc_messages import (
     SystemMessage,
     ToolMessage,
 )
+from opentulpa.agent.context_engineer import (
+    ContextEngineer,
+    trim_text_to_token_budget as _trim_text_to_token_budget,
+)
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
@@ -568,6 +572,9 @@ def build_runtime_graph(runtime: Any):
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}
 
     stable_system_message = _build_system_prompt_message()
+    context_engineer = getattr(runtime, "_context_engineer", None)
+    if not isinstance(context_engineer, ContextEngineer):
+        context_engineer = ContextEngineer()
 
     def _log(state: AgentState | None, event: str, **fields: Any) -> None:
         log_event = getattr(runtime, "log_behavior_event", None)
@@ -587,7 +594,7 @@ def build_runtime_graph(runtime: Any):
         payload.update(fields)
         log_event(event=event, **payload)
 
-    async def agent_node(state: AgentState) -> Command[Literal["validate_tools", "claim_check"]]:
+    async def agent_node(state: AgentState) -> Command[Literal["validate_tools", "finalize_turn"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
@@ -618,7 +625,15 @@ def build_runtime_graph(runtime: Any):
         )
         invoked_skill_context = cached_invoked_context or legacy_cached_context
         available_skills = cached_available if isinstance(cached_available, list) else []
-        rollup_sections = runtime._load_thread_rollup_sections(thread_id) if prompt_mode != "literal_chat" else {}
+        rollup_sections = (
+            runtime._load_thread_rollup_sections(thread_id)
+            if context_engineer.should_include_optional_context(
+                kind="thread_rollup",
+                prompt_mode=prompt_mode,
+                should_retrieve=True,
+            )
+            else {}
+        )
         should_retrieve = runtime._has_retrieval_evidence(
             user_text=latest_user,
             prompt_mode=prompt_mode,
@@ -651,7 +666,15 @@ def build_runtime_graph(runtime: Any):
             selected_names=skill_names,
         )
         style_card = str(state.get("style_card", "")).strip()
-        active_directive = await runtime._load_active_directive(customer_id) if prompt_mode != "literal_chat" else None
+        active_directive = (
+            await runtime._load_active_directive(customer_id)
+            if context_engineer.should_include_optional_context(
+                kind="task_directive",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            )
+            else None
+        )
         thread_rollup = (
             "\n\n".join(
                 part for part in (
@@ -659,18 +682,34 @@ def build_runtime_graph(runtime: Any):
                     str(rollup_sections.get("durable_facts") or "").strip(),
                 ) if part
             ).strip()
-            if prompt_mode != "literal_chat" and should_retrieve
+            if context_engineer.should_include_optional_context(
+                kind="thread_rollup",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            )
             else None
         )
         live_time = await runtime._build_live_time_context(customer_id)
         pending_context_summary = (
             str(state.get("pending_context_summary", "")).strip()
-            if prompt_mode == "execution"
+            if context_engineer.should_include_optional_context(
+                kind="pending_context",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            )
             else ""
         )
-        link_alias_context = runtime._build_link_alias_context(
-            customer_id=customer_id,
-            user_text=latest_user,
+        link_alias_context = (
+            runtime._build_link_alias_context(
+                customer_id=customer_id,
+                user_text=latest_user,
+            )
+            if context_engineer.should_include_optional_context(
+                kind="link_aliases",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            )
+            else ""
         )
         prompt_budget = max(4000, int(getattr(runtime, "_context_token_limit", 12000)))
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
@@ -756,7 +795,11 @@ def build_runtime_graph(runtime: Any):
                     )
                 )
                 prompt_section_names.append("pending_context")
-        if skill_discovery_context and prompt_mode != "literal_chat":
+        if skill_discovery_context and context_engineer.should_include_optional_context(
+            kind="skill_discovery",
+            prompt_mode=prompt_mode,
+            should_retrieve=should_retrieve,
+        ):
             discovery_text = _trim_text_to_token_budget(
                 skill_discovery_context,
                 token_budget=max(160, min(620, int(low_budget * 0.18))),
@@ -769,7 +812,11 @@ def build_runtime_graph(runtime: Any):
                     )
                 )
                 prompt_section_names.append("skill_discovery")
-        if invoked_skill_context and prompt_mode != "literal_chat":
+        if invoked_skill_context and context_engineer.should_include_optional_context(
+            kind="invoked_skills",
+            prompt_mode=prompt_mode,
+            should_retrieve=should_retrieve,
+        ):
             invoked_text = _trim_text_to_token_budget(
                 invoked_skill_context,
                 token_budget=max(400, min(1800, int(low_budget * 0.45))),
@@ -785,7 +832,11 @@ def build_runtime_graph(runtime: Any):
                     )
                 )
                 prompt_section_names.append("invoked_skills")
-        if link_alias_context and prompt_mode != "literal_chat":
+        if link_alias_context and context_engineer.should_include_optional_context(
+            kind="link_aliases",
+            prompt_mode=prompt_mode,
+            should_retrieve=should_retrieve,
+        ):
             aliases_text = _trim_text_to_token_budget(
                 link_alias_context,
                 token_budget=max(120, min(320, int(low_budget * 0.08))),
@@ -834,11 +885,58 @@ def build_runtime_graph(runtime: Any):
         history_budget = max(800, prompt_budget - prompt_overhead_tokens)
         sanitized_history = _sanitize_history_messages_for_model(messages)
         sanitized_history = _enforce_tool_message_protocol(sanitized_history)
-        bounded_messages = _tail_messages_to_token_budget(
+        history_working_set = context_engineer.build_history_working_set(
             sanitized_history,
             token_budget=history_budget,
         )
-        bounded_messages = _enforce_tool_message_protocol(bounded_messages)
+        if history_working_set.summary_text:
+            volatile_optional_messages.append(
+                _build_retrieved_context_message(
+                    title="Compressed older in-thread context.",
+                    body=history_working_set.summary_text,
+                )
+            )
+            prompt_section_names.append("stale_history_summary")
+            prompt_messages = [*stable_prompt_messages]
+            kept_stable_optional = []
+            used_optional_tokens = 0
+            if stable_optional_messages:
+                for msg in stable_optional_messages:
+                    msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+                    if kept_stable_optional and used_optional_tokens + msg_tokens > optional_context_budget:
+                        continue
+                    kept_stable_optional.append(msg)
+                    used_optional_tokens += msg_tokens
+                prompt_messages.extend(kept_stable_optional)
+            stable_prompt_count = len(prompt_messages)
+            prompt_messages.append(volatile_system_message)
+            prompt_messages_base = [*prompt_messages]
+            kept_volatile_optional = []
+            for msg in [m for m in volatile_optional_messages if m is not None]:
+                msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+                if (kept_stable_optional or kept_volatile_optional) and used_optional_tokens + msg_tokens > optional_context_budget:
+                    continue
+                kept_volatile_optional.append(msg)
+                used_optional_tokens += msg_tokens
+            prompt_messages.extend(kept_volatile_optional)
+            prompt_overhead_tokens = sum(
+                _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+                for msg in prompt_messages
+            )
+            max_overhead_tokens = max(1400, int(prompt_budget * 0.72))
+            while len(prompt_messages) > len(prompt_messages_base) and prompt_overhead_tokens > max_overhead_tokens:
+                prompt_messages.pop()
+                prompt_overhead_tokens = sum(
+                    _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+                    for msg in prompt_messages
+                )
+            stable_prompt_count = min(stable_prompt_count, len(prompt_messages))
+            history_budget = max(800, prompt_budget - prompt_overhead_tokens)
+            history_working_set = context_engineer.build_history_working_set(
+                sanitized_history,
+                token_budget=history_budget,
+            )
+        bounded_messages = _enforce_tool_message_protocol(history_working_set.raw_messages)
         cache_profile: dict[str, Any] = {}
         cache_profile_fn = getattr(runtime, "prompt_cache_profile", None)
         if callable(cache_profile_fn):
@@ -853,6 +951,9 @@ def build_runtime_graph(runtime: Any):
             prompt_overhead_tokens=prompt_overhead_tokens,
             history_budget=history_budget,
             history_message_count=len(bounded_messages),
+            raw_chat_history_count=history_working_set.raw_chat_count,
+            raw_tool_history_count=history_working_set.raw_tool_count,
+            protected_history_count=history_working_set.protected_count,
             optional_context_messages=max(0, len(prompt_messages) - len(prompt_messages_base)),
             prompt_sections=",".join(prompt_section_names),
             prompt_cache_strategy=str(cache_profile.get("strategy", "")),
@@ -905,10 +1006,10 @@ def build_runtime_graph(runtime: Any):
             update["active_invoked_skill_context"] = invoked_skill_context
             update["active_invoked_skill_names"] = invoked_skill_names
             update["active_skill_context"] = invoked_skill_context
-        goto: Literal["validate_tools", "claim_check"] = (
+        goto: Literal["validate_tools", "finalize_turn"] = (
             "validate_tools"
             if isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
-            else "claim_check"
+            else "finalize_turn"
         )
         return Command(update=update, goto=goto)
 
@@ -1223,7 +1324,7 @@ def build_runtime_graph(runtime: Any):
                     AIMessage(content=failure_summary),
                 ]
                 update["turn_status"] = "failed"
-                return Command(update=update, goto="claim_check")
+                return Command(update=update, goto="finalize_turn")
         _log(
             state,
             "graph.tools.complete",
@@ -1271,23 +1372,6 @@ def build_runtime_graph(runtime: Any):
             chunk = f"[{role}] {text}"
             parts.append(chunk)
         return "\n".join(parts)
-
-    def _trim_text_to_token_budget(text: str, *, token_budget: int) -> str:
-        raw = str(text or "").strip()
-        if not raw:
-            return ""
-        budget = max(1, int(token_budget))
-        if _approx_tokens(raw) <= budget:
-            return raw
-        max_chars = max(800, budget * 4)
-        if len(raw) <= max_chars:
-            return raw
-        reserve = max(64, max_chars // 2 - 8)
-        compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
-        while _approx_tokens(compact) > budget and reserve > 64:
-            reserve = max(64, int(reserve * 0.85))
-            compact = f"{raw[:reserve]}\n...\n{raw[-reserve:]}"
-        return compact.strip()
 
     def _tail_messages_to_token_budget(
         all_messages: list[AnyMessage],
@@ -1561,7 +1645,7 @@ def build_runtime_graph(runtime: Any):
         "agent",
         agent_node,
         retry_policy=RetryPolicy(max_attempts=3),
-        destinations=("validate_tools", "claim_check"),
+        destinations=("validate_tools", "finalize_turn"),
     )
     builder.add_node(
         "validate_tools",
@@ -1574,12 +1658,6 @@ def build_runtime_graph(runtime: Any):
         tools_node,
         retry_policy=RetryPolicy(max_attempts=3),
         destinations=("agent", END),
-    )
-    builder.add_node(
-        "claim_check",
-        claim_check_node,
-        retry_policy=RetryPolicy(max_attempts=2),
-        destinations=("agent", "finalize_turn"),
     )
     builder.add_node("finalize_turn", finalize_turn_node, retry_policy=RetryPolicy(max_attempts=1))
     builder.add_edge(START, "agent")
