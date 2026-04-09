@@ -756,6 +756,7 @@ def build_runtime_graph(runtime: Any):
             prompt_section_names.append("style_card")
         stable_optional_messages: list[AnyMessage] = []
         volatile_optional_messages: list[AnyMessage] = []
+        memory_grounding_message: AnyMessage | None = None
         if active_directive:
             directive_text = _trim_text_to_token_budget(
                 active_directive,
@@ -778,7 +779,7 @@ def build_runtime_graph(runtime: Any):
                 token_budget=500,
             )
             if grounding_text:
-                volatile_optional_messages.append(
+                memory_grounding_message = (
                     _build_retrieved_context_message(
                         title="Relevant long-term memory grounding (dynamic retrieval).",
                         body=(
@@ -989,20 +990,48 @@ def build_runtime_graph(runtime: Any):
         assert model_with_tools is not None
         ainvoke_fn = getattr(runtime, "ainvoke_model", None)
         if callable(ainvoke_fn):
-            response = await ainvoke_fn(
-                model_with_tools,
-                [
+            model_messages: list[AnyMessage]
+            if memory_grounding_message is not None:
+                latest_turn = _latest_turn_messages(bounded_messages)
+                latest_turn_count = len(latest_turn)
+                if 0 < latest_turn_count < len(bounded_messages):
+                    model_messages = [
+                        *prompt_messages,
+                        *bounded_messages[:-latest_turn_count],
+                        memory_grounding_message,
+                        *bounded_messages[-latest_turn_count:],
+                    ]
+                else:
+                    model_messages = [
+                        *prompt_messages,
+                        memory_grounding_message,
+                        *bounded_messages,
+                    ]
+            else:
+                model_messages = [
                     *prompt_messages,
                     *bounded_messages,
-                ],
+                ]
+            response = await ainvoke_fn(
+                model_with_tools,
+                model_messages,
                 stable_prefix_count=stable_prompt_count,
             )
         else:
+            model_messages = (
+                [
+                    *prompt_messages,
+                    memory_grounding_message,
+                    *bounded_messages,
+                ]
+                if memory_grounding_message is not None
+                else [
+                    *prompt_messages,
+                    *bounded_messages,
+                ]
+            )
             response = await model_with_tools.ainvoke(
-            [
-                *prompt_messages,
-                *bounded_messages,
-            ]
+            model_messages
             )
         response_text = _content_to_text(getattr(response, "content", ""))
         usage_fields: dict[str, Any] = {}

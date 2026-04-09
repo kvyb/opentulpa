@@ -24,11 +24,8 @@ from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_R
 
 logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
-STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.2
-STREAM_EDIT_MIN_CHAR_DELTA = 80
-STREAM_INITIAL_VISIBLE_MIN_CHARS = 48
-STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS = 0.45
-STREAM_FOLLOWUP_VISIBLE_MIN_CHARS = 24
+DRAFT_INITIAL_PUBLISH_DELAY_SECONDS = 0.35
+DRAFT_PUBLISH_MIN_INTERVAL_SECONDS = 0.9
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -153,30 +150,20 @@ async def stream_langgraph_reply_to_telegram(
         current = str(text or "").strip()
         if not current:
             return
-        now = time.monotonic()
-        should_send = force or not live_delivery_text
-        sentence_like = current.endswith((".", "!", "?", "\n"))
-        if not live_delivery_text and not force:
-            elapsed = now - stream_started_at
-            if len(current) < STREAM_INITIAL_VISIBLE_MIN_CHARS and not sentence_like and elapsed < STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS:
-                final_reply = current
-                return
-        if not should_send:
-            if current == live_delivery_text:
-                final_reply = current
-                return
-            grew_by = max(0, len(current) - len(live_delivery_text))
-            elapsed = now - live_delivery_at
-            should_send = (
-                (elapsed >= STREAM_EDIT_MIN_INTERVAL_SECONDS and grew_by >= STREAM_FOLLOWUP_VISIBLE_MIN_CHARS)
-                or grew_by >= STREAM_EDIT_MIN_CHAR_DELTA
-                or sentence_like
-            )
         final_reply = current
-        if not should_send:
+        if current == live_delivery_text and not force:
             return
         if not draft_enabled:
             return
+        now = time.monotonic()
+        if not force:
+            earliest_publish_at = (
+                stream_started_at + DRAFT_INITIAL_PUBLISH_DELAY_SECONDS
+                if not delivered_any
+                else live_delivery_at + DRAFT_PUBLISH_MIN_INTERVAL_SECONDS
+            )
+            if now < earliest_publish_at:
+                return
         if not await client.send_message_draft(
             chat_id=chat_id,
             draft_id=draft_id,
@@ -184,6 +171,8 @@ async def stream_langgraph_reply_to_telegram(
             parse_mode="HTML",
         ):
             draft_enabled = False
+            if not typing_stop.is_set():
+                typing_stop.set()
             logger.warning(
                 "telegram.stream draft_disabled chat_id=%s thread_id=%s customer_id=%s",
                 chat_id,
@@ -191,6 +180,8 @@ async def stream_langgraph_reply_to_telegram(
                 customer_id,
             )
             return
+        if not typing_stop.is_set():
+            typing_stop.set()
         delivered_any = True
         live_delivery_text = current
         live_delivery_at = now
@@ -337,15 +328,29 @@ async def stream_langgraph_reply_to_telegram(
             "(the model/tool loop ended without displayable output)."
         )
     if not suppressed and final_reply:
-        sent = await client.send_message(
-            chat_id=chat_id,
-            text=final_reply,
-            parse_mode="HTML",
-        )
-        if sent:
-            delivered_any = True
-        elif not delivered_any:
-            final_reply = None
+        if draft_enabled:
+            if final_reply != live_delivery_text:
+                await _send_draft_reply(final_reply, force=True)
+            if not delivered_any:
+                sent = await client.send_message(
+                    chat_id=chat_id,
+                    text=final_reply,
+                    parse_mode="HTML",
+                )
+                if sent:
+                    delivered_any = True
+                else:
+                    final_reply = None
+        else:
+            sent = await client.send_message(
+                chat_id=chat_id,
+                text=final_reply,
+                parse_mode="HTML",
+            )
+            if sent:
+                delivered_any = True
+            elif not delivered_any:
+                final_reply = None
     logger.info(
         "telegram.stream complete chat_id=%s thread_id=%s customer_id=%s suppressed=%s final_chars=%s",
         chat_id,

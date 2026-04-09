@@ -299,6 +299,12 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
         if "Relevant long-term memory grounding" in str(getattr(msg, "content", ""))
     )
     assert grounding_index >= captured["stable_prefix_count"]
+    last_human_index = max(
+        idx
+        for idx, msg in enumerate(prompt_messages)
+        if isinstance(msg, HumanMessage)
+    )
+    assert grounding_index < last_human_index
 
 
 def test_memory_grounding_block_stays_compact() -> None:

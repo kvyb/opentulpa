@@ -102,7 +102,9 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     assert "timed out" in final.lower()
     # One automatic retry is attempted before surfacing timeout.
     assert calls["count"] >= 2
-    assert any("timed out" in text.lower() for _, text, _ in fake_client.message_calls)
+    assert any("timed out" in text.lower() for _, _, text, _, _ in fake_client.draft_calls) or any(
+        "timed out" in text.lower() for _, text, _ in fake_client.message_calls
+    )
     assert fake_client.chat_actions
 
 

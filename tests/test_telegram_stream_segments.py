@@ -65,6 +65,22 @@ class _WordByWordRuntime:
         yield "This is a slightly longer streamed reply with enough words."
 
 
+class _DraftThenLongPauseRuntime:
+    async def astream_text(self, **kwargs):
+        yield "This first visible draft is long enough to publish immediately."
+        await asyncio.sleep(4.2)
+        yield "This first visible draft is long enough to publish immediately. And here is the completed follow-up chunk."
+
+
+class _PacedChunkRuntime:
+    async def astream_text(self, **kwargs):
+        yield "Chunk one."
+        await asyncio.sleep(1.0)
+        yield "Chunk one. Chunk two."
+        await asyncio.sleep(1.0)
+        yield "Chunk one. Chunk two. Chunk three."
+
+
 class _PartialThenApprovalRuntime:
     async def astream_text(self, **kwargs):
         yield "I started checking that for you."
@@ -120,7 +136,7 @@ class _FakeTelegramClient:
 
 
 @pytest.mark.asyncio
-async def test_stream_uses_drafts_for_live_partials_and_final_send(
+async def test_stream_uses_drafts_for_live_partials_without_separate_final_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
@@ -139,7 +155,7 @@ async def test_stream_uses_drafts_for_live_partials_and_final_send(
     assert "priority emails" in str(final or "").lower()
     assert fake_client.draft_calls
     assert len({draft_id for _, draft_id, _, _, _ in fake_client.draft_calls}) == 1
-    assert fake_client.message_calls == [(1, "I checked your inbox. 3 priority emails found.", "HTML")]
+    assert fake_client.message_calls == []
     assert fake_client.chat_actions
     assert not fake_client.deleted_messages
 
@@ -163,7 +179,7 @@ async def test_wait_signal_does_not_emit_visible_progress_message(
     assert suppressed is False
     assert "priority emails" in str(final or "").lower()
     assert not any("working on it" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
-    assert fake_client.message_calls == [(1, "I checked the inbox. 3 priority emails found.", "HTML")]
+    assert fake_client.message_calls == []
 
 
 @pytest.mark.asyncio
@@ -186,19 +202,15 @@ async def test_progress_signals_stay_in_typing_only_path(
     assert final == "Here is the result."
     assert not any("searching the web" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
     assert not any("fetching a webpage" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
-    assert fake_client.message_calls == [(1, "Here is the result.", "HTML")]
+    assert fake_client.message_calls == []
 
 
 @pytest.mark.asyncio
-async def test_stream_throttles_rapid_partial_updates(
+async def test_stream_coalesces_rapid_partial_updates_until_final_flush(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
-    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_INTERVAL_SECONDS", 10.0)
-    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_CHAR_DELTA", 1000)
-    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MIN_CHARS", 50)
-    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS", 10.0)
 
     final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
         agent_runtime=_RapidChunkRuntime(),
@@ -211,24 +223,19 @@ async def test_stream_throttles_rapid_partial_updates(
 
     assert suppressed is False
     assert final == "Hello world"
-    assert fake_client.draft_calls == []
-    assert fake_client.message_calls == [(1, "Hello world", "HTML")]
+    assert [text for _, _, text, _, _ in fake_client.draft_calls] == ["Hello world"]
+    assert fake_client.message_calls == []
 
 
 @pytest.mark.asyncio
-async def test_stream_keeps_meaningful_chunking_for_followups(
+async def test_stream_paces_draft_updates_by_time_not_by_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
-    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MIN_CHARS", 10)
-    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_INTERVAL_SECONDS", 0.0)
-    monkeypatch.setattr(relay_module, "STREAM_FOLLOWUP_VISIBLE_MIN_CHARS", 20)
-    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_CHAR_DELTA", 200)
 
     final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
-        agent_runtime=_WordByWordRuntime(),
+        agent_runtime=_PacedChunkRuntime(),
         thread_id="chat-wordy",
         customer_id="telegram_wordy",
         text="hello",
@@ -237,11 +244,12 @@ async def test_stream_keeps_meaningful_chunking_for_followups(
     )
 
     assert suppressed is False
-    assert final == "This is a slightly longer streamed reply with enough words."
-    assert fake_client.draft_calls[0][2] == "This is a"
-    assert fake_client.draft_calls[-1][2] == "This is a slightly longer streamed reply with enough words."
-    assert len(fake_client.draft_calls) < 8
-    assert fake_client.message_calls == [(1, "This is a slightly longer streamed reply with enough words.", "HTML")]
+    assert final == "Chunk one. Chunk two. Chunk three."
+    assert [text for _, _, text, _, _ in fake_client.draft_calls] == [
+        "Chunk one. Chunk two.",
+        "Chunk one. Chunk two. Chunk three.",
+    ]
+    assert fake_client.message_calls == []
 
 
 @pytest.mark.asyncio
@@ -265,6 +273,51 @@ async def test_draft_failure_falls_back_to_typing_and_final_send(
     assert len(fake_client.draft_calls) == 1
     assert fake_client.message_calls == [(1, "Here is the finished result.", "HTML")]
     assert fake_client.chat_actions
+
+
+@pytest.mark.asyncio
+async def test_successful_draft_stream_stops_typing_loop_after_first_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_DraftThenLongPauseRuntime(),
+        thread_id="chat-draft-stop",
+        customer_id="telegram_draft_stop",
+        text="hello",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert "completed follow-up chunk" in str(final or "")
+    assert fake_client.draft_calls
+    assert 1 <= len(fake_client.chat_actions) <= 2
+    assert fake_client.message_calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_draft_stream_also_stops_typing_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy", draft_ok=False)
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_DraftThenLongPauseRuntime(),
+        thread_id="chat-draft-fail-stop",
+        customer_id="telegram_draft_fail_stop",
+        text="hello",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert "completed follow-up chunk" in str(final or "")
+    assert fake_client.draft_calls
+    assert 1 <= len(fake_client.chat_actions) <= 2
 
 
 @pytest.mark.asyncio
@@ -295,8 +348,6 @@ async def test_approval_handoff_stops_draft_streaming_without_final_send(
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
-    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MIN_CHARS", 1)
-    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS", 0.0)
 
     final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
         agent_runtime=_PartialThenApprovalRuntime(),
@@ -309,5 +360,5 @@ async def test_approval_handoff_stops_draft_streaming_without_final_send(
 
     assert suppressed is True
     assert final is None
-    assert len(fake_client.draft_calls) == 1
+    assert fake_client.draft_calls == []
     assert fake_client.message_calls == []
