@@ -186,8 +186,7 @@ async def ingest_attachments(
                     with suppress(Exception):
                         memory.add_text(
                             (
-                                "User sent voice message: "
-                                f"id={record.get('id')} "
+                                "Voice note stored for this user. "
                                 f"name={record.get('original_filename')} "
                                 f"vault_path={record.get('stored_path')} "
                                 f"local_path={record.get('local_path', '')} "
@@ -195,7 +194,7 @@ async def ingest_attachments(
                             ),
                             user_id=customer_id,
                             metadata={
-                                "kind": "uploaded_voice_message",
+                                "kind": "media_fact",
                                 "file_id": record.get("id"),
                                 "file_kind": record.get("kind"),
                             },
@@ -216,10 +215,12 @@ async def ingest_attachments(
         ingested.append(record)
         if memory is not None:
             with suppress(Exception):
+                record_kind = str(record.get("kind", "")).strip().lower()
+                memory_kind = "media_fact" if record_kind in {"photo", "video", "video_note", "audio", "voice"} else "file_fact"
                 memory.add_text(
                     (
-                        "User uploaded file stored in vault: "
-                        f"id={record.get('id')} name={record.get('original_filename')} "
+                        "User file stored in vault. "
+                        f"name={record.get('original_filename')} "
                         f"kind={record.get('kind')} "
                         f"vault_path={record.get('stored_path')} "
                         f"local_path={record.get('local_path', '')} "
@@ -227,7 +228,7 @@ async def ingest_attachments(
                     ),
                     user_id=customer_id,
                     metadata={
-                        "kind": "uploaded_file",
+                        "kind": memory_kind,
                         "file_id": record.get("id"),
                         "file_kind": record.get("kind"),
                     },

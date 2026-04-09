@@ -9,6 +9,7 @@ from opentulpa.agent.lc_messages import AIMessage, HumanMessage
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
+from opentulpa.agent.utils import approx_tokens as _approx_tokens
 
 
 class _CapturingGraph:
@@ -217,3 +218,103 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
         "browser-use-operator" in str(getattr(msg, "content", ""))
         for msg in model.seen_messages
     )
+
+
+@pytest.mark.asyncio
+async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured: dict[str, Any] = {}
+
+    async def _live_time(customer_id: str) -> dict[str, str]:
+        del customer_id
+        return {
+            "server_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "server_time_utc_iso": "2026-04-09T02:00:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "profile",
+        }
+
+    async def _directive(customer_id: str) -> str | None:
+        del customer_id
+        return None
+
+    async def _memory_grounding(**kwargs: Any) -> str:
+        del kwargs
+        return (
+            "Preferences and directives:\n- Be concise and direct.\n\n"
+            "Technical or code facts:\n- Telegram bot uses Gemini Flash for media analysis."
+        )
+
+    async def _ainvoke_model(model: Any, messages: list[Any], *, stable_prefix_count: int = 0, **kwargs: Any) -> AIMessage:
+        del model, kwargs
+        captured["messages"] = messages
+        captured["stable_prefix_count"] = stable_prefix_count
+        return AIMessage(content="ok")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": True}
+
+    runtime._checkpointer = InMemorySaver()
+    runtime._model_with_tools = object()
+    runtime._thread_rollup_service = None
+    runtime._load_active_directive = _directive  # type: ignore[method-assign]
+    runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
+    runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
+    runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
+    runtime._tools = {}
+    runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
+    runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.model_with_tools_for_turn_mode = lambda turn_mode: object()  # type: ignore[assignment]
+    runtime._context_token_limit = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime.recursion_limit = 8
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="what do you remember about my bot setup?")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_test",
+        },
+        config={"configurable": {"thread_id": "chat_test"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "ok"
+    assert captured["stable_prefix_count"] == 1
+    prompt_messages = captured["messages"]
+    grounding_index = next(
+        idx
+        for idx, msg in enumerate(prompt_messages)
+        if "Relevant long-term memory grounding" in str(getattr(msg, "content", ""))
+    )
+    assert grounding_index >= captured["stable_prefix_count"]
+
+
+def test_memory_grounding_block_stays_compact() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    memories = [
+        {"kind": "directive_fact", "text": "Always be concise, direct, and avoid filler.", "score": 0.9},
+        {"kind": "life_fact", "text": "Timezone is UTC+8 and works mostly in the afternoon.", "score": 0.8},
+        {"kind": "aspirations_fact", "text": "Wants to launch more reliable Telegram and Instagram automation.", "score": 0.7},
+        {"kind": "workflow_fact", "text": "Runs an Instagram intake workflow that writes bookings to Google Sheets.", "score": 0.6},
+        {"kind": "code_fact", "text": "Main chat model is GLM 5.1 while media and memory use Gemini Flash.", "score": 0.65},
+        {"kind": "file_fact", "text": "Uploaded planning PDF is stored in tulpa_stuff/uploads for later recall.", "score": 0.55},
+        {"kind": "thread_context_rollup", "text": "Older thread context mentioning long implementation notes and stale discussion that should be deprioritized.", "score": 0.2},
+    ]
+
+    block = runtime._build_memory_grounding_block(memories, token_budget=500)
+
+    assert "Preferences and directives:" in block
+    assert "Technical or code facts:" in block
+    assert _approx_tokens(block) <= 520

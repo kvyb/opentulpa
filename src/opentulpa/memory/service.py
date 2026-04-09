@@ -1,6 +1,8 @@
 """mem0-backed memory service for the agent."""
 
+import json
 import logging
+import re
 from typing import Any
 
 from mem0 import Memory
@@ -19,6 +21,80 @@ class _Mem0NoopFilter(logging.Filter):
 
 
 _MEM0_NOOP_FILTER = _Mem0NoopFilter()
+
+MEMORY_KIND_ALIASES: dict[str, str] = {
+    "directive_profile": "directive_fact",
+    "user_skill": "skill_fact",
+    "uploaded_file": "file_fact",
+    "uploaded_voice_message": "media_fact",
+}
+
+MEMORY_KIND_PRIORITY: dict[str, int] = {
+    "directive_fact": 0,
+    "preference_fact": 1,
+    "style_fact": 2,
+    "user_profile_fact": 3,
+    "life_fact": 4,
+    "relationship_fact": 5,
+    "contact_fact": 6,
+    "project_fact": 7,
+    "aspirations_fact": 8,
+    "workflow_fact": 9,
+    "skill_fact": 10,
+    "code_fact": 11,
+    "credential_fact": 12,
+    "file_fact": 13,
+    "media_fact": 14,
+    "thread_context_rollup": 99,
+}
+
+_CREDENTIAL_FACT_PATTERNS = (
+    r"\bapi[_ -]?key\b",
+    r"\bclient[_ -]?secret\b",
+    r"\baccess[_ -]?token\b",
+    r"\brefresh[_ -]?token\b",
+    r"\bstringsession\b",
+    r"\bpassword\b",
+)
+_CODE_FACT_PATTERNS = (
+    r"\bapi\b",
+    r"\bwebhook\b",
+    r"\boauth\b",
+    r"\bintegration\b",
+    r"\bspreadsheet\b",
+    r"\btoolkit\b",
+    r"\btool slug\b",
+    r"\bconnected account\b",
+    r"\bservice\b",
+    r"\brepo(?:sitory)?\b",
+    r"\bcodebase\b",
+)
+_ASPIRATION_FACT_PATTERNS = (
+    r"\bgoal\b",
+    r"\baspir\w+\b",
+    r"\bplan(?:ning)?\b",
+    r"\bwant to\b",
+    r"\bintend to\b",
+    r"\btrying to\b",
+    r"\bbuild\b",
+    r"\blaunch\b",
+)
+_LIFE_FACT_PATTERNS = (
+    r"\btimezone\b",
+    r"\butc[+-]?\d{1,2}\b",
+    r"\bbirthday\b",
+    r"\blives?\b",
+    r"\bfrom\b",
+    r"\bfamily\b",
+    r"\bage\b",
+)
+_PREFERENCE_FACT_PATTERNS = (
+    r"\bprefers?\b",
+    r"\blikes?\b",
+    r"\bdislikes?\b",
+    r"\bfavorite\b",
+    r"\bavoid\b",
+)
 
 
 def _install_mem0_noop_filter() -> None:
@@ -49,6 +125,144 @@ class MemoryService:
                 self._memory = Memory()
         return self._memory
 
+    @staticmethod
+    def _extract_text_from_messages(messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = str(message.get("content", "") or "").strip()
+            if content:
+                parts.append(content)
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _infer_memory_kind(*, text: str, metadata: dict[str, Any]) -> str | None:
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return None
+        explicit_kind = str(metadata.get("kind", "") or "").strip().lower()
+        if explicit_kind:
+            return MEMORY_KIND_ALIASES.get(explicit_kind, explicit_kind)
+        if any(re.search(pattern, lowered) for pattern in _CREDENTIAL_FACT_PATTERNS):
+            return "credential_fact"
+        if any(re.search(pattern, lowered) for pattern in _CODE_FACT_PATTERNS):
+            return "code_fact"
+        if any(re.search(pattern, lowered) for pattern in _ASPIRATION_FACT_PATTERNS):
+            return "aspirations_fact"
+        if any(re.search(pattern, lowered) for pattern in _PREFERENCE_FACT_PATTERNS):
+            return "preference_fact"
+        if any(re.search(pattern, lowered) for pattern in _LIFE_FACT_PATTERNS):
+            return "life_fact"
+        return None
+
+    @classmethod
+    def _normalize_metadata_for_write(
+        cls,
+        metadata: dict[str, Any] | None,
+        *,
+        text: str,
+    ) -> dict[str, Any]:
+        normalized = dict(metadata or {})
+        original_kind = str(normalized.get("kind", "") or "").strip().lower()
+        kind = cls._infer_memory_kind(text=text, metadata=normalized)
+        if kind:
+            normalized["kind"] = kind
+        if original_kind and kind and original_kind != kind:
+            normalized.setdefault("legacy_kind", original_kind)
+        return normalized
+
+    @classmethod
+    def _normalize_record(cls, item: Any) -> dict[str, Any] | None:
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+            metadata: dict[str, Any] = {}
+            kind = cls._infer_memory_kind(text=text, metadata=metadata) or "thread_context_rollup"
+            return {
+                "id": "",
+                "text": text,
+                "memory": text,
+                "score": None,
+                "kind": kind,
+                "metadata": {"kind": kind},
+                "created_at": None,
+                "updated_at": None,
+                "thread_id": "",
+                "skill_name": "",
+                "source": "",
+            }
+        if not isinstance(item, dict):
+            return None
+        metadata = item.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        text = str(
+            item.get("memory")
+            or item.get("text")
+            or item.get("content")
+            or item.get("summary")
+            or ""
+        ).strip()
+        if not text:
+            return None
+        kind = cls._infer_memory_kind(text=text, metadata=metadata) or "thread_context_rollup"
+        metadata["kind"] = kind
+        return {
+            "id": str(item.get("id", "") or "").strip(),
+            "text": text,
+            "memory": text,
+            "score": item.get("score"),
+            "kind": kind,
+            "metadata": metadata,
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+            "thread_id": str(metadata.get("thread_id", "") or item.get("thread_id", "") or "").strip(),
+            "skill_name": str(metadata.get("skill_name", "") or item.get("skill_name", "") or "").strip(),
+            "source": str(metadata.get("source", "") or item.get("source", "") or "").strip(),
+        }
+
+    @classmethod
+    def normalize_records(cls, raw: Any) -> list[dict[str, Any]]:
+        payload = raw
+        if isinstance(raw, dict):
+            if isinstance(raw.get("results"), list):
+                payload = raw.get("results")
+            elif isinstance(raw.get("memories"), list):
+                payload = raw.get("memories")
+            elif isinstance(raw.get("result"), list):
+                payload = raw.get("result")
+            elif isinstance(raw.get("memory"), (str, dict)):
+                payload = [raw]
+        if not isinstance(payload, list):
+            payload = [payload] if payload not in (None, "") else []
+        records: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in payload:
+            normalized = cls._normalize_record(item)
+            if normalized is None:
+                continue
+            dedupe_key = (
+                str(normalized.get("kind", "")).strip().lower(),
+                str(normalized.get("text", "")).strip().lower(),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            records.append(normalized)
+        return records
+
+    @staticmethod
+    def grounding_priority(record: dict[str, Any]) -> tuple[int, float]:
+        kind = str(record.get("kind", "") or "").strip().lower()
+        priority = MEMORY_KIND_PRIORITY.get(kind, 50)
+        raw_score = record.get("score")
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            score = 0.0
+        return priority, -score
+
     def add(
         self,
         messages: list[dict[str, str]],
@@ -60,6 +274,10 @@ class MemoryService:
         """Add conversation or messages to memory."""
         uid = user_id or self._user_id
         mem = self._get_memory()
+        prepared_metadata = self._normalize_metadata_for_write(
+            metadata,
+            text=self._extract_text_from_messages(messages),
+        )
         attempts = max(0, int(retries)) + 1
         last_result: Any = None
         for _ in range(attempts):
@@ -67,7 +285,7 @@ class MemoryService:
                 result = mem.add(
                     messages,
                     user_id=uid,
-                    metadata=metadata or {},
+                    metadata=prepared_metadata,
                     infer=bool(infer),
                 )
             except TypeError:
@@ -75,7 +293,7 @@ class MemoryService:
                 result = mem.add(
                     messages,
                     user_id=uid,
-                    metadata=metadata or {},
+                    metadata=prepared_metadata,
                 )
 
             last_result = result
@@ -123,16 +341,18 @@ class MemoryService:
         uid = user_id or self._user_id
         mem = self._get_memory()
         extra_filters = metadata or {}
+        raw_results: Any = []
 
         # mem0 signatures changed across versions; try common variants.
         # 1) Newer style: explicit user_id argument.
         try:
-            return mem.search(
+            raw_results = mem.search(
                 query,
                 user_id=uid,
                 filters=extra_filters,
                 limit=limit,
             )
+            return self.normalize_records(raw_results)
         except TypeError:
             pass
         except Exception:
@@ -143,14 +363,16 @@ class MemoryService:
         filters: dict[str, Any] = {"user_id": uid}
         filters.update(extra_filters)
         try:
-            return mem.search(
+            raw_results = mem.search(
                 query,
                 filters=filters,
                 limit=limit,
             )
+            return self.normalize_records(raw_results)
         except TypeError:
             # 3) Minimal fallback.
-            return mem.search(query, limit=limit)
+            raw_results = mem.search(query, limit=limit)
+            return self.normalize_records(raw_results)
 
     def get_all(
         self,

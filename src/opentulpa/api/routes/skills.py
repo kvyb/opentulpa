@@ -107,7 +107,7 @@ def register_skill_routes(
                     ),
                     user_id=customer_id or "global",
                     metadata={
-                        "kind": "user_skill",
+                        "kind": "skill_fact",
                         "skill_name": skill.get("name"),
                         "scope": skill.get("scope"),
                     },

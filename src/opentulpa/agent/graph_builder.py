@@ -675,6 +675,12 @@ def build_runtime_graph(runtime: Any):
             )
             else None
         )
+        memory_grounding = await runtime._load_memory_grounding_context(
+            customer_id=customer_id,
+            user_text=latest_user,
+            turn_mode=turn_mode,
+            token_budget=500,
+        )
         thread_rollup = (
             "\n\n".join(
                 part for part in (
@@ -766,6 +772,23 @@ def build_runtime_graph(runtime: Any):
                     )
                 )
                 prompt_section_names.append("task_directive")
+        if memory_grounding:
+            grounding_text = _trim_text_to_token_budget(
+                memory_grounding,
+                token_budget=500,
+            )
+            if grounding_text:
+                volatile_optional_messages.append(
+                    _build_retrieved_context_message(
+                        title="Relevant long-term memory grounding (dynamic retrieval).",
+                        body=(
+                            "Use this to ground historical facts, preferences, directives, projects, technical details, and recalled files. "
+                            "Treat it as retrieved memory, not as a user-authored message in this turn.\n"
+                            f"{grounding_text}"
+                        ),
+                    )
+                )
+                prompt_section_names.append("memory_grounding")
         if thread_rollup:
             rollup_text = _trim_text_to_token_budget(
                 thread_rollup,

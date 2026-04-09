@@ -53,7 +53,7 @@ def register_profile_routes(
                 memory.add_text(
                     f"Directive updated for this user: {directive}",
                     user_id=customer_id,
-                    metadata={"kind": "directive_profile", "source": source},
+                    metadata={"kind": "directive_fact", "source": source},
                 )
 
         return {"ok": True, "customer_id": customer_id}
@@ -72,7 +72,7 @@ def register_profile_routes(
                 memory.add_text(
                     "Directive profile cleared for this user. Previous directive no longer applies.",
                     user_id=customer_id,
-                    metadata={"kind": "directive_profile", "source": "agent"},
+                    metadata={"kind": "directive_fact", "source": "agent"},
                 )
 
         return {"ok": True, "customer_id": customer_id, "cleared": cleared}
@@ -85,6 +85,14 @@ def register_profile_routes(
         directive = str(body.get("style_directive", "")).strip()
         source = str(body.get("source", "agent") or "agent")
         profiles.set_style_directive(customer_id, directive, source=source)
+        memory = get_memory()
+        if memory is not None and directive:
+            with suppress(Exception):
+                memory.add_text(
+                    f"Style preference for this user: {directive}",
+                    user_id=customer_id,
+                    metadata={"kind": "style_fact", "source": source},
+                )
         return {"ok": True, "customer_id": customer_id}
 
     @app.post("/internal/style_directive/clear")
@@ -93,6 +101,14 @@ def register_profile_routes(
         body = await request.json()
         customer_id = str(body.get("customer_id", "")).strip()
         cleared = profiles.clear_style_directive(customer_id, source="agent")
+        memory = get_memory()
+        if memory is not None:
+            with suppress(Exception):
+                memory.add_text(
+                    "Style preference for this user was cleared. No previous style directive applies.",
+                    user_id=customer_id,
+                    metadata={"kind": "style_fact", "source": "agent"},
+                )
         return {"ok": True, "customer_id": customer_id, "cleared": cleared}
 
     @app.post("/internal/time_profile/get")
@@ -113,6 +129,14 @@ def register_profile_routes(
         utc_offset = str(body.get("utc_offset", "")).strip()
         source = str(body.get("source", "agent") or "agent")
         normalized = profiles.set_utc_offset(customer_id, utc_offset, source=source)
+        memory = get_memory()
+        if memory is not None and normalized:
+            with suppress(Exception):
+                memory.add_text(
+                    f"User timezone is {normalized}.",
+                    user_id=customer_id,
+                    metadata={"kind": "life_fact", "source": source},
+                )
         return {"ok": True, "customer_id": customer_id, "utc_offset": normalized}
 
     @app.post("/internal/lessons_learnt/get")

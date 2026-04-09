@@ -206,7 +206,7 @@ async def persist_rollup_memory(
                     {
                         "role": "user",
                         "content": (
-                            f"Thread context rollup updated for {thread_id}: "
+                            f"Compressed older thread context for {thread_id}: "
                             f"{_sanitize_rollup_text(str(rollup or ''))[:12000]}"
                         ),
                     }

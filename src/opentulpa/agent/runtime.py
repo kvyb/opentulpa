@@ -47,6 +47,9 @@ from opentulpa.agent.context_compaction import (
     split_text_chunks as _split_text_chunks,
 )
 from opentulpa.agent.context_engineer import ContextEngineer
+from opentulpa.agent.context_engineer import (
+    trim_text_to_token_budget as _trim_text_to_token_budget,
+)
 from opentulpa.agent.file_analysis import (
     analyze_uploaded_file as _analyze_uploaded_file,
 )
@@ -78,6 +81,9 @@ from opentulpa.agent.turn_policy import (
     normalize_turn_mode as _normalize_turn_mode,
 )
 from opentulpa.agent.utils import (
+    approx_tokens as _approx_tokens,
+)
+from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )
 from opentulpa.agent.utils import (
@@ -97,8 +103,19 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.ids import new_short_id
+from opentulpa.memory.service import MEMORY_KIND_PRIORITY
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_GROUNDING_KIND_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("preferences_and_directives", ("directive_fact", "preference_fact", "style_fact")),
+    ("durable_personal_facts", ("user_profile_fact", "life_fact", "relationship_fact", "contact_fact")),
+    ("aspirations_and_plans", ("aspirations_fact", "project_fact")),
+    ("active_projects_or_workflows", ("workflow_fact", "skill_fact")),
+    ("technical_or_code_facts", ("code_fact", "credential_fact")),
+    ("relevant_files_or_media", ("file_fact", "media_fact")),
+    ("fallback_thread_context", ("thread_context_rollup",)),
+)
 
 
 def _prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
@@ -1747,6 +1764,149 @@ class OpenTulpaLangGraphRuntime:
             if any(tok in hay for tok in tokens):
                 return True
         return False
+
+    @staticmethod
+    def _normalize_memory_search_results(raw: Any) -> list[dict[str, Any]]:
+        payload = raw.get("results") if isinstance(raw, dict) and isinstance(raw.get("results"), list) else raw
+        if not isinstance(payload, list):
+            payload = [payload] if payload not in (None, "") else []
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or item.get("memory") or item.get("content") or "").strip()
+            if not text:
+                continue
+            metadata = item.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            kind = str(item.get("kind") or metadata.get("kind") or "").strip().lower() or "thread_context_rollup"
+            dedupe_key = (kind, text.lower())
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append(
+                {
+                    "text": text,
+                    "kind": kind,
+                    "score": item.get("score"),
+                    "metadata": metadata,
+                    "thread_id": str(item.get("thread_id") or metadata.get("thread_id") or "").strip(),
+                    "skill_name": str(item.get("skill_name") or metadata.get("skill_name") or "").strip(),
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _memory_grounding_sort_key(item: dict[str, Any]) -> tuple[int, float]:
+        kind = str(item.get("kind", "") or "").strip().lower()
+        priority = int(MEMORY_KIND_PRIORITY.get(kind, 50))
+        try:
+            score = float(item.get("score"))
+        except (TypeError, ValueError):
+            score = 0.0
+        return priority, -score
+
+    @staticmethod
+    def _memory_grounding_section_for_kind(kind: str) -> str:
+        normalized = str(kind or "").strip().lower()
+        for section_name, kinds in _MEMORY_GROUNDING_KIND_SECTIONS:
+            if normalized in kinds:
+                return section_name
+        return "fallback_thread_context"
+
+    def _build_memory_grounding_block(
+        self,
+        memories: list[dict[str, Any]],
+        *,
+        token_budget: int = 500,
+    ) -> str:
+        if not memories:
+            return ""
+        budget = max(180, int(token_budget))
+        section_labels = {
+            "preferences_and_directives": "Preferences and directives",
+            "durable_personal_facts": "Durable personal facts",
+            "aspirations_and_plans": "Aspirations and plans",
+            "active_projects_or_workflows": "Active projects or workflows",
+            "technical_or_code_facts": "Technical or code facts",
+            "relevant_files_or_media": "Relevant files or media",
+            "fallback_thread_context": "Fallback thread context",
+        }
+        grouped: dict[str, list[str]] = {name: [] for name, _ in _MEMORY_GROUNDING_KIND_SECTIONS}
+        used = 0
+        for item in sorted(memories, key=self._memory_grounding_sort_key):
+            section_name = self._memory_grounding_section_for_kind(str(item.get("kind", "")))
+            line = _trim_text_to_token_budget(str(item.get("text", "")).strip(), token_budget=36)
+            if not line:
+                continue
+            line_tokens = max(1, _approx_tokens(line) + 1)
+            if grouped[section_name] and line in grouped[section_name]:
+                continue
+            if used and used + line_tokens > budget:
+                continue
+            grouped[section_name].append(line)
+            used += line_tokens
+        parts: list[str] = []
+        for section_name, _ in _MEMORY_GROUNDING_KIND_SECTIONS:
+            lines = grouped.get(section_name) or []
+            if not lines:
+                continue
+            parts.append(f"{section_labels[section_name]}:\n- " + "\n- ".join(lines[:4]))
+        block = "\n\n".join(parts).strip()
+        return _trim_text_to_token_budget(block, token_budget=budget)
+
+    async def _load_memory_grounding_context(
+        self,
+        *,
+        customer_id: str,
+        user_text: str,
+        turn_mode: str,
+        token_budget: int = 500,
+    ) -> str:
+        if str(turn_mode or "").strip().lower() != "interactive":
+            return ""
+        cid = str(customer_id or "").strip()
+        if not cid:
+            return ""
+        primary_query = str(user_text or "").strip()
+        queries = [
+            primary_query,
+            "important durable facts, preferences, projects, workflows, technical facts, files, and recent context for this user",
+        ]
+        collected: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for idx, query in enumerate(queries):
+            if not query:
+                continue
+            try:
+                response = await self._request_with_backoff(
+                    "POST",
+                    "/internal/memory/search",
+                    json_body={"query": query, "user_id": cid, "limit": 12 if idx == 0 else 8},
+                    timeout=8.0,
+                    retries=1,
+                )
+            except Exception:
+                continue
+            if response.status_code != 200:
+                continue
+            try:
+                payload = response.json()
+            except Exception:
+                continue
+            for item in self._normalize_memory_search_results(payload.get("results", payload)):
+                dedupe_key = (
+                    str(item.get("kind", "")).strip().lower(),
+                    str(item.get("text", "")).strip().lower(),
+                )
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                collected.append(item)
+            if collected:
+                break
+        return self._build_memory_grounding_block(collected, token_budget=token_budget)
 
     async def _list_available_skills(self, customer_id: str) -> list[dict[str, Any]]:
         cid = str(customer_id or "").strip()
