@@ -45,3 +45,13 @@ def test_settings_accepts_primary_openai_compatible_embedding_model_name() -> No
 def test_settings_accepts_legacy_openrouter_embedding_model_alias() -> None:
     settings = Settings(OPENROUTER_EMBEDDING_MODEL="legacy-embedding-model")
     assert settings.openrouter_embedding_model == "legacy-embedding-model"
+
+
+def test_settings_accepts_primary_multimodal_llm_name() -> None:
+    settings = Settings(MULTIMODAL_LLM="google/gemini-3-flash-preview")
+    assert settings.multimodal_llm == "google/gemini-3-flash-preview"
+
+
+def test_settings_accepts_legacy_telegram_media_model_alias() -> None:
+    settings = Settings(TELEGRAM_MEDIA_MODEL="google/gemini-3-flash-preview")
+    assert settings.multimodal_llm == "google/gemini-3-flash-preview"

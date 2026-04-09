@@ -102,7 +102,10 @@ def status_text(agent_up: bool) -> str:
         ),
         f"- TELEGRAM_BOT_TOKEN: {'set' if keys['TELEGRAM_BOT_TOKEN'] else 'missing'}",
         f"- BROWSER_USE_HEADLESS: {'set' if keys['BROWSER_USE_HEADLESS'] else 'default(true)'}",
-        f"- BROWSER_USE_MODEL: {'set' if keys['BROWSER_USE_MODEL'] else 'default(LLM_MODEL)'}",
+        (
+            f"- BROWSER_USE_MODEL: "
+            f"{'set' if keys['BROWSER_USE_MODEL'] else 'default(MULTIMODAL_LLM)'}"
+        ),
         "",
         "Commands: /start, /status, /fresh, /debug_logs",
     ]

@@ -93,8 +93,9 @@ Railway builds from the included `Dockerfile`.
 - `LLM_MODEL=z-ai/glm-5.1:nitro`
 - `WAKE_EXECUTION_MODEL=z-ai/glm-5.1:nitro`
 - `MEMORY_LLM_MODEL=google/gemini-3-flash-preview`
-- `TELEGRAM_MEDIA_MODEL=google/gemini-3-flash-preview`
+- `MULTIMODAL_LLM=google/gemini-3-flash-preview`
 - `GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview`
+- Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
 
 ### Optional
 

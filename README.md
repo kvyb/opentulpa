@@ -89,13 +89,14 @@ Recommended model stack:
 LLM_MODEL=z-ai/glm-5.1:nitro
 WAKE_EXECUTION_MODEL=z-ai/glm-5.1:nitro
 MEMORY_LLM_MODEL=google/gemini-3-flash-preview
-TELEGRAM_MEDIA_MODEL=google/gemini-3-flash-preview
+MULTIMODAL_LLM=google/gemini-3-flash-preview
 GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview
 ```
 
 This is the current recommended production split in this repo:
 - `GLM 5.1` for main chat and wake execution
-- `Gemini Flash` for memory extraction, Telegram media understanding, and guardrail classification
+- `Gemini Flash` for memory extraction, multimodal understanding, and guardrail classification
+- If your main chat model is not multimodal, set `MULTIMODAL_LLM` so media and browser screenshot handling keeps working
 
 Run it:
 

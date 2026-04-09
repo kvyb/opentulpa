@@ -187,11 +187,16 @@ class Settings(BaseSettings):
             "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.1:nitro."
         ),
     )
-    telegram_media_model: str = Field(
+    multimodal_llm: str = Field(
         default="google/gemini-3-flash-preview",
+        validation_alias=AliasChoices(
+            "MULTIMODAL_LLM",
+            "TELEGRAM_MEDIA_MODEL",
+        ),
         description=(
-            "Model used to analyze non-text Telegram attachments such as images, video, "
-            "voice notes, and audio files before passing text summaries into the main chat model. "
+            "Model used for multimodal understanding of non-text inputs such as Telegram "
+            "attachments, browser screenshots, voice notes, and audio/video files before "
+            "passing text summaries into the main chat model. "
             "Recommended default is google/gemini-3-flash-preview."
         ),
     )
@@ -236,8 +241,8 @@ class Settings(BaseSettings):
     browser_use_model: str | None = Field(
         default=None,
         description=(
-            "Optional Browser Use model override. If unset, browser tasks use tool arg llm "
-            "(when explicit) or LLM_MODEL."
+            "Optional Browser Use model override. If unset, Browser Use reuses "
+            "MULTIMODAL_LLM so browser steps keep a multimodal-capable model."
         ),
     )
     browser_use_max_concurrent_tasks: int = Field(
