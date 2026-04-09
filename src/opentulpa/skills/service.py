@@ -288,6 +288,17 @@ class SkillStoreService:
             raise ValueError("scope must be 'user' or 'global'")
         return s
 
+    def _delete_skill_row(self, *, scope: str, customer_id: str, name: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                DELETE FROM skills
+                WHERE scope=? AND customer_id=? AND name=?
+                """,
+                (scope, customer_id, name),
+            )
+            conn.commit()
+
     def _scope_customer(self, *, scope: str, customer_id: str) -> str:
         if scope == "global":
             return ""
@@ -450,6 +461,14 @@ class SkillStoreService:
         # precedence: user skill overrides global with same name
         merged: dict[str, dict[str, Any]] = {}
         for row in rows:
+            skill_path = Path(str(row["skill_path"]))
+            if not skill_path.exists():
+                self._delete_skill_row(
+                    scope=str(row["scope"]),
+                    customer_id=str(row["customer_id"]),
+                    name=str(row["name"]),
+                )
+                continue
             item = self._row_to_item(row, include_paths=False)
             if not include_disabled and not item["enabled"]:
                 continue
@@ -500,6 +519,11 @@ class SkillStoreService:
         item = self._row_to_item(row, include_paths=True)
         skill_path = Path(item["skill_path"])
         if not skill_path.exists():
+            self._delete_skill_row(
+                scope=item["scope"],
+                customer_id=item["customer_id"],
+                name=item["name"],
+            )
             return None
         item["skill_markdown"] = skill_path.read_text(encoding="utf-8", errors="replace")
         if include_files:

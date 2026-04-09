@@ -155,3 +155,6 @@ async def test_transcribe_audio_blob_uses_telegram_media_model_name(monkeypatch)
 
     assert transcript == "hello from audio"
     assert captured["json"]["model"] == "google/gemini-3-flash-preview"
+    instruction = captured["json"]["messages"][0]["content"][0]["text"]
+    assert "Transcribe all spoken or clearly heard speech" in instruction
+    assert "Return plain text transcript only" in instruction

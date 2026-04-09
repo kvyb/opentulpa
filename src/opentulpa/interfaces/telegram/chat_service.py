@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,7 @@ from opentulpa.interfaces.telegram.env_management import (
 )
 from opentulpa.interfaces.telegram.models import TelegramContext
 from opentulpa.interfaces.telegram.relay import (
+    _emit_typing_until_done,
     debug_log,
     stream_langgraph_reply_to_telegram,
 )
@@ -312,16 +314,31 @@ async def handle_telegram_text(
 
     ingested_files: list[dict[str, Any]] = []
     if attachments and bot_token and file_vault is not None:
-        ingested_files = await ingest_attachments(
-            attachments=attachments,
-            bot_token=bot_token,
-            file_vault=file_vault,
-            memory=memory,
-            agent_runtime=agent_runtime,
-            customer_id=customer_id,
-            chat_id=ctx.chat_id,
-            caption=caption,
+        typing_stop = asyncio.Event()
+        typing_task = asyncio.create_task(
+            _emit_typing_until_done(
+                client=TelegramClient(str(bot_token)),
+                chat_id=ctx.chat_id,
+                stop_event=typing_stop,
+            )
         )
+        try:
+            ingested_files = await ingest_attachments(
+                attachments=attachments,
+                bot_token=bot_token,
+                file_vault=file_vault,
+                memory=memory,
+                agent_runtime=agent_runtime,
+                customer_id=customer_id,
+                chat_id=ctx.chat_id,
+                caption=caption,
+            )
+        finally:
+            typing_stop.set()
+            try:
+                await typing_task
+            except Exception:
+                pass
 
     if attachments and not ctx.text and not ingested_files:
         if agent_runtime is None:

@@ -76,7 +76,7 @@ async def test_summarize_uploaded_blob_video_large_file_returns_guard_message() 
 
 
 @pytest.mark.asyncio
-async def test_video_synthesis_prompt_requests_vibe_and_style() -> None:
+async def test_video_synthesis_prompt_requests_transcript_and_concise_happenings() -> None:
     runtime = _DummyRuntime(final_text="ok")
     out = await file_analysis._synthesize_video_segments(
         runtime,
@@ -90,4 +90,6 @@ async def test_video_synthesis_prompt_requests_vibe_and_style() -> None:
     assert out == "ok"
     # First message is SystemMessage, second message carries the user prompt text.
     human_text = str(getattr(runtime._model.calls[-1][1], "content", ""))
-    assert "Vibe, Atmosphere, and Style" in human_text
+    assert "1) Transcript" in human_text
+    assert "2) What happens" in human_text
+    assert "Keep non-transcript description concise" in human_text

@@ -142,3 +142,56 @@ def test_composio_operator_default_mentions_auth_and_schema_flow(tmp_path: Path)
     assert "composio_tool_schema" in skill["skill_markdown"]
     assert "composio_tool_execute" in skill["skill_markdown"]
     assert "redirect_url" in skill["skill_markdown"]
+
+
+def test_list_skills_auto_heals_stale_rows(tmp_path: Path) -> None:
+    store = _mk_service(tmp_path)
+    md = build_skill_markdown(
+        name="ghost-skill",
+        description="Temporary skill.",
+        instructions="Do a thing.",
+    )
+    store.upsert_skill(
+        scope="user",
+        customer_id="user_1",
+        name="ghost-skill",
+        skill_markdown=md,
+        source="test",
+        enabled=True,
+    )
+    skill_dir = tmp_path / "skills" / "users" / "user_1" / "ghost-skill"
+    assert skill_dir.exists()
+    for path in sorted(skill_dir.rglob("*"), reverse=True):
+        if path.is_file():
+            path.unlink()
+        else:
+            path.rmdir()
+    skill_dir.rmdir()
+
+    listed = store.list_skills(customer_id="user_1", include_global=False)
+    assert all(item["name"] != "ghost-skill" for item in listed)
+    assert store.get_skill(customer_id="user_1", name="ghost-skill", include_files=False) is None
+
+
+def test_get_skill_auto_heals_stale_row(tmp_path: Path) -> None:
+    store = _mk_service(tmp_path)
+    md = build_skill_markdown(
+        name="ghost-fetch",
+        description="Temporary skill.",
+        instructions="Do a thing.",
+    )
+    store.upsert_skill(
+        scope="user",
+        customer_id="user_2",
+        name="ghost-fetch",
+        skill_markdown=md,
+        source="test",
+        enabled=True,
+    )
+    skill_md = tmp_path / "skills" / "users" / "user_2" / "ghost-fetch" / "SKILL.md"
+    assert skill_md.exists()
+    skill_md.unlink()
+
+    assert store.get_skill(customer_id="user_2", name="ghost-fetch", include_files=False) is None
+    listed = store.list_skills(customer_id="user_2", include_global=False)
+    assert all(item["name"] != "ghost-fetch" for item in listed)

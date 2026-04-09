@@ -27,6 +27,8 @@ PROGRESS_STATUS_TEXT = "Working on it…"
 PROGRESS_MESSAGE_DELAY_SECONDS = 0.75
 STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.45
 STREAM_EDIT_MIN_CHAR_DELTA = 80
+STREAM_INITIAL_VISIBLE_MIN_CHARS = 48
+STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS = 0.9
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -122,6 +124,7 @@ async def stream_langgraph_reply_to_telegram(
     stream_idle_retry_timeout_s = 240.0
     consecutive_timeouts = 0
     max_consecutive_timeouts = 2
+    stream_started_at = time.monotonic()
     next_chunk_task: asyncio.Task[Any] | None = None
     progress_task: asyncio.Task[None] | None = None
     logger.info(
@@ -189,13 +192,18 @@ async def stream_langgraph_reply_to_telegram(
             return
         now = time.monotonic()
         should_send = force or stream_message_id is None
+        sentence_like = current.endswith((".", "!", "?", "\n"))
+        if stream_message_id is None and not force:
+            elapsed = now - stream_started_at
+            if len(current) < STREAM_INITIAL_VISIBLE_MIN_CHARS and not sentence_like and elapsed < STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS:
+                final_reply = current
+                return
         if not should_send:
             if current == last_delivery_text:
                 final_reply = current
                 return
             grew_by = max(0, len(current) - len(last_delivery_text))
             elapsed = now - last_delivery_at
-            sentence_like = current.endswith((".", "!", "?", "\n"))
             should_send = (
                 elapsed >= STREAM_EDIT_MIN_INTERVAL_SECONDS
                 or grew_by >= STREAM_EDIT_MIN_CHAR_DELTA

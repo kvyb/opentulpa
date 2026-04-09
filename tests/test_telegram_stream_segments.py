@@ -204,6 +204,8 @@ async def test_stream_throttles_rapid_partial_updates(
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
     monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_INTERVAL_SECONDS", 10.0)
     monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_CHAR_DELTA", 1000)
+    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MIN_CHARS", 50)
+    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS", 10.0)
 
     final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
         agent_runtime=_RapidChunkRuntime(),
@@ -216,6 +218,6 @@ async def test_stream_throttles_rapid_partial_updates(
 
     assert suppressed is False
     assert final == "Hello world"
-    assert fake_client.calls[0][1] == "H"
+    assert fake_client.calls[0][1] == "Hello world"
     assert fake_client.calls[-1][1] == "Hello world"
-    assert len(fake_client.calls) < 11
+    assert len(fake_client.calls) == 1

@@ -370,7 +370,7 @@ STREAM_EMPTY_REPLY_FALLBACK = (
     "I couldn't produce a visible user-facing reply for that step. "
     "Please retry, and I will continue from the latest state."
 )
-STREAM_PRECOMMIT_SECONDS = 15.0
+STREAM_PRECOMMIT_SECONDS = 1.5
 _PROVISIONAL_REPLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*i can also\s+", re.IGNORECASE),
     re.compile(r"^\s*i can (?:search|check|look|fetch|inspect|try)\b", re.IGNORECASE),

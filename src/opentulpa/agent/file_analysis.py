@@ -266,13 +266,11 @@ async def _analyze_video_segment(
         "Analyze ONLY the requested video window and ignore other timestamps.\n"
         f"Window: {start_label} to {end_label}.\n"
         "Return concise notes with these headings:\n"
-        "- Scene\n"
-        "- Visual actions\n"
-        "- Spoken dialogue\n"
-        "- Music/SFX\n"
-        "- Vibe/Atmosphere\n"
-        "- Visual style (color, lighting, camera/editing feel)\n"
-        "- Notable changes"
+        "- Transcript: include any spoken or clearly heard speech in the original language when possible. "
+        "Use short quotes or verbatim lines; mark unclear parts as [inaudible].\n"
+        "- What happens: concise visual actions and scene changes only.\n"
+        "- Audio/background: music, notable sounds, or non-speech audio cues only.\n"
+        "- Key visual details: only important appearance/style details that affect understanding."
     )
     if caption:
         prompt += f"\nUser caption: {caption[:500]}"
@@ -310,14 +308,17 @@ async def _synthesize_video_segments(
     if not compiled_notes:
         return ""
     prompt = (
-        "Create a final video description from segmented notes.\n"
+        "Create a final video report from segmented notes.\n"
         "Output sections:\n"
-        "1) Scene Timeline\n"
-        "2) Dialogue Summary\n"
-        "3) Music and Sound Design\n"
-        "4) Vibe, Atmosphere, and Style\n"
-        "5) Key Moments\n"
-        "6) One-paragraph overall summary"
+        "1) Transcript\n"
+        "Include the spoken/heard speech in order. Preserve the original language when possible. "
+        "Use [inaudible] for unclear fragments.\n"
+        "2) What happens\n"
+        "A concise description of the visible actions and scene changes.\n"
+        "3) Audio/background\n"
+        "Only notable non-speech sounds, music, or ambient cues.\n"
+        "4) Short overall summary\n"
+        "Keep non-transcript description concise and retrieval-friendly."
     )
     if question:
         prompt += f"\nUser question to prioritize: {question[:800]}"
@@ -445,8 +446,10 @@ async def transcribe_audio_blob(
                     {
                         "type": "text",
                         "text": (
-                            "Transcribe this audio message accurately. "
-                            "Return plain text only, no commentary."
+                            "Transcribe all spoken or clearly heard speech in this audio accurately. "
+                            "Preserve the original language when possible. "
+                            "Use [inaudible] for unclear fragments. "
+                            "Return plain text transcript only, no commentary or summary."
                         ),
                     },
                     {
