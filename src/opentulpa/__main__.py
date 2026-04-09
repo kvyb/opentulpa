@@ -230,7 +230,7 @@ def main() -> None:
     memory = MemoryService(
         user_id=settings.mem0_user_id,
         config=_mem0_config_openrouter(
-            settings.llm_model,
+            settings.memory_llm_model,
             settings.openrouter_embedding_model,
             openrouter_api_key,
             settings.openrouter_base_url,

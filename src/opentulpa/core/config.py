@@ -157,6 +157,14 @@ class Settings(BaseSettings):
             "Default is the OpenRouter slug google/gemini-3-flash-preview."
         ),
     )
+    memory_llm_model: str = Field(
+        default="google/gemini-3-flash-preview",
+        description=(
+            "Model used by mem0 for background memory extraction. "
+            "Defaults to google/gemini-3-flash-preview so chat can use a different main model "
+            "without making memory inference expensive or brittle."
+        ),
+    )
     llm_reasoning_effort: str | None = Field(
         default=None,
         description=(
