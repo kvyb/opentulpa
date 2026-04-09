@@ -38,6 +38,21 @@ class _UpdatingProgressRuntime:
         yield "Here is the result."
 
 
+class _RapidChunkRuntime:
+    async def astream_text(self, **kwargs):
+        yield "H"
+        yield "He"
+        yield "Hel"
+        yield "Hell"
+        yield "Hello"
+        yield "Hello "
+        yield "Hello w"
+        yield "Hello wo"
+        yield "Hello wor"
+        yield "Hello worl"
+        yield "Hello world"
+
+
 class _FakeTelegramClient:
     def __init__(self, bot_token: str) -> None:
         self.bot_token = bot_token
@@ -77,7 +92,7 @@ class _FakeTelegramClient:
 
 
 @pytest.mark.asyncio
-async def test_stream_creates_new_message_for_new_meaningful_segment(
+async def test_stream_reuses_same_message_for_new_meaningful_segment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
@@ -97,9 +112,8 @@ async def test_stream_creates_new_message_for_new_meaningful_segment(
     assert "priority emails" in str(final or "").lower()
 
     assert len(fake_client.calls) >= 2
-    # New semantic segments should start a fresh message (message_id=None send path).
     assert fake_client.calls[0][2] is None
-    assert fake_client.calls[-1][2] is None
+    assert fake_client.calls[-1][2] is not None
     assert any("working on it" in text.lower() for _, text, _, _ in fake_client.calls)
     assert fake_client.deleted_messages
     assert fake_client.chat_actions
@@ -180,3 +194,28 @@ async def test_progress_updates_edit_one_message_before_final_result(
     assert fake_client.calls[-1][1] == "Here is the result."
     assert fake_client.calls[-1][2] is None
     assert fake_client.deleted_messages
+
+
+@pytest.mark.asyncio
+async def test_stream_throttles_rapid_partial_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_INTERVAL_SECONDS", 10.0)
+    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_CHAR_DELTA", 1000)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_RapidChunkRuntime(),
+        thread_id="chat-rapid",
+        customer_id="telegram_rapid",
+        text="hello",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert final == "Hello world"
+    assert fake_client.calls[0][1] == "H"
+    assert fake_client.calls[-1][1] == "Hello world"
+    assert len(fake_client.calls) < 11

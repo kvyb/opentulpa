@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
 PROGRESS_STATUS_TEXT = "Working on it…"
 PROGRESS_MESSAGE_DELAY_SECONDS = 0.75
+STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.45
+STREAM_EDIT_MIN_CHAR_DELTA = 80
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -104,6 +106,8 @@ async def stream_langgraph_reply_to_telegram(
     final_reply = None
     delivered_any = False
     progress_notified = False
+    last_delivery_text = ""
+    last_delivery_at = 0.0
     client = TelegramClient(bot_token)
     waiting_for_segment = True
     stream_state: dict[str, int | None] = {"message_id": stream_message_id}
@@ -173,9 +177,49 @@ async def stream_langgraph_reply_to_telegram(
                 text=text,
                 message_id=progress_message_id,
                 parse_mode="HTML",
+                allow_fallback_send=False,
             )
             or progress_message_id
         )
+
+    async def _upsert_visible_reply(text: str, *, force: bool = False) -> None:
+        nonlocal stream_message_id, delivered_any, final_reply, last_delivery_text, last_delivery_at
+        current = str(text or "").strip()
+        if not current:
+            return
+        now = time.monotonic()
+        should_send = force or stream_message_id is None
+        if not should_send:
+            if current == last_delivery_text:
+                final_reply = current
+                return
+            grew_by = max(0, len(current) - len(last_delivery_text))
+            elapsed = now - last_delivery_at
+            sentence_like = current.endswith((".", "!", "?", "\n"))
+            should_send = (
+                elapsed >= STREAM_EDIT_MIN_INTERVAL_SECONDS
+                or grew_by >= STREAM_EDIT_MIN_CHAR_DELTA
+                or sentence_like
+            )
+        final_reply = current
+        if not should_send:
+            return
+        stream_message_id = stream_state.get("message_id")
+        stream_message_id = (
+            await client.upsert_stream_message(
+                chat_id=chat_id,
+                text=current,
+                message_id=stream_message_id,
+                parse_mode="HTML",
+                allow_fallback_send=False,
+            )
+            or stream_message_id
+        )
+        stream_state["message_id"] = stream_message_id
+        if stream_message_id is not None:
+            delivered_any = True
+            last_delivery_text = current
+            last_delivery_at = now
 
     async def _schedule_progress(text: str) -> None:
         nonlocal progress_task, pending_progress_text
@@ -272,21 +316,8 @@ async def stream_langgraph_reply_to_telegram(
                     )
                     if progress_message_id is not None:
                         await _clear_progress_message()
-                        stream_message_id = None
-                    stream_message_id = (
-                        await client.upsert_stream_message(
-                            chat_id=chat_id,
-                            text=recovered_text,
-                            message_id=stream_message_id,
-                            parse_mode="HTML",
-                        )
-                        or stream_message_id
-                    )
-                    stream_state["message_id"] = stream_message_id
-                    if stream_message_id is not None:
-                        delivered_any = True
-                        final_reply = recovered_text
-                    else:
+                    await _upsert_visible_reply(recovered_text, force=True)
+                    if stream_message_id is None:
                         final_reply = None
                     break
                 timeout_text = (
@@ -325,7 +356,6 @@ async def stream_langgraph_reply_to_telegram(
                 if not waiting_for_segment:
                     waiting_for_segment = True
                     last_streamed = ""
-                    stream_state["message_id"] = None
                 continue
             if isinstance(partial, str) and partial == STREAM_APPROVAL_HANDOFF_SIGNAL:
                 # Approval UI delivery is handled out-of-band by approval adapters.
@@ -350,24 +380,10 @@ async def stream_langgraph_reply_to_telegram(
             if last_streamed and not current.startswith(last_streamed):
                 waiting_for_segment = True
                 last_streamed = ""
-                stream_state["message_id"] = None
             if waiting_for_segment:
                 waiting_for_segment = False
-            stream_message_id = stream_state.get("message_id")
-            stream_message_id = (
-                await client.upsert_stream_message(
-                    chat_id=chat_id,
-                    text=current,
-                    message_id=stream_message_id,
-                    parse_mode="HTML",
-                )
-                or stream_message_id
-            )
-            if stream_message_id is not None:
-                delivered_any = True
             last_streamed = current
-            final_reply = current
-            stream_state["message_id"] = stream_message_id
+            await _upsert_visible_reply(current)
     except MergedInputSuppressedError:
         logger.info(
             "telegram.stream suppressed_by_merge chat_id=%s thread_id=%s customer_id=%s",
@@ -397,6 +413,8 @@ async def stream_langgraph_reply_to_telegram(
     with suppress(Exception):
         await typing_task
     await _clear_progress_message()
+    if not suppressed and final_reply and final_reply != last_delivery_text:
+        await _upsert_visible_reply(final_reply, force=True)
     if not suppressed and final_reply and not delivered_any:
         final_reply = None
     if not suppressed and not final_reply:
