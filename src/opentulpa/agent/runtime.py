@@ -2815,6 +2815,7 @@ class OpenTulpaLangGraphRuntime:
             stream_key = ""
             yielded_any = False
             in_tool_phase = False
+            suppress_live_text_until_completion = False
             approval_handoff_detected = False
             stream_started_at = time.monotonic()
             stream_no_visible_timeout_s = float(
@@ -2920,6 +2921,7 @@ class OpenTulpaLangGraphRuntime:
                         break
                     if self._stream_chunk_is_tool_phase(node_name, message_chunk) and not in_tool_phase:
                         in_tool_phase = True
+                        suppress_live_text_until_completion = True
                         if buffered_visible and not yielded_any:
                             self.log_behavior_event(
                                 event="turn_stream_precommit_discarded",
@@ -2971,6 +2973,7 @@ class OpenTulpaLangGraphRuntime:
                 tool_calls = getattr(message_chunk, "tool_calls", []) or []
                 if tool_calls:
                     pending_progress_text = self._describe_tool_calls_for_progress(tool_calls)
+                    suppress_live_text_until_completion = True
                 if in_tool_phase:
                     in_tool_phase = False
                     stream_key = ""
@@ -2989,6 +2992,11 @@ class OpenTulpaLangGraphRuntime:
                     expanded = self.expand_link_aliases(customer_id=customer_id, text=cleaned)
                     if expanded.strip():
                         expanded, truncated = self._truncate_user_visible_reply(expanded)
+                        if suppress_live_text_until_completion:
+                            buffered_visible = expanded
+                            buffered_visible_truncated = truncated
+                            buffered_visible_source_chars = len(cleaned.strip())
+                            continue
                         if _precommit_active():
                             buffered_visible = expanded
                             buffered_visible_truncated = truncated
