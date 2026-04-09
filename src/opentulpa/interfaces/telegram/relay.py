@@ -29,6 +29,7 @@ STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.45
 STREAM_EDIT_MIN_CHAR_DELTA = 80
 STREAM_INITIAL_VISIBLE_MIN_CHARS = 48
 STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS = 0.9
+STREAM_FOLLOWUP_VISIBLE_MIN_CHARS = 24
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -205,7 +206,7 @@ async def stream_langgraph_reply_to_telegram(
             grew_by = max(0, len(current) - len(last_delivery_text))
             elapsed = now - last_delivery_at
             should_send = (
-                elapsed >= STREAM_EDIT_MIN_INTERVAL_SECONDS
+                (elapsed >= STREAM_EDIT_MIN_INTERVAL_SECONDS and grew_by >= STREAM_FOLLOWUP_VISIBLE_MIN_CHARS)
                 or grew_by >= STREAM_EDIT_MIN_CHAR_DELTA
                 or sentence_like
             )

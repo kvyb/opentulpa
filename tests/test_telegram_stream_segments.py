@@ -53,6 +53,18 @@ class _RapidChunkRuntime:
         yield "Hello world"
 
 
+class _WordByWordRuntime:
+    async def astream_text(self, **kwargs):
+        yield "This is a"
+        yield "This is a slightly"
+        yield "This is a slightly longer"
+        yield "This is a slightly longer streamed"
+        yield "This is a slightly longer streamed reply"
+        yield "This is a slightly longer streamed reply with"
+        yield "This is a slightly longer streamed reply with enough"
+        yield "This is a slightly longer streamed reply with enough words."
+
+
 class _FakeTelegramClient:
     def __init__(self, bot_token: str) -> None:
         self.bot_token = bot_token
@@ -221,3 +233,31 @@ async def test_stream_throttles_rapid_partial_updates(
     assert fake_client.calls[0][1] == "Hello world"
     assert fake_client.calls[-1][1] == "Hello world"
     assert len(fake_client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_edit_for_tiny_followup_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MIN_CHARS", 10)
+    monkeypatch.setattr(relay_module, "STREAM_INITIAL_VISIBLE_MAX_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(relay_module, "STREAM_FOLLOWUP_VISIBLE_MIN_CHARS", 20)
+    monkeypatch.setattr(relay_module, "STREAM_EDIT_MIN_CHAR_DELTA", 200)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_WordByWordRuntime(),
+        thread_id="chat-wordy",
+        customer_id="telegram_wordy",
+        text="hello",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert final == "This is a slightly longer streamed reply with enough words."
+    assert fake_client.calls[0][1] == "This is a"
+    assert fake_client.calls[-1][1] == "This is a slightly longer streamed reply with enough words."
+    assert len(fake_client.calls) < 8
