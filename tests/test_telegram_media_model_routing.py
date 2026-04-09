@@ -81,6 +81,27 @@ async def test_summarize_uploaded_blob_audio_uses_transcript_path(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_summarize_uploaded_blob_video_note_uses_video_path(monkeypatch) -> None:
+    runtime = _RoutingRuntime()
+
+    async def _fake_video_summary(*args: Any, **kwargs: Any) -> str:  # type: ignore[no-untyped-def]
+        _ = (args, kwargs)
+        return "Video note summary from Gemini."
+
+    monkeypatch.setattr(file_analysis, "_summarize_video_blob", _fake_video_summary)
+
+    summary = await file_analysis.summarize_uploaded_blob(
+        runtime,
+        filename="circle.mp4",
+        mime_type="video/mp4",
+        kind="video_note",
+        raw_bytes=b"video-bytes",
+    )
+
+    assert summary == "Video note summary from Gemini."
+
+
+@pytest.mark.asyncio
 async def test_transcribe_audio_blob_uses_telegram_media_model_name(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -134,4 +155,3 @@ async def test_transcribe_audio_blob_uses_telegram_media_model_name(monkeypatch)
 
     assert transcript == "hello from audio"
     assert captured["json"]["model"] == "google/gemini-3-flash-preview"
-

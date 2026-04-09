@@ -75,7 +75,7 @@ def extract_attachments(message: dict[str, Any]) -> list[TelegramAttachment]:
                     )
                 )
 
-    for key in ("video", "audio", "voice"):
+    for key in ("video", "video_note", "audio", "voice"):
         item = message.get(key)
         if not isinstance(item, dict):
             continue
@@ -85,6 +85,7 @@ def extract_attachments(message: dict[str, Any]) -> list[TelegramAttachment]:
         unique = str(item.get("file_unique_id", "")).strip() or key
         ext = {
             "video": ".mp4",
+            "video_note": ".mp4",
             "audio": ".mp3",
             "voice": ".ogg",
         }.get(key, "")

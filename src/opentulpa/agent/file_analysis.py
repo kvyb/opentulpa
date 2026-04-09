@@ -162,7 +162,7 @@ def _looks_like_video_blob(*, filename: str, mime_type: str, kind: str) -> bool:
     safe_name = str(filename or "").strip().lower()
     safe_mime = str(mime_type or "").strip().lower()
     safe_kind = str(kind or "").strip().lower()
-    if safe_kind == "video":
+    if safe_kind in {"video", "video_note"}:
         return True
     if safe_mime.startswith("video/"):
         return True
