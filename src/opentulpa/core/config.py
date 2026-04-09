@@ -151,10 +151,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="google/gemini-3-flash-preview",
+        default="z-ai/glm-5.1:nitro",
         description=(
             "Model identifier accepted by the configured provider. "
-            "Default is the OpenRouter slug google/gemini-3-flash-preview."
+            "Recommended default is the OpenRouter slug z-ai/glm-5.1:nitro for main chat turns."
         ),
     )
     memory_llm_model: str = Field(
@@ -181,24 +181,25 @@ class Settings(BaseSettings):
         ),
     )
     wake_execution_model: str | None = Field(
-        default="google/gemini-3.1-pro-preview-customtools",
+        default="z-ai/glm-5.1:nitro",
         description=(
             "Model used for wake/routine execution turns that need stronger reasoning "
-            "and tool use. Defaults to google/gemini-3.1-pro-preview-customtools."
+            "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.1:nitro."
         ),
     )
     telegram_media_model: str = Field(
         default="google/gemini-3-flash-preview",
         description=(
             "Model used to analyze non-text Telegram attachments such as images, video, "
-            "voice notes, and audio files before passing text summaries into the main chat model."
+            "voice notes, and audio files before passing text summaries into the main chat model. "
+            "Recommended default is google/gemini-3-flash-preview."
         ),
     )
     guardrail_classifier_model: str = Field(
-        default="minimax/minimax-m2.5",
+        default="google/gemini-3-flash-preview",
         description=(
             "Model used by guardrail intent classification for approval decisions. "
-            "Defaults to minimax/minimax-m2.5."
+            "Recommended default is google/gemini-3-flash-preview."
         ),
     )
     proactive_heartbeat_default_hours: int = Field(

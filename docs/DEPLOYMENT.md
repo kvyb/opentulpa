@@ -90,6 +90,11 @@ Railway builds from the included `Dockerfile`.
 - `TELEGRAM_WEBHOOK_SECRET`
 - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+- `LLM_MODEL=z-ai/glm-5.1:nitro`
+- `WAKE_EXECUTION_MODEL=z-ai/glm-5.1:nitro`
+- `MEMORY_LLM_MODEL=google/gemini-3-flash-preview`
+- `TELEGRAM_MEDIA_MODEL=google/gemini-3-flash-preview`
+- `GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview`
 
 ### Optional
 

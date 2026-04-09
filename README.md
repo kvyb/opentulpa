@@ -83,6 +83,20 @@ Add your key to `.env`:
 OPENAI_COMPATIBLE_API_KEY=...
 ```
 
+Recommended model stack:
+
+```bash
+LLM_MODEL=z-ai/glm-5.1:nitro
+WAKE_EXECUTION_MODEL=z-ai/glm-5.1:nitro
+MEMORY_LLM_MODEL=google/gemini-3-flash-preview
+TELEGRAM_MEDIA_MODEL=google/gemini-3-flash-preview
+GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview
+```
+
+This is the current recommended production split in this repo:
+- `GLM 5.1` for main chat and wake execution
+- `Gemini Flash` for memory extraction, Telegram media understanding, and guardrail classification
+
 Run it:
 
 ```bash
