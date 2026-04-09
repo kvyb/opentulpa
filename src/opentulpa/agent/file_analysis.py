@@ -39,6 +39,32 @@ async def _ainvoke_runtime_model(runtime: Any, messages: list[Any]) -> Any:
     return await runtime._model.ainvoke(messages)
 
 
+def _resolve_runtime_model(runtime: Any, *, use_media_model: bool = False) -> tuple[Any, str]:
+    if use_media_model:
+        media_model = getattr(runtime, "_telegram_media_model", None)
+        media_model_name = str(getattr(runtime, "_telegram_media_model_name", "") or "").strip()
+        if media_model_name:
+            return media_model or getattr(runtime, "_model", None), media_model_name
+    model = getattr(runtime, "_model", None)
+    model_name = str(getattr(runtime, "model_name", "") or "").strip()
+    return model, model_name
+
+
+async def _ainvoke_selected_runtime_model(
+    runtime: Any,
+    messages: list[Any],
+    *,
+    use_media_model: bool = False,
+) -> Any:
+    model, model_name = _resolve_runtime_model(runtime, use_media_model=use_media_model)
+    if model is None:
+        raise RuntimeError("runtime model unavailable")
+    ainvoke_model = getattr(runtime, "ainvoke_model", None)
+    if callable(ainvoke_model):
+        return await ainvoke_model(model, messages, model_name=model_name)
+    return await model.ainvoke(messages)
+
+
 def extract_docx_text(raw_bytes: bytes) -> str:
     try:
         with ZipFile(BytesIO(raw_bytes)) as zf:
@@ -198,7 +224,7 @@ async def _estimate_video_duration_seconds(
     if caption:
         prompt += f"\nUser caption: {caption[:400]}"
     try:
-        response = await _ainvoke_runtime_model(
+        response = await _ainvoke_selected_runtime_model(
             runtime,
             [
                 SystemMessage(content="Return strict JSON only."),
@@ -209,6 +235,7 @@ async def _estimate_video_duration_seconds(
                     ]
                 ),
             ],
+            use_media_model=True,
         )
     except Exception:
         return 0
@@ -251,7 +278,7 @@ async def _analyze_video_segment(
         prompt += f"\nUser caption: {caption[:500]}"
     if question:
         prompt += f"\nUser question focus: {question[:600]}"
-    response = await _ainvoke_runtime_model(
+    response = await _ainvoke_selected_runtime_model(
         runtime,
         [
             SystemMessage(content="You are precise about timeline-based video analysis."),
@@ -262,6 +289,7 @@ async def _analyze_video_segment(
                 ]
             ),
         ],
+        use_media_model=True,
     )
     text = _content_to_text(getattr(response, "content", "")).strip()
     if not text:
@@ -293,7 +321,7 @@ async def _synthesize_video_segments(
     )
     if question:
         prompt += f"\nUser question to prioritize: {question[:800]}"
-    response = await _ainvoke_runtime_model(
+    response = await _ainvoke_selected_runtime_model(
         runtime,
         [
             SystemMessage(content="Synthesize segment notes into one cohesive video report."),
@@ -308,6 +336,7 @@ async def _synthesize_video_segments(
                 )
             ),
         ],
+        use_media_model=True,
     )
     final_text = _content_to_text(getattr(response, "content", "")).strip()
     return final_text[:6000]
@@ -401,7 +430,7 @@ async def transcribe_audio_blob(
         str(getattr(runtime, "openrouter_base_url", "") or "").strip().rstrip("/")
         or "https://openrouter.ai/api/v1"
     )
-    model_name = str(getattr(runtime, "model_name", "") or "").strip()
+    _, model_name = _resolve_runtime_model(runtime, use_media_model=True)
     if not model_name:
         return ""
 
@@ -490,6 +519,20 @@ async def summarize_uploaded_blob(
         if with_video:
             return with_video[:6000]
 
+    if safe_kind in {"voice", "audio"} or safe_mime.startswith("audio/"):
+        transcript = await transcribe_audio_blob(
+            runtime,
+            filename=safe_filename,
+            mime_type=safe_mime or None,
+            kind=safe_kind,
+            raw_bytes=content_bytes,
+        )
+        if transcript:
+            return (
+                f"Uploaded {safe_kind or 'audio'} file '{safe_filename}'. "
+                f"Transcript: {transcript[:5000]}"
+            )
+
     # Gemini/OpenRouter can handle image input; keep payload bounded to avoid excessive prompt size.
     if safe_mime.startswith("image/") and len(content_bytes) <= 2_000_000:
         try:
@@ -504,7 +547,7 @@ async def summarize_uploaded_blob(
                 prompt_text += f"\nUser question about this file: {q}"
             if caption_text:
                 prompt_text += f"\nUser caption: {caption_text[:500]}"
-            response = await _ainvoke_runtime_model(
+            response = await _ainvoke_selected_runtime_model(
                 runtime,
                 [
                     SystemMessage(content="You analyze uploaded user files accurately."),
@@ -515,6 +558,7 @@ async def summarize_uploaded_blob(
                         ]
                     ),
                 ],
+                use_media_model=True,
             )
             vision_summary = _content_to_text(getattr(response, "content", "")).strip()
             if vision_summary:

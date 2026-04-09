@@ -179,6 +179,13 @@ class Settings(BaseSettings):
             "and tool use. Defaults to google/gemini-3.1-pro-preview-customtools."
         ),
     )
+    telegram_media_model: str = Field(
+        default="google/gemini-3-flash-preview",
+        description=(
+            "Model used to analyze non-text Telegram attachments such as images, video, "
+            "voice notes, and audio files before passing text summaries into the main chat model."
+        ),
+    )
     guardrail_classifier_model: str = Field(
         default="minimax/minimax-m2.5",
         description=(

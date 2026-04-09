@@ -278,6 +278,7 @@ def main() -> None:
             reasoning_effort=settings.llm_reasoning_effort,
             wake_classifier_model_name=settings.wake_classifier_model,
             wake_execution_model_name=settings.wake_execution_model,
+            telegram_media_model_name=settings.telegram_media_model,
             guardrail_classifier_model_name=settings.guardrail_classifier_model,
             checkpoint_db_path=settings.agent_checkpoint_db_path,
             recursion_limit=settings.agent_recursion_limit,
