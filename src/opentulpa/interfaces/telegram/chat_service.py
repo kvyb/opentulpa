@@ -147,7 +147,10 @@ def _start_help_text() -> str:
 
 
 def _telegram_command_name(text: str) -> str:
-    head = str(text or "").strip().split(None, 1)[0].lower()
+    parts = str(text or "").strip().split(None, 1)
+    if not parts:
+        return ""
+    head = parts[0].lower()
     if not head.startswith("/"):
         return ""
     return head.split("@", 1)[0]
