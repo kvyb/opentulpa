@@ -2706,6 +2706,31 @@ class OpenTulpaLangGraphRuntime:
                             stream_total_chunks=stream_total_chunks,
                             turn_mode=normalized_turn_mode,
                         )
+                        if buffered_visible and not yielded_any:
+                            self.log_behavior_event(
+                                event="turn_stream_precommit_discarded",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                output_chars=len(buffered_visible.strip()),
+                                reason="approval_handoff",
+                                turn_mode=normalized_turn_mode,
+                            )
+                            buffered_visible = ""
+                            buffered_visible_truncated = False
+                            buffered_visible_source_chars = 0
+                            _finalize_segment(register_links=False)
+                        self.log_behavior_event(
+                            event="turn_approval_handoff",
+                            trace_id=turn_trace_id,
+                            mode="astream",
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            turn_mode=normalized_turn_mode,
+                        )
+                        yielded_any = True
+                        yield STREAM_APPROVAL_HANDOFF_SIGNAL
+                        break
                     if self._stream_chunk_is_tool_phase(node_name, message_chunk) and not in_tool_phase:
                         in_tool_phase = True
                         if buffered_visible and not yielded_any:

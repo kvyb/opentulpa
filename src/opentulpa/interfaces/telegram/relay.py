@@ -329,6 +329,12 @@ async def stream_langgraph_reply_to_telegram(
                 continue
             if isinstance(partial, str) and partial == STREAM_APPROVAL_HANDOFF_SIGNAL:
                 # Approval UI delivery is handled out-of-band by approval adapters.
+                await _clear_progress_message()
+                stream_message_id = stream_state.get("message_id")
+                if stream_message_id is not None:
+                    with suppress(Exception):
+                        await client.delete_message(chat_id=chat_id, message_id=stream_message_id)
+                    stream_state["message_id"] = None
                 suppressed = True
                 final_reply = None
                 break

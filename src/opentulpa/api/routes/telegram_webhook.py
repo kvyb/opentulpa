@@ -327,6 +327,12 @@ def register_telegram_webhook_routes(
                     )
             return
 
+        if chat_id is not None:
+            with suppress(Exception):
+                await get_approvals().flush_deferred_challenges(
+                    origin_interface="telegram",
+                    origin_conversation_id=str(chat_id),
+                )
         if reply and chat_id is not None:
             with suppress(Exception):
                 await get_telegram_client().send_message(
@@ -336,10 +342,3 @@ def register_telegram_webhook_routes(
                 )
             with suppress(Exception):
                 get_telegram_chat().touch_assistant_message(int(chat_id))
-
-        if chat_id is not None:
-            with suppress(Exception):
-                await get_approvals().flush_deferred_challenges(
-                    origin_interface="telegram",
-                    origin_conversation_id=str(chat_id),
-                )
