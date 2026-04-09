@@ -34,7 +34,8 @@ This document describes the current runtime design, request flows, safety contro
 3. Streaming path calls `runtime.astream_text(...)`.
 4. LangGraph runs nodes: `agent -> validate_tools -> guardrail_precheck -> tools -> claim_check`.
 5. Assistant reply is streamed/posted to Telegram.
-6. Deferred approval prompts (if any) are flushed after the assistant reply for the same turn.
+6. If a tool transitions to `approval_pending`, runtime emits an immediate approval-interrupt signal and stops normal reply streaming for that action.
+7. Telegram webhook flow ensures approval challenge delivery before any optional assistant follow-up message in the same turn.
 
 ### Direct API turn flow (non-Telegram)
 
@@ -101,7 +102,7 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
 - Internal/read-oriented actions are deterministically allowed by policy.
 - External-impact actions are gated through approval broker.
 - Pending approvals are durable in SQLite (`pending_approvals.db`).
-- Telegram approvals are currently delivered with deferred queue/flush so approval bubbles appear after the assistant message in that turn.
+- Approval interrupt lifecycle is non-deferred for visibility: approval prompts are surfaced immediately when handoff is detected, and normal reply generation pauses until user decision.
 - State machine: `pending -> approved|denied|expired`, and `approved -> executed` (single-use).
 
 ## Internal API boundary

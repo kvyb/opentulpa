@@ -296,6 +296,54 @@ async def test_external_action_requires_approval_and_reuses_pending(
 
 
 @pytest.mark.asyncio
+async def test_external_action_reuses_pending_when_args_drift_in_same_thread(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    first = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "Hello", "text": "hello"},
+    )
+    second = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "Hello again", "text": "hello again"},
+    )
+    assert first["gate"] == "require_approval"
+    assert second["gate"] == "require_approval"
+    assert first["approval_id"] == second["approval_id"]
+    assert second.get("delivery_mode") == "existing_pending_thread_action"
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_different_guarded_action_reuses_existing_pending_for_thread(
+    broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
+) -> None:
+    broker, adapter = broker_factory()
+    first = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="email_send",
+        action_args={"to": "a@example.com", "subject": "Hello", "text": "hello"},
+    )
+    second = await broker.evaluate_action(
+        customer_id="telegram_42",
+        thread_id="chat-42",
+        action_name="whatsapp_send",
+        action_args={"to": "+621234", "text": "hello"},
+    )
+    assert first["gate"] == "require_approval"
+    assert second["gate"] == "require_approval"
+    assert first["approval_id"] == second["approval_id"]
+    assert second.get("delivery_mode") == "existing_pending_thread"
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_external_action_can_defer_challenge_delivery(tmp_path: Path) -> None:
     adapter = _DeferredCaptureAdapter()
     broker = ApprovalBroker(
@@ -663,7 +711,7 @@ async def test_browser_task_duplicate_after_executed_requests_new_approval(
 
 
 @pytest.mark.asyncio
-async def test_multiple_approvals_are_independent(
+async def test_multiple_guarded_actions_share_one_pending_approval_per_thread(
     broker_factory: Callable[..., tuple[ApprovalBroker, _CaptureAdapter]],
 ) -> None:
     broker, adapter = broker_factory()
@@ -681,8 +729,9 @@ async def test_multiple_approvals_are_independent(
     )
     first_id = str(first.get("approval_id", "")).strip()
     second_id = str(second.get("approval_id", "")).strip()
-    assert first_id and second_id and first_id != second_id
-    assert len(adapter.sent) == 2
+    assert first_id and second_id and first_id == second_id
+    assert second.get("delivery_mode") == "existing_pending_thread"
+    assert len(adapter.sent) == 1
 
     first_decision = await broker.decide(
         approval_id=first_id,
@@ -692,12 +741,3 @@ async def test_multiple_approvals_are_independent(
     )
     assert first_decision["ok"] is True
     assert first_decision["status"] == "approved"
-
-    second_decision = await broker.decide(
-        approval_id=second_id,
-        decision="approve",
-        actor_interface="telegram",
-        actor_id="42",
-    )
-    assert second_decision["ok"] is True
-    assert second_decision["status"] == "approved"

@@ -818,6 +818,7 @@ class OpenTulpaLangGraphRuntime:
         openrouter_base_url: str = "https://openrouter.ai/api/v1",
         wake_classifier_model_name: str | None = None,
         wake_execution_model_name: str | None = None,
+        telegram_media_model_name: str | None = None,
         guardrail_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
         recursion_limit: int = 30,
@@ -858,6 +859,11 @@ class OpenTulpaLangGraphRuntime:
             _normalize_model_name(wake_execution_model_name)
             if str(wake_execution_model_name or "").strip()
             else self.model_name
+        )
+        self._telegram_media_model_name = (
+            _normalize_model_name(telegram_media_model_name)
+            if str(telegram_media_model_name or "").strip()
+            else "google/gemini-3-flash-preview"
         )
         guardrail_model = (
             str(guardrail_classifier_model_name).strip()
@@ -955,8 +961,29 @@ class OpenTulpaLangGraphRuntime:
                     self.model_name,
                 )
                 self._wake_execution_model = self._model
+        if self._telegram_media_model_name == self.model_name:
+            self._telegram_media_model = self._model
+        elif self._telegram_media_model_name == self._wake_classifier_model_name:
+            self._telegram_media_model = self._wake_classifier_model
+        elif self._telegram_media_model_name == self._wake_execution_model_name:
+            self._telegram_media_model = self._wake_execution_model
+        else:
+            try:
+                self._telegram_media_model = init_chat_model(
+                    self._telegram_media_model_name,
+                    **model_init_kwargs,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize Telegram media model '%s'; falling back to main model '%s'.",
+                    self._telegram_media_model_name,
+                    self.model_name,
+                )
+                self._telegram_media_model = self._model
         if self._guardrail_classifier_model_name == self.model_name:
             self._guardrail_classifier_model = self._model
+        elif self._guardrail_classifier_model_name == self._telegram_media_model_name:
+            self._guardrail_classifier_model = self._telegram_media_model
         elif self._guardrail_classifier_model_name == self._wake_classifier_model_name:
             self._guardrail_classifier_model = self._wake_classifier_model
         elif self._guardrail_classifier_model_name == self._wake_execution_model_name:
@@ -2706,6 +2733,31 @@ class OpenTulpaLangGraphRuntime:
                             stream_total_chunks=stream_total_chunks,
                             turn_mode=normalized_turn_mode,
                         )
+                        if buffered_visible and not yielded_any:
+                            self.log_behavior_event(
+                                event="turn_stream_precommit_discarded",
+                                trace_id=turn_trace_id,
+                                thread_id=thread_id,
+                                customer_id=customer_id,
+                                output_chars=len(buffered_visible.strip()),
+                                reason="approval_handoff",
+                                turn_mode=normalized_turn_mode,
+                            )
+                            buffered_visible = ""
+                            buffered_visible_truncated = False
+                            buffered_visible_source_chars = 0
+                            _finalize_segment(register_links=False)
+                        self.log_behavior_event(
+                            event="turn_approval_handoff",
+                            trace_id=turn_trace_id,
+                            mode="astream",
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            turn_mode=normalized_turn_mode,
+                        )
+                        yielded_any = True
+                        yield STREAM_APPROVAL_HANDOFF_SIGNAL
+                        break
                     if self._stream_chunk_is_tool_phase(node_name, message_chunk) and not in_tool_phase:
                         in_tool_phase = True
                         if buffered_visible and not yielded_any:

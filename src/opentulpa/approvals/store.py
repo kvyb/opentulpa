@@ -202,6 +202,33 @@ class PendingApprovalStore:
             ).fetchone()
         return self._row_to_record(row) if row else None
 
+    def find_latest_pending_for_customer_thread(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        action_name: str | None = None,
+    ) -> ApprovalRecord | None:
+        self.expire_due()
+        filters = ["customer_id=?", "thread_id=?", "status='pending'"]
+        values: list[Any] = [str(customer_id or "").strip(), str(thread_id or "").strip()]
+        safe_action = str(action_name or "").strip()
+        if safe_action:
+            filters.append("action_name=?")
+            values.append(safe_action)
+        with self._conn() as conn:
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM pending_approvals
+                WHERE {' AND '.join(filters)}
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                tuple(values),
+            ).fetchone()
+        return self._row_to_record(row) if row else None
+
     def find_recent_matching(
         self,
         *,

@@ -8,8 +8,9 @@ from typing import Any
 
 import pytest
 
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
 from opentulpa.agent.runtime import (
+    STREAM_APPROVAL_HANDOFF_SIGNAL,
     STREAM_EMPTY_REPLY_FALLBACK,
     STREAM_PROGRESS_PREFIX,
     OpenTulpaLangGraphRuntime,
@@ -133,6 +134,34 @@ class _ClaimCheckThenAnswerGraph:
         return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
 
 
+class _ApprovalInterruptGraph:
+    def __init__(self) -> None:
+        self.guardrail_seen = False
+        self.post_handoff_emitted = False
+
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage | ToolMessage, dict[str, str]]]:
+        del config, stream_mode
+        self.guardrail_seen = True
+        yield ToolMessage(
+            content='{"status":"approval_pending","approval_id":"apr_interrupt"}',
+            tool_call_id="call_interrupt",
+        ), {"langgraph_node": "tools"}
+        self.post_handoff_emitted = True
+        yield AIMessage(content="This should never stream after approval handoff."), {
+            "langgraph_node": "agent"
+        }
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
+
 @pytest.mark.asyncio
 async def test_astream_text_emits_fallback_when_no_visible_output(tmp_path) -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
@@ -244,6 +273,47 @@ async def test_astream_text_logs_no_visible_progress_timeout(
     events = {json.loads(line)["event"] for line in lines if line.strip()}
     assert "turn_stream_no_visible_progress_timeout" in events
     assert "turn_stream_no_visible_chunks" in events
+
+
+@pytest.mark.asyncio
+async def test_astream_text_approval_interrupt_stops_turn_immediately(tmp_path) -> None:
+    graph = _ApprovalInterruptGraph()
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = graph
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_approval_interrupt.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-approval-interrupt",
+        customer_id="telegram_approval_interrupt",
+        text="run a guarded action",
+    ):
+        chunks.append(chunk)
+
+    assert graph.guardrail_seen is True
+    assert graph.post_handoff_emitted is False
+    assert chunks == [STREAM_APPROVAL_HANDOFF_SIGNAL]
 
 
 @pytest.mark.asyncio

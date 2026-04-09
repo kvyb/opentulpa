@@ -44,6 +44,8 @@ class ApprovalBroker:
     Decision matrix (high-level):
     - Gate decisions (`allow`/`require_approval`/`deny`) come from LLM guardrail evaluator output.
     - Instant external actions that evaluate to `require_approval` create a challenge.
+    - Only one pending approval is allowed per thread at a time; repeated guarded actions reuse the
+      newest pending approval instead of creating a new challenge.
     - Scheduled external automations evaluate at routine creation time.
     - Background (`wake_*` / `routine_*`) runs are treated as pre-authorized scheduled execution.
       No per-run approval prompts/checks.
@@ -172,6 +174,33 @@ class ApprovalBroker:
             decision.status = duplicate.status
             decision.expires_at = duplicate.expires_at
             decision.delivery_mode = "existing_pending"
+            return self._evaluator.as_dict(decision)
+
+        same_action_pending = self._store.find_latest_pending_for_customer_thread(
+            customer_id=intent.customer_id,
+            thread_id=intent.thread_id,
+            action_name=intent.action_name,
+        )
+        if same_action_pending is not None:
+            decision.approval_id = same_action_pending.id
+            decision.status = same_action_pending.status
+            decision.expires_at = same_action_pending.expires_at
+            decision.delivery_mode = "existing_pending_thread_action"
+            decision.reason = "pending_approval_already_exists_for_action"
+            decision.summary = same_action_pending.summary
+            return self._evaluator.as_dict(decision)
+
+        thread_pending = self._store.find_latest_pending_for_customer_thread(
+            customer_id=intent.customer_id,
+            thread_id=intent.thread_id,
+        )
+        if thread_pending is not None:
+            decision.approval_id = thread_pending.id
+            decision.status = thread_pending.status
+            decision.expires_at = thread_pending.expires_at
+            decision.delivery_mode = "existing_pending_thread"
+            decision.reason = "pending_approval_already_exists_for_thread"
+            decision.summary = thread_pending.summary
             return self._evaluator.as_dict(decision)
 
         approval_id = new_short_id("apr")
