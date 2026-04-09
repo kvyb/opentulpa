@@ -27,25 +27,33 @@ class _NeverYieldsWithFallbackRuntime:
 class _FakeTelegramClient:
     def __init__(self, bot_token: str) -> None:
         self.bot_token = bot_token
-        self.calls: list[tuple[int | str, str, int | None, str | None]] = []
-        self._next_id = 100
+        self.draft_calls: list[tuple[int | str, int, str, str | None, int | None]] = []
+        self.message_calls: list[tuple[int | str, str, str | None]] = []
         self.chat_actions: list[tuple[int | str, str]] = []
 
-    async def upsert_stream_message(
+    async def send_message_draft(
+        self,
+        *,
+        chat_id: int | str,
+        draft_id: int,
+        text: str,
+        message_thread_id: int | None = None,
+        parse_mode: str | None = None,
+    ) -> bool:
+        self.draft_calls.append((chat_id, draft_id, text, parse_mode, message_thread_id))
+        return True
+
+    async def send_message(
         self,
         *,
         chat_id: int | str,
         text: str,
-        message_id: int | None = None,
-        parse_mode: str | None = None,
-        allow_fallback_send: bool = True,
+        parse_mode: str | None = "HTML",
         reply_markup=None,
-    ) -> int | None:
-        self.calls.append((chat_id, text, message_id, parse_mode))
-        if message_id is None:
-            self._next_id += 1
-            return self._next_id
-        return message_id
+    ) -> bool:
+        del reply_markup
+        self.message_calls.append((chat_id, text, parse_mode))
+        return True
 
     async def send_chat_action(
         self,
@@ -94,7 +102,7 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     assert "timed out" in final.lower()
     # One automatic retry is attempted before surfacing timeout.
     assert calls["count"] >= 2
-    assert any("timed out" in text.lower() for _, text, _, _ in fake_client.calls)
+    assert any("timed out" in text.lower() for _, text, _ in fake_client.message_calls)
     assert fake_client.chat_actions
 
 
@@ -134,4 +142,4 @@ async def test_stream_timeout_uses_non_stream_recovery_when_available(
     assert suppressed is False
     assert isinstance(final, str)
     assert "recovered via non-stream fallback" in final.lower()
-    assert not any("timed out" in text.lower() for _, text, _, _ in fake_client.calls)
+    assert not any("timed out" in text.lower() for _, text, _ in fake_client.message_calls)

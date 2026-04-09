@@ -15,6 +15,17 @@ from opentulpa.interfaces.telegram.formatter import prepare_text_and_mode
 logger = logging.getLogger(__name__)
 
 
+def _supports_message_draft(chat_id: int | str) -> bool:
+    if isinstance(chat_id, int):
+        return chat_id > 0
+    text = str(chat_id or "").strip()
+    if not text:
+        return False
+    with suppress(Exception):
+        return int(text) > 0
+    return False
+
+
 def _resolve_media_send_target(
     *,
     kind: str,
@@ -118,6 +129,35 @@ class TelegramClient:
         data = await self._post("sendMessage", payload)
         return bool(data)
 
+    async def send_message_draft(
+        self,
+        *,
+        chat_id: int | str,
+        draft_id: int,
+        text: str,
+        message_thread_id: int | None = None,
+        parse_mode: str | None = "HTML",
+    ) -> bool:
+        if not _supports_message_draft(chat_id):
+            return False
+        final_text, final_mode = prepare_text_and_mode(text, parse_mode)
+        if not final_text:
+            return False
+        safe_draft_id = int(draft_id)
+        if safe_draft_id == 0:
+            return False
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "draft_id": safe_draft_id,
+            "text": final_text,
+        }
+        if isinstance(message_thread_id, int) and message_thread_id > 0:
+            payload["message_thread_id"] = message_thread_id
+        if final_mode:
+            payload["parse_mode"] = final_mode
+        data = await self._post("sendMessageDraft", payload)
+        return bool(data)
+
     async def edit_message_text(
         self,
         *,
@@ -188,61 +228,6 @@ class TelegramClient:
             {"chat_id": chat_id, "message_id": int(message_id)},
         )
         return bool(data)
-
-    async def upsert_stream_message(
-        self,
-        *,
-        chat_id: int | str,
-        text: str,
-        message_id: int | None = None,
-        parse_mode: str | None = None,
-        allow_fallback_send: bool = True,
-        reply_markup: dict[str, Any] | None = None,
-    ) -> int | None:
-        final_text, final_mode = prepare_text_and_mode(text, parse_mode)
-        if not final_text:
-            return message_id
-
-        if message_id is None:
-            payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
-            if final_mode:
-                payload["parse_mode"] = final_mode
-            if isinstance(reply_markup, dict):
-                payload["reply_markup"] = reply_markup
-            data = await self._post("sendMessage", payload)
-            if not data:
-                return None
-            result = data.get("result") if isinstance(data, dict) else None
-            if isinstance(result, dict):
-                rid = result.get("message_id")
-                if isinstance(rid, int):
-                    return rid
-            return None
-
-        payload = {"chat_id": chat_id, "message_id": message_id, "text": final_text}
-        if final_mode:
-            payload["parse_mode"] = final_mode
-        if isinstance(reply_markup, dict):
-            payload["reply_markup"] = reply_markup
-        data = await self._post("editMessageText", payload)
-        if data:
-            return message_id
-        if not allow_fallback_send:
-            return message_id
-        fallback_payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
-        if final_mode:
-            fallback_payload["parse_mode"] = final_mode
-        if isinstance(reply_markup, dict):
-            fallback_payload["reply_markup"] = reply_markup
-        fallback_data = await self._post("sendMessage", fallback_payload)
-        if not fallback_data:
-            return message_id
-        result = fallback_data.get("result") if isinstance(fallback_data, dict) else None
-        if isinstance(result, dict):
-            rid = result.get("message_id")
-            if isinstance(rid, int):
-                return rid
-        return message_id
 
     async def download_file(self, *, file_id: str) -> dict[str, Any] | None:
         info = await self._post("getFile", {"file_id": file_id})
