@@ -306,6 +306,9 @@ async def stream_langgraph_reply_to_telegram(
             typing_stop.set()
         with suppress(Exception):
             await typing_task
+        if hasattr(client, "aclose"):
+            with suppress(Exception):
+                await client.aclose()
         raise
     if next_chunk_task is not None and not next_chunk_task.done():
         next_chunk_task.cancel()
@@ -347,6 +350,9 @@ async def stream_langgraph_reply_to_telegram(
         suppressed,
         len(str(final_reply or "")),
     )
+    if hasattr(client, "aclose"):
+        with suppress(Exception):
+            await client.aclose()
     return final_reply, suppressed
 
 

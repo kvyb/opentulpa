@@ -248,9 +248,10 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
         )
 
     async def _ainvoke_model(model: Any, messages: list[Any], *, stable_prefix_count: int = 0, **kwargs: Any) -> AIMessage:
-        del model, kwargs
+        del model
         captured["messages"] = messages
         captured["stable_prefix_count"] = stable_prefix_count
+        captured["call_context"] = kwargs.get("call_context")
         return AIMessage(content="ok")
 
     async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
@@ -305,6 +306,9 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
         if isinstance(msg, HumanMessage)
     )
     assert grounding_index < last_human_index
+    assert isinstance(captured["call_context"], dict)
+    assert captured["call_context"]["call_site"] == "graph_agent"
+    assert "memory_grounding" in captured["call_context"]["prompt_sections"]
 
 
 def test_memory_grounding_block_stays_compact() -> None:

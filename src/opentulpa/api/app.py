@@ -315,6 +315,8 @@ def create_app(
             await task_runner.shutdown()
         if wake_queue_service:
             await wake_queue_service.shutdown()
+        if telegram_client and hasattr(telegram_client, "aclose"):
+            await telegram_client.aclose()
         if runtime and hasattr(runtime, "shutdown"):
             await runtime.shutdown()
 

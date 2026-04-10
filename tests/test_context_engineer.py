@@ -49,6 +49,9 @@ def test_context_engineer_summarizes_stale_tool_arguments_and_errors() -> None:
     assert "composio_tool_execute" in result.summary_text
     assert "slot" in result.summary_text
     assert "slot conflict" in result.summary_text
+    assert "tool=composio_tool_execute" in result.summary_text
+    assert "args[" in result.summary_text
+    assert "result[" in result.summary_text
 
 
 def test_context_engineer_preserves_active_tool_dependency_suffix() -> None:
@@ -74,6 +77,49 @@ def test_context_engineer_preserves_active_tool_dependency_suffix() -> None:
     assert result.protected_count == 2
     assert any(isinstance(msg, AIMessage) and bool(getattr(msg, "tool_calls", [])) for msg in result.raw_messages)
     assert any(isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") == "call_live" for msg in result.raw_messages)
+
+
+def test_context_engineer_latest_five_stale_tool_calls_keep_full_content() -> None:
+    engineer = ContextEngineer(raw_chat_limit=1, raw_tool_limit=1, stale_summary_token_budget=5000)
+    long_value = "x" * 140
+    messages = [HumanMessage(content="old context"), AIMessage(content="older answer")]
+    for idx in range(6):
+        call_id = f"call_{idx}"
+        messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": call_id,
+                        "name": "composio_tool_execute",
+                        "args": {
+                            "tool_slug": "googlesheets",
+                            "payload": f"args-{idx}-{long_value}",
+                        },
+                    }
+                ],
+            )
+        )
+        messages.append(
+            ToolMessage(
+                content=f'{{"status":"ok","result":"result-{idx}-{long_value}"}}',
+                tool_call_id=call_id,
+            )
+        )
+    messages.append(HumanMessage(content="latest"))
+    messages.append(AIMessage(content="latest answer"))
+
+    result = engineer.build_history_working_set(messages, token_budget=4000)
+    preserved_text = result.summary_text + "\n" + "\n".join(
+        f"{getattr(msg, 'content', '')} {getattr(msg, 'tool_calls', '')}"
+        for msg in result.raw_messages
+    )
+
+    assert f"args-0-{long_value}" not in preserved_text
+    assert f"result-0-{long_value}" not in preserved_text
+    for idx in range(1, 6):
+        assert f"args-{idx}-{long_value}" in preserved_text
+        assert f"result-{idx}-{long_value}" in preserved_text
 
 
 def test_context_engineer_optional_context_rules() -> None:

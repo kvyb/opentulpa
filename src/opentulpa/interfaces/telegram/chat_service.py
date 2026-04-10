@@ -164,15 +164,23 @@ async def _send_debug_logs_file(*, chat_id: int, bot_token: str | None) -> str |
     raw_bytes = read_debug_log_bytes()
     if raw_bytes is None:
         return "Debug log file is not available yet."
-    sent = await TelegramClient(str(bot_token)).send_file(
-        chat_id=chat_id,
-        filename="app.log",
-        raw_bytes=raw_bytes,
-        kind="document",
-        mime_type="text/plain",
-        caption="OpenTulpa debug log dump",
-        parse_mode="HTML",
-    )
+    client = TelegramClient(str(bot_token))
+    try:
+        sent = await client.send_file(
+            chat_id=chat_id,
+            filename="app.log",
+            raw_bytes=raw_bytes,
+            kind="document",
+            mime_type="text/plain",
+            caption="OpenTulpa debug log dump",
+            parse_mode="HTML",
+        )
+    finally:
+        if hasattr(client, "aclose"):
+            try:
+                await client.aclose()
+            except Exception:
+                pass
     if not sent:
         return "I couldn't send the debug log file right now."
     return None
@@ -315,9 +323,10 @@ async def handle_telegram_text(
     ingested_files: list[dict[str, Any]] = []
     if attachments and bot_token and file_vault is not None:
         typing_stop = asyncio.Event()
+        typing_client = TelegramClient(str(bot_token))
         typing_task = asyncio.create_task(
             _emit_typing_until_done(
-                client=TelegramClient(str(bot_token)),
+                client=typing_client,
                 chat_id=ctx.chat_id,
                 stop_event=typing_stop,
             )
@@ -339,6 +348,11 @@ async def handle_telegram_text(
                 await typing_task
             except Exception:
                 pass
+            if hasattr(typing_client, "aclose"):
+                try:
+                    await typing_client.aclose()
+                except Exception:
+                    pass
 
     if attachments and not ctx.text and not ingested_files:
         if agent_runtime is None:

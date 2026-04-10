@@ -179,7 +179,13 @@ async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: s
         ]
         ainvoke_model = getattr(runtime, "ainvoke_model", None)
         if callable(ainvoke_model):
-            response = await ainvoke_model(runtime._model, messages)
+            response = await ainvoke_model(
+                runtime._model,
+                messages,
+                call_context={
+                    "call_site": "context_compaction",
+                },
+            )
         else:
             response = await runtime._model.ainvoke(messages)
         running = _sanitize_rollup_text(_content_to_text(getattr(response, "content", "")).strip() or running)

@@ -117,6 +117,8 @@ _MEMORY_GROUNDING_KIND_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("fallback_thread_context", ("thread_context_rollup",)),
 )
 
+_LLM_CALL_TRACE_LIMIT = 100
+
 
 def _prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
     cc: dict[str, Any] = {"type": "ephemeral"}
@@ -213,6 +215,61 @@ def _provider_prompt_cache_invoke_extras(
     if profile.get("strategy") != "top_level":
         return {}
     return {"extra_body": {"cache_control": dict(profile.get("cache_control") or {})}}
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        with suppress(Exception):
+            return _json_safe(model_dump())
+    return str(value)
+
+
+def _message_role(message: Any) -> str:
+    if isinstance(message, HumanMessage):
+        return "user"
+    if isinstance(message, AIMessage):
+        return "assistant"
+    if isinstance(message, SystemMessage):
+        return "system"
+    if isinstance(message, ToolMessage):
+        return "tool"
+    return "unknown"
+
+
+def _serialize_message(message: Any) -> dict[str, Any]:
+    content = getattr(message, "content", "")
+    payload: dict[str, Any] = {
+        "role": _message_role(message),
+        "type": type(message).__name__,
+        "content": _json_safe(content),
+        "text": _content_to_text(content),
+        "approx_tokens": _approx_tokens(_content_to_text(content)),
+    }
+    tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
+    if tool_call_id:
+        payload["tool_call_id"] = tool_call_id
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        payload["tool_calls"] = _json_safe(tool_calls)
+    name = str(getattr(message, "name", "") or "").strip()
+    if name:
+        payload["name"] = name
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if additional_kwargs:
+        payload["additional_kwargs"] = _json_safe(additional_kwargs)
+    response_metadata = getattr(message, "response_metadata", None)
+    if response_metadata:
+        payload["response_metadata"] = _json_safe(response_metadata)
+    return payload
 
 
 def _message_content_with_cache_breakpoint(
@@ -916,8 +973,10 @@ class OpenTulpaLangGraphRuntime:
         raw_behavior_path = str(behavior_log_path or "").strip() or ".opentulpa/logs/agent_behavior.jsonl"
         self._behavior_log_path = Path(raw_behavior_path).resolve()
         self._behavior_log_lock = threading.Lock()
-        if self._behavior_log_enabled:
-            self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._llm_call_trace_path = self._behavior_log_path.parent / "llm_call_traces.jsonl"
+        self._llm_call_trace_lock = threading.Lock()
+        self._llm_call_trace_limit = _LLM_CALL_TRACE_LIMIT
+        self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._browser_use_headless = bool(browser_use_headless)
         self._browser_use_model_override = str(browser_use_model_override or "").strip()
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
@@ -1115,6 +1174,7 @@ class OpenTulpaLangGraphRuntime:
         *,
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        call_context: dict[str, Any] | None = None,
     ) -> Any:
         resolved_model_name = self._resolve_model_name_for_runtime_call(model, explicit_name=model_name)
         prepared_messages = self.prepare_messages_for_prompt_cache(
@@ -1123,9 +1183,26 @@ class OpenTulpaLangGraphRuntime:
             stable_prefix_count=stable_prefix_count,
         )
         invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
-        if _supports_ainvoke_kwargs(model, invoke_extras):
-            return await model.ainvoke(prepared_messages, **invoke_extras)
-        return await model.ainvoke(prepared_messages)
+        response: Any | None = None
+        error_text: str | None = None
+        try:
+            if _supports_ainvoke_kwargs(model, invoke_extras):
+                response = await model.ainvoke(prepared_messages, **invoke_extras)
+            else:
+                response = await model.ainvoke(prepared_messages)
+            return response
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            self._record_llm_call_trace(
+                model_name=resolved_model_name,
+                prepared_messages=prepared_messages,
+                stable_prefix_count=stable_prefix_count,
+                response=response,
+                error=error_text,
+                call_context=call_context,
+            )
 
     @staticmethod
     def _looks_like_provisional_reply(text: str) -> bool:
@@ -1216,6 +1293,89 @@ class OpenTulpaLangGraphRuntime:
         with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
             f.write(serialized + "\n")
 
+    @staticmethod
+    def _normalize_llm_call_context(call_context: dict[str, Any] | None) -> dict[str, Any]:
+        normalized = dict(call_context) if isinstance(call_context, dict) else {}
+        prompt_sections = normalized.get("prompt_sections")
+        if isinstance(prompt_sections, str):
+            normalized["prompt_sections"] = [
+                part.strip() for part in prompt_sections.split(",") if part.strip()
+            ]
+        elif isinstance(prompt_sections, list):
+            normalized["prompt_sections"] = [
+                str(part).strip() for part in prompt_sections if str(part).strip()
+            ]
+        normalized["call_site"] = str(
+            normalized.get("call_site") or "runtime_model_invoke"
+        ).strip()
+        return normalized
+
+    def _write_llm_call_trace(self, payload: dict[str, Any]) -> None:
+        path = getattr(self, "_llm_call_trace_path", None)
+        lock = getattr(self, "_llm_call_trace_lock", None)
+        limit = max(1, int(getattr(self, "_llm_call_trace_limit", _LLM_CALL_TRACE_LIMIT)))
+        if not isinstance(path, Path):
+            return
+        serialized = json.dumps(payload, ensure_ascii=False, default=str)
+
+        def _commit() -> None:
+            existing: list[str] = []
+            with suppress(Exception):
+                existing = [
+                    line.rstrip("\n")
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            kept = existing[-max(0, limit - 1) :]
+            kept.append(serialized)
+            with path.open("w", encoding="utf-8") as f:
+                if kept:
+                    f.write("\n".join(kept) + "\n")
+
+        with suppress(Exception):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        if lock is None:
+            with suppress(Exception):
+                _commit()
+            return
+        with suppress(Exception), lock:
+            _commit()
+
+    def _record_llm_call_trace(
+        self,
+        *,
+        model_name: str,
+        prepared_messages: list[Any],
+        stable_prefix_count: int,
+        response: Any | None,
+        error: str | None,
+        call_context: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_context = self._normalize_llm_call_context(call_context)
+        usage_fields = (
+            self.extract_response_usage_fields(response)
+            if response is not None
+            else {}
+        )
+        response_content = getattr(response, "content", response) if response is not None else ""
+        record: dict[str, Any] = {
+            "ts": datetime.now(UTC).isoformat(),
+            "model_name": str(model_name or "").strip(),
+            "stable_prefix_count": int(stable_prefix_count),
+            "prompt_messages": [_serialize_message(message) for message in prepared_messages],
+            "prompt_message_count": len(prepared_messages),
+            "response_type": type(response).__name__ if response is not None else "",
+            "response_message": _serialize_message(response) if response is not None else None,
+            "response_text": _content_to_text(response_content).strip() if response is not None else "",
+            "response_content": _json_safe(response_content),
+            "response_tool_calls": _json_safe(getattr(response, "tool_calls", None)),
+            "error": str(error or "").strip() or None,
+            **usage_fields,
+        }
+        for key, value in normalized_context.items():
+            record[str(key)] = _json_safe(value)
+        self._write_llm_call_trace(record)
+
     def _truncate_user_visible_reply(self, text: str) -> tuple[str, bool]:
         raw = str(text or "").strip()
         if not raw:
@@ -1278,6 +1438,7 @@ class OpenTulpaLangGraphRuntime:
                 list(messages),
                 model_name=resolved_model_name,
                 stable_prefix_count=stable_prefix_count,
+                call_context={"call_site": "structured_model_fallback"},
             )
             raw = _content_to_text(getattr(response, "content", response)).strip()
             if raw:

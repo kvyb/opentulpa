@@ -35,7 +35,11 @@ _VIDEO_FALLBACK_DURATION_SECONDS = 120
 async def _ainvoke_runtime_model(runtime: Any, messages: list[Any]) -> Any:
     ainvoke_model = getattr(runtime, "ainvoke_model", None)
     if callable(ainvoke_model):
-        return await ainvoke_model(runtime._model, messages)
+        return await ainvoke_model(
+            runtime._model,
+            messages,
+            call_context={"call_site": "file_analysis"},
+        )
     return await runtime._model.ainvoke(messages)
 
 
@@ -61,7 +65,12 @@ async def _ainvoke_selected_runtime_model(
         raise RuntimeError("runtime model unavailable")
     ainvoke_model = getattr(runtime, "ainvoke_model", None)
     if callable(ainvoke_model):
-        return await ainvoke_model(model, messages, model_name=model_name)
+        return await ainvoke_model(
+            model,
+            messages,
+            model_name=model_name,
+            call_context={"call_site": "file_analysis"},
+        )
     return await model.ainvoke(messages)
 
 

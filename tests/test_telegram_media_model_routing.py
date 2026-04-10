@@ -28,6 +28,7 @@ class _RoutingRuntime:
         *,
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        call_context: dict[str, Any] | None = None,
     ) -> Any:
         self.calls.append(
             {
@@ -35,6 +36,7 @@ class _RoutingRuntime:
                 "model_name": model_name,
                 "messages": messages,
                 "stable_prefix_count": stable_prefix_count,
+                "call_context": call_context,
             }
         )
         return SimpleNamespace(content="Media summary from Gemini.")

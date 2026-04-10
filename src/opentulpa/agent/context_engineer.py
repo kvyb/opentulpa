@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
 from opentulpa.agent.lc_messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from opentulpa.agent.tool_parser import compact_tool_call_record as _compact_tool_call_record
+from opentulpa.agent.tool_parser import compact_tool_payload as _compact_tool_payload
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
 )
@@ -90,6 +91,26 @@ class ContextEngineer:
                 ids.append(call_id)
         return ids
 
+    @staticmethod
+    def _latest_tool_call_ids(messages: list[AnyMessage], *, limit: int = 5) -> set[str]:
+        latest_ids: list[str] = []
+        seen: set[str] = set()
+        max_items = max(1, int(limit))
+        for message in reversed(messages):
+            if isinstance(message, ToolMessage):
+                call_id = str(getattr(message, "tool_call_id", "") or "").strip()
+                if call_id and call_id not in seen:
+                    seen.add(call_id)
+                    latest_ids.append(call_id)
+            elif isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
+                for call_id in reversed(ContextEngineer._tool_call_ids(message)):
+                    if call_id and call_id not in seen:
+                        seen.add(call_id)
+                        latest_ids.append(call_id)
+            if len(latest_ids) >= max_items:
+                break
+        return set(latest_ids[:max_items])
+
     def _protected_suffix_indices(self, messages: list[AnyMessage]) -> set[int]:
         protected: set[int] = set()
         idx = len(messages) - 1
@@ -117,48 +138,22 @@ class ContextEngineer:
             break
         return protected
 
-    @staticmethod
-    def _summarize_jsonish_text(text: str, *, limit: int) -> str:
-        raw = str(text or "").strip()
-        if not raw:
-            return ""
-        parsed: Any = None
-        if raw.startswith("{") or raw.startswith("["):
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                parsed = None
-        if isinstance(parsed, dict):
-            high_signal: dict[str, Any] = {}
-            for key in (
-                "status",
-                "error",
-                "message",
-                "result",
-                "tool_name",
-                "approval_id",
-                "workflow_id",
-                "routine_id",
-            ):
-                value = parsed.get(key)
-                if value not in (None, "", [], {}):
-                    high_signal[key] = value
-            if not high_signal:
-                keys = [str(key) for key in list(parsed.keys())[:10]]
-                high_signal = {"keys": keys}
-            raw = json.dumps(high_signal, ensure_ascii=False)
-        elif isinstance(parsed, list):
-            raw = json.dumps({"items": len(parsed)}, ensure_ascii=False)
-        max_chars = max(120, int(limit))
-        if len(raw) <= max_chars:
-            return raw
-        return raw[: max_chars - 3].rstrip() + "..."
-
-    def _summarize_stale_messages(self, messages: list[AnyMessage]) -> str:
+    def _summarize_stale_messages(
+        self,
+        messages: list[AnyMessage],
+        *,
+        latest_tool_call_ids: set[str] | None = None,
+    ) -> str:
         if not messages:
             return ""
         parts: list[str] = []
         tool_calls_by_id: dict[str, dict[str, Any]] = {}
+        latest_tool_call_ids = set(latest_tool_call_ids or ())
+        result_ids = {
+            str(getattr(message, "tool_call_id", "") or "").strip()
+            for message in messages
+            if isinstance(message, ToolMessage) and str(getattr(message, "tool_call_id", "") or "").strip()
+        }
         for message in messages:
             if isinstance(message, HumanMessage):
                 text = trim_text_to_token_budget(_content_to_text(getattr(message, "content", "")), token_budget=80)
@@ -177,11 +172,21 @@ class ContextEngineer:
                         args = call.get("args")
                         tool_calls_by_id[call_id] = {
                             "name": str(call.get("name", "") or "").strip() or "tool",
-                            "args": self._summarize_jsonish_text(
-                                json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args or ""),
-                                limit=220,
+                            "args": _compact_tool_payload(
+                                args,
+                                value_char_limit=None if call_id in latest_tool_call_ids else 100,
                             ),
                         }
+                        if call_id in latest_tool_call_ids and call_id not in result_ids:
+                            parts.append(
+                                _compact_tool_call_record(
+                                    tool_name=tool_calls_by_id[call_id]["name"],
+                                    args=tool_calls_by_id[call_id]["args"],
+                                    result="",
+                                    args_value_char_limit=None,
+                                    result_value_char_limit=None,
+                                )
+                            )
                     names = ", ".join(
                         sorted({tool_calls_by_id[call_id]["name"] for call_id in tool_calls_by_id if call_id})
                     )
@@ -196,16 +201,13 @@ class ContextEngineer:
                 tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
                 call = tool_calls_by_id.get(tool_call_id, {})
                 tool_name = str(call.get("name", "") or "").strip() or "tool"
-                args_text = str(call.get("args", "") or "").strip()
-                result_text = self._summarize_jsonish_text(
-                    _content_to_text(getattr(message, "content", "")),
-                    limit=260,
+                line = _compact_tool_call_record(
+                    tool_name=tool_name,
+                    args=call.get("args", ""),
+                    result=_content_to_text(getattr(message, "content", "")),
+                    args_value_char_limit=None,
+                    result_value_char_limit=None if tool_call_id in latest_tool_call_ids else 100,
                 )
-                line = f"Tool {tool_name}"
-                if args_text:
-                    line += f" args={args_text}"
-                if result_text:
-                    line += f" -> {result_text}"
                 parts.append(line)
         joined = "\n".join(parts).strip()
         return trim_text_to_token_budget(joined, token_budget=self.stale_summary_token_budget)
@@ -260,7 +262,11 @@ class ContextEngineer:
             if not matching_tool_indices.issubset(keep_indices):
                 keep_indices.discard(idx)
         stale_messages = [msg for idx, msg in enumerate(messages) if idx not in keep_indices]
-        summary_text = self._summarize_stale_messages(stale_messages)
+        latest_tool_call_ids = self._latest_tool_call_ids(messages, limit=5)
+        summary_text = self._summarize_stale_messages(
+            stale_messages,
+            latest_tool_call_ids=latest_tool_call_ids,
+        )
         summary_tokens = min(self.stale_summary_token_budget, max(0, budget // 4))
         summary_text = trim_text_to_token_budget(summary_text, token_budget=summary_tokens) if summary_text else ""
         raw_budget = max(200, budget - (_approx_tokens(summary_text) if summary_text else 0))

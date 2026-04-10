@@ -990,6 +990,22 @@ def build_runtime_graph(runtime: Any):
         assert model_with_tools is not None
         ainvoke_fn = getattr(runtime, "ainvoke_model", None)
         if callable(ainvoke_fn):
+            call_context = {
+                "call_site": "graph_agent",
+                "trace_id": state.get("agent_trace_id"),
+                "thread_id": thread_id,
+                "customer_id": customer_id,
+                "turn_mode": turn_mode,
+                "prompt_mode": prompt_mode,
+                "prompt_sections": prompt_section_names,
+                "stable_prefix_count": stable_prompt_count,
+                "prompt_overhead_tokens": prompt_overhead_tokens,
+                "history_message_count": len(bounded_messages),
+                "raw_chat_history_count": history_working_set.raw_chat_count,
+                "raw_tool_history_count": history_working_set.raw_tool_count,
+                "protected_history_count": history_working_set.protected_count,
+                "optional_context_messages": max(0, len(prompt_messages) - len(prompt_messages_base)),
+            }
             model_messages: list[AnyMessage]
             if memory_grounding_message is not None:
                 latest_turn = _latest_turn_messages(bounded_messages)
@@ -1016,6 +1032,7 @@ def build_runtime_graph(runtime: Any):
                 model_with_tools,
                 model_messages,
                 stable_prefix_count=stable_prompt_count,
+                call_context=call_context,
             )
         else:
             model_messages = (

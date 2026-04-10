@@ -137,100 +137,105 @@ async def ingest_attachments(
 ) -> list[dict[str, Any]]:
     ingested: list[dict[str, Any]] = []
     client = TelegramClient(bot_token)
-    for attachment in attachments:
-        downloaded = await client.download_file(file_id=attachment.file_id)
-        if not downloaded:
-            continue
-        raw_bytes = downloaded.get("raw_bytes")
-        if not isinstance(raw_bytes, (bytes, bytearray)) or not raw_bytes:
-            continue
-        file_path_name = str(downloaded.get("file_path", "")).split("/")[-1].strip()
-        record = file_vault.ingest_file(
-            customer_id=customer_id,
-            chat_id=chat_id,
-            kind=attachment.kind,
-            telegram_file_id=attachment.file_id,
-            original_filename=attachment.filename or file_path_name or f"{attachment.kind}.bin",
-            mime_type=attachment.mime_type or str(downloaded.get("mime_type", "")).strip() or None,
-            caption=caption,
-            raw_bytes=bytes(raw_bytes),
-        )
-        local_path = _mirror_uploaded_file(
-            customer_id=customer_id,
-            file_id=str(record.get("id", "")).strip(),
-            filename=str(record.get("original_filename", "")).strip() or "file.bin",
-            raw_bytes=bytes(raw_bytes),
-        )
-        if local_path:
-            record = {**record, "local_path": local_path}
-        if (
-            attachment.kind == "voice"
-            and agent_runtime is not None
-            and hasattr(agent_runtime, "transcribe_audio_blob")
-        ):
-            with suppress(Exception):
-                transcript = await agent_runtime.transcribe_audio_blob(
-                    filename=attachment.filename or file_path_name or f"{attachment.kind}.ogg",
-                    mime_type=attachment.mime_type
-                    or str(downloaded.get("mime_type", "")).strip()
-                    or None,
-                    kind=attachment.kind,
-                    raw_bytes=bytes(raw_bytes),
-                )
-                if transcript:
-                    record = {**record, "voice_transcript": str(transcript).strip()[:4000]}
-        if agent_runtime is not None and hasattr(agent_runtime, "summarize_uploaded_blob"):
-            if attachment.kind == "voice":
-                ingested.append(record)
-                if memory is not None:
-                    with suppress(Exception):
-                        memory.add_text(
-                            (
-                                "Voice note stored for this user. "
-                                f"name={record.get('original_filename')} "
-                                f"vault_path={record.get('stored_path')} "
-                                f"local_path={record.get('local_path', '')} "
-                                f"transcript={str(record.get('voice_transcript', ''))[:1200]}"
-                            ),
-                            user_id=customer_id,
-                            metadata={
-                                "kind": "media_fact",
-                                "file_id": record.get("id"),
-                                "file_kind": record.get("kind"),
-                            },
-                        )
+    try:
+        for attachment in attachments:
+            downloaded = await client.download_file(file_id=attachment.file_id)
+            if not downloaded:
                 continue
+            raw_bytes = downloaded.get("raw_bytes")
+            if not isinstance(raw_bytes, (bytes, bytearray)) or not raw_bytes:
+                continue
+            file_path_name = str(downloaded.get("file_path", "")).split("/")[-1].strip()
+            record = file_vault.ingest_file(
+                customer_id=customer_id,
+                chat_id=chat_id,
+                kind=attachment.kind,
+                telegram_file_id=attachment.file_id,
+                original_filename=attachment.filename or file_path_name or f"{attachment.kind}.bin",
+                mime_type=attachment.mime_type or str(downloaded.get("mime_type", "")).strip() or None,
+                caption=caption,
+                raw_bytes=bytes(raw_bytes),
+            )
+            local_path = _mirror_uploaded_file(
+                customer_id=customer_id,
+                file_id=str(record.get("id", "")).strip(),
+                filename=str(record.get("original_filename", "")).strip() or "file.bin",
+                raw_bytes=bytes(raw_bytes),
+            )
+            if local_path:
+                record = {**record, "local_path": local_path}
+            if (
+                attachment.kind == "voice"
+                and agent_runtime is not None
+                and hasattr(agent_runtime, "transcribe_audio_blob")
+            ):
+                with suppress(Exception):
+                    transcript = await agent_runtime.transcribe_audio_blob(
+                        filename=attachment.filename or file_path_name or f"{attachment.kind}.ogg",
+                        mime_type=attachment.mime_type
+                        or str(downloaded.get("mime_type", "")).strip()
+                        or None,
+                        kind=attachment.kind,
+                        raw_bytes=bytes(raw_bytes),
+                    )
+                    if transcript:
+                        record = {**record, "voice_transcript": str(transcript).strip()[:4000]}
+            if agent_runtime is not None and hasattr(agent_runtime, "summarize_uploaded_blob"):
+                if attachment.kind == "voice":
+                    ingested.append(record)
+                    if memory is not None:
+                        with suppress(Exception):
+                            memory.add_text(
+                                (
+                                    "Voice note stored for this user. "
+                                    f"name={record.get('original_filename')} "
+                                    f"vault_path={record.get('stored_path')} "
+                                    f"local_path={record.get('local_path', '')} "
+                                    f"transcript={str(record.get('voice_transcript', ''))[:1200]}"
+                                ),
+                                user_id=customer_id,
+                                metadata={
+                                    "kind": "media_fact",
+                                    "file_id": record.get("id"),
+                                    "file_kind": record.get("kind"),
+                                },
+                            )
+                    continue
+                with suppress(Exception):
+                    ai_summary = await agent_runtime.summarize_uploaded_blob(
+                        filename=str(record.get("original_filename", "")).strip() or None,
+                        mime_type=str(record.get("mime_type", "")).strip() or None,
+                        kind=str(record.get("kind", "")).strip() or None,
+                        raw_bytes=bytes(raw_bytes),
+                        caption=caption,
+                    )
+                    if ai_summary:
+                        updated = file_vault.set_ai_summary(customer_id, str(record.get("id", "")), ai_summary)
+                        if isinstance(updated, dict):
+                            record = updated
+            ingested.append(record)
+            if memory is not None:
+                with suppress(Exception):
+                    record_kind = str(record.get("kind", "")).strip().lower()
+                    memory_kind = "media_fact" if record_kind in {"photo", "video", "video_note", "audio", "voice"} else "file_fact"
+                    memory.add_text(
+                        (
+                            "User file stored in vault. "
+                            f"name={record.get('original_filename')} "
+                            f"kind={record.get('kind')} "
+                            f"vault_path={record.get('stored_path')} "
+                            f"local_path={record.get('local_path', '')} "
+                            f"summary={record.get('summary', '')[:1200]}"
+                        ),
+                        user_id=customer_id,
+                        metadata={
+                            "kind": memory_kind,
+                            "file_id": record.get("id"),
+                            "file_kind": record.get("kind"),
+                        },
+                    )
+    finally:
+        if hasattr(client, "aclose"):
             with suppress(Exception):
-                ai_summary = await agent_runtime.summarize_uploaded_blob(
-                    filename=str(record.get("original_filename", "")).strip() or None,
-                    mime_type=str(record.get("mime_type", "")).strip() or None,
-                    kind=str(record.get("kind", "")).strip() or None,
-                    raw_bytes=bytes(raw_bytes),
-                    caption=caption,
-                )
-                if ai_summary:
-                    updated = file_vault.set_ai_summary(customer_id, str(record.get("id", "")), ai_summary)
-                    if isinstance(updated, dict):
-                        record = updated
-        ingested.append(record)
-        if memory is not None:
-            with suppress(Exception):
-                record_kind = str(record.get("kind", "")).strip().lower()
-                memory_kind = "media_fact" if record_kind in {"photo", "video", "video_note", "audio", "voice"} else "file_fact"
-                memory.add_text(
-                    (
-                        "User file stored in vault. "
-                        f"name={record.get('original_filename')} "
-                        f"kind={record.get('kind')} "
-                        f"vault_path={record.get('stored_path')} "
-                        f"local_path={record.get('local_path', '')} "
-                        f"summary={record.get('summary', '')[:1200]}"
-                    ),
-                    user_id=customer_id,
-                    metadata={
-                        "kind": memory_kind,
-                        "file_id": record.get("id"),
-                        "file_kind": record.get("kind"),
-                    },
-                )
+                await client.aclose()
     return ingested

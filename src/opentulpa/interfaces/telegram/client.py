@@ -49,16 +49,32 @@ class TelegramClient:
 
     def __init__(self, bot_token: str) -> None:
         self.bot_token = str(bot_token or "").strip()
+        self._client: Any | None = None
+
+    def _http_client(self) -> Any:
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        close = getattr(client, "aclose", None)
+        if callable(close):
+            with suppress(Exception):
+                await close()
 
     async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
         retryable_http = {408, 429, 500, 502, 503, 504}
         timeout = httpx.Timeout(20.0, connect=8.0, read=15.0)
         max_attempts = 3
+        client = self._http_client()
         for attempt in range(max_attempts):
             try:
-                async with httpx.AsyncClient() as client:
-                    r = await client.post(url, json=payload, timeout=timeout)
+                r = await client.post(url, json=payload, timeout=timeout)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(0.4 * (2**attempt))
@@ -243,8 +259,8 @@ class TelegramClient:
         guessed_mime, _ = mimetypes.guess_type(file_path)
         url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, timeout=45.0)
+            client = self._http_client()
+            resp = await client.get(url, timeout=45.0)
         except Exception:
             return None
         if not resp.is_success:
@@ -285,8 +301,8 @@ class TelegramClient:
         files = {media_field: (safe_name, raw_bytes, mime_type or "application/octet-stream")}
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(url, data=payload, files=files, timeout=60.0)
+            client = self._http_client()
+            resp = await client.post(url, data=payload, files=files, timeout=60.0)
         except Exception:
             return False
         if not resp.is_success:
