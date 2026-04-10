@@ -328,29 +328,17 @@ async def stream_langgraph_reply_to_telegram(
             "(the model/tool loop ended without displayable output)."
         )
     if not suppressed and final_reply:
-        if draft_enabled:
-            if final_reply != live_delivery_text:
-                await _send_draft_reply(final_reply, force=True)
-            if not delivered_any:
-                sent = await client.send_message(
-                    chat_id=chat_id,
-                    text=final_reply,
-                    parse_mode="HTML",
-                )
-                if sent:
-                    delivered_any = True
-                else:
-                    final_reply = None
-        else:
-            sent = await client.send_message(
-                chat_id=chat_id,
-                text=final_reply,
-                parse_mode="HTML",
-            )
-            if sent:
-                delivered_any = True
-            elif not delivered_any:
-                final_reply = None
+        if draft_enabled and final_reply != live_delivery_text:
+            await _send_draft_reply(final_reply, force=True)
+        sent = await client.send_message(
+            chat_id=chat_id,
+            text=final_reply,
+            parse_mode="HTML",
+        )
+        if sent:
+            delivered_any = True
+        elif not delivered_any:
+            final_reply = None
     logger.info(
         "telegram.stream complete chat_id=%s thread_id=%s customer_id=%s suppressed=%s final_chars=%s",
         chat_id,
