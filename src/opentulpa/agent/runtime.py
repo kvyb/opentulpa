@@ -120,6 +120,17 @@ _MEMORY_GROUNDING_KIND_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _LLM_CALL_TRACE_LIMIT = 100
 
 
+def _redact_inline_trace_string(value: str) -> str:
+    raw = str(value)
+    if not raw.lower().startswith("data:"):
+        return raw
+    if ";base64," in raw:
+        prefix, _, _ = raw.partition(";base64,")
+        return f"{prefix};base64,[redacted]"
+    prefix, _, _ = raw.partition(",")
+    return f"{prefix},[redacted]"
+
+
 def _prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
     cc: dict[str, Any] = {"type": "ephemeral"}
     if ttl_1h:
@@ -218,19 +229,28 @@ def _provider_prompt_cache_invoke_extras(
 
 
 def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (int, float, bool)):
         return value
+    if isinstance(value, str):
+        return _redact_inline_trace_string(value)
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
+        safe = {str(k): _json_safe(v) for k, v in value.items()}
+        if str(safe.get("type", "") or "").strip().lower() == "input_audio":
+            input_audio = safe.get("input_audio")
+            if isinstance(input_audio, dict) and str(input_audio.get("data", "") or "").strip():
+                safe_input_audio = dict(input_audio)
+                safe_input_audio["data"] = "[redacted]"
+                safe["input_audio"] = safe_input_audio
+        return safe
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         with suppress(Exception):
             return _json_safe(model_dump())
-    return str(value)
+    return _redact_inline_trace_string(str(value))
 
 
 def _message_role(message: Any) -> str:
@@ -247,12 +267,14 @@ def _message_role(message: Any) -> str:
 
 def _serialize_message(message: Any) -> dict[str, Any]:
     content = getattr(message, "content", "")
+    safe_content = _json_safe(content)
+    safe_text = _content_to_text(safe_content)
     payload: dict[str, Any] = {
         "role": _message_role(message),
         "type": type(message).__name__,
-        "content": _json_safe(content),
-        "text": _content_to_text(content),
-        "approx_tokens": _approx_tokens(_content_to_text(content)),
+        "content": safe_content,
+        "text": safe_text,
+        "approx_tokens": _approx_tokens(safe_text),
     }
     tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
     if tool_call_id:
@@ -976,7 +998,8 @@ class OpenTulpaLangGraphRuntime:
         self._llm_call_trace_path = self._behavior_log_path.parent / "llm_call_traces.jsonl"
         self._llm_call_trace_lock = threading.Lock()
         self._llm_call_trace_limit = _LLM_CALL_TRACE_LIMIT
-        self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._behavior_log_enabled:
+            self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._browser_use_headless = bool(browser_use_headless)
         self._browser_use_model_override = str(browser_use_model_override or "").strip()
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
@@ -1351,6 +1374,8 @@ class OpenTulpaLangGraphRuntime:
         error: str | None,
         call_context: dict[str, Any] | None = None,
     ) -> None:
+        if not bool(getattr(self, "_behavior_log_enabled", True)):
+            return
         normalized_context = self._normalize_llm_call_context(call_context)
         usage_fields = (
             self.extract_response_usage_fields(response)
@@ -1358,6 +1383,7 @@ class OpenTulpaLangGraphRuntime:
             else {}
         )
         response_content = getattr(response, "content", response) if response is not None else ""
+        safe_response_content = _json_safe(response_content)
         record: dict[str, Any] = {
             "ts": datetime.now(UTC).isoformat(),
             "model_name": str(model_name or "").strip(),
@@ -1366,8 +1392,8 @@ class OpenTulpaLangGraphRuntime:
             "prompt_message_count": len(prepared_messages),
             "response_type": type(response).__name__ if response is not None else "",
             "response_message": _serialize_message(response) if response is not None else None,
-            "response_text": _content_to_text(response_content).strip() if response is not None else "",
-            "response_content": _json_safe(response_content),
+            "response_text": _content_to_text(safe_response_content).strip() if response is not None else "",
+            "response_content": safe_response_content,
             "response_tool_calls": _json_safe(getattr(response, "tool_calls", None)),
             "error": str(error or "").strip() or None,
             **usage_fields,

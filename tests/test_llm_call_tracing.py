@@ -89,6 +89,66 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     assert record["prompt_messages"][1]["role"] == "user"
 
 
+@pytest.mark.asyncio
+async def test_ainvoke_model_skips_llm_call_trace_when_behavior_log_disabled(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_enabled=False,
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+
+    await runtime.ainvoke_model(
+        _TraceModel(),
+        [HumanMessage(content="do not persist this")],
+        model_name="google/gemini-3-flash-preview",
+    )
+
+    assert not runtime._llm_call_trace_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_redacts_inline_media_from_llm_call_trace(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+    image_data_url = "data:image/jpeg;base64,/9j/QUJDREVGRw=="
+    audio_b64 = "QUJDREVGRw=="
+
+    await runtime.ainvoke_model(
+        _TraceModel(),
+        [
+            HumanMessage(
+                content=[
+                    {"type": "text", "text": "Analyze this upload."},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "mp3"}},
+                ]
+            )
+        ],
+        model_name="google/gemini-3-flash-preview",
+        call_context={"call_site": "file_analysis"},
+    )
+
+    record = json.loads(runtime._llm_call_trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    prompt_message = record["prompt_messages"][0]
+    prompt_content = prompt_message["content"]
+    serialized_record = json.dumps(record, ensure_ascii=False)
+
+    assert prompt_content[1]["image_url"]["url"] == "data:image/jpeg;base64,[redacted]"
+    assert prompt_content[2]["input_audio"]["data"] == "[redacted]"
+    assert image_data_url not in serialized_record
+    assert audio_b64 not in serialized_record
+    assert image_data_url not in prompt_message["text"]
+    assert audio_b64 not in prompt_message["text"]
+
+
 def test_llm_call_trace_keeps_latest_100_records(tmp_path: Path) -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
