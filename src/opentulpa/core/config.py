@@ -265,6 +265,21 @@ class Settings(BaseSettings):
         default=None,
         description="Optional default callback URL used when starting Composio auth flows.",
     )
+    posthog_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional PostHog project API key for LangGraph/LLM analytics. "
+            "PostHog instrumentation stays disabled unless both POSTHOG_API_KEY and POSTHOG_HOST are set."
+        ),
+    )
+    posthog_host: str | None = Field(
+        default=None,
+        description=(
+            "Optional PostHog host URL for LangGraph/LLM analytics "
+            "(for example https://us.i.posthog.com). "
+            "PostHog instrumentation stays disabled unless both POSTHOG_API_KEY and POSTHOG_HOST are set."
+        ),
+    )
     agent_prompt_caching_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(

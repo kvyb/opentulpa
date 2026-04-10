@@ -104,6 +104,7 @@ from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.ids import new_short_id
 from opentulpa.memory.service import MEMORY_KIND_PRIORITY
+from opentulpa.logging import create_posthog_logger
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,8 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
     cached_tokens = _maybe_int(prompt_details.get("cached_tokens"))
     cache_write_tokens = _maybe_int(prompt_details.get("cache_write_tokens"))
     reasoning_tokens = _maybe_int(completion_details.get("reasoning_tokens"))
+    cost = usage.get("cost")
+    cost_details = _usage_object_to_dict(usage.get("cost_details"))
 
     fields: dict[str, Any] = {}
     if prompt_tokens is not None:
@@ -457,6 +460,17 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
         fields["native_tokens_cache_write"] = cache_write_tokens
     if reasoning_tokens is not None:
         fields["native_tokens_reasoning"] = reasoning_tokens
+    with suppress(Exception):
+        if cost not in (None, ""):
+            fields["native_cost_usd"] = float(cost)
+    if cost_details:
+        fields["native_cost_details"] = cost_details
+        with suppress(Exception):
+            if cost_details.get("prompt") not in (None, ""):
+                fields["native_cost_prompt_usd"] = float(cost_details.get("prompt"))
+        with suppress(Exception):
+            if cost_details.get("completion") not in (None, ""):
+                fields["native_cost_completion_usd"] = float(cost_details.get("completion"))
     return fields
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
@@ -938,6 +952,8 @@ class OpenTulpaLangGraphRuntime:
         browser_use_task_retention_seconds: int = 1800,
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
+        posthog_api_key: str | None = None,
+        posthog_host: str | None = None,
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
@@ -1006,6 +1022,10 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
+        self._posthog_logger = create_posthog_logger(
+            api_key=posthog_api_key,
+            host=posthog_host,
+        )
         self._context_engineer = ContextEngineer()
         self._browser_use_local_manager: Any | None = None
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -1206,13 +1226,14 @@ class OpenTulpaLangGraphRuntime:
             stable_prefix_count=stable_prefix_count,
         )
         invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
+        callback_target = self._model_with_callbacks(model, call_context=call_context)
         response: Any | None = None
         error_text: str | None = None
         try:
-            if _supports_ainvoke_kwargs(model, invoke_extras):
-                response = await model.ainvoke(prepared_messages, **invoke_extras)
+            if _supports_ainvoke_kwargs(callback_target, invoke_extras):
+                response = await callback_target.ainvoke(prepared_messages, **invoke_extras)
             else:
-                response = await model.ainvoke(prepared_messages)
+                response = await callback_target.ainvoke(prepared_messages)
             return response
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -2623,6 +2644,10 @@ class OpenTulpaLangGraphRuntime:
             with suppress(Exception):
                 await manager.shutdown()
         self._browser_use_local_manager = None
+        posthog_logger = getattr(self, "_posthog_logger", None)
+        if posthog_logger is not None and hasattr(posthog_logger, "shutdown"):
+            with suppress(Exception):
+                posthog_logger.shutdown()
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
         self._checkpointer_cm = None
@@ -2723,6 +2748,15 @@ class OpenTulpaLangGraphRuntime:
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
         }
+        callbacks = self._build_posthog_callbacks(
+            customer_id=customer_id,
+            trace_id=trace_id,
+            thread_id=thread_id,
+            turn_mode=turn_mode,
+            prompt_mode=prompt_mode,
+        )
+        if callbacks:
+            config["callbacks"] = callbacks
         graph_input = self._build_graph_input(
             user_text=user_text,
             customer_id=customer_id,
@@ -2738,6 +2772,62 @@ class OpenTulpaLangGraphRuntime:
             config=config,
             graph_input=graph_input,
         )
+
+    def _build_posthog_callbacks(
+        self,
+        *,
+        customer_id: str | None,
+        trace_id: str | None,
+        thread_id: str | None,
+        turn_mode: str | None,
+        prompt_mode: str | None,
+        call_site: str | None = None,
+        model_name: str | None = None,
+    ) -> list[Any]:
+        posthog_logger = getattr(self, "_posthog_logger", None)
+        if posthog_logger is None:
+            return []
+        properties: dict[str, Any] = {
+            "thread_id": str(thread_id or "").strip(),
+            "turn_mode": str(turn_mode or "").strip(),
+            "prompt_mode": str(prompt_mode or "").strip(),
+            "call_site": str(call_site or "").strip(),
+            "model_name": str(model_name or "").strip(),
+        }
+        return posthog_logger.build_callbacks(
+            distinct_id=str(customer_id or "").strip() or None,
+            trace_id=str(trace_id or "").strip() or None,
+            properties=properties,
+        )
+
+    def _model_with_callbacks(self, model: Any, *, call_context: dict[str, Any] | None = None) -> Any:
+        if model is None:
+            return model
+        context = dict(call_context or {})
+        callbacks = self._build_posthog_callbacks(
+            customer_id=str(
+                context.get("customer_id")
+                or self.get_active_customer_id()
+                or ""
+            ).strip()
+            or None,
+            trace_id=str(context.get("trace_id") or "").strip() or None,
+            thread_id=str(context.get("thread_id") or "").strip() or None,
+            turn_mode=str(context.get("turn_mode") or "").strip() or None,
+            prompt_mode=str(context.get("prompt_mode") or "").strip() or None,
+            call_site=str(context.get("call_site") or "").strip() or "runtime_model_invoke",
+            model_name=self._resolve_model_name_for_runtime_call(model, explicit_name=context.get("model_name")),
+        )
+        if not callbacks:
+            return model
+        with_config = getattr(model, "with_config", None)
+        if not callable(with_config):
+            return model
+        try:
+            return with_config({"callbacks": callbacks})
+        except Exception:
+            logger.exception("Failed to attach PostHog callbacks to model invocation.")
+            return model
 
     async def ainvoke_text(
         self,

@@ -138,6 +138,11 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
   - enabled by default (`AGENT_BEHAVIOR_LOG_ENABLED=true`)
   - path default `.opentulpa/logs/agent_behavior.jsonl`
 - Includes turn lifecycle, graph node outcomes, guardrail decisions, claim-check retries, and tool execution outcomes.
+- Optional PostHog LLM analytics:
+  - configured via root `.env` using `POSTHOG_API_KEY` and `POSTHOG_HOST`
+  - inactive unless both values are set
+  - mounted from `src/opentulpa/logging/posthog.py`
+  - attached through LangGraph/LangChain callbacks for graph turns and runtime-owned direct model calls
 
 ## Separation of concerns
 

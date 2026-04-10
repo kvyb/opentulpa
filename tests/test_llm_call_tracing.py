@@ -20,6 +20,11 @@ class _TraceResponse:
             "prompt_tokens": 1234,
             "completion_tokens": 56,
             "total_tokens": 1290,
+            "cost": 0.023471989,
+            "cost_details": {
+                "prompt": 0.017,
+                "completion": 0.006471989,
+            },
         }
 
 
@@ -82,6 +87,9 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     assert record["prompt_sections"] == ["stable_core_policy", "style_card"]
     assert record["native_tokens_prompt"] == 1234
     assert record["native_tokens_completion"] == 56
+    assert record["native_cost_usd"] == 0.023471989
+    assert record["native_cost_prompt_usd"] == 0.017
+    assert record["native_cost_completion_usd"] == 0.006471989
     assert record["response_text"] == "All good."
     assert record["response_tool_calls"][0]["name"] == "memory_search"
     assert len(record["prompt_messages"]) == 2

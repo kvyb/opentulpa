@@ -301,6 +301,8 @@ def main() -> None:
             browser_use_task_retention_seconds=settings.browser_use_task_retention_seconds,
             prompt_caching_enabled=settings.agent_prompt_caching_enabled,
             prompt_cache_ttl_1h=settings.agent_prompt_cache_ttl_1h,
+            posthog_api_key=settings.posthog_api_key,
+            posthog_host=settings.posthog_host,
         )
     else:
         print(
