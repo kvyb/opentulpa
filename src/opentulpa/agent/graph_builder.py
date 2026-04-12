@@ -600,6 +600,18 @@ def build_runtime_graph(runtime: Any):
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
         prompt_mode = str(state.get("prompt_mode", "task_chat")).strip().lower() or "task_chat"
         messages = state.get("messages", [])
+        injected_messages: list[HumanMessage] = []
+        if turn_mode == "interactive":
+            drain_fragments = getattr(runtime, "drain_interactive_fragments", None)
+            if callable(drain_fragments):
+                drained = await drain_fragments(thread_id=thread_id)
+                injected_messages = [
+                    HumanMessage(content=str(fragment).strip())
+                    for fragment in drained
+                    if str(fragment).strip()
+                ]
+                if injected_messages:
+                    messages = [*messages, *injected_messages]
         latest_user = _latest_user_text(messages)
         _log(
             state,
@@ -607,6 +619,7 @@ def build_runtime_graph(runtime: Any):
             message_count=len(messages),
             latest_user_chars=len(latest_user),
             turn_mode=turn_mode,
+            injected_user_messages=len(injected_messages),
         )
         cached_query = str(state.get("active_skill_query", "")).strip()
         cached_names = state.get("active_skill_names", []) or []
@@ -1066,7 +1079,7 @@ def build_runtime_graph(runtime: Any):
             turn_mode=turn_mode,
             **usage_fields,
         )
-        update: dict[str, Any] = {"messages": [response], "turn_status": "running"}
+        update: dict[str, Any] = {"messages": [*injected_messages, response], "turn_status": "running"}
         if skill_query:
             update["active_skill_query"] = skill_query
             update["active_skill_names"] = skill_names

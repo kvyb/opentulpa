@@ -22,6 +22,11 @@ from opentulpa.interfaces.telegram.env_management import (
     missing_key_prompt,
     status_text,
 )
+from opentulpa.interfaces.telegram.interactive_inbox import (
+    InteractiveSession,
+    InteractiveSubmissionResult,
+    TelegramInteractiveInbox,
+)
 from opentulpa.interfaces.telegram.models import TelegramContext
 from opentulpa.interfaces.telegram.relay import (
     _emit_typing_until_done,
@@ -222,6 +227,247 @@ async def relay_event_via_main_agent(
     )
 
 
+async def _ingest_attachments_with_typing(
+    *,
+    attachments: list[Any],
+    bot_token: str,
+    file_vault: FileVaultService | None,
+    memory: Any | None,
+    agent_runtime: Any | None,
+    customer_id: str,
+    chat_id: int,
+    caption: str | None,
+) -> list[dict[str, Any]]:
+    if not attachments or not bot_token or file_vault is None:
+        return []
+    typing_stop = asyncio.Event()
+    typing_client = TelegramClient(str(bot_token))
+    typing_task = asyncio.create_task(
+        _emit_typing_until_done(
+            client=typing_client,
+            chat_id=chat_id,
+            stop_event=typing_stop,
+        )
+    )
+    try:
+        return await ingest_attachments(
+            attachments=attachments,
+            bot_token=bot_token,
+            file_vault=file_vault,
+            memory=memory,
+            agent_runtime=agent_runtime,
+            customer_id=customer_id,
+            chat_id=chat_id,
+            caption=caption,
+        )
+    finally:
+        typing_stop.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
+        if hasattr(typing_client, "aclose"):
+            try:
+                await typing_client.aclose()
+            except Exception:
+                pass
+
+
+def _build_effective_telegram_text(
+    *,
+    user_text: str,
+    attachments: list[Any],
+    ingested_files: list[dict[str, Any]],
+) -> tuple[str, str | None]:
+    voice_transcripts = [
+        str(item.get("voice_transcript", "")).strip()
+        for item in ingested_files
+        if str(item.get("kind", "")).strip() == "voice"
+    ]
+    non_voice_files = [
+        item for item in ingested_files if str(item.get("kind", "")).strip() != "voice"
+    ]
+    context_blob = build_uploaded_files_context(non_voice_files)
+    effective_text = _inject_voice_message_context(user_text, voice_transcripts)
+    if context_blob:
+        if effective_text:
+            effective_text = f"{effective_text}\n\n{context_blob}"
+        else:
+            effective_text = (
+                "User uploaded one or more files without extra text.\n"
+                "Summarize what is available and ask a focused follow-up question.\n\n"
+                f"{context_blob}"
+            )
+    if effective_text:
+        return effective_text, None
+    has_voice = any(str(getattr(item, "kind", "")).strip() == "voice" for item in attachments)
+    if has_voice:
+        return "", (
+            "I received your voice message but couldn't transcribe it. "
+            "Please resend a shorter/clearer voice note or send text."
+        )
+    return "", None
+
+
+async def _send_direct_telegram_reply(
+    *,
+    bot_token: str,
+    chat_id: int,
+    text: str,
+) -> bool:
+    client = TelegramClient(str(bot_token))
+    try:
+        return await client.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+    finally:
+        if hasattr(client, "aclose"):
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+
+async def _materialize_interactive_submission(
+    *,
+    session: InteractiveSession,
+    submission: Any,
+    text: str,
+    caption: str | None,
+    attachments: list[Any],
+    bot_token: str,
+    file_vault: FileVaultService | None,
+    memory: Any | None,
+    agent_runtime: Any | None,
+    customer_id: str,
+    chat_id: int,
+) -> None:
+    fragment = ""
+    direct_reply = None
+    try:
+        ingested_files = await _ingest_attachments_with_typing(
+            attachments=attachments,
+            bot_token=bot_token,
+            file_vault=file_vault,
+            memory=memory,
+            agent_runtime=agent_runtime,
+            customer_id=customer_id,
+            chat_id=chat_id,
+            caption=caption,
+        )
+        fragment, direct_reply = _build_effective_telegram_text(
+            user_text=text,
+            attachments=attachments,
+            ingested_files=ingested_files,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Telegram interactive materialization failed (chat_id=%s, thread_id=%s): %s",
+            chat_id,
+            session.thread_id,
+            exc,
+        )
+        direct_reply = _format_agent_error_for_user(exc)
+    await session.publish(
+        submission,
+        fragment=fragment,
+        direct_reply=direct_reply,
+    )
+
+
+async def _run_interactive_session(
+    *,
+    session: InteractiveSession,
+    bot_token: str,
+    agent_runtime: Any,
+) -> None:
+    while True:
+        ready = await session.wait_for_ready_head()
+        if not ready:
+            if await session.finish_runner_if_idle():
+                return
+            continue
+        ready_items = await session.consume_ready_batch()
+        fragments = [
+            str(item.fragment).strip()
+            for item in ready_items
+            if isinstance(item, InteractiveSubmissionResult) and str(item.fragment or "").strip()
+        ]
+        direct_replies = [
+            str(item.direct_reply).strip()
+            for item in ready_items
+            if isinstance(item, InteractiveSubmissionResult) and str(item.direct_reply or "").strip()
+        ]
+        for reply_text in direct_replies:
+            sent = await _send_direct_telegram_reply(
+                bot_token=bot_token,
+                chat_id=session.chat_id,
+                text=reply_text,
+            )
+            if sent:
+                STATE_STORE.touch_assistant_message(session.chat_id)
+        if not fragments:
+            if await session.finish_runner_if_idle():
+                return
+            continue
+        effective_text = "\n\n".join(fragments).strip()
+        if not effective_text:
+            if await session.finish_runner_if_idle():
+                return
+            continue
+        try:
+            if hasattr(agent_runtime, "register_interactive_session"):
+                await agent_runtime.register_interactive_session(
+                    thread_id=session.thread_id,
+                    session=session,
+                )
+            final, suppressed = await stream_langgraph_reply_to_telegram(
+                agent_runtime=agent_runtime,
+                thread_id=session.thread_id,
+                customer_id=session.customer_id,
+                text=effective_text,
+                bot_token=bot_token,
+                chat_id=session.chat_id,
+                interactive_session=session,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Telegram interactive runner failed (chat_id=%s, thread_id=%s): %s",
+                session.chat_id,
+                session.thread_id,
+                exc,
+            )
+            await _send_direct_telegram_reply(
+                bot_token=bot_token,
+                chat_id=session.chat_id,
+                text=_format_agent_error_for_user(exc),
+            )
+            final = None
+            suppressed = False
+        finally:
+            if hasattr(agent_runtime, "clear_interactive_session"):
+                await agent_runtime.clear_interactive_session(
+                    thread_id=session.thread_id,
+                    session=session,
+                )
+        if final and not suppressed:
+            STATE_STORE.touch_assistant_message(session.chat_id)
+        elif not suppressed:
+            debug_log(
+                hypothesis_id="H4",
+                location="interfaces/telegram/chat_service.py:_run_interactive_session",
+                message="fallback_no_final_reply",
+                data={"chat_id": session.chat_id, "thread_id": session.thread_id},
+            )
+            sent = await _send_direct_telegram_reply(
+                bot_token=bot_token,
+                chat_id=session.chat_id,
+                text="I received your message but no final reply was available yet. Ask again or use /status.",
+            )
+            if sent:
+                STATE_STORE.touch_assistant_message(session.chat_id)
+        if await session.finish_runner_if_idle():
+            return
+
+
 async def handle_telegram_text(
     *,
     body: dict[str, Any],
@@ -231,6 +477,7 @@ async def handle_telegram_text(
     agent_runtime: Any | None = None,
     file_vault: FileVaultService | None = None,
     memory: Any | None = None,
+    interactive_inbox: TelegramInteractiveInbox | None = None,
 ) -> str | None:
     parsed = parse_telegram_update(body)
     if not parsed:
@@ -283,6 +530,8 @@ async def handle_telegram_text(
                 user_id=ctx.user_id,
             )
         )
+        if interactive_inbox is not None:
+            await interactive_inbox.reset_chat(ctx.chat_id)
         return (
             "Started a fresh chat context. "
             f"New thread: {thread_id}. "
@@ -320,19 +569,20 @@ async def handle_telegram_text(
 
     thread_id, customer_id = STATE_STORE.update(_upsert_session)
 
-    ingested_files: list[dict[str, Any]] = []
-    if attachments and bot_token and file_vault is not None:
-        typing_stop = asyncio.Event()
-        typing_client = TelegramClient(str(bot_token))
-        typing_task = asyncio.create_task(
-            _emit_typing_until_done(
-                client=typing_client,
-                chat_id=ctx.chat_id,
-                stop_event=typing_stop,
-            )
+    if interactive_inbox is not None and bot_token:
+        if attachments and file_vault is None:
+            return "I received your file, but file storage is not configured."
+        session, submission, became_runner = await interactive_inbox.submit(
+            chat_id=ctx.chat_id,
+            customer_id=customer_id,
+            thread_id=thread_id,
         )
-        try:
-            ingested_files = await ingest_attachments(
+        asyncio.create_task(
+            _materialize_interactive_submission(
+                session=session,
+                submission=submission,
+                text=ctx.text,
+                caption=caption,
                 attachments=attachments,
                 bot_token=bot_token,
                 file_vault=file_vault,
@@ -340,19 +590,30 @@ async def handle_telegram_text(
                 agent_runtime=agent_runtime,
                 customer_id=customer_id,
                 chat_id=ctx.chat_id,
-                caption=caption,
+            )
+        )
+        if not became_runner:
+            return None
+        try:
+            await _run_interactive_session(
+                session=session,
+                bot_token=bot_token,
+                agent_runtime=agent_runtime,
             )
         finally:
-            typing_stop.set()
-            try:
-                await typing_task
-            except Exception:
-                pass
-            if hasattr(typing_client, "aclose"):
-                try:
-                    await typing_client.aclose()
-                except Exception:
-                    pass
+            await interactive_inbox.prune_if_idle(session)
+        return None
+
+    ingested_files = await _ingest_attachments_with_typing(
+        attachments=attachments,
+        bot_token=str(bot_token or ""),
+        file_vault=file_vault,
+        memory=memory,
+        agent_runtime=agent_runtime,
+        customer_id=customer_id,
+        chat_id=ctx.chat_id,
+        caption=caption,
+    )
 
     if attachments and not ctx.text and not ingested_files:
         if agent_runtime is None:
@@ -360,34 +621,14 @@ async def handle_telegram_text(
         if file_vault is None:
             return "I received your file, but file storage is not configured."
 
-    voice_transcripts = [
-        str(item.get("voice_transcript", "")).strip()
-        for item in ingested_files
-        if str(item.get("kind", "")).strip() == "voice"
-    ]
-    non_voice_files = [
-        item for item in ingested_files if str(item.get("kind", "")).strip() != "voice"
-    ]
-
-    context_blob = build_uploaded_files_context(non_voice_files)
-    effective_text = _inject_voice_message_context(ctx.text, voice_transcripts)
-    if context_blob:
-        if effective_text:
-            effective_text = f"{effective_text}\n\n{context_blob}"
-        else:
-            effective_text = (
-                "User uploaded one or more files without extra text.\n"
-                "Summarize what is available and ask a focused follow-up question.\n\n"
-                f"{context_blob}"
-            )
-
+    effective_text, direct_reply = _build_effective_telegram_text(
+        user_text=ctx.text,
+        attachments=attachments,
+        ingested_files=ingested_files,
+    )
+    if direct_reply:
+        return direct_reply
     if not effective_text:
-        has_voice = any(str(getattr(item, "kind", "")).strip() == "voice" for item in attachments)
-        if has_voice:
-            return (
-                "I received your voice message but couldn't transcribe it. "
-                "Please resend a shorter/clearer voice note or send text."
-            )
         return None
 
     if bot_token:
@@ -452,6 +693,7 @@ class TelegramChatService:
         self.bot_token = str(bot_token or "").strip()
         self.file_vault = file_vault
         self.memory = memory
+        self._interactive_inbox = TelegramInteractiveInbox()
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
         return find_session_slots_for_customer_id(customer_id)
@@ -510,4 +752,5 @@ class TelegramChatService:
             agent_runtime=agent_runtime,
             file_vault=self.file_vault,
             memory=self.memory,
+            interactive_inbox=self._interactive_inbox,
         )

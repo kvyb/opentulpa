@@ -88,6 +88,11 @@ class _PartialThenApprovalRuntime:
         yield "This should never be visible."
 
 
+class _AlwaysPendingInteractiveSession:
+    async def has_pending_items(self) -> bool:
+        return True
+
+
 class _FakeTelegramClient:
     def __init__(self, bot_token: str, *, draft_ok: bool = True) -> None:
         self.bot_token = bot_token
@@ -362,6 +367,29 @@ async def test_approval_handoff_stops_draft_streaming_without_final_send(
         text="check",
         bot_token="dummy",
         chat_id=1,
+    )
+
+    assert suppressed is True
+    assert final is None
+    assert fake_client.draft_calls == []
+    assert fake_client.message_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_pending_items_suppress_final_visible_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_ResultThenWaitRuntime(),
+        thread_id="chat-interactive-pending",
+        customer_id="telegram_interactive_pending",
+        text="finish",
+        bot_token="dummy",
+        chat_id=1,
+        interactive_session=_AlwaysPendingInteractiveSession(),
     )
 
     assert suppressed is True

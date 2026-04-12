@@ -94,6 +94,7 @@ async def stream_langgraph_reply_to_telegram(
     text: str,
     bot_token: str,
     chat_id: int,
+    interactive_session: Any | None = None,
 ) -> tuple[str | None, bool]:
     last_streamed = ""
     final_reply = None
@@ -125,6 +126,20 @@ async def stream_langgraph_reply_to_telegram(
         len(str(text or "")),
     )
 
+    async def _session_has_pending_items() -> bool:
+        if interactive_session is None or not hasattr(interactive_session, "has_pending_items"):
+            return False
+        try:
+            return bool(await interactive_session.has_pending_items())
+        except Exception:
+            logger.exception(
+                "telegram.stream pending_items_check_failed chat_id=%s thread_id=%s customer_id=%s",
+                chat_id,
+                thread_id,
+                customer_id,
+            )
+            return False
+
     async def _recover_after_stream_timeout() -> str | None:
         if not hasattr(agent_runtime, "ainvoke_text"):
             return None
@@ -149,6 +164,8 @@ async def stream_langgraph_reply_to_telegram(
         nonlocal delivered_any, draft_enabled, final_reply, live_delivery_text, live_delivery_at
         current = str(text or "").strip()
         if not current:
+            return
+        if await _session_has_pending_items():
             return
         final_reply = current
         if current == live_delivery_text and not force:
@@ -330,6 +347,15 @@ async def stream_langgraph_reply_to_telegram(
             "I couldn't produce a visible user-facing reply for that step "
             "(the model/tool loop ended without displayable output)."
         )
+    if not suppressed and await _session_has_pending_items():
+        logger.info(
+            "telegram.stream suppressed_by_interactive_pending chat_id=%s thread_id=%s customer_id=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+        )
+        suppressed = True
+        final_reply = None
     if not suppressed and final_reply:
         if draft_enabled and final_reply != live_delivery_text:
             await _send_draft_reply(final_reply, force=True)

@@ -1028,6 +1028,8 @@ class OpenTulpaLangGraphRuntime:
         )
         self._context_engineer = ContextEngineer()
         self._browser_use_local_manager: Any | None = None
+        self._interactive_sessions_lock = asyncio.Lock()
+        self._interactive_sessions: dict[str, Any] = {}
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_customer_id",
             default="",
@@ -2845,10 +2847,17 @@ class OpenTulpaLangGraphRuntime:
         assert self._graph is not None
         normalized_turn_mode = _normalize_turn_mode(turn_mode)
         turn_trace_id = new_short_id("turn")
-        turn_state, effective_text = await self._thread_inputs.begin_turn(
-            thread_id=thread_id, text=text
-        )
-        if turn_state is None:
+        interactive_session = await self._get_registered_interactive_session(thread_id=thread_id)
+        if normalized_turn_mode == "interactive" and interactive_session is not None:
+            turn_state = None
+            effective_text = str(text or "")
+        else:
+            turn_state, effective_text = await self._thread_inputs.begin_turn(
+                thread_id=thread_id, text=text
+            )
+        if turn_state is None and not (
+            normalized_turn_mode == "interactive" and interactive_session is not None
+        ):
             self.log_behavior_event(
                 event="turn_merged",
                 trace_id=turn_trace_id,
@@ -2858,15 +2867,16 @@ class OpenTulpaLangGraphRuntime:
             )
             return ""
         try:
-            self.log_behavior_event(
-                event="turn_start",
-                trace_id=turn_trace_id,
-                mode="ainvoke",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                input_chars=len(str(effective_text or "")),
-                turn_mode=normalized_turn_mode,
-            )
+            if turn_state is not None or not (normalized_turn_mode == "interactive" and interactive_session is not None):
+                self.log_behavior_event(
+                    event="turn_start",
+                    trace_id=turn_trace_id,
+                    mode="ainvoke",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    input_chars=len(str(effective_text or "")),
+                    turn_mode=normalized_turn_mode,
+                )
             prepared = await self._prepare_turn_context(
                 thread_id=thread_id,
                 customer_id=customer_id,
@@ -3030,10 +3040,21 @@ class OpenTulpaLangGraphRuntime:
         assert self._graph is not None
         normalized_turn_mode = _normalize_turn_mode(turn_mode)
         turn_trace_id = new_short_id("turn")
-        turn_state, effective_text = await self._thread_inputs.begin_turn(
-            thread_id=thread_id, text=text
-        )
-        if turn_state is None:
+        interactive_session = await self._get_registered_interactive_session(thread_id=thread_id)
+        if normalized_turn_mode == "interactive" and interactive_session is not None:
+            turn_state = None
+            effective_text = str(text or "")
+        else:
+            turn_state, effective_text = await self._thread_inputs.begin_turn(
+                thread_id=thread_id, text=text
+            )
+        if turn_state is None and normalized_turn_mode == "interactive" and interactive_session is not None:
+            logger.info(
+                "runtime.astream_text interactive_session_bypass thread_id=%s customer_id=%s",
+                thread_id,
+                customer_id,
+            )
+        elif turn_state is None:
             logger.info(
                 "runtime.astream_text merged_input thread_id=%s customer_id=%s",
                 thread_id,
@@ -3566,6 +3587,55 @@ class OpenTulpaLangGraphRuntime:
             raise
         finally:
             self._thread_inputs.end_turn(turn_state)
+
+    async def _get_registered_interactive_session(self, *, thread_id: str) -> Any | None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id:
+            return None
+        lock = getattr(self, "_interactive_sessions_lock", None)
+        sessions = getattr(self, "_interactive_sessions", None)
+        if lock is None or sessions is None:
+            return None
+        async with lock:
+            return sessions.get(safe_thread_id)
+
+    async def register_interactive_session(self, *, thread_id: str, session: Any) -> None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id:
+            return
+        if getattr(self, "_interactive_sessions_lock", None) is None:
+            self._interactive_sessions_lock = asyncio.Lock()
+        if getattr(self, "_interactive_sessions", None) is None:
+            self._interactive_sessions = {}
+        async with self._interactive_sessions_lock:
+            self._interactive_sessions[safe_thread_id] = session
+
+    async def clear_interactive_session(self, *, thread_id: str, session: Any | None = None) -> None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id:
+            return
+        lock = getattr(self, "_interactive_sessions_lock", None)
+        sessions = getattr(self, "_interactive_sessions", None)
+        if lock is None or sessions is None:
+            return
+        async with lock:
+            current = sessions.get(safe_thread_id)
+            if session is None or current is session:
+                sessions.pop(safe_thread_id, None)
+
+    async def drain_interactive_fragments(self, *, thread_id: str) -> list[str]:
+        session = await self._get_registered_interactive_session(thread_id=thread_id)
+        if session is None or not hasattr(session, "drain_graph_fragments"):
+            return []
+        try:
+            drained = await session.drain_graph_fragments()
+        except Exception:
+            logger.exception(
+                "Failed to drain interactive fragments for thread_id=%s",
+                thread_id,
+            )
+            return []
+        return [str(item).strip() for item in drained if str(item).strip()]
 
     async def classify_wake_event(
         self,
