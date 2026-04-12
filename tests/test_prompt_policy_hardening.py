@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from opentulpa.agent.graph_builder import (
     _build_relevant_skill_discovery_context,
-    _build_skill_glossary_context,
     _build_tool_validation_repair_message,
     _enforce_tool_message_protocol,
     _extract_invoked_skill_snapshot,
@@ -17,11 +16,8 @@ from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
 )
 from opentulpa.agent.prompt_sections import (
-    build_core_policy_message,
     build_prompt_mode_message,
-    build_style_card_message,
 )
-from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message,
     execution_origin_for_turn_mode,
@@ -50,18 +46,6 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "answer that status question directly" in text
     assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text
     assert "restate the needed facts in the reply" in text
-
-
-def test_build_skill_glossary_context_is_high_level_and_points_to_skill_get() -> None:
-    text = _build_skill_glossary_context(
-        [
-            {"name": "routine-schedule-composer", "description": "Compose robust routine instructions", "scope": "global"},
-            {"name": "browser-ops", "description": "Use browser steps for dynamic websites", "scope": "user"},
-        ]
-    )
-    assert "Skill glossary (high-level, non-prioritized):" in text
-    assert "Call skill_get(name) to fetch full skill instructions before execution." in text
-    assert "- routine-schedule-composer (global): Compose robust routine instructions" in text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
@@ -112,12 +96,6 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert execution_origin_for_turn_mode("approval_recovery") == "scheduled"
     assert execution_origin_for_turn_mode("interactive", thread_id="wake_legacy") == "scheduled"
     assert execution_origin_for_turn_mode("event_notification", thread_id="wake_legacy") == "interactive"
-
-
-def test_core_policy_message_includes_skill_grounding_rule() -> None:
-    text = str(build_core_policy_message().content)
-    assert "Treat discovered skills as high-level hints" in text
-    assert "call skill_get(name)" in text
 
 
 def test_literal_chat_prompt_mode_discourages_random_follow_up_questions() -> None:
@@ -464,28 +442,6 @@ def test_prompt_mode_classifier_prefers_execution_for_action_request() -> None:
         classify_prompt_mode("search the web and check the latest pricing", turn_mode="interactive")
         == "execution"
     )
-
-
-def test_style_sanitizer_removes_domain_content_and_keeps_tone_only() -> None:
-    runtime = object.__new__(OpenTulpaLangGraphRuntime)
-    text = runtime._sanitize_style_text(
-        "Maintain a friendly, supportive, and proactive tone. "
-        "Balance technical expertise with personal context by mentioning his work at ManyChat "
-        "or his interests in Bali. Avoid being overly formal. No emojis unless specifically requested."
-    )
-    assert "ManyChat" not in text
-    assert "Bali" not in text
-    assert "warm" in text or "friendly" in text
-    assert "avoid emojis" in text
-
-
-def test_style_card_message_is_explicitly_low_salience() -> None:
-    message = build_style_card_message("Style preferences:\n- be concise\n- keep a warm, direct tone")
-    assert message is not None
-    text = str(message.content or "")
-    assert "tone only" in text.lower()
-    assert "Do not use it to introduce project, company, or domain content." in text
-
 
 def test_prompt_mode_message_blocks_hidden_context_for_literal_chat() -> None:
     text = str(build_prompt_mode_message("literal_chat").content or "")

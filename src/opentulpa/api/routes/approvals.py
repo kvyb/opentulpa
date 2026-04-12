@@ -149,14 +149,7 @@ def register_approval_routes(
                     customer_id=cid,
                     inject_customer_id=True,
                 )
-            # Backward-compatible fallback for lightweight runtimes in tests.
-            tools = getattr(agent_runtime, "_tools", {})
-            if not isinstance(tools, dict):
-                raise RuntimeError("agent runtime does not expose executable tools")
-            tool = tools.get(str(action_name or "").strip())
-            if tool is None or not hasattr(tool, "ainvoke"):
-                raise RuntimeError(f"unknown tool: {action_name}")
-            return await tool.ainvoke(safe_args)
+            raise RuntimeError("agent runtime does not expose execute_tool")
 
         try:
             result = await broker.execute_approved_action(

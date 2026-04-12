@@ -27,16 +27,6 @@ def register_profile_routes(
             "directive": profiles.get_directive(customer_id),
         }
 
-    @app.post("/internal/style_directive/get")
-    async def internal_style_directive_get(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        return {
-            "customer_id": customer_id,
-            "style_directive": profiles.get_style_directive(customer_id),
-        }
-
     @app.post("/internal/directive/set")
     async def internal_directive_set(request: Request) -> Any:
         profiles = get_profiles()
@@ -75,40 +65,6 @@ def register_profile_routes(
                     metadata={"kind": "directive_fact", "source": "agent"},
                 )
 
-        return {"ok": True, "customer_id": customer_id, "cleared": cleared}
-
-    @app.post("/internal/style_directive/set")
-    async def internal_style_directive_set(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        directive = str(body.get("style_directive", "")).strip()
-        source = str(body.get("source", "agent") or "agent")
-        profiles.set_style_directive(customer_id, directive, source=source)
-        memory = get_memory()
-        if memory is not None and directive:
-            with suppress(Exception):
-                memory.add_text(
-                    f"Style preference for this user: {directive}",
-                    user_id=customer_id,
-                    metadata={"kind": "style_fact", "source": source},
-                )
-        return {"ok": True, "customer_id": customer_id}
-
-    @app.post("/internal/style_directive/clear")
-    async def internal_style_directive_clear(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        cleared = profiles.clear_style_directive(customer_id, source="agent")
-        memory = get_memory()
-        if memory is not None:
-            with suppress(Exception):
-                memory.add_text(
-                    "Style preference for this user was cleared. No previous style directive applies.",
-                    user_id=customer_id,
-                    metadata={"kind": "style_fact", "source": "agent"},
-                )
         return {"ok": True, "customer_id": customer_id, "cleared": cleared}
 
     @app.post("/internal/time_profile/get")

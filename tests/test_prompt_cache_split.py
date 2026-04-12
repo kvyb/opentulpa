@@ -6,18 +6,12 @@ import pytest
 
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.prompt_policy import build_system_prompt_message
-from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY, build_core_policy_message
+from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 
 
 def test_prompt_dynamic_boundary_marker_is_single_line_prefix() -> None:
     assert PROMPT_DYNAMIC_BOUNDARY.startswith("[OPENTULPA_PROMPT_DYNAMIC_BOUNDARY]")
-
-
-def test_stable_core_policy_is_only_core_message() -> None:
-    text = str(build_core_policy_message().content)
-    assert "You are OpenTulpa." in text
-    assert PROMPT_DYNAMIC_BOUNDARY not in text
 
 
 def test_full_runtime_policy_retains_hardened_rules() -> None:

@@ -1,18 +1,23 @@
-"""Integrations: Composio, web-search, and external service connectors."""
+"""Integrations: Browser Use, Composio, web-search, and external service connectors."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__all__ = ["ComposioService"]
+__all__ = ["BrowserUseLocalManager", "ComposioService"]
 
 if TYPE_CHECKING:
+    from opentulpa.integrations.browser_use_local import BrowserUseLocalManager
     from opentulpa.integrations.composio import ComposioService
 
 
 def __getattr__(name: str) -> Any:
-    if name != "ComposioService":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from opentulpa.integrations.composio import ComposioService
+    if name == "BrowserUseLocalManager":
+        from opentulpa.integrations.browser_use_local import BrowserUseLocalManager
 
-    return ComposioService
+        return BrowserUseLocalManager
+    if name == "ComposioService":
+        from opentulpa.integrations.composio import ComposioService
+
+        return ComposioService
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

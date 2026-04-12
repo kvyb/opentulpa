@@ -306,7 +306,7 @@ class Settings(BaseSettings):
 
     @property
     def openrouter_api_key(self) -> str | None:
-        """Backward-compatible alias for older code/tests."""
+        """Backward-compatible alias for older callers."""
         return self.openai_compatible_api_key
 
 @lru_cache

@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from opentulpa.api.routes.telegram_webhook import (
-    _execute_approved_action_and_summarize,
     _run_post_approval_execution_flow,
     _run_post_denial_iteration_flow,
 )
@@ -143,33 +142,6 @@ class _FakeApprovalExecutionOrchestrator:
     ) -> str:
         _ = (approval_ids, decision_payload, chat_id)
         return "Completed approved actions:\n\ndone"
-
-
-@pytest.mark.asyncio
-async def test_failed_approved_action_uses_autonomous_recovery_message() -> None:
-    runtime = _FakeRuntime()
-    context_events = _FakeContextEvents()
-    decision_payload = {
-        "customer_id": "telegram_42",
-        "thread_id": "chat-42",
-        "action_name": "tulpa_write_file",
-        "summary": "write gmail_setup.py",
-        "action_args": {"path": "tulpa_stuff/gmail_setup.py", "content": "print('x')"},
-    }
-
-    out = await _execute_approved_action_and_summarize(
-        get_agent_runtime=lambda: runtime,
-        get_context_events=lambda: context_events,
-        approval_id="apr_test",
-        decision_payload=decision_payload,
-        chat_id=42,
-    )
-
-    assert "auth link" in out.lower()
-    ainvoke_calls = [c for c in runtime.calls if c.get("kind") == "ainvoke"]
-    assert len(ainvoke_calls) == 1
-    assert ainvoke_calls[0].get("recursion_limit_override") == 48
-    assert ainvoke_calls[0].get("turn_mode") == "approval_recovery"
 
 
 @pytest.mark.asyncio

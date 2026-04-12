@@ -4,33 +4,27 @@ import asyncio
 
 import pytest
 
-from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime_input import ThreadInputCoordinator
 
 
-def _mk_runtime(*, debounce: float) -> OpenTulpaLangGraphRuntime:
-    return OpenTulpaLangGraphRuntime(
-        app_url="http://127.0.0.1:8000",
-        openrouter_api_key="test-key",
-        model_name="gpt-4o-mini",
-        checkpoint_db_path=".opentulpa/test-debounce.sqlite",
-        input_debounce_seconds=debounce,
-    )
+def _mk_coordinator(*, debounce: float) -> ThreadInputCoordinator:
+    return ThreadInputCoordinator(debounce_seconds=debounce)
 
 
 @pytest.mark.asyncio
 async def test_thread_input_coalesces_burst_before_turn_start() -> None:
-    runtime = _mk_runtime(debounce=0.12)
+    coordinator = _mk_coordinator(debounce=0.12)
     results: list[tuple[str, str, str]] = []
 
     async def _submit(text: str, delay: float) -> None:
         await asyncio.sleep(delay)
-        state, merged = await runtime._begin_thread_turn(thread_id="chat-1", text=text)
+        state, merged = await coordinator.begin_turn(thread_id="chat-1", text=text)
         if state is None:
             results.append(("suppressed", text, merged))
             return
         results.append(("active", text, merged))
         await asyncio.sleep(0.01)
-        state.turn_lock.release()
+        ThreadInputCoordinator.end_turn(state)
 
     await asyncio.gather(
         _submit("first", 0.0),
@@ -46,18 +40,18 @@ async def test_thread_input_coalesces_burst_before_turn_start() -> None:
 
 @pytest.mark.asyncio
 async def test_thread_input_enqueues_while_running_then_coalesces_next_turn() -> None:
-    runtime = _mk_runtime(debounce=0.06)
+    coordinator = _mk_coordinator(debounce=0.06)
     results: list[tuple[str, str, str]] = []
 
     async def _submit(text: str, delay: float, hold_seconds: float) -> None:
         await asyncio.sleep(delay)
-        state, merged = await runtime._begin_thread_turn(thread_id="chat-2", text=text)
+        state, merged = await coordinator.begin_turn(thread_id="chat-2", text=text)
         if state is None:
             results.append(("suppressed", text, merged))
             return
         results.append(("active", text, merged))
         await asyncio.sleep(hold_seconds)
-        state.turn_lock.release()
+        ThreadInputCoordinator.end_turn(state)
 
     await asyncio.gather(
         _submit("first", 0.0, 0.25),

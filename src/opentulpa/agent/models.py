@@ -30,7 +30,6 @@ class AgentState(TypedDict, total=False):
     turn_status: Literal["running", "approval_pending", "completed", "failed"]
     final_response_text: str
     pending_context_summary: str
-    style_card: str
     active_skill_query: str
     active_skill_names: list[str]
     active_available_skills: list[dict[str, Any]]

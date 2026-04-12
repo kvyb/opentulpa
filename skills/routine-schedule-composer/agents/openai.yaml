@@ -1,4 +1,0 @@
-interface:
-  display_name: "Routine Schedule Composer"
-  short_description: "Compose robust routine_create payloads"
-  default_prompt: "Use this skill to compose scheduled routine instructions and notification messages with clear separation."

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -55,11 +56,6 @@ def _clean_thread_id(value: Any) -> str:
 
 def find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]]:
     return STATE_STORE.find_session_slots(customer_id)
-
-
-def _find_session_slots_for_customer_id(customer_id: str) -> list[dict[str, Any]]:
-    """Backward-compatible alias."""
-    return find_session_slots_for_customer_id(customer_id)
 
 
 def get_session_slot_for_chat_id(chat_id: int) -> dict[str, Any] | None:
@@ -182,10 +178,8 @@ async def _send_debug_logs_file(*, chat_id: int, bot_token: str | None) -> str |
         )
     finally:
         if hasattr(client, "aclose"):
-            try:
+            with suppress(Exception):
                 await client.aclose()
-            except Exception:
-                pass
     if not sent:
         return "I couldn't send the debug log file right now."
     return None
@@ -262,15 +256,11 @@ async def _ingest_attachments_with_typing(
         )
     finally:
         typing_stop.set()
-        try:
+        with suppress(Exception):
             await typing_task
-        except Exception:
-            pass
         if hasattr(typing_client, "aclose"):
-            try:
+            with suppress(Exception):
                 await typing_client.aclose()
-            except Exception:
-                pass
 
 
 def _build_effective_telegram_text(
@@ -320,10 +310,8 @@ async def _send_direct_telegram_reply(
         return await client.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
     finally:
         if hasattr(client, "aclose"):
-            try:
+            with suppress(Exception):
                 await client.aclose()
-            except Exception:
-                pass
 
 
 async def _materialize_interactive_submission(
@@ -452,7 +440,7 @@ async def _run_interactive_session(
             STATE_STORE.touch_assistant_message(session.chat_id)
         elif not suppressed:
             debug_log(
-                hypothesis_id="H4",
+                hypothesis_id="telegram_chat",
                 location="interfaces/telegram/chat_service.py:_run_interactive_session",
                 message="fallback_no_final_reply",
                 data={"chat_id": session.chat_id, "thread_id": session.thread_id},
@@ -655,7 +643,7 @@ async def handle_telegram_text(
             STATE_STORE.touch_assistant_message(ctx.chat_id)
             return None
         debug_log(
-            hypothesis_id="H4",
+            hypothesis_id="telegram_chat",
             location="interfaces/telegram/chat_service.py:handle_telegram_text",
             message="fallback_no_final_reply",
             data={"chat_id": ctx.chat_id, "thread_id": thread_id},

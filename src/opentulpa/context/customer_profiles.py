@@ -27,7 +27,7 @@ def _normalize_utc_offset(value: str) -> str:
 
 
 class CustomerProfileService:
-    """Store stable per-customer metadata (directive, timezone, locale)."""
+    """Store stable per-customer metadata (directive, timezone, locale, lessons)."""
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path.resolve()
@@ -46,7 +46,6 @@ class CustomerProfileService:
                 CREATE TABLE IF NOT EXISTS customer_profiles (
                     customer_id TEXT PRIMARY KEY,
                     directive_text TEXT,
-                    style_directive_text TEXT,
                     utc_offset TEXT,
                     locale TEXT,
                     lessons_learnt TEXT,
@@ -56,7 +55,6 @@ class CustomerProfileService:
                 """
             )
             self._ensure_column(conn, "customer_profiles", "lessons_learnt", "TEXT")
-            self._ensure_column(conn, "customer_profiles", "style_directive_text", "TEXT")
 
     @staticmethod
     def _ensure_column(
@@ -81,7 +79,6 @@ class CustomerProfileService:
         customer_id: str,
         *,
         directive_text: str | None = None,
-        style_directive_text: str | None = None,
         utc_offset: str | None = None,
         locale: str | None = None,
         lessons_learnt: str | None = None,
@@ -93,27 +90,18 @@ class CustomerProfileService:
         with self._conn() as conn:
             existing = conn.execute(
                 """
-                SELECT directive_text, style_directive_text, utc_offset, locale
-                , lessons_learnt
+                SELECT directive_text, utc_offset, locale, lessons_learnt
                 FROM customer_profiles
                 WHERE customer_id=?
                 """,
                 (cid,),
             ).fetchone()
             cur_directive = str(existing["directive_text"]) if existing and existing["directive_text"] is not None else None
-            cur_style_directive = (
-                str(existing["style_directive_text"])
-                if existing and existing["style_directive_text"] is not None
-                else None
-            )
             cur_offset = str(existing["utc_offset"]) if existing and existing["utc_offset"] is not None else None
             cur_locale = str(existing["locale"]) if existing and existing["locale"] is not None else None
             cur_lessons = str(existing["lessons_learnt"]) if existing and existing["lessons_learnt"] is not None else None
 
             next_directive = cur_directive if directive_text is None else directive_text
-            next_style_directive = (
-                cur_style_directive if style_directive_text is None else style_directive_text
-            )
             next_offset = cur_offset if utc_offset is None else utc_offset
             next_locale = cur_locale if locale is None else locale
             next_lessons = cur_lessons if lessons_learnt is None else lessons_learnt
@@ -121,12 +109,11 @@ class CustomerProfileService:
             conn.execute(
                 """
                 INSERT INTO customer_profiles
-                    (customer_id, directive_text, style_directive_text, utc_offset, locale, lessons_learnt, source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (customer_id, directive_text, utc_offset, locale, lessons_learnt, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(customer_id)
                 DO UPDATE SET
                     directive_text=excluded.directive_text,
-                    style_directive_text=excluded.style_directive_text,
                     utc_offset=excluded.utc_offset,
                     locale=excluded.locale,
                     lessons_learnt=excluded.lessons_learnt,
@@ -136,7 +123,6 @@ class CustomerProfileService:
                 (
                     cid,
                     next_directive,
-                    next_style_directive,
                     next_offset,
                     next_locale,
                     next_lessons,
@@ -153,8 +139,7 @@ class CustomerProfileService:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT customer_id, directive_text, style_directive_text, utc_offset, locale, source, updated_at
-                , lessons_learnt
+                SELECT customer_id, directive_text, utc_offset, locale, source, updated_at, lessons_learnt
                 FROM customer_profiles
                 WHERE customer_id=?
                 """,
@@ -165,9 +150,6 @@ class CustomerProfileService:
         return {
             "customer_id": str(row["customer_id"]),
             "directive_text": str(row["directive_text"]) if row["directive_text"] is not None else None,
-            "style_directive_text": (
-                str(row["style_directive_text"]) if row["style_directive_text"] is not None else None
-            ),
             "utc_offset": str(row["utc_offset"]) if row["utc_offset"] is not None else None,
             "locale": str(row["locale"]) if row["locale"] is not None else None,
             "lessons_learnt": str(row["lessons_learnt"]) if row["lessons_learnt"] is not None else None,
@@ -188,19 +170,6 @@ class CustomerProfileService:
             raise ValueError("directive is required")
         self._upsert(customer_id, directive_text=text, source=source)
 
-    def get_style_directive(self, customer_id: str) -> str | None:
-        profile = self.get_profile(customer_id)
-        if not profile:
-            return None
-        text = str(profile.get("style_directive_text") or "").strip()
-        return text or None
-
-    def set_style_directive(self, customer_id: str, directive: str, *, source: str = "agent") -> None:
-        text = str(directive or "").strip()
-        if not text:
-            raise ValueError("style_directive is required")
-        self._upsert(customer_id, style_directive_text=text, source=source)
-
     def clear_directive(self, customer_id: str, *, source: str = "agent") -> bool:
         cid = str(customer_id or "").strip()
         if not cid:
@@ -209,16 +178,6 @@ class CustomerProfileService:
         if profile is None:
             return False
         self._upsert(cid, directive_text="", source=source)
-        return True
-
-    def clear_style_directive(self, customer_id: str, *, source: str = "agent") -> bool:
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return False
-        profile = self.get_profile(cid)
-        if profile is None:
-            return False
-        self._upsert(cid, style_directive_text="", source=source)
         return True
 
     def get_utc_offset(self, customer_id: str) -> str | None:

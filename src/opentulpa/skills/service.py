@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import threading
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,11 @@ _DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION = (
 )
 _DEFAULT_COMPOSIO_OPERATOR_DESCRIPTION = (
     "Use this skill when connecting external apps through Composio or executing Composio-backed tools."
+)
+_DEFAULT_ROUTINE_SCHEDULE_COMPOSER_DESCRIPTION = (
+    "Use this skill when creating or updating reminders/scheduled routines with "
+    "routine_create, especially when you need clear schedule-time instructions that "
+    "capture scripts, files, and required resources."
 )
 _LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS = (
     "## Purpose\n"
@@ -145,7 +151,40 @@ _DEFAULT_COMPOSIO_OPERATOR_INSTRUCTIONS = (
     "5. When auth is required, prefer giving the user the link immediately rather than explaining the entire integration stack.\n"
     "6. Keep the user-facing instructions short: what link to open, what to do next, and how success will be verified.\n"
 )
+_DEFAULT_ROUTINE_SCHEDULE_COMPOSER_INSTRUCTIONS = (
+    "## Purpose\n"
+    "Compose routine_create payloads so schedule-time behavior is explicit and deterministic.\n\n"
+    "## Field mapping\n"
+    "1. instruction: schedule-time scratchpad (what to run, files to read/write, expected output).\n"
+    "2. implementation_command: concrete shell/script command for scheduled execution and guardrail evaluation.\n\n"
+    "3. implementation_command path style: keep script/file arguments relative to working_dir.\n"
+    "   Example with default working_dir=tulpa_stuff: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`.\n\n"
+    "## Instruction style\n"
+    "1. Write instruction in second-person imperative voice: start with 'You must ...'.\n"
+    "2. Include concrete steps, required scripts/files/keys source, and expected result.\n"
+    "3. Include failure/reporting behavior (what to return/log if blocked).\n\n"
+    "## Execution claim policy\n"
+    "1. If user asked for immediate bootstrap/initialization, execute now and verify before claiming success.\n"
+    "2. If only scheduling was done, state clearly that future runs are scheduled but bootstrap was not executed.\n"
+    "3. Never include concrete fetched facts (headlines/metrics) unless they came from tool output in this run.\n\n"
+    "## Defaults\n"
+    "1. Set notify_user=true unless user explicitly asks for silent runs.\n"
+    "2. For one-time reminders from relative time phrases, use local ISO datetime schedule.\n"
+    "3. For recurring jobs, use cron schedule.\n\n"
+    "## Quality checks before calling routine_create\n"
+    "1. Ensure instruction describes the actual work output (file/API/update).\n"
+    "2. Ensure instruction references required scripts/files/keys source as needed.\n"
+    "3. Ensure implementation_command is concrete (executable + args), not natural language.\n"
+)
 _SKILL_FS_LOCK = threading.Lock()
+_SKILL_ROW_COLUMNS = (
+    "scope, customer_id, name, description, source, enabled, skill_path, created_at, updated_at"
+)
+_SKILL_MARKDOWN_LIMIT_BYTES = 10_000_000
+_SUPPORTING_FILE_LIMIT_BYTES = 2_000_000
+_SUPPORTING_FILES_TOTAL_LIMIT_BYTES = 10_000_000
+_SUPPORTING_FILE_PREVIEW_LIMIT = 12
+_SUPPORTING_FILE_PREVIEW_CHARS = 12_000
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -188,8 +227,12 @@ def _normalize_skill_name(name: str) -> str:
     return value
 
 
+def _normalize_customer_id(customer_id: str) -> str:
+    return str(customer_id or "").strip()
+
+
 def _sanitize_customer_segment(customer_id: str) -> str:
-    value = str(customer_id or "").strip()
+    value = _normalize_customer_id(customer_id)
     if not value:
         raise ValueError("customer_id is required for user skills")
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", value)
@@ -246,6 +289,50 @@ def build_skill_markdown(*, name: str, description: str, instructions: str) -> s
     )
 
 
+@dataclass(frozen=True)
+class _BootstrapSkillSpec:
+    name: str
+    description: str
+    instructions: str
+    legacy_instructions: tuple[str, ...] = ()
+    replace_if_bootstrap_managed: bool = False
+
+    def render_markdown(self, instructions: str | None = None) -> str:
+        return build_skill_markdown(
+            name=self.name,
+            description=self.description,
+            instructions=self.instructions if instructions is None else instructions,
+        )
+
+
+_DEFAULT_BOOTSTRAP_SKILLS = (
+    _BootstrapSkillSpec(
+        name="skill-creator",
+        description=_DEFAULT_SKILL_CREATOR_DESCRIPTION,
+        instructions=_DEFAULT_SKILL_CREATOR_INSTRUCTIONS,
+        legacy_instructions=(_LEGACY_SKILL_CREATOR_INSTRUCTIONS,),
+        replace_if_bootstrap_managed=True,
+    ),
+    _BootstrapSkillSpec(
+        name="browser-use-operator",
+        description=_DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION,
+        instructions=_DEFAULT_BROWSER_USE_OPERATOR_INSTRUCTIONS,
+        legacy_instructions=(_LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS,),
+        replace_if_bootstrap_managed=True,
+    ),
+    _BootstrapSkillSpec(
+        name="composio-operator",
+        description=_DEFAULT_COMPOSIO_OPERATOR_DESCRIPTION,
+        instructions=_DEFAULT_COMPOSIO_OPERATOR_INSTRUCTIONS,
+    ),
+    _BootstrapSkillSpec(
+        name="routine-schedule-composer",
+        description=_DEFAULT_ROUTINE_SCHEDULE_COMPOSER_DESCRIPTION,
+        instructions=_DEFAULT_ROUTINE_SCHEDULE_COMPOSER_INSTRUCTIONS,
+    ),
+)
+
+
 class SkillStoreService:
     """Store and resolve skills with user-overrides-global precedence."""
 
@@ -299,10 +386,145 @@ class SkillStoreService:
             )
             conn.commit()
 
+    @staticmethod
+    def _row_identity(row: sqlite3.Row) -> tuple[str, str, str]:
+        return (
+            str(row["scope"]),
+            str(row["customer_id"]),
+            str(row["name"]),
+        )
+
+    def _fetch_skill_row(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        customer_id: str,
+        name: str,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            f"""
+            SELECT {_SKILL_ROW_COLUMNS}
+            FROM skills
+            WHERE scope=? AND customer_id=? AND name=?
+            """,
+            (scope, customer_id, name),
+        ).fetchone()
+
+    def _fetch_listing_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        customer_id: str,
+        include_global: bool,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        rows: list[sqlite3.Row] = []
+        if include_global:
+            rows.extend(
+                conn.execute(
+                    f"""
+                    SELECT {_SKILL_ROW_COLUMNS}
+                    FROM skills
+                    WHERE scope='global'
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            )
+        if customer_id:
+            rows.extend(
+                conn.execute(
+                    f"""
+                    SELECT {_SKILL_ROW_COLUMNS}
+                    FROM skills
+                    WHERE scope='user' AND customer_id=?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (customer_id, limit),
+                ).fetchall()
+            )
+        return rows
+
+    def _resolve_skill_path(self, row: sqlite3.Row) -> Path | None:
+        skill_path = Path(str(row["skill_path"]))
+        if skill_path.exists():
+            return skill_path
+        scope, customer_id, name = self._row_identity(row)
+        self._delete_skill_row(scope=scope, customer_id=customer_id, name=name)
+        return None
+
+    def _item_from_row(
+        self,
+        row: sqlite3.Row,
+        *,
+        include_paths: bool,
+        include_markdown: bool = False,
+        include_files: bool = False,
+    ) -> dict[str, Any] | None:
+        skill_path = self._resolve_skill_path(row)
+        if skill_path is None:
+            return None
+        item = self._row_to_item(row, include_paths=include_paths)
+        if include_markdown:
+            item["skill_markdown"] = skill_path.read_text(encoding="utf-8", errors="replace")
+        if include_files:
+            item["supporting_files"] = self._load_supporting_files(skill_path.parent)
+        return item
+
+    @staticmethod
+    def _should_prefer_item(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+        return (candidate["scope"] == "user" and current["scope"] == "global") or (
+            candidate["updated_at"] > current["updated_at"]
+        )
+
+    @staticmethod
+    def _should_replace_bootstrap_skill(
+        existing: dict[str, Any],
+        *,
+        managed_markdowns: set[str],
+    ) -> bool:
+        return existing["source"] == "system_bootstrap" and existing["skill_markdown"] in managed_markdowns
+
+    def _ensure_bootstrap_skill(self, spec: _BootstrapSkillSpec) -> None:
+        existing = self.get_skill(
+            customer_id="",
+            name=spec.name,
+            include_files=False,
+            include_global=True,
+        )
+        if existing is not None and not spec.replace_if_bootstrap_managed:
+            return
+
+        desired_markdown = spec.render_markdown()
+        if existing is not None:
+            managed_markdowns = {desired_markdown}
+            managed_markdowns.update(
+                spec.render_markdown(instructions=instructions)
+                for instructions in spec.legacy_instructions
+            )
+            if not self._should_replace_bootstrap_skill(
+                existing,
+                managed_markdowns=managed_markdowns,
+            ):
+                return
+
+        self.upsert_skill(
+            scope="global",
+            customer_id="",
+            name=spec.name,
+            skill_markdown=desired_markdown,
+            source="system_bootstrap",
+            enabled=True,
+            supporting_files=None,
+        )
+
     def _scope_customer(self, *, scope: str, customer_id: str) -> str:
         if scope == "global":
             return ""
-        return str(customer_id or "").strip()
+        return _normalize_customer_id(customer_id)
 
     def _skill_dir(self, *, scope: str, customer_id: str, name: str) -> Path:
         if scope == "global":
@@ -328,10 +550,10 @@ class SkillStoreService:
             content = str(raw_content or "")
             encoded = content.encode("utf-8")
             total_bytes += len(encoded)
-            if len(encoded) > 2_000_000:
+            if len(encoded) > _SUPPORTING_FILE_LIMIT_BYTES:
                 raise ValueError(f"supporting file too large: {rel}")
             out[str(p)] = content
-        if total_bytes > 10_000_000:
+        if total_bytes > _SUPPORTING_FILES_TOTAL_LIMIT_BYTES:
             raise ValueError("supporting_files total payload too large (>10MB)")
         return out
 
@@ -350,7 +572,7 @@ class SkillStoreService:
         safe_customer = self._scope_customer(scope=safe_scope, customer_id=customer_id)
         safe_name = _normalize_skill_name(name)
         markdown = str(skill_markdown or "")
-        if len(markdown.encode("utf-8")) > 10_000_000:
+        if len(markdown.encode("utf-8")) > _SKILL_MARKDOWN_LIMIT_BYTES:
             raise ValueError("SKILL.md exceeds 10MB limit")
         parsed_name, description = parse_skill_frontmatter(markdown)
         if parsed_name != safe_name:
@@ -374,13 +596,12 @@ class SkillStoreService:
 
         now = _utc_now()
         with self._conn() as conn:
-            existing = conn.execute(
-                """
-                SELECT created_at FROM skills
-                WHERE scope=? AND customer_id=? AND name=?
-                """,
-                (safe_scope, safe_customer, safe_name),
-            ).fetchone()
+            existing = self._fetch_skill_row(
+                conn,
+                scope=safe_scope,
+                customer_id=safe_customer,
+                name=safe_name,
+            )
             created_at = str(existing["created_at"]) if existing else now
             conn.execute(
                 """
@@ -428,48 +649,21 @@ class SkillStoreService:
         include_disabled: bool = False,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        safe_customer = str(customer_id or "").strip()
+        safe_customer = _normalize_customer_id(customer_id)
         safe_limit = max(1, min(int(limit), 500))
-        rows: list[sqlite3.Row] = []
         with self._conn() as conn:
-            if include_global:
-                rows.extend(
-                    conn.execute(
-                        """
-                        SELECT scope, customer_id, name, description, source, enabled, skill_path, created_at, updated_at
-                        FROM skills
-                        WHERE scope='global'
-                        ORDER BY updated_at DESC
-                        LIMIT ?
-                        """,
-                        (safe_limit,),
-                    ).fetchall()
-                )
-            if safe_customer:
-                rows.extend(
-                    conn.execute(
-                        """
-                        SELECT scope, customer_id, name, description, source, enabled, skill_path, created_at, updated_at
-                        FROM skills
-                        WHERE scope='user' AND customer_id=?
-                        ORDER BY updated_at DESC
-                        LIMIT ?
-                        """,
-                        (safe_customer, safe_limit),
-                    ).fetchall()
-                )
+            rows = self._fetch_listing_rows(
+                conn,
+                customer_id=safe_customer,
+                include_global=include_global,
+                limit=safe_limit,
+            )
         # precedence: user skill overrides global with same name
         merged: dict[str, dict[str, Any]] = {}
         for row in rows:
-            skill_path = Path(str(row["skill_path"]))
-            if not skill_path.exists():
-                self._delete_skill_row(
-                    scope=str(row["scope"]),
-                    customer_id=str(row["customer_id"]),
-                    name=str(row["name"]),
-                )
+            item = self._item_from_row(row, include_paths=False)
+            if item is None:
                 continue
-            item = self._row_to_item(row, include_paths=False)
             if not include_disabled and not item["enabled"]:
                 continue
             name = item["name"]
@@ -477,9 +671,7 @@ class SkillStoreService:
             if current is None:
                 merged[name] = item
                 continue
-            if (item["scope"] == "user" and current["scope"] == "global") or (
-                item["updated_at"] > current["updated_at"]
-            ):
+            if self._should_prefer_item(item, current):
                 merged[name] = item
         out = sorted(merged.values(), key=lambda x: x["updated_at"], reverse=True)
         return out[:safe_limit]
@@ -493,42 +685,31 @@ class SkillStoreService:
         include_global: bool = True,
     ) -> dict[str, Any] | None:
         safe_name = _normalize_skill_name(name)
-        safe_customer = str(customer_id or "").strip()
+        safe_customer = _normalize_customer_id(customer_id)
         with self._conn() as conn:
             row = None
             if safe_customer:
-                row = conn.execute(
-                    """
-                    SELECT scope, customer_id, name, description, source, enabled, skill_path, created_at, updated_at
-                    FROM skills
-                    WHERE scope='user' AND customer_id=? AND name=?
-                    """,
-                    (safe_customer, safe_name),
-                ).fetchone()
+                row = self._fetch_skill_row(
+                    conn,
+                    scope="user",
+                    customer_id=safe_customer,
+                    name=safe_name,
+                )
             if row is None and include_global:
-                row = conn.execute(
-                    """
-                    SELECT scope, customer_id, name, description, source, enabled, skill_path, created_at, updated_at
-                    FROM skills
-                    WHERE scope='global' AND customer_id='' AND name=?
-                    """,
-                    (safe_name,),
-                ).fetchone()
+                row = self._fetch_skill_row(
+                    conn,
+                    scope="global",
+                    customer_id="",
+                    name=safe_name,
+                )
         if row is None:
             return None
-        item = self._row_to_item(row, include_paths=True)
-        skill_path = Path(item["skill_path"])
-        if not skill_path.exists():
-            self._delete_skill_row(
-                scope=item["scope"],
-                customer_id=item["customer_id"],
-                name=item["name"],
-            )
-            return None
-        item["skill_markdown"] = skill_path.read_text(encoding="utf-8", errors="replace")
-        if include_files:
-            item["supporting_files"] = self._load_supporting_files(skill_path.parent)
-        return item
+        return self._item_from_row(
+            row,
+            include_paths=True,
+            include_markdown=True,
+            include_files=include_files,
+        )
 
     def delete_skill(
         self,
@@ -541,13 +722,12 @@ class SkillStoreService:
         safe_customer = self._scope_customer(scope=safe_scope, customer_id=customer_id)
         safe_name = _normalize_skill_name(name)
         with self._conn() as conn:
-            row = conn.execute(
-                """
-                SELECT skill_path FROM skills
-                WHERE scope=? AND customer_id=? AND name=?
-                """,
-                (safe_scope, safe_customer, safe_name),
-            ).fetchone()
+            row = self._fetch_skill_row(
+                conn,
+                scope=safe_scope,
+                customer_id=safe_customer,
+                name=safe_name,
+            )
             if row is None:
                 return False
             conn.execute(
@@ -561,23 +741,23 @@ class SkillStoreService:
         skill_md = Path(str(row["skill_path"]))
         skill_dir = skill_md.parent
         if skill_dir.exists():
-            shutil.rmtree(skill_dir)
+            shutil.rmtree(skill_dir, onexc=_rmtree_ignore_missing)
         return True
 
     @staticmethod
     def _load_supporting_files(skill_dir: Path) -> dict[str, str]:
         out: dict[str, str] = {}
-        max_files = 12
-        max_chars = 12000
         for path in sorted(skill_dir.rglob("*")):
             if not path.is_file():
                 continue
             if path.name == "SKILL.md":
                 continue
-            if len(out) >= max_files:
+            if len(out) >= _SUPPORTING_FILE_PREVIEW_LIMIT:
                 break
             rel = str(path.relative_to(skill_dir))
-            out[rel] = path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+            out[rel] = path.read_text(encoding="utf-8", errors="replace")[
+                :_SUPPORTING_FILE_PREVIEW_CHARS
+            ]
         return out
 
     @staticmethod
@@ -596,119 +776,6 @@ class SkillStoreService:
             item["skill_path"] = str(row["skill_path"])
         return item
 
-    def _ensure_global_skill(self, *, name: str, description: str, instructions: str) -> None:
-        if self.get_skill(customer_id="", name=name, include_files=False, include_global=True):
-            return
-        markdown = build_skill_markdown(
-            name=name,
-            description=description,
-            instructions=instructions,
-        )
-        self.upsert_skill(
-            scope="global",
-            customer_id="",
-            name=name,
-            skill_markdown=markdown,
-            source="system_bootstrap",
-            enabled=True,
-            supporting_files=None,
-        )
-
     def ensure_default_skill(self) -> None:
-        existing_skill_creator = self.get_skill(
-            customer_id="",
-            name="skill-creator",
-            include_files=False,
-            include_global=True,
-        )
-        desired_skill_creator = build_skill_markdown(
-            name="skill-creator",
-            description=_DEFAULT_SKILL_CREATOR_DESCRIPTION,
-            instructions=_DEFAULT_SKILL_CREATOR_INSTRUCTIONS,
-        )
-        legacy_skill_creator = build_skill_markdown(
-            name="skill-creator",
-            description=_DEFAULT_SKILL_CREATOR_DESCRIPTION,
-            instructions=_LEGACY_SKILL_CREATOR_INSTRUCTIONS,
-        )
-        if existing_skill_creator is None or (
-            existing_skill_creator["source"] == "system_bootstrap"
-            and existing_skill_creator["skill_markdown"] in {legacy_skill_creator, desired_skill_creator}
-        ):
-            self.upsert_skill(
-                scope="global",
-                customer_id="",
-                name="skill-creator",
-                skill_markdown=desired_skill_creator,
-                source="system_bootstrap",
-                enabled=True,
-                supporting_files=None,
-            )
-        existing_browser_use_operator = self.get_skill(
-            customer_id="",
-            name="browser-use-operator",
-            include_files=False,
-            include_global=True,
-        )
-        desired_browser_use_operator = build_skill_markdown(
-            name="browser-use-operator",
-            description=_DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION,
-            instructions=_DEFAULT_BROWSER_USE_OPERATOR_INSTRUCTIONS,
-        )
-        legacy_browser_use_operator = build_skill_markdown(
-            name="browser-use-operator",
-            description=_DEFAULT_BROWSER_USE_OPERATOR_DESCRIPTION,
-            instructions=_LEGACY_BROWSER_USE_OPERATOR_INSTRUCTIONS,
-        )
-        if existing_browser_use_operator is None or (
-            existing_browser_use_operator["source"] == "system_bootstrap"
-            and existing_browser_use_operator["skill_markdown"]
-            in {legacy_browser_use_operator, desired_browser_use_operator}
-        ):
-            self.upsert_skill(
-                scope="global",
-                customer_id="",
-                name="browser-use-operator",
-                skill_markdown=desired_browser_use_operator,
-                source="system_bootstrap",
-                enabled=True,
-                supporting_files=None,
-            )
-        self._ensure_global_skill(
-            name="composio-operator",
-            description=_DEFAULT_COMPOSIO_OPERATOR_DESCRIPTION,
-            instructions=_DEFAULT_COMPOSIO_OPERATOR_INSTRUCTIONS,
-        )
-        self._ensure_global_skill(
-            name="routine-schedule-composer",
-            description=(
-                "Use this skill when creating or updating reminders/scheduled routines with "
-                "routine_create, especially when you need clear schedule-time instructions that "
-                "capture scripts, files, and required resources."
-            ),
-            instructions=(
-                "## Purpose\n"
-                "Compose routine_create payloads so schedule-time behavior is explicit and deterministic.\n\n"
-                "## Field mapping\n"
-                "1. instruction: schedule-time scratchpad (what to run, files to read/write, expected output).\n"
-                "2. implementation_command: concrete shell/script command for scheduled execution and guardrail evaluation.\n\n"
-                "3. implementation_command path style: keep script/file arguments relative to working_dir.\n"
-                "   Example with default working_dir=tulpa_stuff: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`.\n\n"
-                "## Instruction style\n"
-                "1. Write instruction in second-person imperative voice: start with 'You must ...'.\n"
-                "2. Include concrete steps, required scripts/files/keys source, and expected result.\n"
-                "3. Include failure/reporting behavior (what to return/log if blocked).\n\n"
-                "## Execution claim policy\n"
-                "1. If user asked for immediate bootstrap/initialization, execute now and verify before claiming success.\n"
-                "2. If only scheduling was done, state clearly that future runs are scheduled but bootstrap was not executed.\n"
-                "3. Never include concrete fetched facts (headlines/metrics) unless they came from tool output in this run.\n\n"
-                "## Defaults\n"
-                "1. Set notify_user=true unless user explicitly asks for silent runs.\n"
-                "2. For one-time reminders from relative time phrases, use local ISO datetime schedule.\n"
-                "3. For recurring jobs, use cron schedule.\n\n"
-                "## Quality checks before calling routine_create\n"
-                "1. Ensure instruction describes the actual work output (file/API/update).\n"
-                "2. Ensure instruction references required scripts/files/keys source as needed.\n"
-                "3. Ensure implementation_command is concrete (executable + args), not natural language.\n"
-            ),
-        )
+        for spec in _DEFAULT_BOOTSTRAP_SKILLS:
+            self._ensure_bootstrap_skill(spec)

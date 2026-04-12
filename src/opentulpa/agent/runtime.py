@@ -1,7 +1,7 @@
 """
 In-process LangGraph runtime for OpenTulpa.
 
-This replaces the Parlant subprocess/session model with a local StateGraph that:
+This runs the agent in-process with a local StateGraph that:
 - runs tool-calling in a bounded loop,
 - persists thread state via SQLite checkpointer,
 - supports token streaming for Telegram,
@@ -87,9 +87,6 @@ from opentulpa.agent.utils import (
     content_to_text as _content_to_text,
 )
 from opentulpa.agent.utils import (
-    html_to_text as _html_to_text,
-)
-from opentulpa.agent.utils import (
     minutes_to_utc_offset as _minutes_to_utc_offset,
 )
 from opentulpa.agent.utils import (
@@ -103,13 +100,13 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.ids import new_short_id
-from opentulpa.memory.service import MEMORY_KIND_PRIORITY
 from opentulpa.logging import create_posthog_logger
+from opentulpa.memory.service import MEMORY_KIND_PRIORITY
 
 logger = logging.getLogger(__name__)
 
 _MEMORY_GROUNDING_KIND_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("preferences_and_directives", ("directive_fact", "preference_fact", "style_fact")),
+    ("preferences_and_directives", ("directive_fact", "preference_fact")),
     ("durable_personal_facts", ("user_profile_fact", "life_fact", "relationship_fact", "contact_fact")),
     ("aspirations_and_plans", ("aspirations_fact", "project_fact")),
     ("active_projects_or_workflows", ("workflow_fact", "skill_fact")),
@@ -489,10 +486,6 @@ _PROVISIONAL_REPLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*i will\b", re.IGNORECASE),
     re.compile(r"^\s*(?:one sec|one second|still working|working on it)\b", re.IGNORECASE),
     re.compile(r"\bthis will take\b", re.IGNORECASE),
-)
-_STYLE_NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:manychat|solana|bali|kristian|vyb[ií]ral)\b", re.IGNORECASE),
-    re.compile(r"\b(?:project|company|work|interests?)\b.{0,40}\b(?:mention|refer|personal)\b", re.IGNORECASE),
 )
 _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "tulpa_read_file": "Reading a file",
@@ -999,7 +992,7 @@ class OpenTulpaLangGraphRuntime:
             max(500, int(context_rollup_tokens)),
             max(500, self._context_short_term_low_tokens - 250),
         )
-        # Backward-compat aliases consumed by existing helpers/tests.
+        # Compatibility aliases consumed by helper modules and persisted state.
         self._context_recent_tokens = self._context_short_term_low_tokens
         self._context_compaction_source_tokens = max(
             self._context_rollup_tokens,
@@ -1297,7 +1290,7 @@ class OpenTulpaLangGraphRuntime:
 
     def get_browser_use_local_manager(self) -> Any:
         if self._browser_use_local_manager is None:
-            from opentulpa.agent.integrations.browser_use_local import BrowserUseLocalManager
+            from opentulpa.integrations.browser_use_local import BrowserUseLocalManager
 
             self._browser_use_local_manager = BrowserUseLocalManager(
                 openrouter_api_key=self.openrouter_api_key,
@@ -1801,31 +1794,6 @@ class OpenTulpaLangGraphRuntime:
         except Exception:
             return None
 
-    async def _load_style_directive(self, customer_id: str) -> str | None:
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return None
-        if self._customer_profile_service is not None:
-            try:
-                return self._customer_profile_service.get_style_directive(cid)
-            except Exception:
-                pass
-        try:
-            r = await self._request_with_backoff(
-                "POST",
-                "/internal/style_directive/get",
-                json_body={"customer_id": cid},
-                timeout=5.0,
-                retries=1,
-            )
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            directive = str(data.get("style_directive") or "").strip()
-            return directive or None
-        except Exception:
-            return None
-
     async def _load_user_utc_offset(self, customer_id: str) -> str | None:
         cid = str(customer_id or "").strip()
         if not cid:
@@ -1848,100 +1816,6 @@ class OpenTulpaLangGraphRuntime:
             return offset or None
         except Exception:
             return None
-
-    @staticmethod
-    def _sanitize_style_text(raw_text: str) -> str:
-        text = _html_to_text(str(raw_text or "")).strip()
-        if not text:
-            return ""
-        for pattern in _STYLE_NOISE_PATTERNS:
-            text = pattern.sub("", text)
-        text = re.sub(r"\([^)]*\)", " ", text)
-        text = re.sub(r"\s+", " ", text).strip(" .,-")
-        if not text:
-            return ""
-        keep_phrases: list[str] = []
-        lowered = text.lower()
-        phrase_map = [
-            ("concise", "be concise"),
-            ("brief", "be brief"),
-            ("warm", "keep a warm tone"),
-            ("friendly", "keep a friendly tone"),
-            ("supportive", "keep a supportive tone"),
-            ("direct", "be direct"),
-            ("playful", "allow light playfulness when it fits"),
-            ("romantic", "keep warmth without forcing intimacy"),
-            ("not overly formal", "avoid overly formal phrasing"),
-            ("no emojis", "avoid emojis unless the user asks"),
-            ("use 'kristian' occasionally", "light personalization is okay"),
-            ("use kristian occasionally", "light personalization is okay"),
-        ]
-        for needle, phrase in phrase_map:
-            if needle in lowered and phrase not in keep_phrases:
-                keep_phrases.append(phrase)
-        if not keep_phrases:
-            keep_phrases = ["be concise", "keep a warm, direct tone"]
-        return "Style preferences:\n- " + "\n- ".join(keep_phrases[:5])
-
-    async def _build_style_card(
-        self,
-        *,
-        customer_id: str,
-        available_skills: list[dict[str, Any]] | None = None,
-    ) -> str:
-        cid = str(customer_id or "").strip()
-        if not cid:
-            return "Style preferences:\n- be concise\n- keep a warm, direct tone"
-        style_directive = await self._load_style_directive(cid)
-        if style_directive:
-            sanitized = self._sanitize_style_text(style_directive)
-            if sanitized:
-                return sanitized
-        candidates = available_skills if isinstance(available_skills, list) else await self._list_available_skills(cid)
-        style_skill_names = {
-            "personal-assistant-persona",
-            "concise-prompter",
-        }
-        raw_parts: list[str] = []
-        for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            desc = str(item.get("description", "")).strip()
-            if not name:
-                continue
-            lowered = name.lower()
-            desc_lower = desc.lower()
-            if lowered not in style_skill_names and not any(
-                token in desc_lower for token in ("tone", "style", "concise", "persona", "friendly", "warm")
-            ):
-                continue
-            try:
-                r = await self._request_with_backoff(
-                    "POST",
-                    "/internal/skills/get",
-                    json_body={
-                        "customer_id": cid,
-                        "name": name,
-                        "include_files": False,
-                        "include_global": True,
-                    },
-                    timeout=8.0,
-                    retries=1,
-                )
-                if r.status_code != 200:
-                    continue
-                payload = r.json()
-                skill = payload.get("skill", {})
-                if not isinstance(skill, dict):
-                    continue
-                skill_md = str(skill.get("skill_markdown", "")).strip()
-                if skill_md:
-                    raw_parts.append(skill_md[:1200])
-            except Exception:
-                continue
-        sanitized = self._sanitize_style_text("\n\n".join(raw_parts))
-        return sanitized or "Style preferences:\n- be concise\n- keep a warm, direct tone"
 
     @staticmethod
     def _has_retrieval_evidence(
@@ -2543,10 +2417,6 @@ class OpenTulpaLangGraphRuntime:
     ) -> dict[str, Any]:
         query = str(user_text or "").strip()
         available_skills = await self._list_available_skills(customer_id)
-        style_card = await self._build_style_card(
-            customer_id=customer_id,
-            available_skills=available_skills,
-        )
         forced_names = [
             str(item or "").strip()
             for item in (forced_skill_names or [])
@@ -2563,7 +2433,6 @@ class OpenTulpaLangGraphRuntime:
         if not query:
             return {
                 "prompt_mode": prompt_mode,
-                "style_card": style_card,
                 "active_skill_query": "",
                 "active_skill_names": forced_names,
                 "active_available_skills": available_skills,
@@ -2575,7 +2444,6 @@ class OpenTulpaLangGraphRuntime:
         if forced_names:
             return {
                 "prompt_mode": prompt_mode,
-                "style_card": style_card,
                 "active_skill_query": query,
                 "active_skill_names": forced_names,
                 "active_available_skills": available_skills,
@@ -2587,7 +2455,6 @@ class OpenTulpaLangGraphRuntime:
         if prompt_mode == "literal_chat":
             return {
                 "prompt_mode": prompt_mode,
-                "style_card": style_card,
                 "active_skill_query": query,
                 "active_skill_names": [],
                 "active_available_skills": available_skills,
@@ -2606,7 +2473,6 @@ class OpenTulpaLangGraphRuntime:
         names = [str(item.get("name", "")).strip() for item in selected if str(item.get("name", "")).strip()]
         return {
             "prompt_mode": prompt_mode,
-            "style_card": style_card,
             "active_skill_query": query,
             "active_skill_names": names,
             "active_available_skills": available_skills,
@@ -3007,23 +2873,6 @@ class OpenTulpaLangGraphRuntime:
             raise
         finally:
             self._thread_inputs.end_turn(turn_state)
-
-    async def _begin_thread_turn(
-        self,
-        *,
-        thread_id: str,
-        text: str,
-    ) -> tuple[Any | None, str]:
-        """
-        Backward-compatible wrapper for tests/internal callers that relied on
-        the previous runtime-local turn debounce API.
-        """
-        return await self._thread_inputs.begin_turn(thread_id=thread_id, text=text)
-
-    @staticmethod
-    def _end_thread_turn(state: Any | None) -> None:
-        """Backward-compatible wrapper around thread turn release."""
-        ThreadInputCoordinator.end_turn(state)
 
     async def astream_text(
         self,
@@ -4114,16 +3963,25 @@ class OpenTulpaLangGraphRuntime:
 
     def set_active_customer_id(self, customer_id: str):
         cid = str(customer_id or "").strip()
-        token = self._active_customer_id_ctx.set(cid)
+        token = self._ensure_active_customer_id_ctx().set(cid)
         self._active_customer_id = cid
         return token
 
     def reset_active_customer_id(self, token: object) -> None:
-        self._active_customer_id_ctx.reset(token)
-        self._active_customer_id = str(self._active_customer_id_ctx.get() or "").strip()
+        ctx = self._ensure_active_customer_id_ctx()
+        ctx.reset(token)
+        self._active_customer_id = str(ctx.get() or "").strip()
 
     def get_active_customer_id(self) -> str:
-        return str(self._active_customer_id_ctx.get() or "").strip()
+        return str(self._ensure_active_customer_id_ctx().get() or "").strip()
+
+    def _ensure_active_customer_id_ctx(self) -> contextvars.ContextVar[str]:
+        ctx = getattr(self, "_active_customer_id_ctx", None)
+        if isinstance(ctx, contextvars.ContextVar):
+            return ctx
+        ctx = contextvars.ContextVar("opentulpa_active_customer_id", default="")
+        self._active_customer_id_ctx = ctx
+        return ctx
 
     async def execute_tool(
         self,

@@ -12,16 +12,18 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
+from opentulpa.agent.context_engineer import (
+    ContextEngineer,
+)
+from opentulpa.agent.context_engineer import (
+    trim_text_to_token_budget as _trim_text_to_token_budget,
+)
 from opentulpa.agent.lc_messages import (
     AIMessage,
     AnyMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
-)
-from opentulpa.agent.context_engineer import (
-    ContextEngineer,
-    trim_text_to_token_budget as _trim_text_to_token_budget,
 )
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.prompt_policy import (
@@ -35,9 +37,6 @@ from opentulpa.agent.prompt_sections import (
 )
 from opentulpa.agent.prompt_sections import (
     build_retrieved_context_message as _build_retrieved_context_message,
-)
-from opentulpa.agent.prompt_sections import (
-    build_style_card_message as _build_style_card_message,
 )
 from opentulpa.agent.tool_message_protocol import (
     enforce_tool_message_protocol as _enforce_tool_message_protocol,
@@ -334,35 +333,6 @@ def _validate_model_tool_call(
                 "for append/set actions."
             )
     return None
-
-
-def _build_skill_glossary_context(available_skills: Any) -> str:
-    if not isinstance(available_skills, list):
-        return ""
-    normalized_items: list[tuple[str, str, str]] = []
-    seen_names: set[str] = set()
-    for item in available_skills:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).strip()
-        description = " ".join(str(item.get("description", "")).split()).strip()
-        scope = str(item.get("scope", "")).strip() or "user"
-        if not name or not description or name in seen_names:
-            continue
-        seen_names.add(name)
-        normalized_items.append((name, description[:220], scope))
-    if not normalized_items:
-        return ""
-    normalized_items.sort(key=lambda x: x[0].casefold())
-    lines: list[str] = [
-        "Skill glossary (high-level, non-prioritized):",
-        "Use this as discovery context only. Call skill_get(name) to fetch full skill instructions before execution.",
-    ]
-    for name, description, scope in normalized_items[:20]:
-        lines.append(f"- {name} ({scope}): {description}")
-    return "\n".join(lines)
-
-
 def _build_relevant_skill_discovery_context(
     *,
     available_skills: Any,
@@ -678,7 +648,6 @@ def build_runtime_graph(runtime: Any):
             available_skills=available_skills,
             selected_names=skill_names,
         )
-        style_card = str(state.get("style_card", "")).strip()
         active_directive = (
             await runtime._load_active_directive(customer_id)
             if context_engineer.should_include_optional_context(
@@ -733,10 +702,7 @@ def build_runtime_graph(runtime: Any):
         prompt_budget = max(4000, int(getattr(runtime, "_context_token_limit", 12000)))
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
-        style_message = _build_style_card_message(style_card)
         stable_prompt_messages: list[AnyMessage] = [stable_system_message]
-        if style_message is not None:
-            stable_prompt_messages.append(style_message)
         volatile_parts: list[str] = [
             PROMPT_DYNAMIC_BOUNDARY,
             _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
@@ -765,8 +731,6 @@ def build_runtime_graph(runtime: Any):
             "customer_scope",
             "live_time",
         ]
-        if style_message is not None:
-            prompt_section_names.append("style_card")
         stable_optional_messages: list[AnyMessage] = []
         volatile_optional_messages: list[AnyMessage] = []
         memory_grounding_message: AnyMessage | None = None

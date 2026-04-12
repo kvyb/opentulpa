@@ -1,4 +1,0 @@
-interface:
-  display_name: "OpenTulpa Engineering"
-  short_description: "Best-practice coding and testing workflow for OpenTulpa."
-  default_prompt: "Apply OpenTulpa coding and testing best practices to this task."
