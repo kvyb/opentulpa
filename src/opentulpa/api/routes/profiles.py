@@ -2,155 +2,116 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+
+from opentulpa.context.customer_profile_models import (
+    CustomerScopedClearResponse,
+    CustomerScopedOkResponse,
+    CustomerScopedRequest,
+    DirectiveGetResponse,
+    DirectiveSetRequest,
+    TimeProfileGetResponse,
+    TimeProfileSetRequest,
+    TimeProfileSetResponse,
+)
+from opentulpa.context.customer_profiles import CustomerProfileService
+
+
+def _schedule_best_effort_memory_add(
+    memory: Any,
+    *,
+    text: str,
+    user_id: str,
+    metadata: dict[str, Any],
+) -> None:
+    if memory is None:
+        return
+
+    async def _runner() -> None:
+        with suppress(Exception):
+            await asyncio.to_thread(
+                memory.add_text,
+                text,
+                user_id=user_id,
+                metadata=metadata,
+            )
+
+    with suppress(RuntimeError):
+        asyncio.create_task(_runner())
 
 
 def register_profile_routes(
     app: FastAPI,
     *,
-    get_profiles: Callable[[], Any],
+    get_profiles: Callable[[], CustomerProfileService],
     get_memory: Callable[[], Any],
 ) -> None:
     """Register directive + timezone profile endpoints."""
 
-    @app.post("/internal/directive/get")
-    async def internal_directive_get(request: Request) -> Any:
+    @app.post("/internal/directive/get", response_model=DirectiveGetResponse)
+    async def internal_directive_get(body: CustomerScopedRequest) -> DirectiveGetResponse:
         profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        return {
-            "customer_id": customer_id,
-            "directive": profiles.get_directive(customer_id),
-        }
+        return DirectiveGetResponse(
+            customer_id=body.customer_id,
+            directive=profiles.get_directive(body.customer_id),
+        )
 
-    @app.post("/internal/directive/set")
-    async def internal_directive_set(request: Request) -> Any:
+    @app.post("/internal/directive/set", response_model=CustomerScopedOkResponse)
+    async def internal_directive_set(body: DirectiveSetRequest) -> CustomerScopedOkResponse:
         profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        directive = str(body.get("directive", "")).strip()
-        source = str(body.get("source", "agent") or "agent")
-        profiles.set_directive(customer_id, directive, source=source)
+        profiles.set_directive(body.customer_id, body.directive, source=body.source)
 
         # Best-effort memory signal for recall; directive DB remains source of truth.
         memory = get_memory()
-        if memory is not None:
-            with suppress(Exception):
-                memory.add_text(
-                    f"Directive updated for this user: {directive}",
-                    user_id=customer_id,
-                    metadata={"kind": "directive_fact", "source": source},
-                )
+        _schedule_best_effort_memory_add(
+            memory,
+            text=f"Directive updated for this user: {body.directive}",
+            user_id=body.customer_id,
+            metadata={"kind": "directive_fact", "source": body.source},
+        )
 
-        return {"ok": True, "customer_id": customer_id}
+        return CustomerScopedOkResponse(customer_id=body.customer_id)
 
-    @app.post("/internal/directive/clear")
-    async def internal_directive_clear(request: Request) -> Any:
+    @app.post("/internal/directive/clear", response_model=CustomerScopedClearResponse)
+    async def internal_directive_clear(body: CustomerScopedRequest) -> CustomerScopedClearResponse:
         profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        cleared = profiles.clear_directive(customer_id, source="agent")
+        cleared = profiles.clear_directive(body.customer_id, source="agent")
 
         # Best-effort memory signal for recall; directive DB remains source of truth.
         memory = get_memory()
-        if memory is not None:
-            with suppress(Exception):
-                memory.add_text(
-                    "Directive profile cleared for this user. Previous directive no longer applies.",
-                    user_id=customer_id,
-                    metadata={"kind": "directive_fact", "source": "agent"},
-                )
+        _schedule_best_effort_memory_add(
+            memory,
+            text="Directive profile cleared for this user. Previous directive no longer applies.",
+            user_id=body.customer_id,
+            metadata={"kind": "directive_fact", "source": "agent"},
+        )
 
-        return {"ok": True, "customer_id": customer_id, "cleared": cleared}
+        return CustomerScopedClearResponse(customer_id=body.customer_id, cleared=cleared)
 
-    @app.post("/internal/time_profile/get")
-    async def internal_time_profile_get(request: Request) -> Any:
+    @app.post("/internal/time_profile/get", response_model=TimeProfileGetResponse)
+    async def internal_time_profile_get(body: CustomerScopedRequest) -> TimeProfileGetResponse:
         profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        return {
-            "customer_id": customer_id,
-            "utc_offset": profiles.get_utc_offset(customer_id),
-        }
+        return TimeProfileGetResponse(
+            customer_id=body.customer_id,
+            utc_offset=profiles.get_utc_offset(body.customer_id),
+        )
 
-    @app.post("/internal/time_profile/set")
-    async def internal_time_profile_set(request: Request) -> Any:
+    @app.post("/internal/time_profile/set", response_model=TimeProfileSetResponse)
+    async def internal_time_profile_set(body: TimeProfileSetRequest) -> TimeProfileSetResponse:
         profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        utc_offset = str(body.get("utc_offset", "")).strip()
-        source = str(body.get("source", "agent") or "agent")
-        normalized = profiles.set_utc_offset(customer_id, utc_offset, source=source)
+        updated = profiles.set_utc_offset(body.customer_id, body.utc_offset, source=body.source)
+        normalized = updated.utc_offset or body.utc_offset
         memory = get_memory()
-        if memory is not None and normalized:
-            with suppress(Exception):
-                memory.add_text(
-                    f"User timezone is {normalized}.",
-                    user_id=customer_id,
-                    metadata={"kind": "life_fact", "source": source},
-                )
-        return {"ok": True, "customer_id": customer_id, "utc_offset": normalized}
-
-    @app.post("/internal/lessons_learnt/get")
-    async def internal_lessons_learnt_get(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        return {
-            "customer_id": customer_id,
-            "lessons_learnt": profiles.get_lessons_learnt(customer_id),
-        }
-
-    @app.post("/internal/lessons_learnt/append")
-    async def internal_lessons_learnt_append(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        lesson = str(body.get("lesson", "")).strip()
-        source = str(body.get("source", "agent") or "agent")
-        max_chars = int(body.get("max_chars", 20000))
-        merged = profiles.append_lesson(
-            customer_id,
-            lesson,
-            source=source,
-            max_chars=max_chars,
-        )
-        return {
-            "ok": True,
-            "customer_id": customer_id,
-            "lessons_learnt": merged,
-        }
-
-    @app.post("/internal/lessons_learnt/set")
-    async def internal_lessons_learnt_set(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        lessons_learnt = str(body.get("lessons_learnt", "")).strip()
-        source = str(body.get("source", "agent") or "agent")
-        updated = profiles.set_lessons_learnt(
-            customer_id,
-            lessons_learnt,
-            source=source,
-        )
-        return {
-            "ok": True,
-            "customer_id": customer_id,
-            "lessons_learnt": updated,
-        }
-
-    @app.post("/internal/lessons_learnt/clear")
-    async def internal_lessons_learnt_clear(request: Request) -> Any:
-        profiles = get_profiles()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        cleared = profiles.clear_lessons_learnt(customer_id, source="agent")
-        return {
-            "ok": True,
-            "customer_id": customer_id,
-            "cleared": cleared,
-        }
+        if normalized:
+            _schedule_best_effort_memory_add(
+                memory,
+                text=f"User timezone is {normalized}.",
+                user_id=body.customer_id,
+                metadata={"kind": "life_fact", "source": body.source},
+            )
+        return TimeProfileSetResponse(customer_id=body.customer_id, utc_offset=normalized)

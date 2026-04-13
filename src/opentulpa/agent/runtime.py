@@ -95,6 +95,11 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     utc_offset_to_minutes as _utc_offset_to_minutes,
 )
+from opentulpa.context.customer_profile_models import (
+    CustomerScopedRequest,
+    DirectiveGetResponse,
+    TimeProfileGetResponse,
+)
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
@@ -516,7 +521,6 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "directive_get",
     "directive_set",
     "directive_clear",
-    "lessons_learnt",
     "time_profile_get",
     "time_profile_set",
     "routine_list",
@@ -1782,15 +1786,13 @@ class OpenTulpaLangGraphRuntime:
             r = await self._request_with_backoff(
                 "POST",
                 "/internal/directive/get",
-                json_body={"customer_id": cid},
+                json_body=CustomerScopedRequest(customer_id=cid).model_dump(mode="json"),
                 timeout=5.0,
                 retries=1,
             )
             if r.status_code != 200:
                 return None
-            data = r.json()
-            directive = str(data.get("directive") or "").strip()
-            return directive or None
+            return DirectiveGetResponse.model_validate(r.json()).directive
         except Exception:
             return None
 
@@ -1805,15 +1807,13 @@ class OpenTulpaLangGraphRuntime:
             r = await self._request_with_backoff(
                 "POST",
                 "/internal/time_profile/get",
-                json_body={"customer_id": cid},
+                json_body=CustomerScopedRequest(customer_id=cid).model_dump(mode="json"),
                 timeout=5.0,
                 retries=1,
             )
             if r.status_code != 200:
                 return None
-            data = r.json()
-            offset = str(data.get("utc_offset") or "").strip()
-            return offset or None
+            return TimeProfileGetResponse.model_validate(r.json()).utc_offset
         except Exception:
             return None
 

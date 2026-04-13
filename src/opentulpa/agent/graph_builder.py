@@ -323,15 +323,6 @@ def _validate_model_tool_call(
                 "use a local ISO datetime schedule (not cron)."
             )
 
-    if call_name == "lessons_learnt":
-        op = str(args.get("action", "")).strip().lower()
-        if op not in {"get", "append", "set", "clear"}:
-            return "TOOL_VALIDATION_ERROR: lessons_learnt action must be one of get|append|set|clear."
-        if op in {"append", "set"} and not str(args.get("lesson", "")).strip():
-            return (
-                "TOOL_VALIDATION_ERROR: lessons_learnt requires a non-empty lesson "
-                "for append/set actions."
-            )
     return None
 def _build_relevant_skill_discovery_context(
     *,
@@ -481,7 +472,6 @@ def build_runtime_graph(runtime: Any):
         "composio_instagram_reply_precheck": (),
         "composio_tool_execute": ("tool_slug",),
         "directive_set": ("directive",),
-        "lessons_learnt": ("action",),
         "time_profile_set": ("utc_offset",),
         "browser_use_session_list": (),
         "browser_use_run": ("task",),
@@ -528,7 +518,6 @@ def build_runtime_graph(runtime: Any):
         "directive_get",
         "directive_set",
         "directive_clear",
-        "lessons_learnt",
         "time_profile_get",
         "time_profile_set",
         "tulpa_run_terminal",

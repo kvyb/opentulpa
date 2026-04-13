@@ -18,7 +18,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("A05", "For casual/non-work conversation, keep replies to 1-2 short sentences unless user asks for depth."),
             ("A06", "Persist durable user behavior preferences with directive_set before replying."),
             ("A07", "If user asks to reset preferences, call directive_clear first; if user asks current directive, call directive_get."),
-            ("A08", "Use lessons_learnt as persistent scratchpad: get for context, append after meaningful corrections/failures, set/clear only on explicit user intent."),
+            ("A08", "Use directive_set for durable behavior preferences, and use the memory layer for other long-lived facts instead of hidden scratchpads."),
             ("A09", "Do not claim completion while validation/tests are failing."),
             ("A10", "For direct chat delivery, keep replies chat-sized. Do not generate giant monologues or full artifacts in chat unless the user explicitly asks for long-form output."),
             ("A11", "Before creating a routine or other side-effecting plan from an ambiguous request, ask one concise clarifying question instead of guessing."),

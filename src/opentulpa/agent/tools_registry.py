@@ -28,6 +28,16 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     looks_like_shell_command as _looks_like_shell_command,
 )
+from opentulpa.context.customer_profile_models import (
+    CustomerScopedClearResponse,
+    CustomerScopedOkResponse,
+    CustomerScopedRequest,
+    DirectiveGetResponse,
+    DirectiveSetRequest,
+    TimeProfileGetResponse,
+    TimeProfileSetRequest,
+    TimeProfileSetResponse,
+)
 from opentulpa.policy.execution_boundary import (
     ExecutionBoundaryContext,
     ExecutionBoundaryGuard,
@@ -1270,12 +1280,12 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/directive/get",
-            json_body={"customer_id": customer_id},
+            json_body=CustomerScopedRequest(customer_id=customer_id).model_dump(mode="json"),
             timeout=5.0,
         )
         if r.status_code != 200:
             return {"error": f"directive_get failed: {r.text}"}
-        return r.json()
+        return DirectiveGetResponse.model_validate(r.json()).model_dump(mode="json")
 
     @tool
     async def directive_set(directive: str) -> Any:
@@ -1284,16 +1294,16 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/directive/set",
-            json_body={
-                "customer_id": customer_id,
-                "directive": directive,
-                "source": "langgraph_tool",
-            },
+            json_body=DirectiveSetRequest(
+                customer_id=customer_id,
+                directive=directive,
+                source="langgraph_tool",
+            ).model_dump(mode="json"),
             timeout=5.0,
         )
         if r.status_code != 200:
             return {"error": f"directive_set failed: {r.text}"}
-        payload = r.json()
+        payload = CustomerScopedOkResponse.model_validate(r.json()).model_dump(mode="json")
         heartbeat = await _sync_proactive_heartbeat(
             runtime=runtime,
             customer_id=customer_id,
@@ -1309,12 +1319,12 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/directive/clear",
-            json_body={"customer_id": customer_id},
+            json_body=CustomerScopedRequest(customer_id=customer_id).model_dump(mode="json"),
             timeout=5.0,
         )
         if r.status_code != 200:
             return {"error": f"directive_clear failed: {r.text}"}
-        payload = r.json()
+        payload = CustomerScopedClearResponse.model_validate(r.json()).model_dump(mode="json")
         heartbeat = await _sync_proactive_heartbeat(
             runtime=runtime,
             customer_id=customer_id,
@@ -1324,90 +1334,18 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         return payload
 
     @tool
-    async def lessons_learnt(
-        action: str,
-        lesson: str = "",
-        max_chars: int = 20000,
-    ) -> Any:
-        """
-        Manage the user's persistent lessons_learnt scratchpad.
-
-        Use action='get' to read, action='append' to add a new lesson,
-        action='set' to replace full content, and action='clear' to delete content.
-        Pass lesson for append/set actions.
-        """
-        customer_id = _require_customer_id(runtime)
-        op = str(action or "").strip().lower()
-        if op == "get":
-            r = await runtime._request_with_backoff(
-                "POST",
-                "/internal/lessons_learnt/get",
-                json_body={"customer_id": customer_id},
-                timeout=5.0,
-            )
-            if r.status_code != 200:
-                return {"error": f"lessons_learnt failed (get): {r.text}"}
-            return r.json()
-        if op == "append":
-            safe_lesson = str(lesson or "").strip()
-            if not safe_lesson:
-                return {"error": "lessons_learnt failed (append): lesson is required"}
-            r = await runtime._request_with_backoff(
-                "POST",
-                "/internal/lessons_learnt/append",
-                json_body={
-                    "customer_id": customer_id,
-                    "lesson": safe_lesson,
-                    "source": "langgraph_tool",
-                    "max_chars": max(500, min(int(max_chars), 200000)),
-                },
-                timeout=6.0,
-            )
-            if r.status_code != 200:
-                return {"error": f"lessons_learnt failed (append): {r.text}"}
-            return r.json()
-        if op == "set":
-            safe_lessons = str(lesson or "").strip()
-            if not safe_lessons:
-                return {"error": "lessons_learnt failed (set): lesson is required"}
-            r = await runtime._request_with_backoff(
-                "POST",
-                "/internal/lessons_learnt/set",
-                json_body={
-                    "customer_id": customer_id,
-                    "lessons_learnt": safe_lessons,
-                    "source": "langgraph_tool",
-                },
-                timeout=6.0,
-            )
-            if r.status_code != 200:
-                return {"error": f"lessons_learnt failed (set): {r.text}"}
-            return r.json()
-        if op == "clear":
-            r = await runtime._request_with_backoff(
-                "POST",
-                "/internal/lessons_learnt/clear",
-                json_body={"customer_id": customer_id},
-                timeout=5.0,
-            )
-            if r.status_code != 200:
-                return {"error": f"lessons_learnt failed (clear): {r.text}"}
-            return r.json()
-        return {"error": "lessons_learnt failed: action must be one of get|append|set|clear"}
-
-    @tool
     async def time_profile_get() -> Any:
         """Get stored user UTC offset (if known)."""
         customer_id = _require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/time_profile/get",
-            json_body={"customer_id": customer_id},
+            json_body=CustomerScopedRequest(customer_id=customer_id).model_dump(mode="json"),
             timeout=5.0,
         )
         if r.status_code != 200:
             return {"error": f"time_profile_get failed: {r.text}"}
-        return r.json()
+        return TimeProfileGetResponse.model_validate(r.json()).model_dump(mode="json")
 
     @tool
     async def time_profile_set(utc_offset: str) -> Any:
@@ -1416,16 +1354,16 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/time_profile/set",
-            json_body={
-                "customer_id": customer_id,
-                "utc_offset": utc_offset,
-                "source": "langgraph_tool",
-            },
+            json_body=TimeProfileSetRequest(
+                customer_id=customer_id,
+                utc_offset=utc_offset,
+                source="langgraph_tool",
+            ).model_dump(mode="json"),
             timeout=5.0,
         )
         if r.status_code != 200:
             return {"error": f"time_profile_set failed: {r.text}"}
-        return r.json()
+        return TimeProfileSetResponse.model_validate(r.json()).model_dump(mode="json")
 
     @tool
     async def web_search(query: str) -> Any:
@@ -2231,7 +2169,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,
-        "lessons_learnt": lessons_learnt,
         "time_profile_get": time_profile_get,
         "time_profile_set": time_profile_set,
         "web_search": web_search,
