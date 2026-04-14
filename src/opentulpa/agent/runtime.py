@@ -2122,7 +2122,7 @@ class OpenTulpaLangGraphRuntime:
         self,
         memories: list[dict[str, Any]],
         *,
-        token_budget: int = 500,
+        token_budget: int = 380,
     ) -> str:
         if not memories:
             return ""
@@ -2138,13 +2138,16 @@ class OpenTulpaLangGraphRuntime:
         }
         grouped: dict[str, list[str]] = {name: [] for name, _ in _MEMORY_GROUNDING_KIND_SECTIONS}
         used = 0
+        max_lines_per_section = 3
         for item in sorted(memories, key=self._memory_grounding_sort_key):
             section_name = self._memory_grounding_section_for_kind(str(item.get("kind", "")))
-            line = _trim_text_to_token_budget(str(item.get("text", "")).strip(), token_budget=36)
+            line = _trim_text_to_token_budget(str(item.get("text", "")).strip(), token_budget=28)
             if not line:
                 continue
             line_tokens = max(1, _approx_tokens(line) + 1)
             if grouped[section_name] and line in grouped[section_name]:
+                continue
+            if len(grouped[section_name]) >= max_lines_per_section:
                 continue
             if used and used + line_tokens > budget:
                 continue
@@ -2155,7 +2158,7 @@ class OpenTulpaLangGraphRuntime:
             lines = grouped.get(section_name) or []
             if not lines:
                 continue
-            parts.append(f"{section_labels[section_name]}:\n- " + "\n- ".join(lines[:4]))
+            parts.append(f"{section_labels[section_name]}:\n- " + "\n- ".join(lines))
         block = "\n\n".join(parts).strip()
         return _trim_text_to_token_budget(block, token_budget=budget)
 
@@ -2173,20 +2176,58 @@ class OpenTulpaLangGraphRuntime:
         if not cid:
             return ""
         primary_query = str(user_text or "").strip()
-        queries = [
-            primary_query,
-            "important durable facts, preferences, projects, workflows, technical facts, files, and recent context for this user",
-        ]
+        queries: list[dict[str, Any]] = []
+        if primary_query:
+            queries.append({"query": primary_query, "limit": 8, "metadata": None})
+        # Favor durable facts first and pull thread rollups only as fallback.
+        queries.extend(
+            [
+                {
+                    "query": "important durable preferences, directives, personal facts, projects, workflows, skills, and technical context",
+                    "limit": 8,
+                    "metadata": {
+                        "kind": [
+                            "directive_fact",
+                            "preference_fact",
+                            "style_fact",
+                            "user_profile_fact",
+                            "life_fact",
+                            "relationship_fact",
+                            "contact_fact",
+                            "project_fact",
+                            "aspirations_fact",
+                            "workflow_fact",
+                            "skill_fact",
+                            "code_fact",
+                            "credential_fact",
+                            "file_fact",
+                            "media_fact",
+                        ]
+                    },
+                },
+                {
+                    "query": "compressed older thread context and unresolved notes",
+                    "limit": 4,
+                    "metadata": {"kind": "thread_context_rollup"},
+                },
+            ]
+        )
         collected: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
-        for idx, query in enumerate(queries):
+        for spec in queries:
+            query = str(spec.get("query", "") or "").strip()
             if not query:
                 continue
             try:
                 response = await self._request_with_backoff(
                     "POST",
                     "/internal/memory/search",
-                    json_body={"query": query, "user_id": cid, "limit": 12 if idx == 0 else 8},
+                    json_body={
+                        "query": query,
+                        "user_id": cid,
+                        "limit": int(spec.get("limit", 8)),
+                        "metadata": spec.get("metadata"),
+                    },
                     timeout=8.0,
                     retries=1,
                 )
@@ -2207,7 +2248,7 @@ class OpenTulpaLangGraphRuntime:
                     continue
                 seen.add(dedupe_key)
                 collected.append(item)
-            if collected:
+            if len(collected) >= 10:
                 break
         return self._build_memory_grounding_block(collected, token_budget=token_budget)
 
