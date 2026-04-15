@@ -18,6 +18,7 @@ from opentulpa.interfaces.telegram.client import (
     parse_telegram_callback_query,
     parse_telegram_update,
 )
+from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,8 @@ def register_telegram_webhook_routes(
     *,
     settings: Any,
     get_telegram_client: Callable[[], Any],
+    get_telegram_business: Callable[[], Any],
+    get_intake_workflows: Callable[[], Any],
     get_telegram_chat: Callable[[], Any],
     get_approvals: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
@@ -212,6 +215,51 @@ def register_telegram_webhook_routes(
         return Response(status_code=200)
 
     async def _telegram_background_handler(body: dict[str, Any]) -> None:
+        business_result = get_telegram_business().ingest_update(body)
+        if bool(business_result.get("handled")):
+            if bool(business_result.get("trigger_workflows")):
+                customer_id = str(business_result.get("customer_id", "") or "").strip()
+                business_connection_id = str(
+                    business_result.get("business_connection_id", "") or ""
+                ).strip()
+                conversation_id = str(business_result.get("chat_id", "") or "").strip()
+                owner_chat_id = str(business_result.get("user_chat_id", "") or "").strip()
+                if customer_id and business_connection_id and conversation_id:
+                    workflows = get_intake_workflows().list_workflows(
+                        customer_id=customer_id,
+                        include_disabled=False,
+                    )
+                    for workflow in workflows:
+                        if str(workflow.get("channel", "")).strip() != "telegram_business_dm":
+                            continue
+                        if str(workflow.get("provider", "")).strip() != "telegram_bot_api":
+                            continue
+                        if not get_intake_workflows()._source_matches_workflow(  # noqa: SLF001
+                            workflow=workflow,
+                            business_connection_id=business_connection_id,
+                            conversation_id=conversation_id,
+                        ):
+                            continue
+                        result = await get_intake_workflows().run_workflow(
+                            customer_id=customer_id,
+                            workflow_id=str(workflow.get("workflow_id", "") or "").strip(),
+                            event_type="telegram_business_webhook",
+                        )
+                        summary = str(result.get("summary", "") or "").strip()
+                        if (
+                            not bool(result.get("ok", False))
+                            and owner_chat_id
+                            and summary
+                            and summary != NO_NOTIFY_TOKEN
+                        ):
+                            with suppress(Exception):
+                                await get_telegram_client().send_message(
+                                    chat_id=owner_chat_id,
+                                    text=f"Telegram Business workflow issue: {summary}",
+                                    parse_mode="HTML",
+                                )
+            return
+
         callback_id, callback_user_id, callback_chat_id, callback_data, callback_message_id = (
             parse_telegram_callback_query(body)
         )

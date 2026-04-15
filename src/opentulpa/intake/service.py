@@ -10,13 +10,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.scheduler.models import Routine
 from opentulpa.skills.service import build_skill_markdown
 
-_ALLOWED_CHANNELS = {"instagram_dm"}
-_ALLOWED_PROVIDERS = {"composio"}
+_ALLOWED_CHANNELS = {"instagram_dm", "telegram_business_dm"}
+_ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
 _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_write"}
 _DEFAULT_SCHEDULE = "*/5 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
@@ -142,6 +143,8 @@ class IntakeWorkflowService:
         scheduler: Any | None = None,
         skill_store: Any | None = None,
         composio: Any | None = None,
+        telegram_business: Any | None = None,
+        file_vault: FileVaultService | None = None,
         get_agent_runtime: Any | None = None,
     ) -> None:
         self._db_path = db_path.resolve()
@@ -149,6 +152,8 @@ class IntakeWorkflowService:
         self._scheduler = scheduler
         self._skill_store = skill_store
         self._composio = composio
+        self._telegram_business = telegram_business
+        self._file_vault = file_vault
         self._get_agent_runtime = get_agent_runtime
         self._init_db()
 
@@ -253,6 +258,8 @@ class IntakeWorkflowService:
                     intent_description TEXT NOT NULL,
                     required_fields_json TEXT NOT NULL,
                     field_guidance_json TEXT NOT NULL,
+                    assistant_instructions TEXT NOT NULL DEFAULT '',
+                    knowledge_file_ids_json TEXT NOT NULL DEFAULT '[]',
                     sink_type TEXT NOT NULL,
                     sink_config_json TEXT NOT NULL,
                     schedule TEXT NOT NULL,
@@ -299,6 +306,7 @@ class IntakeWorkflowService:
                 """
             )
             self._ensure_cursor_columns(conn)
+            self._ensure_workflow_columns(conn)
             self._migrate_legacy_sink_configs(conn)
 
     @staticmethod
@@ -315,6 +323,22 @@ class IntakeWorkflowService:
                 continue
             conn.execute(
                 f"ALTER TABLE intake_conversation_cursors ADD COLUMN {column} {column_type}"
+            )
+        conn.commit()
+
+    @staticmethod
+    def _ensure_workflow_columns(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(intake_workflows)").fetchall()
+        existing = {str(row["name"] or "") for row in rows}
+        required_columns = {
+            "assistant_instructions": "TEXT NOT NULL DEFAULT ''",
+            "knowledge_file_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for column, column_type in required_columns.items():
+            if column in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE intake_workflows ADD COLUMN {column} {column_type}"
             )
         conn.commit()
 
@@ -352,6 +376,8 @@ class IntakeWorkflowService:
         intent_description: str,
         required_fields: list[str],
         field_guidance: dict[str, Any] | None,
+        assistant_instructions: str,
+        knowledge_file_ids: list[str],
         sink_type: str,
         sink_config: dict[str, Any] | None,
         schedule: str,
@@ -368,14 +394,24 @@ class IntakeWorkflowService:
         safe_required_fields = _unique_string_list(required_fields)
         safe_source_config = _safe_dict(source_config)
         safe_field_guidance = _safe_dict(field_guidance)
+        safe_assistant_instructions = str(assistant_instructions or "").strip()
+        safe_knowledge_file_ids = _unique_string_list(knowledge_file_ids)
         if not safe_customer:
             raise ValueError("customer_id is required")
         if not safe_name:
             raise ValueError("name is required")
         if safe_channel not in _ALLOWED_CHANNELS:
-            raise ValueError("channel must be instagram_dm")
+            raise ValueError("channel must be instagram_dm|telegram_business_dm")
         if safe_provider not in _ALLOWED_PROVIDERS:
-            raise ValueError("provider must be composio")
+            raise ValueError("provider must be composio|telegram_bot_api")
+        if safe_channel == "instagram_dm" and safe_provider != "composio":
+            raise ValueError("instagram_dm workflows require provider=composio")
+        if safe_channel == "telegram_business_dm" and safe_provider != "telegram_bot_api":
+            raise ValueError("telegram_business_dm workflows require provider=telegram_bot_api")
+        if safe_channel == "telegram_business_dm":
+            business_connection_id = str(safe_source_config.get("business_connection_id", "") or "").strip()
+            if not business_connection_id:
+                raise ValueError("telegram_business_dm workflows require source_config.business_connection_id")
         if not safe_intent:
             raise ValueError("intent_description is required")
         if not safe_required_fields:
@@ -412,6 +448,8 @@ class IntakeWorkflowService:
             "intent_description": safe_intent,
             "required_fields": safe_required_fields,
             "field_guidance": safe_field_guidance,
+            "assistant_instructions": safe_assistant_instructions,
+            "knowledge_file_ids": safe_knowledge_file_ids,
             "sink_type": safe_sink_type,
             "sink_config": safe_sink_config,
             "schedule": safe_schedule,
@@ -510,6 +548,8 @@ class IntakeWorkflowService:
             "intent_description": str(row["intent_description"]),
             "required_fields": json.loads(row["required_fields_json"] or "[]"),
             "field_guidance": json.loads(row["field_guidance_json"] or "{}"),
+            "assistant_instructions": str(row["assistant_instructions"] or ""),
+            "knowledge_file_ids": json.loads(row["knowledge_file_ids_json"] or "[]"),
             "sink_type": str(row["sink_type"]),
             "sink_config": json.loads(row["sink_config_json"] or "{}"),
             "schedule": str(row["schedule"]),
@@ -551,6 +591,8 @@ class IntakeWorkflowService:
         intent_description: str,
         required_fields: list[str],
         field_guidance: dict[str, Any] | None = None,
+        assistant_instructions: str = "",
+        knowledge_file_ids: list[str] | None = None,
         sink_type: str,
         sink_config: dict[str, Any] | None = None,
         schedule: str = _DEFAULT_SCHEDULE,
@@ -559,8 +601,13 @@ class IntakeWorkflowService:
     ) -> dict[str, Any]:
         existing = None
         safe_workflow_id = _normalize_optional_id(workflow_id)
+        safe_channel = str(channel or "instagram_dm").strip().lower() or "instagram_dm"
         if safe_workflow_id:
             existing = self.get_workflow(customer_id=customer_id, workflow_id=safe_workflow_id)
+        elif safe_channel == "telegram_business_dm":
+            existing = self._get_unique_telegram_business_workflow(customer_id=customer_id)
+            if existing is not None:
+                safe_workflow_id = str(existing.get("workflow_id", "") or "").strip()
         workflow = self._normalize_workflow_payload(
             workflow_id=safe_workflow_id or None,
             customer_id=customer_id,
@@ -571,6 +618,8 @@ class IntakeWorkflowService:
             intent_description=intent_description,
             required_fields=required_fields,
             field_guidance=field_guidance,
+            assistant_instructions=assistant_instructions,
+            knowledge_file_ids=knowledge_file_ids or [],
             sink_type=sink_type,
             sink_config=sink_config,
             schedule=schedule,
@@ -588,9 +637,10 @@ class IntakeWorkflowService:
                 INSERT INTO intake_workflows (
                     workflow_id, customer_id, name, channel, provider, source_config_json,
                     intent_description, required_fields_json, field_guidance_json,
-                    sink_type, sink_config_json, schedule, notify_user, enabled, routine_id,
+                    assistant_instructions, knowledge_file_ids_json, sink_type,
+                    sink_config_json, schedule, notify_user, enabled, routine_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
                     customer_id=excluded.customer_id,
                     name=excluded.name,
@@ -600,6 +650,8 @@ class IntakeWorkflowService:
                     intent_description=excluded.intent_description,
                     required_fields_json=excluded.required_fields_json,
                     field_guidance_json=excluded.field_guidance_json,
+                    assistant_instructions=excluded.assistant_instructions,
+                    knowledge_file_ids_json=excluded.knowledge_file_ids_json,
                     sink_type=excluded.sink_type,
                     sink_config_json=excluded.sink_config_json,
                     schedule=excluded.schedule,
@@ -618,6 +670,8 @@ class IntakeWorkflowService:
                     workflow["intent_description"],
                     _json_dumps(workflow["required_fields"]),
                     _json_dumps(workflow["field_guidance"]),
+                    workflow["assistant_instructions"],
+                    _json_dumps(workflow["knowledge_file_ids"]),
                     workflow["sink_type"],
                     _json_dumps(workflow["sink_config"]),
                     workflow["schedule"],
@@ -635,6 +689,24 @@ class IntakeWorkflowService:
             customer_id=workflow["customer_id"],
             workflow_id=workflow["workflow_id"],
         ) or workflow
+
+    def _get_unique_telegram_business_workflow(
+        self,
+        *,
+        customer_id: str,
+    ) -> dict[str, Any] | None:
+        workflows = [
+            workflow
+            for workflow in self.list_workflows(customer_id=customer_id, include_disabled=True)
+            if str(workflow.get("channel", "") or "").strip().lower() == "telegram_business_dm"
+        ]
+        if not workflows:
+            return None
+        if len(workflows) > 1:
+            raise ValueError(
+                "telegram_business_dm supports only one workflow per customer; multiple existing workflows found"
+            )
+        return workflows[0]
 
     def list_workflows(
         self,
@@ -723,12 +795,35 @@ class IntakeWorkflowService:
             rows = conn.execute(query, params).fetchall()
         return [self._hydrate_booking_row(row) for row in rows]
 
+    @staticmethod
+    def _channel_label(channel: str) -> str:
+        safe_channel = str(channel or "").strip().lower()
+        if safe_channel == "telegram_business_dm":
+            return "Telegram Business DMs"
+        return "Instagram DMs"
+
+    @staticmethod
+    def _reply_channel_label(channel: str) -> str:
+        safe_channel = str(channel or "").strip().lower()
+        if safe_channel == "telegram_business_dm":
+            return "Telegram Business DM"
+        return "Instagram DM"
+
+    def _knowledge_files_for_workflow(self, *, customer_id: str, workflow: dict[str, Any]) -> list[dict[str, Any]]:
+        file_vault = self._file_vault
+        if file_vault is None:
+            return []
+        return file_vault.get_many(
+            customer_id=str(customer_id or "").strip(),
+            file_ids=_unique_string_list(workflow.get("knowledge_file_ids")),
+        )
+
     def _sync_routine(self, workflow: dict[str, Any]) -> None:
         if self._scheduler is None:
             return
         payload = {
             "instruction": (
-                "Run the configured intake workflow, inspect recent Instagram DMs through Composio, "
+                "Run the configured intake workflow, inspect recent external customer messages, "
                 "continue conversations when needed, and save completed bookings using the stored sink."
             ),
             "customer_id": workflow["customer_id"],
@@ -757,9 +852,14 @@ class IntakeWorkflowService:
             return
         workflow_id = str(workflow["workflow_id"])
         name = self._workflow_skill_name(workflow_id)
+        channel_label = self._channel_label(str(workflow.get("channel", "") or ""))
+        reply_channel_label = self._reply_channel_label(str(workflow.get("channel", "") or ""))
         description = (
-            f"Operate the {workflow['name']} Instagram intake workflow for this user."
+            f"Operate the {workflow['name']} {channel_label} intake workflow for this user."
         )
+        knowledge_file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
+        field_guidance = _safe_dict(workflow.get("field_guidance"))
+        source_config = _safe_dict(workflow.get("source_config"))
         instructions = (
             "## Purpose\n"
             f"Support the durable intake workflow `{workflow['name']}`.\n\n"
@@ -768,13 +868,37 @@ class IntakeWorkflowService:
             "## Required Fields\n"
             f"- Collect these fields before save: {', '.join(workflow['required_fields'])}\n\n"
             "## Behavioral Rules\n"
-            "- Ask concise follow-up questions in the Instagram DM when fields are missing.\n"
+            f"- Ask concise follow-up questions in the {reply_channel_label} when fields are missing.\n"
             "- When all required fields are present, save through the configured sink.\n"
             "- Treat the same DM thread as one active booking until completion.\n"
             "- If the last completed booking is still inside the edit window, follow-up changes may edit it.\n"
             "- Otherwise, a clearly new request should create a new booking.\n"
             "- Telegram notifications should stay concise and only summarize booking success or failures.\n"
         )
+        if field_guidance:
+            guidance_lines = []
+            for key, value in field_guidance.items():
+                safe_key = str(key or "").strip()
+                safe_value = str(value or "").strip()
+                if safe_key and safe_value:
+                    guidance_lines.append(f"- {safe_key}: {safe_value}")
+            if guidance_lines:
+                instructions += (
+                    "\n## Field Guidance\n"
+                    + "\n".join(guidance_lines)
+                    + "\n"
+                )
+        assistant_instructions = str(workflow.get("assistant_instructions", "") or "").strip()
+        if assistant_instructions:
+            instructions += (
+                "\n## Reply Instructions\n"
+                f"{assistant_instructions}\n"
+            )
+        if knowledge_file_ids:
+            instructions += (
+                "\n## Knowledge Files\n"
+                "- Use the workflow-bound uploaded files when answering customer questions.\n"
+            )
         supporting_files = {
             "workflow.json": _json_dumps(
                 {
@@ -782,9 +906,14 @@ class IntakeWorkflowService:
                     "name": workflow["name"],
                     "channel": workflow["channel"],
                     "provider": workflow["provider"],
+                    "source_config": source_config,
                     "intent_description": workflow["intent_description"],
                     "required_fields": workflow["required_fields"],
+                    "field_guidance": field_guidance,
+                    "assistant_instructions": workflow.get("assistant_instructions", ""),
+                    "knowledge_file_ids": knowledge_file_ids,
                     "sink_type": workflow["sink_type"],
+                    "sink_config": workflow.get("sink_config", {}),
                 }
             )
             + "\n"
@@ -946,9 +1075,28 @@ class IntakeWorkflowService:
     def _normalize_conversation_messages(
         self,
         *,
+        workflow: dict[str, Any],
         conversation: dict[str, Any],
         recipient_id: str | None,
     ) -> list[dict[str, Any]]:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        if channel == "telegram_business_dm":
+            messages = _safe_list(conversation.get("messages"))
+            normalized: list[dict[str, Any]] = []
+            for item in messages:
+                msg = _safe_dict(item)
+                normalized.append(
+                    {
+                        "id": str(msg.get("message_id", msg.get("id", "")) or "").strip(),
+                        "created_time": str(msg.get("date_iso", msg.get("created_time", "")) or "").strip(),
+                        "sender_id": str(msg.get("from_user_id", msg.get("sender_id", "")) or "").strip(),
+                        "sender_username": str(msg.get("from_username", msg.get("sender_username", "")) or "").strip(),
+                        "sender_role": str(msg.get("sender_role", "") or "").strip() or "customer",
+                        "text": str(msg.get("text", "") or "").strip(),
+                    }
+                )
+            normalized.sort(key=lambda item: str(item.get("created_time", "")))
+            return normalized[-12:]
         payload = _safe_dict(conversation.get("data")) if "data" in conversation else _safe_dict(conversation)
         participants = _safe_list(_safe_dict(payload.get("participants")).get("data"))
         messages = _safe_list(_safe_dict(payload.get("messages")).get("data"))
@@ -979,6 +1127,161 @@ class IntakeWorkflowService:
         normalized.sort(key=lambda item: str(item.get("created_time", "")))
         return normalized[-12:]
 
+    def _source_matches_workflow(
+        self,
+        *,
+        workflow: dict[str, Any],
+        business_connection_id: str,
+        conversation_id: str,
+    ) -> bool:
+        source_config = _safe_dict(workflow.get("source_config"))
+        expected_business_connection_id = str(
+            source_config.get("business_connection_id", "") or ""
+        ).strip()
+        if expected_business_connection_id and expected_business_connection_id != business_connection_id:
+            return False
+        configured_conversation_ids = _unique_string_list(
+            source_config.get("conversation_ids")
+            if isinstance(source_config.get("conversation_ids"), list)
+            else (
+                [source_config.get("conversation_id")]
+                if str(source_config.get("conversation_id", "")).strip()
+                else []
+            )
+        )
+        if configured_conversation_ids and conversation_id not in configured_conversation_ids:
+            return False
+        return True
+
+    def _load_source_items(
+        self,
+        *,
+        workflow: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        if channel == "instagram_dm" and provider == "composio":
+            composio = self._composio
+            if composio is None or not bool(getattr(composio, "enabled", False)):
+                return [], f"Workflow {workflow['name']} failed: Composio is not available."
+            source_config = _safe_dict(workflow.get("source_config"))
+            connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
+            scan_limit = max(1, min(int(source_config.get("scan_limit", 10) or 10), 25))
+            configured_conversation_ids = _unique_string_list(
+                source_config.get("conversation_ids")
+                if isinstance(source_config.get("conversation_ids"), list)
+                else (
+                    [source_config.get("conversation_id")]
+                    if str(source_config.get("conversation_id", "")).strip()
+                    else []
+                )
+            )
+            try:
+                if configured_conversation_ids:
+                    items = []
+                    for conversation_id in configured_conversation_ids:
+                        detailed = composio.get_instagram_conversation(
+                            customer_id=str(workflow["customer_id"]),
+                            conversation_id=conversation_id,
+                            connected_account_id=connected_account_id,
+                        )
+                        items.append(_safe_dict(detailed.get("summary")))
+                else:
+                    conversations_payload = composio.list_instagram_conversations(
+                        customer_id=str(workflow["customer_id"]),
+                        connected_account_id=connected_account_id,
+                        limit=scan_limit,
+                    )
+                    items = _safe_list(conversations_payload.get("items"))
+            except Exception as exc:
+                return [], f"Workflow {workflow['name']} failed while reading Instagram DMs: {exc}"
+            return items, None
+        if channel == "telegram_business_dm" and provider == "telegram_bot_api":
+            telegram_business = self._telegram_business
+            if telegram_business is None:
+                return [], f"Workflow {workflow['name']} failed: Telegram Business is not available."
+            source_config = _safe_dict(workflow.get("source_config"))
+            business_connection_id = str(source_config.get("business_connection_id", "") or "").strip()
+            if not business_connection_id:
+                return [], f"Workflow {workflow['name']} failed: source_config.business_connection_id is required."
+            scan_limit = max(1, min(int(source_config.get("scan_limit", 10) or 10), 50))
+            configured_conversation_ids = _unique_string_list(
+                source_config.get("conversation_ids")
+                if isinstance(source_config.get("conversation_ids"), list)
+                else (
+                    [source_config.get("conversation_id")]
+                    if str(source_config.get("conversation_id", "")).strip()
+                    else []
+                )
+            )
+            payload = telegram_business.list_conversations(
+                customer_id=str(workflow["customer_id"]),
+                business_connection_id=business_connection_id,
+                limit=scan_limit,
+                chat_ids=configured_conversation_ids or None,
+            )
+            return _safe_list(payload.get("items")), None
+        return [], (
+            f"Workflow {workflow['name']} failed: unsupported source "
+            f"{workflow.get('channel')}/{workflow.get('provider')}."
+        )
+
+    def _load_source_conversation(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        if channel == "instagram_dm" and provider == "composio":
+            source_config = _safe_dict(workflow.get("source_config"))
+            connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
+            try:
+                detailed = self._composio.get_instagram_conversation(
+                    customer_id=str(workflow["customer_id"]),
+                    conversation_id=conversation_id,
+                    connected_account_id=connected_account_id,
+                )
+            except Exception as exc:
+                return {}, {}, str(exc)
+            return _safe_dict(detailed.get("summary")), _safe_dict(detailed.get("conversation")), None
+        if channel == "telegram_business_dm" and provider == "telegram_bot_api":
+            source_config = _safe_dict(workflow.get("source_config"))
+            business_connection_id = str(source_config.get("business_connection_id", "") or "").strip()
+            detailed = self._telegram_business.get_conversation(
+                customer_id=str(workflow["customer_id"]),
+                business_connection_id=business_connection_id,
+                conversation_id=conversation_id,
+            )
+            if not bool(detailed.get("ok", False)):
+                return {}, {}, str(detailed.get("error") or "conversation not found")
+            return _safe_dict(detailed.get("summary")), _safe_dict(detailed.get("conversation")), None
+        return {}, {}, "unsupported source"
+
+    async def _send_source_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        reply_text: str,
+    ) -> str | None:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        if channel == "instagram_dm" and provider == "composio":
+            return await self._send_instagram_reply(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                reply_text=reply_text,
+            )
+        if channel == "telegram_business_dm" and provider == "telegram_bot_api":
+            return await self._send_telegram_business_reply(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                reply_text=reply_text,
+            )
+        return f"unsupported reply source {channel}/{provider}"
+
     async def run_workflow(
         self,
         *,
@@ -1001,57 +1304,12 @@ class IntakeWorkflowService:
                 "summary": NO_NOTIFY_TOKEN,
                 "reason": "workflow_disabled",
             }
-        if str(workflow.get("channel")) != "instagram_dm" or str(workflow.get("provider")) != "composio":
+        items, source_error = self._load_source_items(workflow=workflow)
+        if source_error is not None:
             return {
                 "ok": False,
                 "workflow_id": workflow_id,
-                "summary": (
-                    f"Workflow {workflow['name']} failed: unsupported source "
-                    f"{workflow.get('channel')}/{workflow.get('provider')}."
-                ),
-            }
-        composio = self._composio
-        if composio is None or not bool(getattr(composio, "enabled", False)):
-            return {
-                "ok": False,
-                "workflow_id": workflow_id,
-                "summary": f"Workflow {workflow['name']} failed: Composio is not available.",
-            }
-
-        source_config = _safe_dict(workflow.get("source_config"))
-        connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
-        scan_limit = max(1, min(int(source_config.get("scan_limit", 10) or 10), 25))
-        configured_conversation_ids = _unique_string_list(
-            source_config.get("conversation_ids")
-            if isinstance(source_config.get("conversation_ids"), list)
-            else (
-                [source_config.get("conversation_id")]
-                if str(source_config.get("conversation_id", "")).strip()
-                else []
-            )
-        )
-        try:
-            if configured_conversation_ids:
-                items = []
-                for conversation_id in configured_conversation_ids:
-                    detailed = composio.get_instagram_conversation(
-                        customer_id=str(workflow["customer_id"]),
-                        conversation_id=conversation_id,
-                        connected_account_id=connected_account_id,
-                    )
-                    items.append(_safe_dict(detailed.get("summary")))
-            else:
-                conversations_payload = composio.list_instagram_conversations(
-                    customer_id=str(workflow["customer_id"]),
-                    connected_account_id=connected_account_id,
-                    limit=scan_limit,
-                )
-                items = _safe_list(conversations_payload.get("items"))
-        except Exception as exc:
-            return {
-                "ok": False,
-                "workflow_id": workflow_id,
-                "summary": f"Workflow {workflow['name']} failed while reading Instagram DMs: {exc}",
+                "summary": source_error,
             }
 
         processed = 0
@@ -1095,13 +1353,16 @@ class IntakeWorkflowService:
                 cursor_latest_outbound_message_id=str(cursor.get("latest_outbound_message_id", "") or "").strip(),
             )
             try:
-                detailed = composio.get_instagram_conversation(
-                    customer_id=str(workflow["customer_id"]),
+                detailed_summary, conversation, detail_error = self._load_source_conversation(
+                    workflow=workflow,
                     conversation_id=conversation_id,
-                    connected_account_id=connected_account_id,
                 )
             except Exception as exc:
-                error_text = str(exc)
+                detailed_summary = {}
+                conversation = {}
+                detail_error = str(exc)
+            if detail_error:
+                error_text = str(detail_error)
                 errors.append(f"{conversation_id}: {error_text}")
                 self._emit_observability(
                     event="intake.conversation.error",
@@ -1112,8 +1373,6 @@ class IntakeWorkflowService:
                 )
                 continue
 
-            detailed_summary = _safe_dict(detailed.get("summary"))
-            conversation = _safe_dict(detailed.get("conversation"))
             cursor_summary = detailed_summary or conversation_summary
             latest_inbound_id = str(cursor_summary.get("latest_inbound_message_id", "") or "").strip()
             latest_inbound_time = str(
@@ -1296,9 +1555,26 @@ class IntakeWorkflowService:
             )
             return {}, error
         recent_messages = self._normalize_conversation_messages(
+            workflow=workflow,
             conversation=conversation,
             recipient_id=str(conversation_summary.get("recipient_id", "") or "").strip() or None,
         )
+        workflow_context = {
+            "workflow_id": workflow.get("workflow_id"),
+            "name": workflow.get("name"),
+            "intent_description": workflow.get("intent_description"),
+            "required_fields": workflow.get("required_fields"),
+            "field_guidance": workflow.get("field_guidance"),
+            "assistant_instructions": workflow.get("assistant_instructions", ""),
+            "knowledge_file_ids": _unique_string_list(workflow.get("knowledge_file_ids")),
+            "knowledge_files": self._knowledge_files_for_workflow(
+                customer_id=str(workflow["customer_id"]),
+                workflow=workflow,
+            ),
+            "sink_type": workflow.get("sink_type"),
+            "channel": workflow.get("channel"),
+            "provider": workflow.get("provider"),
+        }
         self._emit_observability(
             event="intake.decision.start",
             workflow=workflow,
@@ -1314,14 +1590,7 @@ class IntakeWorkflowService:
         try:
             decision = await runtime.decide_intake_workflow(
                 customer_id=str(workflow["customer_id"]),
-                workflow={
-                    "workflow_id": workflow["workflow_id"],
-                    "name": workflow["name"],
-                    "intent_description": workflow["intent_description"],
-                    "required_fields": workflow["required_fields"],
-                    "field_guidance": workflow["field_guidance"],
-                    "sink_type": workflow["sink_type"],
-                },
+                workflow=workflow_context,
                 conversation={
                     "summary": conversation_summary,
                     "recent_messages": recent_messages,
@@ -1596,7 +1865,7 @@ class IntakeWorkflowService:
                 booking_id=str(target_booking.get("booking_id", "") or "").strip(),
                 reply_text=reply_text,
             )
-            reply_error = await self._send_instagram_reply(
+            reply_error = await self._send_source_reply(
                 workflow=workflow,
                 conversation_summary=conversation_summary,
                 reply_text=reply_text,
@@ -1701,6 +1970,41 @@ class IntakeWorkflowService:
             return f"failed to send Instagram DM reply: {exc}"
         if not bool(result.get("successful", False)):
             return str(result.get("error") or "Instagram DM reply failed")
+        return None
+
+    async def _send_telegram_business_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        reply_text: str,
+    ) -> str | None:
+        if not reply_text:
+            return "reply_action=send_reply requires non-empty reply_text"
+        telegram_business = self._telegram_business
+        if telegram_business is None:
+            return "Telegram Business is not available"
+        source_config = _safe_dict(workflow.get("source_config"))
+        business_connection_id = str(source_config.get("business_connection_id", "") or "").strip()
+        conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip()
+        if not business_connection_id or not conversation_id:
+            return "Telegram Business reply requires business_connection_id and conversation_id"
+        latest_inbound = str(conversation_summary.get("latest_inbound_message_id", "") or "").strip()
+        client = getattr(telegram_business, "client", None)
+        if client is None:
+            return "Telegram Business client is not available"
+        try:
+            sent = await client.send_message(
+                chat_id=conversation_id,
+                text=reply_text,
+                parse_mode="HTML",
+                business_connection_id=business_connection_id,
+                reply_to_message_id=int(latest_inbound) if latest_inbound.isdigit() else None,
+            )
+        except Exception as exc:
+            return f"failed to send Telegram Business reply: {exc}"
+        if not sent:
+            return "Telegram Business reply failed"
         return None
 
     def _write_to_sink(
@@ -2012,7 +2316,7 @@ class IntakeWorkflowService:
     ) -> str:
         contact = str(conversation_summary.get("latest_inbound_sender_username", "") or "").strip()
         if not contact:
-            contact = str(conversation_summary.get("recipient_id", "") or "").strip() or "instagram_contact"
+            contact = str(conversation_summary.get("recipient_id", "") or "").strip() or "customer_contact"
         fields = _safe_dict(booking.get("extracted_fields"))
         parts = [
             f"Booking saved for {workflow['name']}:",

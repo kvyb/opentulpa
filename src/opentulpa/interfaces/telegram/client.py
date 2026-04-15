@@ -136,6 +136,8 @@ class TelegramClient:
         text: str,
         parse_mode: str | None = "HTML",
         reply_markup: dict[str, Any] | None = None,
+        business_connection_id: str | None = None,
+        reply_to_message_id: int | None = None,
     ) -> bool:
         final_text, final_mode = prepare_text_and_mode(text, parse_mode)
         payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
@@ -143,6 +145,11 @@ class TelegramClient:
             payload["parse_mode"] = final_mode
         if isinstance(reply_markup, dict):
             payload["reply_markup"] = reply_markup
+        safe_business_connection_id = str(business_connection_id or "").strip()
+        if safe_business_connection_id:
+            payload["business_connection_id"] = safe_business_connection_id
+        if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+            payload["reply_parameters"] = {"message_id": reply_to_message_id}
         data = await self._post("sendMessage", payload)
         return bool(data)
 
@@ -229,9 +236,14 @@ class TelegramClient:
         *,
         chat_id: int | str,
         action: str = "typing",
+        business_connection_id: str | None = None,
     ) -> bool:
         safe_action = str(action or "").strip() or "typing"
-        data = await self._post("sendChatAction", {"chat_id": chat_id, "action": safe_action})
+        payload: dict[str, Any] = {"chat_id": chat_id, "action": safe_action}
+        safe_business_connection_id = str(business_connection_id or "").strip()
+        if safe_business_connection_id:
+            payload["business_connection_id"] = safe_business_connection_id
+        data = await self._post("sendChatAction", payload)
         return bool(data)
 
     async def delete_message(

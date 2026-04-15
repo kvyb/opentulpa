@@ -832,6 +832,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         provider: str = "composio",
         source_config: dict[str, Any] | None | str = None,
         field_guidance: dict[str, Any] | None | str = None,
+        assistant_instructions: str = "",
+        knowledge_file_ids: list[str] | None = None,
         notify_user: bool = True,
         enabled: bool = True,
         workflow_id: str | None = "",
@@ -848,6 +850,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         Important shaping rules:
         - For a brand-new workflow, omit workflow_id or pass an empty string.
         - For updates, pass the existing workflow_id.
+        - If the user is refining or editing an existing workflow, prefer intake_workflow_list and
+          intake_workflow_get first, then update the matching workflow_id instead of creating a duplicate.
         - required_fields must be a list of plain field names like ["date", "time", "car_type"].
         - field_guidance may be either:
           - a dict keyed by field name, or
@@ -855,7 +859,15 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         - source_config is optional.
         - If source_config.conversation_id is omitted, the workflow scans recent conversations
           for the configured source instead of pinning one specific thread.
-        - channel should usually be instagram_dm and provider should usually be composio.
+        - channel/provider pairs supported here:
+          - instagram_dm + composio
+          - telegram_business_dm + telegram_bot_api
+        - For Telegram Business, source_config.business_connection_id is required.
+        - assistant_instructions stores durable reply rules, tone, escalation, guardrails, and any other
+          important workflow context learned during the conversation that should persist for future inbox turns.
+        - knowledge_file_ids is optional. Use it only when the user explicitly wants uploaded files bound to the workflow.
+        - The workflow must still work when knowledge_file_ids is empty; in that case rely on the saved instructions
+          and other workflow fields instead of pretending files exist.
         - sink_config must contain the concrete configuration needed by the chosen sink_type.
         - Valid sink_type values here are local_csv, google_sheets_composio, or generic_composio_write.
         - Never invent sink_type=google_sheets.
@@ -877,6 +889,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         safe_sink_type = str(sink_type or "").strip()
         safe_workflow_id = _normalize_optional_id(workflow_id)
         safe_required_fields = _unique_string_list(required_fields)
+        safe_knowledge_file_ids = _unique_string_list(knowledge_file_ids)
         safe_sink_config = sink_config if isinstance(sink_config, dict) else {}
         safe_source_config = source_config if isinstance(source_config, dict) else None
         safe_field_guidance = (
@@ -884,6 +897,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             if isinstance(field_guidance, dict)
             else ({"notes": str(field_guidance).strip()} if str(field_guidance or "").strip() else None)
         )
+        safe_assistant_instructions = str(assistant_instructions or "").strip()
         if not safe_name:
             return {"error": "intake_workflow_upsert failed: name is required"}
         if not safe_intent:
@@ -919,6 +933,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
             "provider": safe_provider,
             "source_config": safe_source_config,
             "field_guidance": safe_field_guidance,
+            "assistant_instructions": safe_assistant_instructions,
+            "knowledge_file_ids": safe_knowledge_file_ids,
             "notify_user": bool(notify_user),
             "enabled": bool(enabled),
             "workflow_id": safe_workflow_id,
@@ -967,6 +983,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
                 "intent_description": safe_intent,
                 "required_fields": safe_required_fields,
                 "field_guidance": safe_field_guidance,
+                "assistant_instructions": safe_assistant_instructions,
+                "knowledge_file_ids": safe_knowledge_file_ids,
                 "sink_type": safe_sink_type,
                 "sink_config": safe_sink_config,
                 "schedule": safe_schedule,
@@ -978,6 +996,20 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         if r.status_code != 200:
             return {"error": f"intake_workflow_upsert failed: {r.text}"}
         return r.json().get("workflow", {})
+
+    @tool
+    async def telegram_business_status() -> Any:
+        """Check whether Telegram Business is connected for the active user and inspect available business connections."""
+        customer_id = _require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/telegram/business/status",
+            json_body={"customer_id": customer_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"telegram_business_status failed: {r.text}"}
+        return r.json()
 
     @tool
     async def intake_workflow_list(include_disabled: bool = False) -> Any:
@@ -2155,6 +2187,7 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "intake_workflow_get": intake_workflow_get,
         "intake_workflow_delete": intake_workflow_delete,
         "intake_workflow_run": intake_workflow_run,
+        "telegram_business_status": telegram_business_status,
         "composio_status": composio_status,
         "composio_authorize_toolkit": composio_authorize_toolkit,
         "composio_wait_for_connection": composio_wait_for_connection,

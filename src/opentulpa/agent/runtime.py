@@ -747,6 +747,17 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             for key in list(static_arguments.keys())[:8]
             if str(key or "").strip()
         ]
+    knowledge_files: list[dict[str, Any]] = []
+    for item in list(safe_workflow.get("knowledge_files") or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        knowledge_files.append(
+            {
+                "id": str(item.get("id", "") or "").strip(),
+                "filename": _trim_text_chars(item.get("original_filename", ""), limit=80),
+                "summary": _trim_text_chars(item.get("summary", ""), limit=220),
+            }
+        )
     return {
         "workflow_id": str(safe_workflow.get("workflow_id", "") or "").strip(),
         "name": _trim_text_chars(safe_workflow.get("name", ""), limit=80),
@@ -760,7 +771,19 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             if str(item or "").strip()
         ],
         "field_guidance": compact_guidance,
+        "assistant_instructions": _trim_text_chars(
+            safe_workflow.get("assistant_instructions", ""),
+            limit=400,
+        ),
+        "knowledge_file_ids": [
+            str(item or "").strip()
+            for item in list(safe_workflow.get("knowledge_file_ids") or [])[:12]
+            if str(item or "").strip()
+        ],
+        "knowledge_files": knowledge_files,
         "sink_type": str(safe_workflow.get("sink_type", "") or "").strip(),
+        "channel": str(safe_workflow.get("channel", "") or "").strip(),
+        "provider": str(safe_workflow.get("provider", "") or "").strip(),
         "sink": compact_sink,
         "policies": safe_workflow.get("policies", {})
         if isinstance(safe_workflow.get("policies"), dict)
@@ -887,15 +910,17 @@ def _build_intake_workflow_agent_prompt(
         "- If necessary, inspect external state before deciding, especially for availability checks.\n"
         "- Return strict JSON only as the final answer.\n\n"
         "Tool-use guidance:\n"
-        "- You may use normal tools, especially composio_tool_search, composio_tool_schema, composio_tool_execute, "
-        "and composio_instagram_reply_precheck when they materially help.\n"
+        "- You may use normal tools, especially uploaded_file_get, uploaded_file_analyze, uploaded_file_search, "
+        "composio_tool_search, composio_tool_schema, composio_tool_execute, and "
+        "composio_instagram_reply_precheck when they materially help.\n"
         "- If the workflow uses a Google Sheets or generic Composio sink and availability matters, inspect the "
         "relevant external state before setting ready_to_save=true.\n"
+        "- If the workflow has bound knowledge files, use them before improvising answers.\n"
         "- Prefer minimal read-only tool usage first.\n"
         "- Do not create, update, delete, or run workflows/routines from inside this turn.\n"
         "- Do not call intake_workflow_upsert, intake_workflow_delete, intake_workflow_run, routine_create, or routine_delete.\n"
         "- Do not ask the user for approval. This is background execution.\n"
-        "- Do not send the outbound Instagram reply or perform the final booking write yourself in this turn; "
+        "- Do not send the outbound source reply or perform the final booking write yourself in this turn; "
         "the intake workflow service will do the final idempotent reply/save after your decision.\n\n"
         "Final answer contract:\n"
         "- Return strict JSON only with keys:\n"

@@ -99,6 +99,49 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
     assert payload["schedule"] == "*/5 * * * *"
     assert payload["channel"] == "instagram_dm"
     assert payload["provider"] == "composio"
+    assert payload["assistant_instructions"] == ""
+    assert payload["knowledge_file_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_upsert_accepts_telegram_business_fields() -> None:
+    runtime = _DummyRuntime([_Response(200, {"workflow": {"workflow_id": "iwf_tg"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Salon Telegram Intake",
+            "intent_description": "Handle Telegram Business booking requests.",
+            "required_fields": ["name", "time"],
+            "channel": "telegram_business_dm",
+            "provider": "telegram_bot_api",
+            "source_config": {"business_connection_id": "bc_123"},
+            "assistant_instructions": "Be concise and friendly.",
+            "knowledge_file_ids": ["file_1", "file_2"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        }
+    )
+
+    assert result["workflow_id"] == "iwf_tg"
+    payload = runtime.calls[0][2]["json_body"]
+    assert payload["channel"] == "telegram_business_dm"
+    assert payload["provider"] == "telegram_bot_api"
+    assert payload["assistant_instructions"] == "Be concise and friendly."
+    assert payload["knowledge_file_ids"] == ["file_1", "file_2"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_status_posts_expected_payload() -> None:
+    runtime = _DummyRuntime([_Response(200, {"ok": True, "connected": True, "connections": []})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["telegram_business_status"].ainvoke({})
+
+    assert result["connected"] is True
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/telegram/business/status"
+    assert runtime.calls[0][2]["json_body"] == {"customer_id": "telegram_123"}
 
 
 @pytest.mark.asyncio
