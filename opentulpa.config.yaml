@@ -18,12 +18,12 @@ approvals_db_path: .opentulpa/pending_approvals.db
 agent_behavior_log_path: .opentulpa/logs/agent_behavior.jsonl
 
 # Agent/runtime limits
-agent_recursion_limit: 30
+agent_recursion_limit: 50
 agent_max_completion_tokens: 4096
 agent_max_user_reply_chars: 4000
-agent_context_token_limit: 30000
-agent_context_recent_tokens: 10000
-agent_context_rollup_tokens: 5000
+agent_context_token_limit: 12000
+agent_context_recent_tokens: 3500
+agent_context_rollup_tokens: 2200
 agent_context_compaction_source_tokens: 100000
 approvals_ttl_minutes: 10
 
