@@ -457,6 +457,10 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
     )
     assert skill is not None
     assert "Telegram Business DMs" in skill["skill_markdown"]
+    assert "## Workflow Goal" in skill["skill_markdown"]
+    assert "## Operating Context" in skill["skill_markdown"]
+    assert "## Save Behavior" in skill["skill_markdown"]
+    assert "single durable intake policy" in skill["skill_markdown"]
     assert "Always confirm the final appointment time explicitly." in skill["skill_markdown"]
     workflow_file = json.loads(skill["supporting_files"]["workflow.json"])
     assert workflow_file["source_config"] == {"business_connection_id": "bc_123"}

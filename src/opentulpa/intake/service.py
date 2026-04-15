@@ -12,9 +12,9 @@ from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
+from opentulpa.intake.workflow_skill import build_intake_workflow_skill, workflow_skill_name
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.scheduler.models import Routine
-from opentulpa.skills.service import build_skill_markdown
 
 _ALLOWED_CHANNELS = {"instagram_dm", "telegram_business_dm"}
 _ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
@@ -766,7 +766,7 @@ class IntakeWorkflowService:
                 self._skill_store.delete_skill(
                     scope="user",
                     customer_id=str(workflow["customer_id"]),
-                    name=self._workflow_skill_name(str(workflow["workflow_id"])),
+                    name=workflow_skill_name(str(workflow["workflow_id"])),
                 )
         return {"ok": True, "deleted": True, "workflow_id": workflow["workflow_id"]}
 
@@ -794,20 +794,6 @@ class IntakeWorkflowService:
         with self._conn() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._hydrate_booking_row(row) for row in rows]
-
-    @staticmethod
-    def _channel_label(channel: str) -> str:
-        safe_channel = str(channel or "").strip().lower()
-        if safe_channel == "telegram_business_dm":
-            return "Telegram Business DMs"
-        return "Instagram DMs"
-
-    @staticmethod
-    def _reply_channel_label(channel: str) -> str:
-        safe_channel = str(channel or "").strip().lower()
-        if safe_channel == "telegram_business_dm":
-            return "Telegram Business DM"
-        return "Instagram DM"
 
     def _knowledge_files_for_workflow(self, *, customer_id: str, workflow: dict[str, Any]) -> list[dict[str, Any]]:
         file_vault = self._file_vault
@@ -844,93 +830,18 @@ class IntakeWorkflowService:
         )
         self._scheduler.add_routine(routine)
 
-    def _workflow_skill_name(self, workflow_id: str) -> str:
-        return f"intake-workflow-{workflow_id}"
-
     def _sync_skill(self, workflow: dict[str, Any]) -> None:
         if self._skill_store is None:
             return
-        workflow_id = str(workflow["workflow_id"])
-        name = self._workflow_skill_name(workflow_id)
-        channel_label = self._channel_label(str(workflow.get("channel", "") or ""))
-        reply_channel_label = self._reply_channel_label(str(workflow.get("channel", "") or ""))
-        description = (
-            f"Operate the {workflow['name']} {channel_label} intake workflow for this user."
-        )
-        knowledge_file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
-        field_guidance = _safe_dict(workflow.get("field_guidance"))
-        source_config = _safe_dict(workflow.get("source_config"))
-        instructions = (
-            "## Purpose\n"
-            f"Support the durable intake workflow `{workflow['name']}`.\n\n"
-            "## Matching Rule\n"
-            f"- Match conversations that fit this intent: {workflow['intent_description']}\n\n"
-            "## Required Fields\n"
-            f"- Collect these fields before save: {', '.join(workflow['required_fields'])}\n\n"
-            "## Behavioral Rules\n"
-            f"- Ask concise follow-up questions in the {reply_channel_label} when fields are missing.\n"
-            "- When all required fields are present, save through the configured sink.\n"
-            "- Treat the same DM thread as one active booking until completion.\n"
-            "- If the last completed booking is still inside the edit window, follow-up changes may edit it.\n"
-            "- Otherwise, a clearly new request should create a new booking.\n"
-            "- Telegram notifications should stay concise and only summarize booking success or failures.\n"
-        )
-        if field_guidance:
-            guidance_lines = []
-            for key, value in field_guidance.items():
-                safe_key = str(key or "").strip()
-                safe_value = str(value or "").strip()
-                if safe_key and safe_value:
-                    guidance_lines.append(f"- {safe_key}: {safe_value}")
-            if guidance_lines:
-                instructions += (
-                    "\n## Field Guidance\n"
-                    + "\n".join(guidance_lines)
-                    + "\n"
-                )
-        assistant_instructions = str(workflow.get("assistant_instructions", "") or "").strip()
-        if assistant_instructions:
-            instructions += (
-                "\n## Reply Instructions\n"
-                f"{assistant_instructions}\n"
-            )
-        if knowledge_file_ids:
-            instructions += (
-                "\n## Knowledge Files\n"
-                "- Use the workflow-bound uploaded files when answering customer questions.\n"
-            )
-        supporting_files = {
-            "workflow.json": _json_dumps(
-                {
-                    "workflow_id": workflow_id,
-                    "name": workflow["name"],
-                    "channel": workflow["channel"],
-                    "provider": workflow["provider"],
-                    "source_config": source_config,
-                    "intent_description": workflow["intent_description"],
-                    "required_fields": workflow["required_fields"],
-                    "field_guidance": field_guidance,
-                    "assistant_instructions": workflow.get("assistant_instructions", ""),
-                    "knowledge_file_ids": knowledge_file_ids,
-                    "sink_type": workflow["sink_type"],
-                    "sink_config": workflow.get("sink_config", {}),
-                }
-            )
-            + "\n"
-        }
-        skill_markdown = build_skill_markdown(
-            name=name,
-            description=description,
-            instructions=instructions,
-        )
+        skill = build_intake_workflow_skill(workflow)
         self._skill_store.upsert_skill(
             scope="user",
             customer_id=str(workflow["customer_id"]),
-            name=name,
-            skill_markdown=skill_markdown,
+            name=str(skill["name"]),
+            skill_markdown=str(skill["skill_markdown"]),
             source="intake_workflow",
             enabled=True,
-            supporting_files=supporting_files,
+            supporting_files=dict(skill.get("supporting_files") or {}),
         )
 
     def _get_active_booking(

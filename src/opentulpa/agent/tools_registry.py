@@ -863,8 +863,10 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
           - instagram_dm + composio
           - telegram_business_dm + telegram_bot_api
         - For Telegram Business, source_config.business_connection_id is required.
-        - assistant_instructions stores durable reply rules, tone, escalation, guardrails, and any other
-          important workflow context learned during the conversation that should persist for future inbox turns.
+        - assistant_instructions should store the durable business brief for the workflow:
+          the user's goals, reply style, qualification rules, booking policy, escalation boundaries,
+          important constraints, and any other operating instructions learned during the conversation that
+          should persist for future inbox turns.
         - knowledge_file_ids is optional. Use it only when the user explicitly wants uploaded files bound to the workflow.
         - The workflow must still work when knowledge_file_ids is empty; in that case rely on the saved instructions
           and other workflow fields instead of pretending files exist.
