@@ -23,7 +23,7 @@ def normalize_model_name(model_name: str) -> str:
 
 def safe_json(data: Any) -> str:
     try:
-        return json.dumps(data, ensure_ascii=False)
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     except Exception:
         return str(data)
 
@@ -116,7 +116,18 @@ def message_to_text(message: Any) -> str:
     elif isinstance(message, ToolMessage):
         role = "tool"
     content = content_to_text(getattr(message, "content", ""))
-    return f"[{role}] {content}".strip()
+    parts = [f"[{role}]"]
+    if content:
+        parts.append(content)
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list) and tool_calls:
+        try:
+            tool_text = json.dumps(tool_calls, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            tool_text = str(tool_calls)
+        if tool_text:
+            parts.append(f"tool_calls={tool_text}")
+    return " ".join(part for part in parts if part).strip()
 
 
 def html_to_text(raw_html: str) -> str:

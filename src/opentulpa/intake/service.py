@@ -152,6 +152,87 @@ class IntakeWorkflowService:
         self._get_agent_runtime = get_agent_runtime
         self._init_db()
 
+    def _runtime_for_observability(self) -> Any | None:
+        getter = self._get_agent_runtime
+        if not callable(getter):
+            return None
+        with suppress(Exception):
+            return getter()
+        return None
+
+    @staticmethod
+    def _intake_trace_id(*, workflow: dict[str, Any], conversation_summary: dict[str, Any]) -> str:
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
+        conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip() or "conversation"
+        latest_inbound_id = str(conversation_summary.get("latest_inbound_message_id", "") or "").strip() or "latest"
+        return f"intake_{workflow_id}_{conversation_id}_{latest_inbound_id}"
+
+    @staticmethod
+    def _intake_thread_id(*, workflow: dict[str, Any], conversation_summary: dict[str, Any]) -> str:
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
+        conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip() or "conversation"
+        return f"intake_decision_{workflow_id}_{conversation_id}"
+
+    def _intake_observability_fields(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        **extra: Any,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "trace_id": self._intake_trace_id(workflow=workflow, conversation_summary=conversation_summary),
+            "thread_id": self._intake_thread_id(workflow=workflow, conversation_summary=conversation_summary),
+            "customer_id": str(workflow.get("customer_id", "") or "").strip(),
+            "workflow_id": str(workflow.get("workflow_id", "") or "").strip(),
+            "workflow_name": str(workflow.get("name", "") or "").strip(),
+            "routine_id": str(workflow.get("routine_id", "") or "").strip(),
+            "channel": str(workflow.get("channel", "") or "").strip() or "instagram_dm",
+            "provider": str(workflow.get("provider", "") or "").strip() or "composio",
+            "sink_type": str(workflow.get("sink_type", "") or "").strip(),
+            "conversation_id": str(conversation_summary.get("conversation_id", "") or "").strip(),
+            "recipient_id": str(conversation_summary.get("recipient_id", "") or "").strip(),
+            "latest_inbound_message_id": str(
+                conversation_summary.get("latest_inbound_message_id", "") or ""
+            ).strip(),
+            "latest_inbound_sender_username": str(
+                conversation_summary.get("latest_inbound_sender_username", "") or ""
+            ).strip(),
+        }
+        for key, value in extra.items():
+            safe_key = str(key or "").strip()
+            if safe_key:
+                fields[safe_key] = value
+        return fields
+
+    def _emit_observability(
+        self,
+        *,
+        event: str,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        **extra: Any,
+    ) -> None:
+        runtime = self._runtime_for_observability()
+        fields = self._intake_observability_fields(
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            **extra,
+        )
+        customer_id = str(fields.pop("customer_id", "") or "").strip() or None
+        record = getattr(runtime, "record_observability_event", None)
+        if callable(record):
+            record(
+                event=event,
+                customer_id=customer_id,
+                posthog_event=event,
+                **fields,
+            )
+            return
+        log_event = getattr(runtime, "log_behavior_event", None)
+        if callable(log_event):
+            log_event(event=event, **fields)
+
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -1005,6 +1086,14 @@ class IntakeWorkflowService:
                 continue
 
             processed += 1
+            self._emit_observability(
+                event="intake.conversation.start",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                force=bool(force),
+                cursor_latest_inbound_message_id=str(cursor.get("latest_inbound_message_id", "") or "").strip(),
+                cursor_latest_outbound_message_id=str(cursor.get("latest_outbound_message_id", "") or "").strip(),
+            )
             try:
                 detailed = composio.get_instagram_conversation(
                     customer_id=str(workflow["customer_id"]),
@@ -1012,7 +1101,15 @@ class IntakeWorkflowService:
                     connected_account_id=connected_account_id,
                 )
             except Exception as exc:
-                errors.append(f"{conversation_id}: {exc}")
+                error_text = str(exc)
+                errors.append(f"{conversation_id}: {error_text}")
+                self._emit_observability(
+                    event="intake.conversation.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    phase="load_conversation",
+                    error=error_text,
+                )
                 continue
 
             detailed_summary = _safe_dict(detailed.get("summary"))
@@ -1047,6 +1144,13 @@ class IntakeWorkflowService:
             )
             if error:
                 errors.append(f"{conversation_id}: {error}")
+                self._emit_observability(
+                    event="intake.conversation.error",
+                    workflow=workflow,
+                    conversation_summary=cursor_summary,
+                    phase="decision",
+                    error=error,
+                )
                 continue
             if not bool(decision.get("matches_workflow")):
                 self._set_cursor(
@@ -1063,6 +1167,13 @@ class IntakeWorkflowService:
                         "matched": False,
                         "status": "ignored",
                     }
+                )
+                self._emit_observability(
+                    event="intake.conversation.complete",
+                    workflow=workflow,
+                    conversation_summary=cursor_summary,
+                    matched=False,
+                    status="ignored",
                 )
                 continue
 
@@ -1114,6 +1225,13 @@ class IntakeWorkflowService:
                     break
             if apply_error:
                 errors.append(f"{conversation_id}: {apply_error}")
+                self._emit_observability(
+                    event="intake.conversation.error",
+                    workflow=workflow,
+                    conversation_summary=cursor_summary,
+                    phase="apply",
+                    error=apply_error,
+                )
                 continue
             self._set_cursor(
                 workflow_id=str(workflow["workflow_id"]),
@@ -1128,6 +1246,15 @@ class IntakeWorkflowService:
             saved_summary = str(applied.get("saved_summary", "") or "").strip()
             if saved_summary:
                 saved_notifications.append(saved_summary)
+            self._emit_observability(
+                event="intake.conversation.complete",
+                workflow=workflow,
+                conversation_summary=cursor_summary,
+                matched=True,
+                status=str(applied.get("status", "") or "").strip(),
+                booking_id=str(applied.get("booking_id", "") or "").strip(),
+                saved_summary=saved_summary,
+            )
 
         if errors:
             summary = (
@@ -1160,10 +1287,29 @@ class IntakeWorkflowService:
     ) -> tuple[dict[str, Any], str | None]:
         runtime = self._get_agent_runtime() if callable(self._get_agent_runtime) else None
         if runtime is None or not hasattr(runtime, "decide_intake_workflow"):
-            return {}, "agent runtime does not support intake workflow decisions"
+            error = "agent runtime does not support intake workflow decisions"
+            self._emit_observability(
+                event="intake.decision.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                error=error,
+            )
+            return {}, error
         recent_messages = self._normalize_conversation_messages(
             conversation=conversation,
             recipient_id=str(conversation_summary.get("recipient_id", "") or "").strip() or None,
+        )
+        self._emit_observability(
+            event="intake.decision.start",
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            active_booking_id=str((active_booking or {}).get("booking_id", "") or "").strip(),
+            recent_completed_booking_id=str(
+                (recent_completed_booking or {}).get("booking_id", "") or ""
+            ).strip(),
+            recent_message_count=len(recent_messages),
+            execution_feedback_count=len(execution_feedback or []),
+            execution_feedback=_safe_list(execution_feedback),
         )
         try:
             decision = await runtime.decide_intake_workflow(
@@ -1185,9 +1331,38 @@ class IntakeWorkflowService:
                 execution_feedback=execution_feedback,
             )
         except Exception as exc:
-            return {}, str(exc)
+            error = str(exc)
+            self._emit_observability(
+                event="intake.decision.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                error=error,
+            )
+            return {}, error
         if not isinstance(decision, dict) or not bool(decision.get("ok", False)):
-            return {}, str(decision.get("error", "invalid intake workflow decision"))
+            error = str(decision.get("error", "invalid intake workflow decision"))
+            self._emit_observability(
+                event="intake.decision.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                error=error,
+                decision=_safe_dict(decision),
+            )
+            return {}, error
+        self._emit_observability(
+            event="intake.decision.ok",
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            matches_workflow=bool(decision.get("matches_workflow")),
+            confidence=decision.get("confidence"),
+            booking_action=str(decision.get("booking_action", "") or "").strip().lower(),
+            reply_action=str(decision.get("reply_action", "") or "").strip().lower(),
+            ready_to_save=bool(decision.get("ready_to_save")),
+            missing_fields=_unique_string_list(decision.get("missing_fields")),
+            extracted_fields=_safe_dict(decision.get("extracted_fields")),
+            save_payload=_safe_dict(decision.get("save_payload")),
+            reason=str(decision.get("reason", "") or "").strip(),
+        )
         return decision, None
 
     async def _apply_decision(
@@ -1201,18 +1376,45 @@ class IntakeWorkflowService:
         decision: dict[str, Any],
     ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
         booking_action = str(decision.get("booking_action", "ignore") or "ignore").strip().lower()
+        ready_to_save = bool(decision.get("ready_to_save"))
+        reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
+        reply_text = str(decision.get("reply_text", "") or "").strip()
+        self._emit_observability(
+            event="intake.apply.start",
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            booking_action=booking_action,
+            reply_action=reply_action,
+            ready_to_save=ready_to_save,
+        )
         if booking_action not in {
             "ignore",
             "update_active",
             "edit_recent_completed",
             "create_new_booking",
         }:
-            return {}, f"unsupported booking_action={booking_action}", self._build_recovery_feedback(
+            error = f"unsupported booking_action={booking_action}"
+            self._emit_observability(
+                event="intake.apply.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
                 phase="decision_validation",
-                error=f"unsupported booking_action={booking_action}",
+                error=error,
+                booking_action=booking_action,
+            )
+            return {}, error, self._build_recovery_feedback(
+                phase="decision_validation",
+                error=error,
                 decision=decision,
             )
         if booking_action == "ignore":
+            self._emit_observability(
+                event="intake.apply.ok",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                status="ignored",
+                booking_action=booking_action,
+            )
             return {
                 "conversation_id": str(conversation_summary.get("conversation_id", "") or ""),
                 "matched": True,
@@ -1252,9 +1454,18 @@ class IntakeWorkflowService:
                 "updated_at": _utc_now_iso(),
             }
         if target_booking is None:
-            return {}, "workflow decision did not resolve a booking target", self._build_recovery_feedback(
+            error = "workflow decision did not resolve a booking target"
+            self._emit_observability(
+                event="intake.apply.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
                 phase="decision_validation",
-                error="workflow decision did not resolve a booking target",
+                error=error,
+                booking_action=booking_action,
+            )
+            return {}, error, self._build_recovery_feedback(
+                phase="decision_validation",
+                error=error,
                 decision=decision,
             )
 
@@ -1271,9 +1482,6 @@ class IntakeWorkflowService:
             conversation_summary.get("latest_inbound_message_created_time", "") or ""
         ).strip()
 
-        ready_to_save = bool(decision.get("ready_to_save"))
-        reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
-        reply_text = str(decision.get("reply_text", "") or "").strip()
         sink_ref = dict(_safe_dict(target_booking.get("sink_record_ref")))
         sink_status = str(target_booking.get("sink_write_status", "pending") or "pending").strip()
         saved_summary = ""
@@ -1287,13 +1495,34 @@ class IntakeWorkflowService:
                 if not str(save_payload.get(field, "") or "").strip()
             ]
             if missing:
+                error = (
+                    "decision marked ready_to_save but required fields are missing: "
+                    + ", ".join(missing)
+                )
+                self._emit_observability(
+                    event="intake.apply.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    phase="decision_validation",
+                    error=error,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    missing_fields=missing,
+                )
                 return {}, (
-                    f"decision marked ready_to_save but required fields are missing: {', '.join(missing)}"
+                    error
                 ), self._build_recovery_feedback(
                     phase="decision_validation",
                     error=f"ready_to_save missing required fields: {', '.join(missing)}",
                     decision=decision,
                 )
+            self._emit_observability(
+                event="intake.sink_write.start",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                payload=save_payload,
+            )
             sink_result, sink_error = self._write_to_sink(
                 workflow=workflow,
                 booking=target_booking,
@@ -1304,6 +1533,22 @@ class IntakeWorkflowService:
                 target_booking["sink_write_status"] = "failed"
                 target_booking["sink_record_ref"] = sink_ref
                 self._upsert_booking(target_booking)
+                self._emit_observability(
+                    event="intake.sink_write.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                    error=sink_error,
+                )
+                self._emit_observability(
+                    event="intake.apply.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    phase="sink_execution",
+                    error=sink_error,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                )
                 return {}, sink_error, self._build_recovery_feedback(
                     phase="sink_execution",
                     error=sink_error,
@@ -1320,6 +1565,14 @@ class IntakeWorkflowService:
             target_booking["extracted_fields"] = save_payload
             target_booking["updated_at"] = now.isoformat()
             self._upsert_booking(target_booking)
+            self._emit_observability(
+                event="intake.sink_write.ok",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                sink_result=sink_ref,
+            )
             saved_summary = self._build_saved_summary(
                 workflow=workflow,
                 booking=target_booking,
@@ -1336,18 +1589,58 @@ class IntakeWorkflowService:
             self._upsert_booking(target_booking)
 
         if reply_action == "send_reply":
+            self._emit_observability(
+                event="intake.reply.start",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                reply_text=reply_text,
+            )
             reply_error = await self._send_instagram_reply(
                 workflow=workflow,
                 conversation_summary=conversation_summary,
                 reply_text=reply_text,
             )
             if reply_error is not None:
+                self._emit_observability(
+                    event="intake.reply.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    error=reply_error,
+                )
+                self._emit_observability(
+                    event="intake.apply.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    phase="reply_execution",
+                    error=reply_error,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                )
                 return {}, reply_error, self._build_recovery_feedback(
                     phase="reply_execution",
                     error=reply_error,
                     decision=decision,
                 )
+            self._emit_observability(
+                event="intake.reply.ok",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+            )
 
+        self._emit_observability(
+            event="intake.apply.ok",
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            status=str(target_booking.get("status", "") or "active"),
+            booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+            sink_write_status=str(target_booking.get("sink_write_status", "") or "").strip(),
+            booking_action=booking_action,
+            reply_action=reply_action,
+            ready_to_save=ready_to_save,
+            saved_summary=saved_summary,
+        )
         return {
             "conversation_id": str(conversation_summary.get("conversation_id", "") or ""),
             "matched": True,

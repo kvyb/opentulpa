@@ -14,7 +14,6 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from opentulpa.application.approval_execution import ApprovalExecutionOrchestrator
 from opentulpa.interfaces.telegram.client import (
     parse_telegram_callback_query,
     parse_telegram_update,
@@ -34,26 +33,6 @@ def _parse_approval_callback_data(data: str) -> tuple[str, str] | None:
     if not match:
         return None
     return match.group(1), match.group(2).lower()
-
-
-async def _execute_approved_action_and_summarize(
-    *,
-    get_agent_runtime: Callable[[], Any],
-    get_context_events: Callable[[], Any],
-    approval_id: str,
-    decision_payload: dict[str, Any],
-    chat_id: int,
-) -> str:
-    """Backward-compatible helper kept for tests/internal call sites."""
-    orchestrator = ApprovalExecutionOrchestrator(
-        get_agent_runtime=get_agent_runtime,
-        get_context_events=get_context_events,
-    )
-    return await orchestrator.execute_approved_action_and_summarize(
-        approval_id=approval_id,
-        decision_payload=decision_payload,
-        chat_id=chat_id,
-    )
 
 
 async def _emit_typing_until_done(

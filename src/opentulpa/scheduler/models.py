@@ -1,7 +1,7 @@
-"""Models for routines and one-off tasks."""
+"""Models for routines and one-off scheduled items."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -15,15 +15,5 @@ class Routine:
     schedule: str  # e.g. "0 9 * * *" (9am daily) or "2025-02-18 10:00:00"
     payload: dict[str, Any]  # e.g. {"instruction": "You must ...", "action": "wake"}
     enabled: bool = True
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     is_cron: bool = True  # False = one-off at schedule time
-
-
-@dataclass
-class TaskRun:
-    """Record of a task execution."""
-
-    routine_id: str
-    run_at: datetime
-    success: bool
-    result: str | None = None

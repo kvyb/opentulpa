@@ -32,7 +32,7 @@ DEBUG_LOG_PATH = Path(__file__).resolve().parents[3] / ".cursor" / "debug.log"
 def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
     try:
         payload = {
-            "runId": "review-capability",
+            "runId": "tasks",
             "hypothesisId": hypothesis_id,
             "location": location,
             "message": message,
@@ -200,7 +200,7 @@ class TaskService:
         await self._emit_event(task_id, "queued", {"goal": goal})
         # region agent log
         _debug_log(
-            hypothesis_id="H2",
+            hypothesis_id="tasks",
             location="tasks/service.py:create_task",
             message="task_created",
             data={
@@ -321,7 +321,7 @@ class TaskService:
             steps = payload.get("steps", [])
             # region agent log
             _debug_log(
-                hypothesis_id="H2",
+                hypothesis_id="tasks",
                 location="tasks/service.py:_run_task",
                 message="task_runner_started",
                 data={"task_id": task_id, "step_count": len(steps), "status": task.get("status")},
@@ -347,7 +347,7 @@ class TaskService:
                 if not isinstance(step, dict):
                     # region agent log
                     _debug_log(
-                        hypothesis_id="H3",
+                        hypothesis_id="tasks",
                         location="tasks/service.py:_run_task",
                         message="invalid_step_schema",
                         data={
@@ -449,7 +449,7 @@ class TaskService:
             await self._set_status(task_id, "done", summary="Task finished successfully.")
             # region agent log
             _debug_log(
-                hypothesis_id="H2",
+                hypothesis_id="tasks",
                 location="tasks/service.py:_run_task",
                 message="task_runner_done",
                 data={"task_id": task_id, "artifact_count": len(artifacts)},
@@ -487,7 +487,7 @@ class TaskService:
         )
         # region agent log
         _debug_log(
-            hypothesis_id="H2",
+            hypothesis_id="tasks",
             location="tasks/service.py:_handle_failure",
             message="task_failure_decision",
             data={

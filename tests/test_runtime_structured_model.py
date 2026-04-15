@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -53,6 +55,25 @@ class _BrokenStructuredThenFallbackModel(_FallbackModel):
         raise RuntimeError("structured_unavailable")
 
 
+class _ProviderAwareStructuredRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def ainvoke(self, _messages: object, **kwargs: Any) -> object:
+        self.calls.append({"messages": _messages, "kwargs": kwargs})
+        return {"ok": True, "reason": "ordered_route"}
+
+
+class _ProviderAwareStructuredModel:
+    def __init__(self) -> None:
+        self.runners: list[_ProviderAwareStructuredRunner] = []
+
+    def with_structured_output(self, _schema: type[BaseModel]) -> _ProviderAwareStructuredRunner:
+        runner = _ProviderAwareStructuredRunner()
+        self.runners.append(runner)
+        return runner
+
+
 @pytest.mark.asyncio
 async def test_invoke_structured_model_prefers_native_structured_output() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
@@ -88,6 +109,23 @@ async def test_invoke_structured_model_uses_strict_json_fallback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invoke_structured_model_accepts_fenced_json_in_fallback() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    model = _BrokenStructuredThenFallbackModel('```json\n{"ok": true, "reason": "fenced"}\n```')
+
+    parsed, error = await runtime._invoke_structured_model(
+        model=model,
+        messages=[],
+        schema=_Schema,
+    )
+
+    assert isinstance(parsed, _Schema)
+    assert parsed.ok is True
+    assert parsed.reason == "fenced"
+    assert error is None
+
+
+@pytest.mark.asyncio
 async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     model = _BrokenStructuredThenFallbackModel('prefix {"ok": true, "reason": "x"} suffix')
@@ -101,6 +139,70 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
     assert parsed is None
     assert isinstance(error, str)
     assert "ValidationError" in error
+
+
+@pytest.mark.asyncio
+async def test_invoke_structured_model_routes_glm51_with_fireworks_then_siliconflow_order() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
+    runtime.model_name = "z-ai/glm-5.1"
+    runtime._prompt_caching_enabled = False
+    runtime._prompt_cache_ttl_1h = False
+    model = _ProviderAwareStructuredModel()
+
+    parsed, error = await runtime._invoke_structured_model(
+        model=model,
+        messages=[],
+        schema=_Schema,
+        model_name="z-ai/glm-5.1",
+    )
+
+    assert isinstance(parsed, _Schema)
+    assert parsed.ok is True
+    assert parsed.reason == "ordered_route"
+    assert error is None
+    assert len(model.runners) == 1
+    provider = model.runners[0].calls[0]["kwargs"]["extra_body"]["provider"]
+    assert provider == {"order": ["fireworks", "siliconflow"], "allow_fallbacks": False}
+
+
+@pytest.mark.asyncio
+async def test_invoke_structured_model_records_single_llm_call_trace_on_success(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+    model = _StructuredModel({"ok": True, "reason": "native"})
+
+    parsed, error = await runtime._invoke_structured_model(
+        model=model,
+        messages=[],
+        schema=_Schema,
+        call_context={
+            "call_site": "intake_workflow_decision",
+            "trace_id": "intake_trace_test",
+            "thread_id": "intake_decision_iwf_conv",
+            "customer_id": "telegram_123",
+            "turn_mode": "routine_wake",
+            "prompt_mode": "structured_intake",
+        },
+    )
+
+    assert isinstance(parsed, _Schema)
+    assert error is None
+    records = [
+        json.loads(line)
+        for line in runtime._llm_call_trace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["call_site"] == "intake_workflow_decision"
+    assert records[0]["trace_id"] == "intake_trace_test"
+    assert "native" in records[0]["response_text"]
+    assert records[0]["response_content"]["reason"] == "native"
 
 
 @pytest.mark.asyncio

@@ -53,12 +53,47 @@ class _FakeRuntime:
     def __init__(self, decisions: list[dict[str, Any]]) -> None:
         self.decisions = list(decisions)
         self.calls: list[dict[str, Any]] = []
+        self.behavior_events: list[dict[str, Any]] = []
+        self.posthog_events: list[dict[str, Any]] = []
 
     async def decide_intake_workflow(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         if not self.decisions:
             raise RuntimeError("unexpected intake decision call")
         return self.decisions.pop(0)
+
+    def log_behavior_event(self, *, event: str, **fields: Any) -> None:
+        self.behavior_events.append({"event": event, **fields})
+
+    def capture_posthog_event(
+        self,
+        *,
+        event: str,
+        customer_id: str | None = None,
+        properties: dict[str, Any] | None = None,
+    ) -> None:
+        self.posthog_events.append(
+            {
+                "event": event,
+                "customer_id": customer_id,
+                "properties": dict(properties or {}),
+            }
+        )
+
+    def record_observability_event(
+        self,
+        *,
+        event: str,
+        customer_id: str | None = None,
+        posthog_event: str | None = None,
+        **fields: Any,
+    ) -> None:
+        self.log_behavior_event(event=event, **fields)
+        self.capture_posthog_event(
+            event=str(posthog_event or event or "").strip(),
+            customer_id=customer_id,
+            properties={"behavior_event": event, **fields},
+        )
 
 
 class _FakeComposio:
@@ -683,6 +718,92 @@ async def test_intake_workflow_reply_uses_instagram_text_argument(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_emits_observability_for_successful_save_and_reply(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Book me tomorrow at 3pm for a full wash on my SUV.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Customer wants a booking tomorrow at 3pm.",
+                "extracted_fields": {
+                    "day": "tomorrow",
+                    "time": "3pm",
+                    "car_type": "SUV",
+                    "wash_type": "full wash",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Booked for tomorrow at 3pm.",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "day": "tomorrow",
+                    "time": "3pm",
+                    "car_type": "SUV",
+                    "wash_type": "full wash",
+                },
+                "reason": "All required fields are present.",
+            }
+        ]
+    )
+    composio = _FakeComposio(summary, conversation)
+    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time", "car_type", "wash_type"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["ok"] is True
+    event_names = [item["event"] for item in runtime.behavior_events]
+    assert event_names == [
+        "intake.conversation.start",
+        "intake.decision.start",
+        "intake.decision.ok",
+        "intake.apply.start",
+        "intake.sink_write.start",
+        "intake.sink_write.ok",
+        "intake.reply.start",
+        "intake.reply.ok",
+        "intake.apply.ok",
+        "intake.conversation.complete",
+    ]
+    apply_ok = next(item for item in runtime.behavior_events if item["event"] == "intake.apply.ok")
+    assert apply_ok["booking_id"].startswith("bkg_")
+    assert apply_ok["status"] == "completed"
+    decision_ok = next(item for item in runtime.behavior_events if item["event"] == "intake.decision.ok")
+    assert decision_ok["workflow_id"] == workflow["workflow_id"]
+    assert decision_ok["conversation_id"] == "conv_1"
+    assert decision_ok["save_payload"]["wash_type"] == "full wash"
+    assert len(runtime.posthog_events) == len(runtime.behavior_events)
+    assert runtime.posthog_events[0]["event"] == "intake.conversation.start"
+
+
+@pytest.mark.asyncio
 async def test_intake_workflow_retries_with_execution_feedback_after_reply_failure(
     tmp_path: Path,
 ) -> None:
@@ -762,6 +883,80 @@ async def test_intake_workflow_retries_with_execution_feedback_after_reply_failu
     )
     assert len(bookings) == 1
     assert bookings[0]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_emits_observability_for_reply_failure(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Hello I would like to book a car wash at 4pm.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.92,
+                "conversation_summary": "Customer wants a car wash booking but details are missing.",
+                "extracted_fields": {"time": "4pm"},
+                "missing_fields": ["day", "car_type", "wash_type"],
+                "reply_action": "send_reply",
+                "reply_text": "What day is this for?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need missing details before saving.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.92,
+                "conversation_summary": "Customer still wants a car wash booking but details are missing.",
+                "extracted_fields": {"time": "4pm"},
+                "missing_fields": ["day", "car_type", "wash_type"],
+                "reply_action": "send_reply",
+                "reply_text": "What day is this for?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need missing details before saving.",
+            },
+        ]
+    )
+    composio = _AlwaysFailingReplyComposio(summary, conversation)
+    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time", "car_type", "wash_type"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["ok"] is False
+    event_names = [item["event"] for item in runtime.behavior_events]
+    assert "intake.reply.error" in event_names
+    assert "intake.apply.error" in event_names
+    assert "intake.conversation.error" in event_names
+    reply_error = next(item for item in runtime.behavior_events if item["event"] == "intake.reply.error")
+    assert "temporary send failure" in reply_error["error"]
 
 
 @pytest.mark.asyncio

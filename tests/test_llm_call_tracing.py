@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +62,7 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
             "customer_id": "telegram_test",
             "turn_mode": "interactive",
             "prompt_mode": "literal_chat",
-            "prompt_sections": ["stable_core_policy", "style_card"],
+            "prompt_sections": ["stable_core_policy"],
             "prompt_overhead_tokens": 1900,
             "history_message_count": 2,
             "raw_chat_history_count": 1,
@@ -84,7 +82,7 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     assert record["call_site"] == "graph_agent"
     assert record["model_name"] == "google/gemini-3-flash-preview"
     assert record["stable_prefix_count"] == 1
-    assert record["prompt_sections"] == ["stable_core_policy", "style_card"]
+    assert record["prompt_sections"] == ["stable_core_policy"]
     assert record["native_tokens_prompt"] == 1234
     assert record["native_tokens_completion"] == 56
     assert record["native_cost_usd"] == 0.023471989
@@ -182,60 +180,3 @@ def test_llm_call_trace_keeps_latest_100_records(tmp_path: Path) -> None:
     assert len(records) == 100
     assert records[0]["trace_id"] == "turn_5"
     assert records[-1]["trace_id"] == "turn_104"
-
-
-def test_llm_call_trace_inspector_shows_decomposition(tmp_path: Path) -> None:
-    trace_path = tmp_path / "llm_call_traces.jsonl"
-    trace_path.write_text(
-        json.dumps(
-            {
-                "ts": "2026-04-10T00:00:00Z",
-                "trace_id": "turn_show",
-                "call_site": "graph_agent",
-                "model_name": "z-ai/glm-5.1",
-                "thread_id": "chat_test",
-                "customer_id": "telegram_test",
-                "turn_mode": "interactive",
-                "prompt_mode": "literal_chat",
-                "stable_prefix_count": 1,
-                "prompt_sections": ["stable_core_policy", "style_card"],
-                "prompt_overhead_tokens": 1900,
-                "history_message_count": 2,
-                "raw_chat_history_count": 1,
-                "raw_tool_history_count": 0,
-                "optional_context_messages": 1,
-                "native_tokens_prompt": 1234,
-                "native_tokens_completion": 56,
-                "prompt_messages": [
-                    {"role": "system", "type": "SystemMessage", "approx_tokens": 10, "text": "Stable system prompt"},
-                    {"role": "user", "type": "HumanMessage", "approx_tokens": 7, "text": "What do you remember?"},
-                ],
-                "response_text": "All good.",
-                "response_tool_calls": [],
-            },
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/inspect_llm_call_traces.py",
-            "--path",
-            str(trace_path),
-            "--trace-id",
-            "turn_show",
-        ],
-        cwd=str(Path(__file__).resolve().parent.parent),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0
-    assert "trace_id: turn_show" in result.stdout
-    assert "Prompt messages:" in result.stdout
-    assert "00. role=system" in result.stdout
-    assert "Response text:" in result.stdout

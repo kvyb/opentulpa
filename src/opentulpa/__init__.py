@@ -1,3 +1,3 @@
-"""OpenTulpa: background-capable AI agent with Parlant and mem0."""
+"""OpenTulpa: self-hosted background-capable agent runtime."""
 
 __version__ = "0.1.0"

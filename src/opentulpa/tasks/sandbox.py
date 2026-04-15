@@ -100,7 +100,7 @@ def _is_tulpa_router_module(path: Path) -> bool:
 def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
     try:
         payload = {
-            "runId": "review-capability",
+            "runId": "sandbox",
             "hypothesisId": hypothesis_id,
             "location": location,
             "message": message,
@@ -349,7 +349,7 @@ def run_terminal(
             return AGENT_VENV_DIR
         AGENT_VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
         _debug_log(
-            hypothesis_id="H1",
+            hypothesis_id="sandbox",
             location="tasks/sandbox.py:run_terminal",
             message="agent_venv_create_start",
             data={"venv_path": str(AGENT_VENV_DIR)},
@@ -365,7 +365,7 @@ def run_terminal(
             )
         except Exception as exc:
             _debug_log(
-                hypothesis_id="H4",
+                hypothesis_id="sandbox",
                 location="tasks/sandbox.py:run_terminal",
                 message="agent_venv_create_failed",
                 data={"venv_path": str(AGENT_VENV_DIR), "error": str(exc)},
@@ -375,7 +375,7 @@ def run_terminal(
                 "Create it manually with: python3 -m venv .opentulpa/agent_venv"
             ) from exc
         _debug_log(
-            hypothesis_id="H1",
+            hypothesis_id="sandbox",
             location="tasks/sandbox.py:run_terminal",
             message="agent_venv_create_ok",
             data={"venv_path": str(AGENT_VENV_DIR)},
@@ -397,7 +397,7 @@ def run_terminal(
         raise ValueError("command is required")
     # region agent log
     _debug_log(
-        hypothesis_id="H1",
+        hypothesis_id="sandbox",
         location="tasks/sandbox.py:run_terminal",
         message="terminal_command_received",
         data={
@@ -411,7 +411,7 @@ def run_terminal(
     if allowed_commands and parts[0] not in allowed_commands:
         # region agent log
         _debug_log(
-            hypothesis_id="H1",
+            hypothesis_id="sandbox",
             location="tasks/sandbox.py:run_terminal",
             message="terminal_command_rejected",
             data={
@@ -452,7 +452,7 @@ def run_terminal(
         normalized_parts = [parts[0], *(_strip_prefix(item) for item in parts[1:])]
         if normalized_parts != parts:
             _debug_log(
-                hypothesis_id="H1",
+                hypothesis_id="sandbox",
                 location="tasks/sandbox.py:run_terminal",
                 message="terminal_command_normalized",
                 data={
@@ -484,7 +484,7 @@ def run_terminal(
         )
     except subprocess.TimeoutExpired as exc:
         _debug_log(
-            hypothesis_id="H1",
+            hypothesis_id="sandbox",
             location="tasks/sandbox.py:run_terminal",
             message="terminal_command_timeout",
             data={
@@ -505,7 +505,7 @@ def run_terminal(
     }
     # region agent log
     _debug_log(
-        hypothesis_id="H1",
+        hypothesis_id="sandbox",
         location="tasks/sandbox.py:run_terminal",
         message="terminal_command_finished",
         data={

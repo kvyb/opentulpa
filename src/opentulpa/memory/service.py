@@ -1,6 +1,5 @@
 """mem0-backed memory service for the agent."""
 
-import json
 import logging
 import re
 from typing import Any
@@ -32,19 +31,18 @@ MEMORY_KIND_ALIASES: dict[str, str] = {
 MEMORY_KIND_PRIORITY: dict[str, int] = {
     "directive_fact": 0,
     "preference_fact": 1,
-    "style_fact": 2,
-    "user_profile_fact": 3,
-    "life_fact": 4,
-    "relationship_fact": 5,
-    "contact_fact": 6,
-    "project_fact": 7,
-    "aspirations_fact": 8,
-    "workflow_fact": 9,
-    "skill_fact": 10,
-    "code_fact": 11,
-    "credential_fact": 12,
-    "file_fact": 13,
-    "media_fact": 14,
+    "user_profile_fact": 2,
+    "life_fact": 3,
+    "relationship_fact": 4,
+    "contact_fact": 5,
+    "project_fact": 6,
+    "aspirations_fact": 7,
+    "workflow_fact": 8,
+    "skill_fact": 9,
+    "code_fact": 10,
+    "credential_fact": 11,
+    "file_fact": 12,
+    "media_fact": 13,
     "thread_context_rollup": 99,
 }
 

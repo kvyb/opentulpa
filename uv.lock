@@ -1182,6 +1182,23 @@ wheels = [
 ]
 
 [[package]]
+name = "headroom-ai"
+version = "0.5.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "litellm" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "rich" },
+    { name = "tiktoken" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ce/a4/43f54d58e97d23526065aad1ee708d972e0286f8301b2af8aac77ca96f63/headroom_ai-0.5.25.tar.gz", hash = "sha256:e5849b8814e74655462f3e9690c5ee873525df60ba9e3af93ddcbf9f29e35c9c", size = 1498646 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/29/42736bbd1c0a51c1fa2a92d3cdc786f53309082edf8c00ac63dc257a8c57/headroom_ai-0.5.25-py3-none-any.whl", hash = "sha256:dfdadc30e05d855098294149199dac42419d3aabb8ba7424c854d3dab197f48c", size = 1127559 },
+]
+
+[[package]]
 name = "hf-xet"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1754,7 +1771,7 @@ wheels = [
 
 [[package]]
 name = "litellm"
-version = "1.80.0"
+version = "1.82.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1770,9 +1787,9 @@ dependencies = [
     { name = "tiktoken" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/8c/48d533affdbc6d485b7ad4221cd3b40b8c12f9f5568edfe0be0b11e7b945/litellm-1.80.0.tar.gz", hash = "sha256:eeac733eb6b226f9e5fb020f72fe13a32b3354b001dc62bcf1bc4d9b526d6231", size = 11591976 }
+sdist = { url = "https://files.pythonhosted.org/packages/53/00/13993312e6d2fb29cd6d5ffceb293455ef747fe5675eaa9aa49b09184656/litellm-1.82.3.tar.gz", hash = "sha256:7215b95e7cc38a52b5ae778d67e8829dec86594c8b05d8431294e95c7d59937c", size = 17368754 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/53/aa31e4d057b3746b3c323ca993003d6cf15ef987e7fe7ceb53681695ae87/litellm-1.80.0-py3-none-any.whl", hash = "sha256:fd0009758f4772257048d74bf79bb64318859adb4ea49a8b66fdbc718cd80b6e", size = 10492975 },
+    { url = "https://files.pythonhosted.org/packages/5a/3a/590d58dee65a238f7f3d5c37f8f9f9021ecaf27fe379a393b4259324b56e/litellm-1.82.3-py3-none-any.whl", hash = "sha256:609901f6c5a5cf8c24386e4e3f50738bb8a9db719709fd76b208c8ee6d00f7a7", size = 15551034 },
 ]
 
 [[package]]
@@ -2295,6 +2312,19 @@ wheels = [
 ]
 
 [[package]]
+name = "opentelemetry-api"
+version = "1.41.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-metadata" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/47/8e/3778a7e87801d994869a9396b9fc2a289e5f9be91ff54a27d41eace494b0/opentelemetry_api-1.41.0.tar.gz", hash = "sha256:9421d911326ec12dee8bc933f7839090cad7a3f13fcfb0f9e82f8174dc003c09", size = 71416 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/ee/99ab786653b3bda9c37ade7e24a7b607a1b1f696063172768417539d876d/opentelemetry_api-1.41.0-py3-none-any.whl", hash = "sha256:0e77c806e6a89c9e4f8d372034622f3e1418a11bdbe1c80a50b3d3397ad0fa4f", size = 69007 },
+]
+
+[[package]]
 name = "opentulpa"
 version = "0.1.0"
 source = { editable = "." }
@@ -2305,6 +2335,7 @@ dependencies = [
     { name = "composio-langchain" },
     { name = "crawl4ai" },
     { name = "fastapi" },
+    { name = "headroom-ai" },
     { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-openai" },
@@ -2342,6 +2373,7 @@ requires-dist = [
     { name = "composio-langchain", specifier = ">=0.11.4" },
     { name = "crawl4ai", specifier = ">=0.7.0" },
     { name = "fastapi", specifier = ">=0.109" },
+    { name = "headroom-ai", specifier = ">=0.5.25" },
     { name = "httpx", specifier = ">=0.26" },
     { name = "langchain", specifier = ">=0.3" },
     { name = "langchain-openai", specifier = ">=0.3" },

@@ -51,7 +51,7 @@ class ContextEngineer:
         self,
         *,
         raw_chat_limit: int = 20,
-        raw_tool_limit: int = 10,
+        raw_tool_limit: int = 4,
         stale_summary_token_budget: int = 900,
     ) -> None:
         self.raw_chat_limit = max(4, int(raw_chat_limit))
@@ -262,7 +262,7 @@ class ContextEngineer:
             if not matching_tool_indices.issubset(keep_indices):
                 keep_indices.discard(idx)
         stale_messages = [msg for idx, msg in enumerate(messages) if idx not in keep_indices]
-        latest_tool_call_ids = self._latest_tool_call_ids(messages, limit=5)
+        latest_tool_call_ids = self._latest_tool_call_ids(messages, limit=self.raw_tool_limit)
         summary_text = self._summarize_stale_messages(
             stale_messages,
             latest_tool_call_ids=latest_tool_call_ids,

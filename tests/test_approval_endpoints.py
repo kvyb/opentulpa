@@ -97,10 +97,6 @@ class _DummyRuntime:
         self.started = 0
         self.tool = _DummyTool()
         self.intake_tool = _DummyTool()
-        self._tools = {
-            "dummy_action": self.tool,
-            "intake_workflow_upsert": self.intake_tool,
-        }
 
     async def start(self) -> None:
         self.started += 1
@@ -110,6 +106,21 @@ class _DummyRuntime:
 
     def healthy(self) -> bool:
         return True
+
+    async def execute_tool(
+        self,
+        *,
+        action_name: str,
+        action_args: dict[str, Any],
+        customer_id: str | None = None,
+        inject_customer_id: bool = False,
+    ) -> dict[str, Any]:
+        _ = (customer_id, inject_customer_id)
+        if action_name == "dummy_action":
+            return await self.tool.ainvoke(action_args)
+        if action_name == "intake_workflow_upsert":
+            return await self.intake_tool.ainvoke(action_args)
+        raise RuntimeError(f"unknown tool: {action_name}")
 
     async def classify_guardrail_intent(
         self,

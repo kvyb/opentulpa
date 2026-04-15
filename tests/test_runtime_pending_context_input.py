@@ -5,8 +5,8 @@ from typing import Any
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage
 from opentulpa.agent.graph_builder import build_runtime_graph
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 from opentulpa.agent.utils import approx_tokens as _approx_tokens
@@ -279,7 +279,11 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
         {
-            "messages": [HumanMessage(content="what do you remember about my bot setup?")],
+            "messages": [
+                HumanMessage(content="remind me what stack I used before"),
+                AIMessage(content="You used Gemini Flash for media analysis."),
+                HumanMessage(content="what do you remember about my bot setup?"),
+            ],
             "customer_id": "telegram_test",
             "thread_id": "chat_test",
             "turn_mode": "interactive",
@@ -292,14 +296,20 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
     )
 
     assert result["final_response_text"] == "ok"
-    assert captured["stable_prefix_count"] == 1
+    assert captured["stable_prefix_count"] >= 2
     prompt_messages = captured["messages"]
+    older_assistant_index = next(
+        idx
+        for idx, msg in enumerate(prompt_messages)
+        if isinstance(msg, AIMessage) and "Gemini Flash for media analysis" in str(getattr(msg, "content", ""))
+    )
     grounding_index = next(
         idx
         for idx, msg in enumerate(prompt_messages)
         if "Relevant long-term memory grounding" in str(getattr(msg, "content", ""))
     )
-    assert grounding_index >= captured["stable_prefix_count"]
+    assert older_assistant_index < grounding_index
+    assert grounding_index < captured["stable_prefix_count"]
     last_human_index = max(
         idx
         for idx, msg in enumerate(prompt_messages)
@@ -309,6 +319,223 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
     assert isinstance(captured["call_context"], dict)
     assert captured["call_context"]["call_site"] == "graph_agent"
     assert "memory_grounding" in captured["call_context"]["prompt_sections"]
+
+
+@pytest.mark.asyncio
+async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_messages: list[list[Any]] = []
+    captured_prefix_counts: list[int] = []
+    live_time_calls = 0
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            return {"status": "ok", "result": "done"}
+
+    async def _live_time(customer_id: str) -> dict[str, str]:
+        nonlocal live_time_calls
+        del customer_id
+        live_time_calls += 1
+        minute = f"{live_time_calls:02d}"
+        return {
+            "server_time_local_iso": f"2026-04-09T10:{minute}:00+08:00",
+            "server_time_utc_iso": f"2026-04-09T02:{minute}:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": f"2026-04-09T10:{minute}:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "profile",
+        }
+
+    async def _directive(customer_id: str) -> str | None:
+        del customer_id
+        return None
+
+    async def _memory_grounding(**kwargs: Any) -> str:
+        del kwargs
+        return ""
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, kwargs
+        captured_messages.append(list(messages))
+        captured_prefix_counts.append(stable_prefix_count)
+        if len(captured_messages) == 1:
+            return AIMessage(
+                content="Let me run that.",
+                tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {}}],
+            )
+        return AIMessage(content="Done.")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": True}
+
+    runtime._checkpointer = InMemorySaver()
+    runtime._model_with_tools = object()
+    runtime._thread_rollup_service = None
+    runtime._load_active_directive = _directive  # type: ignore[method-assign]
+    runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
+    runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
+    runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
+    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
+    runtime._tools = {"fake_tool": _FakeTool()}
+    runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
+    runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.model_with_tools_for_turn_mode = lambda turn_mode: object()  # type: ignore[assignment]
+    runtime._context_token_limit = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime.recursion_limit = 8
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="run the fake tool and then answer")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_test",
+        },
+        config={"configurable": {"thread_id": "chat_test"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Done."
+    assert len(captured_messages) == 2
+    assert live_time_calls == 1
+    assert captured_prefix_counts[0] >= 2
+    assert captured_prefix_counts[1] == captured_prefix_counts[0]
+
+    def _live_time_block(messages: list[Any]) -> str:
+        return next(
+            str(getattr(msg, "content", ""))
+            for msg in messages
+            if "Live time context (auto-injected this turn):" in str(getattr(msg, "content", ""))
+        )
+
+    first_live_time = _live_time_block(captured_messages[0])
+    second_live_time = _live_time_block(captured_messages[1])
+    assert "2026-04-09T10:01:00+08:00" in first_live_time
+    assert second_live_time == first_live_time
+    assert captured_messages[0][:captured_prefix_counts[0]] == captured_messages[1][:captured_prefix_counts[1]]
+
+
+@pytest.mark.asyncio
+async def test_agent_freezes_older_history_projection_and_stale_summary_across_tool_loop() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_messages: list[list[Any]] = []
+    captured_prefix_counts: list[int] = []
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            return {"status": "ok"}
+
+    async def _live_time(customer_id: str) -> dict[str, str]:
+        del customer_id
+        return {
+            "server_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "server_time_utc_iso": "2026-04-09T02:00:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "profile",
+        }
+
+    async def _directive(customer_id: str) -> str | None:
+        del customer_id
+        return None
+
+    async def _memory_grounding(**kwargs: Any) -> str:
+        del kwargs
+        return ""
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, kwargs
+        captured_messages.append(list(messages))
+        captured_prefix_counts.append(stable_prefix_count)
+        if len(captured_messages) == 1:
+            return AIMessage(
+                content="Let me run that.",
+                tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {}}],
+            )
+        return AIMessage(content="Done.")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": True}
+
+    prior_messages: list[Any] = []
+    for idx in range(14):
+        prior_messages.append(HumanMessage(content=f"Earlier user note {idx}: keep this thread moving."))
+        prior_messages.append(AIMessage(content=f"Earlier assistant reply {idx}: acknowledged."))
+
+    runtime._checkpointer = InMemorySaver()
+    runtime._model_with_tools = object()
+    runtime._thread_rollup_service = None
+    runtime._load_active_directive = _directive  # type: ignore[method-assign]
+    runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
+    runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
+    runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
+    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
+    runtime._tools = {"fake_tool": _FakeTool()}
+    runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
+    runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.model_with_tools_for_turn_mode = lambda turn_mode: object()  # type: ignore[assignment]
+    runtime._context_token_limit = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime.recursion_limit = 8
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [*prior_messages, HumanMessage(content="run the fake tool and then answer")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_test",
+        },
+        config={"configurable": {"thread_id": "chat_test"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Done."
+    assert len(captured_messages) == 2
+    assert captured_prefix_counts[1] == captured_prefix_counts[0]
+    assert captured_messages[0][:captured_prefix_counts[0]] == captured_messages[1][:captured_prefix_counts[1]]
+
+    def _summary_block(messages: list[Any]) -> str:
+        return next(
+            str(getattr(msg, "content", ""))
+            for msg in messages
+            if "Compressed older in-thread context." in str(getattr(msg, "content", ""))
+        )
+
+    first_summary = _summary_block(captured_messages[0])
+    second_summary = _summary_block(captured_messages[1])
+    assert first_summary == second_summary
+
 
 
 def test_memory_grounding_block_stays_compact() -> None:

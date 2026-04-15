@@ -25,7 +25,7 @@ DEFAULT_DB_PATH = PROJECT_ROOT / ".opentulpa" / "scheduler.db"
 def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
     try:
         payload = {
-            "runId": "review-capability",
+            "runId": "scheduler",
             "hypothesisId": hypothesis_id,
             "location": location,
             "message": message,
@@ -214,7 +214,7 @@ class SchedulerService:
         routine = self._routines.get(routine_id)
         # region agent log
         _debug_log(
-            hypothesis_id="H5",
+            hypothesis_id="scheduler",
             location="scheduler/service.py:_run_routine",
             message="routine_triggered",
             data={"routine_id": routine_id, "enabled": bool(routine.enabled) if routine else False},

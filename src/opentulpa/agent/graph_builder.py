@@ -12,16 +12,18 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
+from opentulpa.agent.context_engineer import (
+    ContextEngineer,
+)
+from opentulpa.agent.context_engineer import (
+    trim_text_to_token_budget as _trim_text_to_token_budget,
+)
 from opentulpa.agent.lc_messages import (
     AIMessage,
     AnyMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
-)
-from opentulpa.agent.context_engineer import (
-    ContextEngineer,
-    trim_text_to_token_budget as _trim_text_to_token_budget,
 )
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.prompt_policy import (
@@ -35,9 +37,6 @@ from opentulpa.agent.prompt_sections import (
 )
 from opentulpa.agent.prompt_sections import (
     build_retrieved_context_message as _build_retrieved_context_message,
-)
-from opentulpa.agent.prompt_sections import (
-    build_style_card_message as _build_style_card_message,
 )
 from opentulpa.agent.tool_message_protocol import (
     enforce_tool_message_protocol as _enforce_tool_message_protocol,
@@ -101,6 +100,128 @@ def _compute_empty_output_retry_limit(runtime: Any) -> int:
     Long retry loops here burn context without producing user-visible progress.
     """
     return min(2, _compute_claim_check_retry_limit(runtime))
+
+
+def _make_prompt_context_entry(*, section: str, content: str) -> dict[str, str] | None:
+    safe_section = str(section or "").strip()
+    safe_content = str(content or "").strip()
+    if not safe_section or not safe_content:
+        return None
+    return {"section": safe_section, "content": safe_content}
+
+
+def _make_retrieved_context_entry(*, section: str, title: str, body: str) -> dict[str, str] | None:
+    message = _build_retrieved_context_message(title=title, body=body)
+    if message is None:
+        return None
+    return _make_prompt_context_entry(
+        section=section,
+        content=_content_to_text(getattr(message, "content", "")).strip(),
+    )
+
+
+def _normalize_prompt_context_entries(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        entry = _make_prompt_context_entry(
+            section=str(item.get("section", "")).strip(),
+            content=str(item.get("content", "")).strip(),
+        )
+        if entry is not None:
+            normalized.append(entry)
+    return normalized
+
+
+def _normalize_frozen_history_messages(raw: Any) -> list[AnyMessage]:
+    if not isinstance(raw, list):
+        return []
+    normalized: list[AnyMessage] = []
+    for item in raw:
+        if isinstance(item, (HumanMessage, AIMessage, ToolMessage)):
+            normalized.append(item)
+    return normalized
+
+
+def _frozen_prompt_context_matches(
+    raw: Any,
+    *,
+    latest_user: str,
+    customer_id: str,
+    prompt_mode: str,
+    turn_mode: str,
+) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    signature = raw.get("signature")
+    if not isinstance(signature, dict):
+        return False
+    return (
+        str(signature.get("latest_user", "")).strip() == str(latest_user or "").strip()
+        and str(signature.get("customer_id", "")).strip() == str(customer_id or "").strip()
+        and str(signature.get("prompt_mode", "")).strip() == str(prompt_mode or "").strip()
+        and str(signature.get("turn_mode", "")).strip() == str(turn_mode or "").strip()
+    )
+
+
+def _build_late_turn_control_text(
+    *,
+    prompt_mode: str,
+    turn_mode: str,
+    customer_id: str,
+    live_time: dict[str, str],
+) -> str:
+    parts: list[str] = [
+        PROMPT_DYNAMIC_BOUNDARY,
+        _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
+        _content_to_text(_build_turn_mode_system_message(turn_mode).content),
+        (
+            f"customer_id={customer_id}. "
+            "Customer scope for customer-scoped tools is resolved automatically from runtime state."
+        ),
+        (
+            "Live time context (auto-injected this turn):\n"
+            f"- server_time_local_iso: {live_time['server_time_local_iso']}\n"
+            f"- server_time_utc_iso: {live_time['server_time_utc_iso']}\n"
+            f"- server_utc_offset: {live_time['server_utc_offset']}\n"
+            f"- user_time_local_iso: {live_time['user_time_local_iso']}\n"
+            f"- user_utc_offset: {live_time['user_utc_offset']}\n"
+            f"- user_time_source: {live_time['user_time_source']}\n"
+            "Use these concrete values for all relative-time reasoning in this turn."
+        ),
+    ]
+    return "\n\n".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _prompt_overhead_tokens(messages: list[AnyMessage]) -> int:
+    return sum(
+        _approx_tokens(_content_to_text(getattr(msg, "content", "")))
+        for msg in messages
+    )
+
+
+def _select_optional_prompt_entries(
+    entries: list[dict[str, str]],
+    *,
+    initial_used_tokens: int,
+    optional_context_budget: int,
+) -> tuple[list[tuple[str, SystemMessage]], int]:
+    kept: list[tuple[str, SystemMessage]] = []
+    used_tokens = max(0, int(initial_used_tokens))
+    for entry in entries:
+        content = str(entry.get("content", "")).strip()
+        section = str(entry.get("section", "")).strip()
+        if not content or not section:
+            continue
+        msg_tokens = _approx_tokens(content)
+        if (used_tokens > 0 or kept) and used_tokens + msg_tokens > optional_context_budget:
+            continue
+        kept.append((section, SystemMessage(content=content)))
+        used_tokens += msg_tokens
+    return kept, used_tokens
 
 _WORKING_DIR_PREFIXES: dict[str, str] = {
     "tulpa_stuff": "tulpa_stuff",
@@ -324,45 +445,7 @@ def _validate_model_tool_call(
                 "use a local ISO datetime schedule (not cron)."
             )
 
-    if call_name == "lessons_learnt":
-        op = str(args.get("action", "")).strip().lower()
-        if op not in {"get", "append", "set", "clear"}:
-            return "TOOL_VALIDATION_ERROR: lessons_learnt action must be one of get|append|set|clear."
-        if op in {"append", "set"} and not str(args.get("lesson", "")).strip():
-            return (
-                "TOOL_VALIDATION_ERROR: lessons_learnt requires a non-empty lesson "
-                "for append/set actions."
-            )
     return None
-
-
-def _build_skill_glossary_context(available_skills: Any) -> str:
-    if not isinstance(available_skills, list):
-        return ""
-    normalized_items: list[tuple[str, str, str]] = []
-    seen_names: set[str] = set()
-    for item in available_skills:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).strip()
-        description = " ".join(str(item.get("description", "")).split()).strip()
-        scope = str(item.get("scope", "")).strip() or "user"
-        if not name or not description or name in seen_names:
-            continue
-        seen_names.add(name)
-        normalized_items.append((name, description[:220], scope))
-    if not normalized_items:
-        return ""
-    normalized_items.sort(key=lambda x: x[0].casefold())
-    lines: list[str] = [
-        "Skill glossary (high-level, non-prioritized):",
-        "Use this as discovery context only. Call skill_get(name) to fetch full skill instructions before execution.",
-    ]
-    for name, description, scope in normalized_items[:20]:
-        lines.append(f"- {name} ({scope}): {description}")
-    return "\n".join(lines)
-
-
 def _build_relevant_skill_discovery_context(
     *,
     available_skills: Any,
@@ -511,7 +594,6 @@ def build_runtime_graph(runtime: Any):
         "composio_instagram_reply_precheck": (),
         "composio_tool_execute": ("tool_slug",),
         "directive_set": ("directive",),
-        "lessons_learnt": ("action",),
         "time_profile_set": ("utc_offset",),
         "browser_use_session_list": (),
         "browser_use_run": ("task",),
@@ -558,7 +640,6 @@ def build_runtime_graph(runtime: Any):
         "directive_get",
         "directive_set",
         "directive_clear",
-        "lessons_learnt",
         "time_profile_get",
         "time_profile_set",
         "tulpa_run_terminal",
@@ -638,342 +719,410 @@ def build_runtime_graph(runtime: Any):
         )
         invoked_skill_context = cached_invoked_context or legacy_cached_context
         available_skills = cached_available if isinstance(cached_available, list) else []
-        rollup_sections = (
-            runtime._load_thread_rollup_sections(thread_id)
-            if context_engineer.should_include_optional_context(
-                kind="thread_rollup",
-                prompt_mode=prompt_mode,
-                should_retrieve=True,
-            )
-            else {}
-        )
-        should_retrieve = runtime._has_retrieval_evidence(
-            user_text=latest_user,
-            prompt_mode=prompt_mode,
-            skill_candidates=available_skills,
-            thread_rollup_sections=rollup_sections,
-        )
-        if should_retrieve and latest_user and latest_user != cached_query:
-            if not available_skills:
-                list_skills = getattr(runtime, "_list_available_skills", None)
-                if callable(list_skills):
-                    try:
-                        available_skills = await list_skills(customer_id)
-                    except Exception:
-                        available_skills = []
-            selected = await runtime._select_relevant_skills(
-                customer_id=customer_id,
-                query=latest_user,
-                candidates=available_skills,
-                prompt_mode=prompt_mode,
-                max_skills=3,
-            )
-            skill_names = [
-                str(item.get("name", "")).strip()
-                for item in selected
-                if isinstance(item, dict) and str(item.get("name", "")).strip()
-            ]
-            skill_query = latest_user
-        skill_discovery_context = _build_relevant_skill_discovery_context(
-            available_skills=available_skills,
-            selected_names=skill_names,
-        )
-        style_card = str(state.get("style_card", "")).strip()
-        active_directive = (
-            await runtime._load_active_directive(customer_id)
-            if context_engineer.should_include_optional_context(
-                kind="task_directive",
-                prompt_mode=prompt_mode,
-                should_retrieve=should_retrieve,
-            )
-            else None
-        )
-        memory_grounding = await runtime._load_memory_grounding_context(
-            customer_id=customer_id,
-            user_text=latest_user,
-            turn_mode=turn_mode,
-            token_budget=500,
-        )
-        thread_rollup = (
-            "\n\n".join(
-                part for part in (
-                    str(rollup_sections.get("open_loops") or "").strip(),
-                    str(rollup_sections.get("durable_facts") or "").strip(),
-                ) if part
-            ).strip()
-            if context_engineer.should_include_optional_context(
-                kind="thread_rollup",
-                prompt_mode=prompt_mode,
-                should_retrieve=should_retrieve,
-            )
-            else None
-        )
-        live_time = await runtime._build_live_time_context(customer_id)
-        pending_context_summary = (
-            str(state.get("pending_context_summary", "")).strip()
-            if context_engineer.should_include_optional_context(
-                kind="pending_context",
-                prompt_mode=prompt_mode,
-                should_retrieve=should_retrieve,
-            )
-            else ""
-        )
-        link_alias_context = (
-            runtime._build_link_alias_context(
-                customer_id=customer_id,
-                user_text=latest_user,
-            )
-            if context_engineer.should_include_optional_context(
-                kind="link_aliases",
-                prompt_mode=prompt_mode,
-                should_retrieve=should_retrieve,
-            )
-            else ""
-        )
         prompt_budget = max(4000, int(getattr(runtime, "_context_token_limit", 12000)))
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
-        style_message = _build_style_card_message(style_card)
-        stable_prompt_messages: list[AnyMessage] = [stable_system_message]
-        if style_message is not None:
-            stable_prompt_messages.append(style_message)
-        volatile_parts: list[str] = [
-            PROMPT_DYNAMIC_BOUNDARY,
-            _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
-            _content_to_text(_build_turn_mode_system_message(turn_mode).content),
-            (
-                f"customer_id={customer_id}. "
-                "Customer scope for customer-scoped tools is resolved automatically from runtime state."
-            ),
-            (
-                "Live time context (auto-injected this turn):\n"
-                f"- server_time_local_iso: {live_time['server_time_local_iso']}\n"
-                f"- server_time_utc_iso: {live_time['server_time_utc_iso']}\n"
-                f"- server_utc_offset: {live_time['server_utc_offset']}\n"
-                f"- user_time_local_iso: {live_time['user_time_local_iso']}\n"
-                f"- user_utc_offset: {live_time['user_utc_offset']}\n"
-                f"- user_time_source: {live_time['user_time_source']}\n"
-                "Use these concrete values for all relative-time reasoning in this turn."
-            ),
-        ]
-        volatile_system_message = SystemMessage(content="\n\n".join(volatile_parts))
-        prompt_section_names = [
-            "stable_core_policy",
-            "volatile_injected",
-            f"prompt_mode:{prompt_mode}",
-            f"turn_mode:{turn_mode}",
-            "customer_scope",
-            "live_time",
-        ]
-        if style_message is not None:
-            prompt_section_names.append("style_card")
-        stable_optional_messages: list[AnyMessage] = []
-        volatile_optional_messages: list[AnyMessage] = []
-        memory_grounding_message: AnyMessage | None = None
-        if active_directive:
-            directive_text = _trim_text_to_token_budget(
-                active_directive,
-                token_budget=max(120, min(420, int(low_budget * 0.12))),
-            )
-            if directive_text:
-                stable_optional_messages.append(
-                    _build_retrieved_context_message(
-                        title="Active persistent task/profile directive.",
-                        body=(
-                            "Treat this as relevant task context, not conversational topic guidance.\n"
-                            f"{directive_text}"
-                        ),
-                    )
+        frozen_prompt_context_raw = state.get("frozen_prompt_context")
+        prompt_context_update: dict[str, Any] = {}
+        if _frozen_prompt_context_matches(
+            frozen_prompt_context_raw,
+            latest_user=latest_user,
+            customer_id=customer_id,
+            prompt_mode=prompt_mode,
+            turn_mode=turn_mode,
+        ):
+            frozen_prompt_context = dict(frozen_prompt_context_raw or {})
+        else:
+            rollup_sections = (
+                runtime._load_thread_rollup_sections(thread_id)
+                if context_engineer.should_include_optional_context(
+                    kind="thread_rollup",
+                    prompt_mode=prompt_mode,
+                    should_retrieve=True,
                 )
-                prompt_section_names.append("task_directive")
-        if memory_grounding:
-            grounding_text = _trim_text_to_token_budget(
-                memory_grounding,
+                else {}
+            )
+            should_retrieve = runtime._has_retrieval_evidence(
+                user_text=latest_user,
+                prompt_mode=prompt_mode,
+                skill_candidates=available_skills,
+                thread_rollup_sections=rollup_sections,
+            )
+            if should_retrieve and latest_user and latest_user != cached_query:
+                if not available_skills:
+                    list_skills = getattr(runtime, "_list_available_skills", None)
+                    if callable(list_skills):
+                        try:
+                            available_skills = await list_skills(customer_id)
+                        except Exception:
+                            available_skills = []
+                selected = await runtime._select_relevant_skills(
+                    customer_id=customer_id,
+                    query=latest_user,
+                    candidates=available_skills,
+                    prompt_mode=prompt_mode,
+                    max_skills=3,
+                )
+                skill_names = [
+                    str(item.get("name", "")).strip()
+                    for item in selected
+                    if isinstance(item, dict) and str(item.get("name", "")).strip()
+                ]
+                skill_query = latest_user
+            skill_discovery_context = _build_relevant_skill_discovery_context(
+                available_skills=available_skills,
+                selected_names=skill_names,
+            )
+            active_directive = (
+                await runtime._load_active_directive(customer_id)
+                if context_engineer.should_include_optional_context(
+                    kind="task_directive",
+                    prompt_mode=prompt_mode,
+                    should_retrieve=should_retrieve,
+                )
+                else None
+            )
+            memory_grounding = await runtime._load_memory_grounding_context(
+                customer_id=customer_id,
+                user_text=latest_user,
+                turn_mode=turn_mode,
                 token_budget=500,
             )
-            if grounding_text:
-                memory_grounding_message = (
-                    _build_retrieved_context_message(
-                        title="Relevant long-term memory grounding (dynamic retrieval).",
-                        body=(
-                            "Use this to ground historical facts, preferences, directives, projects, technical details, and recalled files. "
-                            "Treat it as retrieved memory, not as a user-authored message in this turn.\n"
-                            f"{grounding_text}"
-                        ),
+            thread_rollup = (
+                "\n\n".join(
+                    part
+                    for part in (
+                        str(rollup_sections.get("open_loops") or "").strip(),
+                        str(rollup_sections.get("durable_facts") or "").strip(),
                     )
+                    if part
+                ).strip()
+                if context_engineer.should_include_optional_context(
+                    kind="thread_rollup",
+                    prompt_mode=prompt_mode,
+                    should_retrieve=should_retrieve,
                 )
-                prompt_section_names.append("memory_grounding")
-        if thread_rollup:
-            rollup_text = _trim_text_to_token_budget(
-                thread_rollup,
-                token_budget=max(300, min(1400, int(low_budget * 0.4))),
+                else None
             )
-            if rollup_text:
-                volatile_optional_messages.append(
-                    _build_retrieved_context_message(
-                        title="Compressed older thread context.",
-                        body=rollup_text,
-                    )
+            live_time = await runtime._build_live_time_context(customer_id)
+            pending_context_summary = (
+                str(state.get("pending_context_summary", "")).strip()
+                if context_engineer.should_include_optional_context(
+                    kind="pending_context",
+                    prompt_mode=prompt_mode,
+                    should_retrieve=should_retrieve,
                 )
-                prompt_section_names.append("thread_rollup")
-        if pending_context_summary:
-            pending_text = _trim_text_to_token_budget(
-                pending_context_summary,
-                token_budget=max(140, min(520, int(low_budget * 0.15))),
+                else ""
             )
-            if pending_text:
-                volatile_optional_messages.append(
-                    _build_retrieved_context_message(
-                        title="Background system events summary (not user-authored).",
-                        body=(
-                            "Use this only to reconcile hidden state and never quote event lines directly.\n"
-                            f"{pending_text}"
-                        ),
-                    )
+            link_alias_context = (
+                runtime._build_link_alias_context(
+                    customer_id=customer_id,
+                    user_text=latest_user,
                 )
-                prompt_section_names.append("pending_context")
-        if skill_discovery_context and context_engineer.should_include_optional_context(
-            kind="skill_discovery",
-            prompt_mode=prompt_mode,
-            should_retrieve=should_retrieve,
-        ):
-            discovery_text = _trim_text_to_token_budget(
-                skill_discovery_context,
-                token_budget=max(160, min(620, int(low_budget * 0.18))),
-            )
-            if discovery_text:
-                volatile_optional_messages.append(
-                    _build_retrieved_context_message(
-                        title="Relevant skill discovery for this turn.",
-                        body=discovery_text,
-                    )
+                if context_engineer.should_include_optional_context(
+                    kind="link_aliases",
+                    prompt_mode=prompt_mode,
+                    should_retrieve=should_retrieve,
                 )
-                prompt_section_names.append("skill_discovery")
-        if invoked_skill_context and context_engineer.should_include_optional_context(
-            kind="invoked_skills",
-            prompt_mode=prompt_mode,
-            should_retrieve=should_retrieve,
-        ):
-            invoked_text = _trim_text_to_token_budget(
-                invoked_skill_context,
-                token_budget=max(400, min(1800, int(low_budget * 0.45))),
+                else ""
             )
-            if invoked_text:
-                volatile_optional_messages.append(
-                    _build_retrieved_context_message(
-                        title=(
-                            "Previously invoked skill instructions still relevant in this session "
-                            f"(skills: {', '.join(invoked_skill_names) if invoked_skill_names else 'unknown'})."
-                        ),
-                        body=invoked_text,
-                    )
-                )
-                prompt_section_names.append("invoked_skills")
-        if link_alias_context and context_engineer.should_include_optional_context(
-            kind="link_aliases",
-            prompt_mode=prompt_mode,
-            should_retrieve=should_retrieve,
-        ):
-            aliases_text = _trim_text_to_token_budget(
-                link_alias_context,
-                token_budget=max(120, min(320, int(low_budget * 0.08))),
-            )
-            if aliases_text:
-                volatile_optional_messages.append(SystemMessage(content=aliases_text))
-                prompt_section_names.append("link_aliases")
-        stable_optional_messages = [msg for msg in stable_optional_messages if msg is not None]
-        volatile_optional_messages = [msg for msg in volatile_optional_messages if msg is not None]
 
-        prompt_messages: list[AnyMessage] = [*stable_prompt_messages]
-        kept_stable_optional: list[AnyMessage] = []
-        used_optional_tokens = 0
-        if stable_optional_messages:
-            for msg in stable_optional_messages:
-                msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                if kept_stable_optional and used_optional_tokens + msg_tokens > optional_context_budget:
-                    continue
-                kept_stable_optional.append(msg)
-                used_optional_tokens += msg_tokens
-            prompt_messages.extend(kept_stable_optional)
-        stable_prompt_count = len(prompt_messages)
-        prompt_messages.append(volatile_system_message)
-        prompt_messages_base: list[AnyMessage] = [*prompt_messages]
-        if volatile_optional_messages:
-            kept_volatile_optional: list[AnyMessage] = []
-            for msg in volatile_optional_messages:
-                msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                if (kept_stable_optional or kept_volatile_optional) and used_optional_tokens + msg_tokens > optional_context_budget:
-                    continue
-                kept_volatile_optional.append(msg)
-                used_optional_tokens += msg_tokens
-            prompt_messages.extend(kept_volatile_optional)
-        prompt_overhead_tokens = sum(
-            _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-            for msg in prompt_messages
+            stable_entries: list[dict[str, str]] = []
+            late_entries: list[dict[str, str]] = []
+            if active_directive:
+                directive_text = _trim_text_to_token_budget(
+                    active_directive,
+                    token_budget=max(120, min(420, int(low_budget * 0.12))),
+                )
+                directive_entry = _make_retrieved_context_entry(
+                    section="task_directive",
+                    title="Active persistent task/profile directive.",
+                    body=(
+                        "Treat this as relevant task context, not conversational topic guidance.\n"
+                        f"{directive_text}"
+                    ),
+                )
+                if directive_entry is not None:
+                    stable_entries.append(directive_entry)
+            if thread_rollup:
+                rollup_text = _trim_text_to_token_budget(
+                    thread_rollup,
+                    token_budget=max(300, min(1400, int(low_budget * 0.4))),
+                )
+                rollup_entry = _make_retrieved_context_entry(
+                    section="thread_rollup",
+                    title="Compressed older thread context.",
+                    body=rollup_text,
+                )
+                if rollup_entry is not None:
+                    late_entries.append(rollup_entry)
+            if pending_context_summary:
+                pending_text = _trim_text_to_token_budget(
+                    pending_context_summary,
+                    token_budget=max(140, min(520, int(low_budget * 0.15))),
+                )
+                pending_entry = _make_retrieved_context_entry(
+                    section="pending_context",
+                    title="Background system events summary (not user-authored).",
+                    body=(
+                        "Use this only to reconcile hidden state and never quote event lines directly.\n"
+                        f"{pending_text}"
+                    ),
+                )
+                if pending_entry is not None:
+                    late_entries.append(pending_entry)
+            if skill_discovery_context and context_engineer.should_include_optional_context(
+                kind="skill_discovery",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            ):
+                discovery_text = _trim_text_to_token_budget(
+                    skill_discovery_context,
+                    token_budget=max(160, min(620, int(low_budget * 0.18))),
+                )
+                discovery_entry = _make_retrieved_context_entry(
+                    section="skill_discovery",
+                    title="Relevant skill discovery for this turn.",
+                    body=discovery_text,
+                )
+                if discovery_entry is not None:
+                    late_entries.append(discovery_entry)
+            if invoked_skill_context and context_engineer.should_include_optional_context(
+                kind="invoked_skills",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            ):
+                invoked_text = _trim_text_to_token_budget(
+                    invoked_skill_context,
+                    token_budget=max(400, min(1800, int(low_budget * 0.45))),
+                )
+                invoked_entry = _make_retrieved_context_entry(
+                    section="invoked_skills",
+                    title=(
+                        "Previously invoked skill instructions still relevant in this session "
+                        f"(skills: {', '.join(invoked_skill_names) if invoked_skill_names else 'unknown'})."
+                    ),
+                    body=invoked_text,
+                )
+                if invoked_entry is not None:
+                    late_entries.append(invoked_entry)
+            if link_alias_context and context_engineer.should_include_optional_context(
+                kind="link_aliases",
+                prompt_mode=prompt_mode,
+                should_retrieve=should_retrieve,
+            ):
+                aliases_text = _trim_text_to_token_budget(
+                    link_alias_context,
+                    token_budget=max(120, min(320, int(low_budget * 0.08))),
+                )
+                aliases_entry = _make_prompt_context_entry(
+                    section="link_aliases",
+                    content=aliases_text,
+                )
+                if aliases_entry is not None:
+                    late_entries.append(aliases_entry)
+            if memory_grounding:
+                grounding_text = _trim_text_to_token_budget(
+                    memory_grounding,
+                    token_budget=500,
+                )
+                grounding_entry = _make_retrieved_context_entry(
+                    section="memory_grounding",
+                    title="Relevant long-term memory grounding (dynamic retrieval).",
+                    body=(
+                        "Use this to ground historical facts, preferences, directives, projects, technical details, and recalled files. "
+                        "Treat it as retrieved memory, not as a user-authored message in this turn.\n"
+                        f"{grounding_text}"
+                    ),
+                )
+                if grounding_entry is not None:
+                    late_entries.append(grounding_entry)
+
+            frozen_prompt_context = {
+                "signature": {
+                    "latest_user": latest_user,
+                    "customer_id": customer_id,
+                    "prompt_mode": prompt_mode,
+                    "turn_mode": turn_mode,
+                },
+                "late_control_content": _build_late_turn_control_text(
+                    prompt_mode=prompt_mode,
+                    turn_mode=turn_mode,
+                    customer_id=customer_id,
+                    live_time=live_time,
+                ),
+                "late_control_sections": [
+                    "volatile_injected",
+                    f"prompt_mode:{prompt_mode}",
+                    f"turn_mode:{turn_mode}",
+                    "customer_scope",
+                    "live_time",
+                ],
+                "stable_entries": stable_entries,
+                "late_entries": late_entries,
+            }
+            prompt_context_update["frozen_prompt_context"] = frozen_prompt_context
+
+        stable_prompt_messages: list[AnyMessage] = [stable_system_message]
+        stable_prompt_sections = ["stable_core_policy"]
+        stable_entries = _normalize_prompt_context_entries(frozen_prompt_context.get("stable_entries"))
+        late_entries = _normalize_prompt_context_entries(frozen_prompt_context.get("late_entries"))
+        late_control_content = str(frozen_prompt_context.get("late_control_content", "")).strip()
+        late_control_sections = [
+            str(section).strip()
+            for section in (frozen_prompt_context.get("late_control_sections") or [])
+            if str(section).strip()
+        ]
+
+        kept_stable_optional_entries, used_optional_tokens = _select_optional_prompt_entries(
+            stable_entries,
+            initial_used_tokens=0,
+            optional_context_budget=optional_context_budget,
         )
+        prefix_messages: list[AnyMessage] = [
+            *stable_prompt_messages,
+            *(message for _, message in kept_stable_optional_entries),
+        ]
+        prefix_sections = [
+            *stable_prompt_sections,
+            *(section for section, _ in kept_stable_optional_entries),
+        ]
+
+        late_control_message = SystemMessage(content=late_control_content) if late_control_content else None
+        selected_frozen_late_entries, used_optional_tokens = _select_optional_prompt_entries(
+            late_entries,
+            initial_used_tokens=used_optional_tokens,
+            optional_context_budget=optional_context_budget,
+        )
+        prompt_messages_base: list[AnyMessage] = [
+            *prefix_messages,
+            *([late_control_message] if late_control_message is not None else []),
+        ]
         max_overhead_tokens = max(1400, int(prompt_budget * 0.72))
-        while len(prompt_messages) > len(prompt_messages_base) and prompt_overhead_tokens > max_overhead_tokens:
-            prompt_messages.pop()
-            prompt_overhead_tokens = sum(
-                _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                for msg in prompt_messages
-            )
-        stable_prompt_count = min(stable_prompt_count, len(prompt_messages))
+        prompt_messages: list[AnyMessage] = [
+            *prompt_messages_base,
+            *(message for _, message in selected_frozen_late_entries),
+        ]
+        prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
+        while selected_frozen_late_entries and prompt_overhead_tokens > max_overhead_tokens:
+            selected_frozen_late_entries.pop()
+            prompt_messages = [
+                *prompt_messages_base,
+                *(message for _, message in selected_frozen_late_entries),
+            ]
+            prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
         history_budget = max(800, prompt_budget - prompt_overhead_tokens)
         sanitized_history = _sanitize_history_messages_for_model(messages)
         sanitized_history = _enforce_tool_message_protocol(sanitized_history)
+        frozen_history_projection_raw = state.get("frozen_history_projection")
+        turn_history_messages = _enforce_tool_message_protocol(_latest_turn_messages(sanitized_history))
+        turn_start_index = max(0, len(sanitized_history) - len(turn_history_messages))
+        older_history_messages: list[AnyMessage] = []
+        stale_summary_text = ""
         history_working_set = context_engineer.build_history_working_set(
             sanitized_history,
             token_budget=history_budget,
         )
-        if history_working_set.summary_text:
-            volatile_optional_messages.append(
-                _build_retrieved_context_message(
+        if (
+            isinstance(frozen_history_projection_raw, dict)
+            and int(frozen_history_projection_raw.get("turn_start_index", -1)) >= 0
+            and int(frozen_history_projection_raw.get("turn_start_index", -1)) <= len(sanitized_history)
+        ):
+            turn_start_index = int(frozen_history_projection_raw.get("turn_start_index", 0))
+            older_history_messages = _normalize_frozen_history_messages(
+                frozen_history_projection_raw.get("older_history_messages")
+            )
+            stale_summary_text = str(frozen_history_projection_raw.get("stale_summary_text", "")).strip()
+        else:
+            initial_turn_messages = _enforce_tool_message_protocol(_latest_turn_messages(sanitized_history))
+            turn_start_index = max(0, len(sanitized_history) - len(initial_turn_messages))
+            summary_entry = None
+            if history_working_set.summary_text:
+                summary_entry = _make_retrieved_context_entry(
+                    section="stale_history_summary",
                     title="Compressed older in-thread context.",
                     body=history_working_set.summary_text,
                 )
-            )
-            prompt_section_names.append("stale_history_summary")
-            prompt_messages = [*stable_prompt_messages]
-            kept_stable_optional = []
-            used_optional_tokens = 0
-            if stable_optional_messages:
-                for msg in stable_optional_messages:
-                    msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                    if kept_stable_optional and used_optional_tokens + msg_tokens > optional_context_budget:
-                        continue
-                    kept_stable_optional.append(msg)
-                    used_optional_tokens += msg_tokens
-                prompt_messages.extend(kept_stable_optional)
-            stable_prompt_count = len(prompt_messages)
-            prompt_messages.append(volatile_system_message)
-            prompt_messages_base = [*prompt_messages]
-            kept_volatile_optional = []
-            for msg in [m for m in volatile_optional_messages if m is not None]:
-                msg_tokens = _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                if (kept_stable_optional or kept_volatile_optional) and used_optional_tokens + msg_tokens > optional_context_budget:
-                    continue
-                kept_volatile_optional.append(msg)
-                used_optional_tokens += msg_tokens
-            prompt_messages.extend(kept_volatile_optional)
-            prompt_overhead_tokens = sum(
-                _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                for msg in prompt_messages
-            )
-            max_overhead_tokens = max(1400, int(prompt_budget * 0.72))
-            while len(prompt_messages) > len(prompt_messages_base) and prompt_overhead_tokens > max_overhead_tokens:
-                prompt_messages.pop()
-                prompt_overhead_tokens = sum(
-                    _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-                    for msg in prompt_messages
+            selected_summary_entries: list[tuple[str, SystemMessage]] = []
+            if summary_entry is not None:
+                selected_summary_entries, _ = _select_optional_prompt_entries(
+                    [summary_entry],
+                    initial_used_tokens=used_optional_tokens,
+                    optional_context_budget=optional_context_budget,
                 )
-            stable_prompt_count = min(stable_prompt_count, len(prompt_messages))
-            history_budget = max(800, prompt_budget - prompt_overhead_tokens)
-            history_working_set = context_engineer.build_history_working_set(
-                sanitized_history,
-                token_budget=history_budget,
+            prompt_messages = [
+                *prompt_messages_base,
+                *(message for _, message in selected_frozen_late_entries),
+                *(message for _, message in selected_summary_entries),
+            ]
+            prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
+            while selected_summary_entries and prompt_overhead_tokens > max_overhead_tokens:
+                selected_summary_entries.pop()
+                prompt_messages = [
+                    *prompt_messages_base,
+                    *(message for _, message in selected_frozen_late_entries),
+                    *(message for _, message in selected_summary_entries),
+                ]
+                prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
+            if selected_summary_entries:
+                history_budget = max(800, prompt_budget - prompt_overhead_tokens)
+                history_working_set = context_engineer.build_history_working_set(
+                    sanitized_history,
+                    token_budget=history_budget,
+                )
+            bounded_messages = _enforce_tool_message_protocol(history_working_set.raw_messages)
+            bounded_latest_turn = _latest_turn_messages(bounded_messages)
+            bounded_latest_turn_count = len(bounded_latest_turn)
+            if 0 < bounded_latest_turn_count < len(bounded_messages):
+                older_history_messages = bounded_messages[:-bounded_latest_turn_count]
+            else:
+                older_history_messages = []
+            stale_summary_text = history_working_set.summary_text
+            prompt_context_update["frozen_history_projection"] = {
+                "turn_start_index": turn_start_index,
+                "older_history_messages": older_history_messages,
+                "stale_summary_text": stale_summary_text,
+            }
+        latest_turn_messages = _enforce_tool_message_protocol(sanitized_history[turn_start_index:])
+        summary_entry = (
+            _make_retrieved_context_entry(
+                section="stale_history_summary",
+                title="Compressed older in-thread context.",
+                body=stale_summary_text,
             )
-        bounded_messages = _enforce_tool_message_protocol(history_working_set.raw_messages)
+            if stale_summary_text
+            else None
+        )
+        selected_summary_entries: list[tuple[str, SystemMessage]] = []
+        if summary_entry is not None:
+            selected_summary_entries, _ = _select_optional_prompt_entries(
+                [summary_entry],
+                initial_used_tokens=used_optional_tokens,
+                optional_context_budget=optional_context_budget,
+            )
+        prompt_messages = [
+            *prompt_messages_base,
+            *(message for _, message in selected_frozen_late_entries),
+            *(message for _, message in selected_summary_entries),
+        ]
+        prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
+        frozen_late_messages: list[AnyMessage] = [
+            *([late_control_message] if late_control_message is not None else []),
+            *(message for _, message in selected_frozen_late_entries),
+            *(message for _, message in selected_summary_entries),
+        ]
+        dynamic_late_messages: list[AnyMessage] = []
+        prompt_section_names = [
+            *prefix_sections,
+            *late_control_sections,
+            *(section for section, _ in selected_frozen_late_entries),
+            *(section for section, _ in selected_summary_entries),
+        ]
+        optional_context_messages = (
+            len(kept_stable_optional_entries)
+            + len(selected_frozen_late_entries)
+            + len(selected_summary_entries)
+        )
         cache_profile: dict[str, Any] = {}
         cache_profile_fn = getattr(runtime, "prompt_cache_profile", None)
         if callable(cache_profile_fn):
@@ -981,22 +1130,37 @@ def build_runtime_graph(runtime: Any):
                 cache_profile = cache_profile_fn()
             except Exception:
                 cache_profile = {}
+        stable_prefix_count = len(prefix_messages) + len(older_history_messages) + len(frozen_late_messages)
+        actual_history_messages = [*older_history_messages, *latest_turn_messages]
+        raw_chat_history_count = sum(
+            1 for msg in actual_history_messages if isinstance(msg, (HumanMessage, AIMessage))
+        )
+        raw_tool_history_count = sum(1 for msg in actual_history_messages if isinstance(msg, ToolMessage))
+        protected_history_count = len(context_engineer._protected_suffix_indices(actual_history_messages))
+        model_messages: list[AnyMessage] = [
+            *prefix_messages,
+            *older_history_messages,
+            *frozen_late_messages,
+            *dynamic_late_messages,
+            *latest_turn_messages,
+        ]
         _log(
             state,
             "graph.agent.prompt_ready",
-            prompt_message_count=len(prompt_messages),
+            prompt_message_count=len(model_messages),
             prompt_overhead_tokens=prompt_overhead_tokens,
             history_budget=history_budget,
-            history_message_count=len(bounded_messages),
-            raw_chat_history_count=history_working_set.raw_chat_count,
-            raw_tool_history_count=history_working_set.raw_tool_count,
-            protected_history_count=history_working_set.protected_count,
-            optional_context_messages=max(0, len(prompt_messages) - len(prompt_messages_base)),
+            history_message_count=len(actual_history_messages),
+            raw_chat_history_count=raw_chat_history_count,
+            raw_tool_history_count=raw_tool_history_count,
+            protected_history_count=protected_history_count,
+            optional_context_messages=optional_context_messages,
             prompt_sections=",".join(prompt_section_names),
             prompt_cache_strategy=str(cache_profile.get("strategy", "")),
             prompt_cache_enabled=bool(cache_profile.get("enabled", False)),
             prompt_cache_breakpoints=bool(cache_profile.get("supports_breakpoints", False)),
             prompt_cache_top_level=bool(cache_profile.get("supports_top_level", False)),
+            stable_prefix_count=stable_prefix_count,
             turn_mode=turn_mode,
         )
         model_with_tools = runtime.model_with_tools_for_turn_mode(turn_mode)
@@ -1011,58 +1175,22 @@ def build_runtime_graph(runtime: Any):
                 "turn_mode": turn_mode,
                 "prompt_mode": prompt_mode,
                 "prompt_sections": prompt_section_names,
-                "stable_prefix_count": stable_prompt_count,
+                "stable_prefix_count": stable_prefix_count,
                 "prompt_overhead_tokens": prompt_overhead_tokens,
-                "history_message_count": len(bounded_messages),
-                "raw_chat_history_count": history_working_set.raw_chat_count,
-                "raw_tool_history_count": history_working_set.raw_tool_count,
-                "protected_history_count": history_working_set.protected_count,
-                "optional_context_messages": max(0, len(prompt_messages) - len(prompt_messages_base)),
+                "history_message_count": len(actual_history_messages),
+                "raw_chat_history_count": raw_chat_history_count,
+                "raw_tool_history_count": raw_tool_history_count,
+                "protected_history_count": protected_history_count,
+                "optional_context_messages": optional_context_messages,
             }
-            model_messages: list[AnyMessage]
-            if memory_grounding_message is not None:
-                latest_turn = _latest_turn_messages(bounded_messages)
-                latest_turn_count = len(latest_turn)
-                if 0 < latest_turn_count < len(bounded_messages):
-                    model_messages = [
-                        *prompt_messages,
-                        *bounded_messages[:-latest_turn_count],
-                        memory_grounding_message,
-                        *bounded_messages[-latest_turn_count:],
-                    ]
-                else:
-                    model_messages = [
-                        *prompt_messages,
-                        memory_grounding_message,
-                        *bounded_messages,
-                    ]
-            else:
-                model_messages = [
-                    *prompt_messages,
-                    *bounded_messages,
-                ]
             response = await ainvoke_fn(
                 model_with_tools,
                 model_messages,
-                stable_prefix_count=stable_prompt_count,
+                stable_prefix_count=stable_prefix_count,
                 call_context=call_context,
             )
         else:
-            model_messages = (
-                [
-                    *prompt_messages,
-                    memory_grounding_message,
-                    *bounded_messages,
-                ]
-                if memory_grounding_message is not None
-                else [
-                    *prompt_messages,
-                    *bounded_messages,
-                ]
-            )
-            response = await model_with_tools.ainvoke(
-            model_messages
-            )
+            response = await model_with_tools.ainvoke(model_messages)
         response_text = _content_to_text(getattr(response, "content", ""))
         usage_fields: dict[str, Any] = {}
         usage_fields_fn = getattr(runtime, "extract_response_usage_fields", None)
@@ -1079,7 +1207,11 @@ def build_runtime_graph(runtime: Any):
             turn_mode=turn_mode,
             **usage_fields,
         )
-        update: dict[str, Any] = {"messages": [*injected_messages, response], "turn_status": "running"}
+        update: dict[str, Any] = {
+            "messages": [*injected_messages, response],
+            "turn_status": "running",
+            **prompt_context_update,
+        }
         if skill_query:
             update["active_skill_query"] = skill_query
             update["active_skill_names"] = skill_names
@@ -1259,12 +1391,15 @@ def build_runtime_graph(runtime: Any):
                     limit=40,
                 )
                 result_text = _safe_json(result)
+                model_visible_result_text = result_text
                 _log(
                     state,
                     "graph.tools.success",
                     tool_name=call_name,
                     tool_call_id=call_id,
                     result_chars=len(result_text),
+                    model_visible_result_chars=len(model_visible_result_text),
+                    tool_result_compressed=model_visible_result_text != result_text,
                 )
                 if (
                     isinstance(result, dict)
@@ -1308,7 +1443,7 @@ def build_runtime_graph(runtime: Any):
                 else:
                     tool_messages.append(
                         ToolMessage(
-                            content=result_text,
+                            content=model_visible_result_text,
                             tool_call_id=call_id,
                             additional_kwargs={"opentulpa_control": {"status": "ok"}},
                         )
