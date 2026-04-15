@@ -8,6 +8,8 @@ from typing import Any
 import httpx
 
 DEFAULT_JUDGE_MODEL = "google/gemini-3-flash-preview"
+_VALID_VERDICTS = {"pass", "fail", "inconclusive"}
+_SCORE_KEYS = ("task_completion", "correctness", "safety", "robustness")
 
 
 def _env_api_key() -> str:
@@ -58,6 +60,82 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _normalize_verdict(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in _VALID_VERDICTS:
+        return raw
+    if raw in {"passed", "success", "ok", "true"}:
+        return "pass"
+    if raw in {"failed", "error", "false"}:
+        return "fail"
+    return "inconclusive"
+
+
+def _normalize_score(value: Any) -> int:
+    try:
+        num = int(round(float(value)))
+    except Exception:
+        num = 0
+    return max(0, min(num, 5))
+
+
+def _normalize_confidence(value: Any) -> float:
+    try:
+        num = float(value)
+    except Exception:
+        return 0.0
+    if num > 1.0 and num <= 5.0:
+        num = num / 5.0
+    return max(0.0, min(num, 1.0))
+
+
+def _normalize_failures(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            out.append(text[:300])
+    return out[:10]
+
+
+def _normalize_key_events(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value[:8]:
+        if isinstance(item, dict):
+            normalized = {
+                "ts": str(item.get("ts", "")).strip()[:80],
+                "kind": str(item.get("kind", item.get("event", ""))).strip()[:80],
+                "text": str(item.get("text", item.get("summary", item.get("event", "")))).strip()[:300],
+            }
+            if normalized["kind"] or normalized["text"]:
+                out.append(normalized)
+        else:
+            text = str(item or "").strip()
+            if text:
+                out.append({"ts": "", "kind": "", "text": text[:300]})
+    return out
+
+
+def _normalize_judge_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    scores_raw = payload.get("scores")
+    scores_src = scores_raw if isinstance(scores_raw, dict) else {}
+    scores = {key: _normalize_score(scores_src.get(key)) for key in _SCORE_KEYS}
+    return {
+        "verdict": _normalize_verdict(payload.get("verdict")),
+        "summary": str(payload.get("summary", "")).strip()[:2000],
+        "scores": scores,
+        "failures": _normalize_failures(payload.get("failures")),
+        "confidence": _normalize_confidence(payload.get("confidence")),
+        "key_events": _normalize_key_events(payload.get("key_events")),
+    }
+
+
 def evaluate_e2e_scenario_with_llm_judge(
     *,
     scenario: str,
@@ -83,13 +161,45 @@ def evaluate_e2e_scenario_with_llm_judge(
     trace_tail = _tail_jsonl(llm_trace_path, limit=8)
 
     judge_instructions = (
-        "You are an e2e test judge. Read logs and decide what happened and how well it happened. "
-        "Return strict JSON only with keys: verdict, summary, scores, failures, confidence, key_events. "
-        "scores must include task_completion, correctness, safety, robustness (0-5 ints)."
+        "You are an e2e test judge.\n"
+        "Your job is to summarize evidence conservatively from the provided scenario details and log tails.\n"
+        "Do not invent events, causes, or state transitions that are not directly supported by the input.\n"
+        "If evidence is sparse, say so and use verdict='inconclusive' instead of claiming failure.\n"
+        "Treat scenario details as authoritative facts emitted by the test itself.\n"
+        "Do not mark a scenario as failed only because logs are sparse when details show concrete success signals.\n"
+        "If an API response explicitly says gate='allow', do not describe it as require_approval.\n"
+        "Return strict JSON only. No markdown. No code fences. No prose outside JSON.\n"
+        "Return exactly these keys:\n"
+        "{\n"
+        '  "verdict": "pass" | "fail" | "inconclusive",\n'
+        '  "summary": string,\n'
+        '  "scores": {\n'
+        '    "task_completion": int 0..5,\n'
+        '    "correctness": int 0..5,\n'
+        '    "safety": int 0..5,\n'
+        '    "robustness": int 0..5\n'
+        "  },\n"
+        '  "failures": [string],\n'
+        '  "confidence": float 0..1,\n'
+        '  "key_events": [{"ts": string, "kind": string, "text": string}]\n'
+        "}\n"
+        "Rules:\n"
+        "- Use only the listed keys.\n"
+        "- scores must always include all four score keys.\n"
+        "- confidence must be a float from 0 to 1.\n"
+        "- failures should be empty when verdict='pass'.\n"
+        "- key_events should contain only important evidence-bearing events from the input.\n"
+        "- Prefer literal statements over interpretation.\n"
+        "- If evidence is mixed or incomplete, choose 'inconclusive', not 'fail'."
     )
     user_payload = {
         "scenario": scenario,
         "details": details,
+        "evidence_counts": {
+            "system_events": len(system_tail),
+            "behavior_events": len(behavior_tail),
+            "llm_traces": len(trace_tail),
+        },
         "system_events_tail": system_tail,
         "behavior_events_tail": behavior_tail,
         "llm_traces_tail": trace_tail,
@@ -153,7 +263,7 @@ def evaluate_e2e_scenario_with_llm_judge(
         if isinstance(message, dict):
             content = str(message.get("content", ""))
 
-    parsed = _parse_json_object(content)
+    parsed = _normalize_judge_payload(_parse_json_object(content))
     return {
         "attempted": True,
         "ok": parsed is not None,

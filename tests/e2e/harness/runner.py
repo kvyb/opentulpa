@@ -33,6 +33,12 @@ class E2EHarness:
     telegram_client: FakeTelegramClient
     composio_service: FakeComposioInstagramService
 
+    def count_internal_api_calls(self) -> int:
+        return self.recorder.count("internal_api_call")
+
+    def internal_api_calls_since(self, start: int = 0) -> list[dict[str, Any]]:
+        return self.recorder.slice("internal_api_call", start)
+
     def post_chat(self, *, customer_id: str, thread_id: str, text: str) -> dict[str, Any]:
         started = time.monotonic()
         self.recorder.add("user_turn", customer_id=customer_id, thread_id=thread_id, text=text)
@@ -147,6 +153,37 @@ class E2EHarness:
             llm_trace_path=self.llm_trace_path,
         )
         return write_status_report(self.status_report_path, payload)
+
+    def latest_approval_id_from_calls(
+        self,
+        *,
+        action_name: str,
+        calls: list[dict[str, Any]] | None = None,
+    ) -> str:
+        for item in reversed(calls or self.internal_api_calls_since(0)):
+            if str(item.get("path", "")).strip() != "/internal/approvals/evaluate":
+                continue
+            json_body = item.get("json_body", {})
+            if not isinstance(json_body, dict):
+                continue
+            if str(json_body.get("action_name", "")).strip() != str(action_name or "").strip():
+                continue
+            payload = _decode_json_object(str(item.get("response_text", "")))
+            approval_id = str(payload.get("approval_id", "")).strip()
+            if approval_id and approval_id.lower() not in {"none", "null"}:
+                return approval_id
+        return ""
+
+    def get_approval(self, approval_id: str) -> dict[str, Any]:
+        response = self.client.get(f"/internal/approvals/{approval_id}")
+        payload = response.json()
+        self.recorder.add(
+            "approval_get",
+            approval_id=approval_id,
+            status_code=int(response.status_code),
+            payload=payload,
+        )
+        return {"status_code": int(response.status_code), "payload": payload}
 
 
 def _require_openai_compatible_env() -> tuple[str, str]:
@@ -283,6 +320,14 @@ def extract_approval_id(text: str) -> str:
 
     match = re.search(r"\bapr_[a-z0-9_-]{6,40}\b", str(text or ""), flags=re.IGNORECASE)
     return str(match.group(0)).strip() if match else ""
+
+
+def _decode_json_object(text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(text or "").strip())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:

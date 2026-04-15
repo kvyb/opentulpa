@@ -9,6 +9,7 @@ from typing import Any
 class FakeComposioInstagramService:
     """Transport-only fake for Instagram read/write calls."""
 
+    enabled: bool = True
     calls: list[dict[str, Any]] = field(default_factory=list)
     conversations: dict[str, dict[str, Any]] = field(default_factory=dict)
     reply_fail_once_for_invalid_mid: bool = True

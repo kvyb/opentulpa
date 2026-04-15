@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from uuid import uuid4
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ def test_live_instagram_ingress_read_smoke(e2e_harness: E2EHarness) -> None:
 
 def test_live_instagram_ingress_extract_and_local_sink(e2e_harness: E2EHarness) -> None:
     customer_id = "cust_e2e_ingress"
-    csv_relative_path = "tulpa_stuff/live_instagram_ingress_e2e.csv"
+    csv_relative_path = f"tulpa_stuff/e2e/live_instagram_ingress_{uuid4().hex[:8]}.csv"
 
     upsert = e2e_harness.upsert_instagram_workflow(
         customer_id=customer_id,
@@ -52,12 +53,15 @@ def test_live_instagram_ingress_extract_and_local_sink(e2e_harness: E2EHarness) 
     payload = run["payload"]
     assert payload["ok"] is True
     assert int(payload["processed_conversations"]) >= 1
+    assert int(payload.get("matched_conversations") or 0) >= 1
+    assert isinstance(payload.get("results"), list) and payload["results"]
 
     csv_path = Path.cwd() / csv_relative_path
     assert csv_path.exists()
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "Alex Rivera" in csv_text
     assert "+1 415 555 1234" in csv_text
+    assert any(item.get("method") == "get_instagram_conversation" for item in e2e_harness.composio_service.calls)
 
     report = e2e_harness.write_status_report(
         scenario="live_instagram_ingress_extract_and_local_sink",
