@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from opentulpa.core.config import Settings, get_openai_compatible_api_key_from_env
 
 
@@ -30,6 +32,7 @@ def test_env_helper_falls_back_to_legacy_name(monkeypatch) -> None:
 def test_settings_accepts_primary_openai_compatible_base_url_name() -> None:
     settings = Settings(OPENAI_COMPATIBLE_BASE_URL="https://example.com/v1")
     assert settings.openrouter_base_url == "https://example.com/v1"
+    assert settings.openai_compatible_base_url == "https://example.com/v1"
 
 
 def test_settings_accepts_legacy_openrouter_base_url_alias() -> None:
@@ -40,6 +43,7 @@ def test_settings_accepts_legacy_openrouter_base_url_alias() -> None:
 def test_settings_accepts_primary_openai_compatible_embedding_model_name() -> None:
     settings = Settings(OPENAI_COMPATIBLE_EMBEDDING_MODEL="text-embedding-x")
     assert settings.openrouter_embedding_model == "text-embedding-x"
+    assert settings.openai_compatible_embedding_model == "text-embedding-x"
 
 
 def test_settings_accepts_legacy_openrouter_embedding_model_alias() -> None:
@@ -55,3 +59,64 @@ def test_settings_accepts_primary_multimodal_llm_name() -> None:
 def test_settings_accepts_legacy_telegram_media_model_alias() -> None:
     settings = Settings(TELEGRAM_MEDIA_MODEL="google/gemini-3-flash-preview")
     assert settings.multimodal_llm == "google/gemini-3-flash-preview"
+
+
+def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "opentulpa.config.yaml"
+    config_file.write_text(
+        "llm_model: from-yaml\nagent_recursion_limit: 42\n"
+        "openai_compatible_base_url: https://yaml.example/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings()
+
+    assert settings.llm_model == "from-yaml"
+    assert settings.agent_recursion_limit == 42
+    assert settings.openai_compatible_base_url == "https://yaml.example/v1"
+
+
+def test_dotenv_overrides_yaml_runtime_defaults(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "opentulpa.config.yaml"
+    config_file.write_text("llm_model: from-yaml\n", encoding="utf-8")
+    env_file = tmp_path / ".env"
+    env_file.write_text("LLM_MODEL=from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_env_file=str(env_file))
+
+    assert settings.llm_model == "from-dotenv"
+
+
+def test_settings_discovers_yaml_by_walking_parent_directories(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "opentulpa.config.yaml"
+    config_file.write_text("llm_model: from-parent\n", encoding="utf-8")
+    nested_dir = tmp_path / "nested" / "deeper"
+    nested_dir.mkdir(parents=True)
+    monkeypatch.chdir(nested_dir)
+
+    settings = Settings()
+
+    assert settings.llm_model == "from-parent"
+
+
+def test_settings_falls_back_to_packaged_yaml_defaults(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.agent_recursion_limit == 50
+    assert settings.agent_context_token_limit == 12000
+    assert settings.agent_context_recent_tokens == 3500
+    assert settings.agent_context_rollup_tokens == 2200
+
+
+def test_repo_and_packaged_yaml_defaults_stay_in_sync() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_config = repo_root / "opentulpa.config.yaml"
+    packaged_config = repo_root / "src" / "opentulpa" / "opentulpa.config.yaml"
+
+    assert packaged_config.read_text(encoding="utf-8") == repo_config.read_text(encoding="utf-8")

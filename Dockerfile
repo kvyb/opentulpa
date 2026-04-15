@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy
 ENV UV_COMPILE_BYTECODE=1
 
-COPY pyproject.toml uv.lock README.md /app/
+COPY pyproject.toml uv.lock README.md opentulpa.config.yaml /app/
 COPY src /app/src
 COPY scripts /app/scripts
 COPY docs /app/docs
