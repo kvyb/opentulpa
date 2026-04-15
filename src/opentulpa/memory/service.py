@@ -338,7 +338,11 @@ class MemoryService:
         """Search memories for the user."""
         uid = user_id or self._user_id
         mem = self._get_memory()
-        extra_filters = metadata or {}
+        extra_filters = {
+            str(key): value
+            for key, value in dict(metadata or {}).items()
+            if str(key) not in {"user_id", "agent_id", "run_id"}
+        }
         raw_results: Any = []
 
         # mem0 signatures changed across versions; try common variants.
@@ -358,8 +362,8 @@ class MemoryService:
             pass
 
         # 2) Older style: user_id included in filters.
-        filters: dict[str, Any] = {"user_id": uid}
-        filters.update(extra_filters)
+        filters: dict[str, Any] = dict(extra_filters)
+        filters["user_id"] = uid
         try:
             raw_results = mem.search(
                 query,

@@ -38,6 +38,23 @@ class _FakeMem0:
         return {"results": [{"ok": True}]}
 
 
+class _LegacySearchFakeMem0:
+    def __init__(self) -> None:
+        self.filters_calls: list[dict[str, object]] = []
+
+    def search(self, query: str, **kwargs: object):
+        if "user_id" in kwargs:
+            raise TypeError("legacy signature")
+        self.filters_calls.append(
+            {
+                "query": query,
+                "filters": dict(kwargs.get("filters") or {}),
+                "limit": kwargs.get("limit"),
+            }
+        )
+        return []
+
+
 def test_memory_service_normalizes_dict_style_search_results() -> None:
     memory = MemoryService()
     memory._memory = _FakeMem0(
@@ -84,3 +101,32 @@ def test_memory_service_infers_typed_kinds_on_write() -> None:
 
     kinds = [str(call["metadata"].get("kind")) for call in fake.add_calls]
     assert kinds == ["credential_fact", "aspirations_fact", "life_fact"]
+
+
+def test_memory_service_preserves_explicit_user_scope_in_legacy_search() -> None:
+    memory = MemoryService()
+    fake = _LegacySearchFakeMem0()
+    memory._memory = fake
+
+    memory.search(
+        "durable context",
+        user_id="customer-1",
+        limit=7,
+        metadata={
+            "user_id": "customer-2",
+            "agent_id": "agent-2",
+            "run_id": "run-2",
+            "kind": ["directive_fact", "life_fact"],
+        },
+    )
+
+    assert fake.filters_calls == [
+        {
+            "query": "durable context",
+            "filters": {
+                "user_id": "customer-1",
+                "kind": ["directive_fact", "life_fact"],
+            },
+            "limit": 7,
+        }
+    ]
