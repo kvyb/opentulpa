@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import mimetypes
 from contextlib import suppress
@@ -321,6 +322,60 @@ class TelegramClient:
         ok = bool(isinstance(data, dict) and data.get("ok") is True)
         if not ok:
             logger.warning("Telegram API %s returned error payload: %s", method, str(data)[:400])
+        return ok
+
+    async def send_files(
+        self,
+        *,
+        chat_id: int | str,
+        files: list[dict[str, Any]],
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> bool:
+        if not files:
+            return False
+        media: list[dict[str, Any]] = []
+        multipart_files: dict[str, tuple[str, bytes, str]] = {}
+        for idx, item in enumerate(files):
+            filename = str(item.get("filename") or "file.bin").strip() or "file.bin"
+            raw_bytes = item.get("raw_bytes")
+            if not isinstance(raw_bytes, (bytes, bytearray)):
+                continue
+            mime_type = str(item.get("mime_type") or "application/octet-stream").strip() or "application/octet-stream"
+            attach_name = f"file{idx}"
+            media_item: dict[str, Any] = {"type": "document", "media": f"attach://{attach_name}"}
+            if idx == 0 and caption:
+                final_caption, final_mode = prepare_text_and_mode(caption, parse_mode)
+                if final_caption:
+                    media_item["caption"] = final_caption
+                if final_mode:
+                    media_item["parse_mode"] = final_mode
+            media.append(media_item)
+            multipart_files[attach_name] = (filename, bytes(raw_bytes), mime_type)
+        if not media:
+            return False
+        payload: dict[str, Any] = {"chat_id": str(chat_id), "media": json.dumps(media, ensure_ascii=False)}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMediaGroup"
+        try:
+            client = self._http_client()
+            resp = await client.post(url, data=payload, files=multipart_files, timeout=120.0)
+        except Exception:
+            return False
+        if not resp.is_success:
+            logger.warning(
+                "Telegram API sendMediaGroup HTTP %s: %s",
+                resp.status_code,
+                (resp.text or "")[:400],
+            )
+            return False
+        try:
+            data = resp.json()
+        except Exception:
+            logger.warning("Telegram API sendMediaGroup returned non-JSON body")
+            return False
+        ok = bool(isinstance(data, dict) and data.get("ok") is True)
+        if not ok:
+            logger.warning("Telegram API sendMediaGroup returned error payload: %s", str(data)[:400])
         return ok
 
 
