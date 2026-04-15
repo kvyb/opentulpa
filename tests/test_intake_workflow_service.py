@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 import pytest
 
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.intake import service as intake_service_module
 from opentulpa.intake.service import IntakeWorkflowService
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
@@ -97,6 +99,16 @@ class _FakeRuntime:
             customer_id=customer_id,
             properties={"behavior_event": event, **fields},
         )
+
+
+class _DelayedRuntime(_FakeRuntime):
+    def __init__(self, decisions: list[dict[str, Any]], *, delay_seconds: float) -> None:
+        super().__init__(decisions)
+        self.delay_seconds = delay_seconds
+
+    async def decide_intake_workflow(self, **kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(self.delay_seconds)
+        return await super().decide_intake_workflow(**kwargs)
 
 
 class _FakeComposio:
@@ -737,6 +749,220 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert sent["chat_id"] == "555"
     assert sent["business_connection_id"] == "bc_123"
     assert sent["reply_to_message_id"] == 10
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_workflow_serializes_same_conversation_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS",
+        0.0,
+    )
+    runtime = _DelayedRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a booking.",
+                "extracted_fields": {"telegram_username": "alice"},
+                "missing_fields": ["time"],
+                "reply_action": "send_reply",
+                "reply_text": "What time works for you?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need one more field before saving.",
+            }
+        ],
+        delay_seconds=0.05,
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Can I book a wash?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["telegram_username", "time"],
+        assistant_instructions="Ask for time before saving.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    first, second = await asyncio.gather(
+        service.run_workflow(
+            customer_id="telegram_123",
+            workflow_id=workflow["workflow_id"],
+            event_type="telegram_business_webhook",
+        ),
+        service.run_workflow(
+            customer_id="telegram_123",
+            workflow_id=workflow["workflow_id"],
+            event_type="telegram_business_webhook",
+        ),
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert len(runtime.calls) == 1
+    assert len(telegram_business.client.sent_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_workflow_coalesces_messages_arriving_during_debounce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS",
+        0.05,
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.9,
+                "conversation_summary": "Customer is asking about car wash services.",
+                "extracted_fields": {"telegram_username": "alice"},
+                "missing_fields": ["car_model"],
+                "reply_action": "send_reply",
+                "reply_text": "Да, моем. Какая у вас машина?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need to collect more details.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Привет",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["telegram_username", "car_model"],
+        assistant_instructions="Answer based on the latest coalesced lead context.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    task = asyncio.create_task(
+        service.run_workflow(
+            customer_id="telegram_123",
+            workflow_id=workflow["workflow_id"],
+            event_type="telegram_business_webhook",
+        )
+    )
+    await asyncio.sleep(0.01)
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 11,
+            "date": 1_775_552_401,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Привет, вы моете машины?",
+        },
+    )
+    result = await task
+
+    assert result["ok"] is True
+    assert runtime.calls[0]["conversation"]["summary"]["latest_inbound_message_id"] == "11"
+    assert [item["text"] for item in runtime.calls[0]["conversation"]["recent_messages"]] == [
+        "Привет",
+        "Привет, вы моете машины?",
+    ]
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["reply_to_message_id"] == 11
 
 
 @pytest.mark.asyncio

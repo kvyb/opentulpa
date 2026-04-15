@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import sqlite3
+import threading
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +24,7 @@ _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_
 _DEFAULT_SCHEDULE = "*/5 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
+_TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 
 
 def _utc_now() -> datetime:
@@ -155,6 +158,8 @@ class IntakeWorkflowService:
         self._telegram_business = telegram_business
         self._file_vault = file_vault
         self._get_agent_runtime = get_agent_runtime
+        self._conversation_locks_guard = threading.Lock()
+        self._conversation_locks: dict[str, asyncio.Lock] = {}
         self._init_db()
 
     def _runtime_for_observability(self) -> Any | None:
@@ -237,6 +242,38 @@ class IntakeWorkflowService:
         log_event = getattr(runtime, "log_behavior_event", None)
         if callable(log_event):
             log_event(event=event, **fields)
+
+    def _conversation_lock(self, *, workflow_id: str, conversation_id: str) -> asyncio.Lock:
+        key = f"{workflow_id}:{conversation_id}"
+        with self._conversation_locks_guard:
+            lock = self._conversation_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._conversation_locks[key] = lock
+            return lock
+
+    @staticmethod
+    def _conversation_debounce_seconds(*, workflow: dict[str, Any], event_type: str) -> float:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        if channel == "telegram_business_dm" and str(event_type or "").strip() == "telegram_business_webhook":
+            return _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS
+        return 0.0
+
+    def _reload_conversation_summary(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        fallback: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        items, source_error = self._load_source_items(workflow=workflow)
+        if source_error is not None:
+            return fallback, source_error
+        for item in items:
+            summary = _safe_dict(item)
+            if str(summary.get("conversation_id", "") or "").strip() == conversation_id:
+                return summary, None
+        return fallback, None
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -1231,144 +1268,102 @@ class IntakeWorkflowService:
         for item in items:
             conversation_summary = _safe_dict(item)
             conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip()
-            latest_inbound_id = str(conversation_summary.get("latest_inbound_message_id", "") or "").strip()
-            latest_inbound_time = str(
-                conversation_summary.get("latest_inbound_message_created_time", "") or ""
-            ).strip()
-            conversation_updated_time = str(
-                conversation_summary.get("conversation_updated_time", "") or ""
-            ).strip()
-            latest_outbound_id = str(
-                conversation_summary.get("latest_outbound_message_id", "") or ""
-            ).strip()
             if not conversation_id:
                 continue
-            cursor = self._get_cursor(
+            async with self._conversation_lock(
                 workflow_id=str(workflow["workflow_id"]),
                 conversation_id=conversation_id,
-            )
-            if not self._has_new_inbound_signal(
-                conversation_summary=conversation_summary,
-                cursor=cursor,
-                force=force,
             ):
-                continue
+                debounce_seconds = self._conversation_debounce_seconds(
+                    workflow=workflow,
+                    event_type=event_type,
+                )
+                if debounce_seconds > 0:
+                    await asyncio.sleep(debounce_seconds)
+                    conversation_summary, refresh_error = self._reload_conversation_summary(
+                        workflow=workflow,
+                        conversation_id=conversation_id,
+                        fallback=conversation_summary,
+                    )
+                    if refresh_error:
+                        errors.append(f"{conversation_id}: {refresh_error}")
+                        self._emit_observability(
+                            event="intake.conversation.error",
+                            workflow=workflow,
+                            conversation_summary=conversation_summary,
+                            phase="reload_summary",
+                            error=refresh_error,
+                        )
+                        continue
 
-            processed += 1
-            self._emit_observability(
-                event="intake.conversation.start",
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                force=bool(force),
-                cursor_latest_inbound_message_id=str(cursor.get("latest_inbound_message_id", "") or "").strip(),
-                cursor_latest_outbound_message_id=str(cursor.get("latest_outbound_message_id", "") or "").strip(),
-            )
-            try:
-                detailed_summary, conversation, detail_error = self._load_source_conversation(
-                    workflow=workflow,
-                    conversation_id=conversation_id,
-                )
-            except Exception as exc:
-                detailed_summary = {}
-                conversation = {}
-                detail_error = str(exc)
-            if detail_error:
-                error_text = str(detail_error)
-                errors.append(f"{conversation_id}: {error_text}")
-                self._emit_observability(
-                    event="intake.conversation.error",
-                    workflow=workflow,
-                    conversation_summary=conversation_summary,
-                    phase="load_conversation",
-                    error=error_text,
-                )
-                continue
-
-            cursor_summary = detailed_summary or conversation_summary
-            latest_inbound_id = str(cursor_summary.get("latest_inbound_message_id", "") or "").strip()
-            latest_inbound_time = str(
-                cursor_summary.get("latest_inbound_message_created_time", "") or ""
-            ).strip()
-            conversation_updated_time = str(
-                cursor_summary.get("conversation_updated_time", "") or ""
-            ).strip()
-            latest_outbound_id = str(
-                cursor_summary.get("latest_outbound_message_id", "") or ""
-            ).strip()
-            active_booking = self._get_active_booking(
-                customer_id=str(workflow["customer_id"]),
-                workflow_id=str(workflow["workflow_id"]),
-                conversation_id=conversation_id,
-            )
-            recent_completed_booking = self._get_recent_completed_booking(
-                customer_id=str(workflow["customer_id"]),
-                workflow_id=str(workflow["workflow_id"]),
-                conversation_id=conversation_id,
-            )
-            decision, error = await self._decide_workflow_action(
-                workflow=workflow,
-                conversation_summary=cursor_summary,
-                conversation=conversation,
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-            )
-            if error:
-                errors.append(f"{conversation_id}: {error}")
-                self._emit_observability(
-                    event="intake.conversation.error",
-                    workflow=workflow,
-                    conversation_summary=cursor_summary,
-                    phase="decision",
-                    error=error,
-                )
-                continue
-            if not bool(decision.get("matches_workflow")):
-                self._set_cursor(
+                latest_inbound_id = str(
+                    conversation_summary.get("latest_inbound_message_id", "") or ""
+                ).strip()
+                latest_inbound_time = str(
+                    conversation_summary.get("latest_inbound_message_created_time", "") or ""
+                ).strip()
+                conversation_updated_time = str(
+                    conversation_summary.get("conversation_updated_time", "") or ""
+                ).strip()
+                latest_outbound_id = str(
+                    conversation_summary.get("latest_outbound_message_id", "") or ""
+                ).strip()
+                cursor = self._get_cursor(
                     workflow_id=str(workflow["workflow_id"]),
                     conversation_id=conversation_id,
-                    latest_inbound_message_id=latest_inbound_id,
-                    latest_inbound_message_time=latest_inbound_time,
-                    conversation_updated_time=conversation_updated_time,
-                    latest_outbound_message_id=latest_outbound_id,
                 )
-                result_items.append(
-                    {
-                        "conversation_id": conversation_id,
-                        "matched": False,
-                        "status": "ignored",
-                    }
-                )
-                self._emit_observability(
-                    event="intake.conversation.complete",
-                    workflow=workflow,
-                    conversation_summary=cursor_summary,
-                    matched=False,
-                    status="ignored",
-                )
-                continue
-
-            matched += 1
-            recovery_feedback: list[dict[str, Any]] = []
-            applied: dict[str, Any] = {}
-            apply_error: str | None = None
-            for attempt in range(_MAX_DECISION_RECOVERY_ATTEMPTS + 1):
-                applied, apply_error, feedback = await self._apply_decision(
-                    workflow=workflow,
-                    conversation_summary=cursor_summary,
-                    conversation=conversation,
-                    active_booking=active_booking,
-                    recent_completed_booking=recent_completed_booking,
-                    decision=decision,
-                )
-                if apply_error is None:
-                    break
-                if (
-                    attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS
-                    or feedback is None
-                    or str(feedback.get("phase", "")).strip() == "sink_execution"
+                if not self._has_new_inbound_signal(
+                    conversation_summary=conversation_summary,
+                    cursor=cursor,
+                    force=force,
                 ):
-                    break
-                recovery_feedback.append(feedback)
+                    continue
+
+                processed += 1
+                self._emit_observability(
+                    event="intake.conversation.start",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    force=bool(force),
+                    cursor_latest_inbound_message_id=str(
+                        cursor.get("latest_inbound_message_id", "") or ""
+                    ).strip(),
+                    cursor_latest_outbound_message_id=str(
+                        cursor.get("latest_outbound_message_id", "") or ""
+                    ).strip(),
+                )
+                try:
+                    detailed_summary, conversation, detail_error = self._load_source_conversation(
+                        workflow=workflow,
+                        conversation_id=conversation_id,
+                    )
+                except Exception as exc:
+                    detailed_summary = {}
+                    conversation = {}
+                    detail_error = str(exc)
+                if detail_error:
+                    error_text = str(detail_error)
+                    errors.append(f"{conversation_id}: {error_text}")
+                    self._emit_observability(
+                        event="intake.conversation.error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        phase="load_conversation",
+                        error=error_text,
+                    )
+                    continue
+
+                cursor_summary = detailed_summary or conversation_summary
+                latest_inbound_id = str(cursor_summary.get("latest_inbound_message_id", "") or "").strip()
+                latest_inbound_time = str(
+                    cursor_summary.get("latest_inbound_message_created_time", "") or ""
+                ).strip()
+                conversation_updated_time = str(
+                    cursor_summary.get("conversation_updated_time", "") or ""
+                ).strip()
+                latest_outbound_id = str(
+                    cursor_summary.get("latest_outbound_message_id", "") or ""
+                ).strip()
                 active_booking = self._get_active_booking(
                     customer_id=str(workflow["customer_id"]),
                     workflow_id=str(workflow["workflow_id"]),
@@ -1385,46 +1380,120 @@ class IntakeWorkflowService:
                     conversation=conversation,
                     active_booking=active_booking,
                     recent_completed_booking=recent_completed_booking,
-                    execution_feedback=recovery_feedback,
                 )
                 if error:
-                    apply_error = error
-                    break
+                    errors.append(f"{conversation_id}: {error}")
+                    self._emit_observability(
+                        event="intake.conversation.error",
+                        workflow=workflow,
+                        conversation_summary=cursor_summary,
+                        phase="decision",
+                        error=error,
+                    )
+                    continue
                 if not bool(decision.get("matches_workflow")):
-                    apply_error = "recovery decision no longer matches workflow"
-                    break
-            if apply_error:
-                errors.append(f"{conversation_id}: {apply_error}")
+                    self._set_cursor(
+                        workflow_id=str(workflow["workflow_id"]),
+                        conversation_id=conversation_id,
+                        latest_inbound_message_id=latest_inbound_id,
+                        latest_inbound_message_time=latest_inbound_time,
+                        conversation_updated_time=conversation_updated_time,
+                        latest_outbound_message_id=latest_outbound_id,
+                    )
+                    result_items.append(
+                        {
+                            "conversation_id": conversation_id,
+                            "matched": False,
+                            "status": "ignored",
+                        }
+                    )
+                    self._emit_observability(
+                        event="intake.conversation.complete",
+                        workflow=workflow,
+                        conversation_summary=cursor_summary,
+                        matched=False,
+                        status="ignored",
+                    )
+                    continue
+
+                matched += 1
+                recovery_feedback: list[dict[str, Any]] = []
+                applied: dict[str, Any] = {}
+                apply_error: str | None = None
+                for attempt in range(_MAX_DECISION_RECOVERY_ATTEMPTS + 1):
+                    applied, apply_error, feedback = await self._apply_decision(
+                        workflow=workflow,
+                        conversation_summary=cursor_summary,
+                        conversation=conversation,
+                        active_booking=active_booking,
+                        recent_completed_booking=recent_completed_booking,
+                        decision=decision,
+                    )
+                    if apply_error is None:
+                        break
+                    if (
+                        attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS
+                        or feedback is None
+                        or str(feedback.get("phase", "")).strip() == "sink_execution"
+                    ):
+                        break
+                    recovery_feedback.append(feedback)
+                    active_booking = self._get_active_booking(
+                        customer_id=str(workflow["customer_id"]),
+                        workflow_id=str(workflow["workflow_id"]),
+                        conversation_id=conversation_id,
+                    )
+                    recent_completed_booking = self._get_recent_completed_booking(
+                        customer_id=str(workflow["customer_id"]),
+                        workflow_id=str(workflow["workflow_id"]),
+                        conversation_id=conversation_id,
+                    )
+                    decision, error = await self._decide_workflow_action(
+                        workflow=workflow,
+                        conversation_summary=cursor_summary,
+                        conversation=conversation,
+                        active_booking=active_booking,
+                        recent_completed_booking=recent_completed_booking,
+                        execution_feedback=recovery_feedback,
+                    )
+                    if error:
+                        apply_error = error
+                        break
+                    if not bool(decision.get("matches_workflow")):
+                        apply_error = "recovery decision no longer matches workflow"
+                        break
+                if apply_error:
+                    errors.append(f"{conversation_id}: {apply_error}")
+                    self._emit_observability(
+                        event="intake.conversation.error",
+                        workflow=workflow,
+                        conversation_summary=cursor_summary,
+                        phase="apply",
+                        error=apply_error,
+                    )
+                    continue
+                self._set_cursor(
+                    workflow_id=str(workflow["workflow_id"]),
+                    conversation_id=conversation_id,
+                    latest_inbound_message_id=latest_inbound_id,
+                    latest_inbound_message_time=latest_inbound_time,
+                    conversation_updated_time=conversation_updated_time,
+                    latest_outbound_message_id=latest_outbound_id,
+                    agent_action_at=_utc_now_iso(),
+                )
+                result_items.append(applied)
+                saved_summary = str(applied.get("saved_summary", "") or "").strip()
+                if saved_summary:
+                    saved_notifications.append(saved_summary)
                 self._emit_observability(
-                    event="intake.conversation.error",
+                    event="intake.conversation.complete",
                     workflow=workflow,
                     conversation_summary=cursor_summary,
-                    phase="apply",
-                    error=apply_error,
+                    matched=True,
+                    status=str(applied.get("status", "") or "").strip(),
+                    booking_id=str(applied.get("booking_id", "") or "").strip(),
+                    saved_summary=saved_summary,
                 )
-                continue
-            self._set_cursor(
-                workflow_id=str(workflow["workflow_id"]),
-                conversation_id=conversation_id,
-                latest_inbound_message_id=latest_inbound_id,
-                latest_inbound_message_time=latest_inbound_time,
-                conversation_updated_time=conversation_updated_time,
-                latest_outbound_message_id=latest_outbound_id,
-                agent_action_at=_utc_now_iso(),
-            )
-            result_items.append(applied)
-            saved_summary = str(applied.get("saved_summary", "") or "").strip()
-            if saved_summary:
-                saved_notifications.append(saved_summary)
-            self._emit_observability(
-                event="intake.conversation.complete",
-                workflow=workflow,
-                conversation_summary=cursor_summary,
-                matched=True,
-                status=str(applied.get("status", "") or "").strip(),
-                booking_id=str(applied.get("booking_id", "") or "").strip(),
-                saved_summary=saved_summary,
-            )
 
         if errors:
             summary = (
