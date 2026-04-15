@@ -83,14 +83,17 @@ Add your key to `.env`:
 OPENAI_COMPATIBLE_API_KEY=...
 ```
 
-Recommended model stack:
+Runtime defaults (models, token limits, etc.) now live in `opentulpa.config.yaml`.
+You can edit that file directly and optionally override any field via `.env`.
+
+Recommended model stack in `opentulpa.config.yaml`:
 
 ```bash
-LLM_MODEL=z-ai/glm-5.1:nitro
-WAKE_EXECUTION_MODEL=z-ai/glm-5.1:nitro
-MEMORY_LLM_MODEL=google/gemini-3-flash-preview
-MULTIMODAL_LLM=google/gemini-3-flash-preview
-GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview
+llm_model: z-ai/glm-5.1
+wake_execution_model: z-ai/glm-5.1
+memory_llm_model: google/gemini-3-flash-preview
+multimodal_llm: google/gemini-3-flash-preview
+guardrail_classifier_model: google/gemini-3-flash-preview
 ```
 
 This is the current recommended production split in this repo:

@@ -1,10 +1,17 @@
-"""Configuration from environment."""
+"""Configuration from environment + repository YAML defaults."""
 
 import os
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
 PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
 LEGACY_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -12,6 +19,7 @@ PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV = "OPENAI_COMPATIBLE_BASE_URL"
 LEGACY_OPENROUTER_BASE_URL_ENV = "OPENROUTER_BASE_URL"
 PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV = "OPENAI_COMPATIBLE_EMBEDDING_MODEL"
 LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV = "OPENROUTER_EMBEDDING_MODEL"
+DEFAULT_CONFIG_FILENAME = "opentulpa.config.yaml"
 
 
 def get_openai_compatible_api_key_from_env() -> str | None:
@@ -32,6 +40,24 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Load defaults from YAML, but allow env/.env overrides."""
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            _YamlRuntimeDefaultsSource(settings_cls),
+            file_secret_settings,
+        )
 
     # Host
     host: str = Field(default="0.0.0.0", description="Bind host")
@@ -140,6 +166,8 @@ class Settings(BaseSettings):
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
         validation_alias=AliasChoices(
+            "openai_compatible_base_url",
+            "openrouter_base_url",
             PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV,
             LEGACY_OPENROUTER_BASE_URL_ENV,
         ),
@@ -225,6 +253,8 @@ class Settings(BaseSettings):
     openrouter_embedding_model: str = Field(
         default="openai/text-embedding-3-small",
         validation_alias=AliasChoices(
+            "openai_compatible_embedding_model",
+            "openrouter_embedding_model",
             PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV,
             LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV,
         ),
@@ -264,7 +294,10 @@ class Settings(BaseSettings):
     )
     composio_default_callback_url: str | None = Field(
         default=None,
-        description="Optional default callback URL used when starting Composio auth flows.",
+        description=(
+            "Optional override callback URL used when starting Composio auth flows. "
+            "If unset, OpenTulpa derives it automatically from the public base URL."
+        ),
     )
     posthog_api_key: str | None = Field(
         default=None,
@@ -310,6 +343,58 @@ class Settings(BaseSettings):
         """Backward-compatible alias for older callers."""
         return self.openai_compatible_api_key
 
+    @property
+    def openai_compatible_base_url(self) -> str:
+        """Preferred neutral provider naming for base URL."""
+        return self.openrouter_base_url
+
+    @property
+    def openai_compatible_embedding_model(self) -> str:
+        """Preferred neutral provider naming for embedding model."""
+        return self.openrouter_embedding_model
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+class _YamlRuntimeDefaultsSource(PydanticBaseSettingsSource):
+    """Optional repository-level YAML defaults source."""
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        self._delegate = self._build_delegate(settings_cls)
+
+    def _candidate_paths(self) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+
+        def _add_path(path: Path) -> None:
+            resolved = path.resolve()
+            if resolved in seen:
+                return
+            seen.add(resolved)
+            candidates.append(path)
+
+        for base in [Path.cwd(), Path(__file__).resolve().parents[3]]:
+            _add_path(base / DEFAULT_CONFIG_FILENAME)
+            for parent in base.parents:
+                _add_path(parent / DEFAULT_CONFIG_FILENAME)
+
+        return candidates
+
+    def _build_delegate(self, settings_cls: type[BaseSettings]) -> PydanticBaseSettingsSource | None:
+        for candidate in self._candidate_paths():
+            if candidate.exists():
+                return YamlConfigSettingsSource(settings_cls, yaml_file=candidate)
+        return None
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        if self._delegate is None:
+            return None, field_name, False
+        return self._delegate.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        if self._delegate is None:
+            return {}
+        return self._delegate()

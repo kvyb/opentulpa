@@ -40,11 +40,11 @@ async def _wake_callback(payload: dict) -> None:
         pass
 
 
-def _mem0_config_openrouter(
+def _mem0_config_openai_compatible(
     llm_model: str,
     embedding_model: str,
-    openrouter_api_key: str | None,
-    openrouter_base_url: str,
+    openai_compatible_api_key: str | None,
+    openai_compatible_base_url: str,
     qdrant_path: str,
     qdrant_on_disk: bool,
 ) -> dict:
@@ -53,16 +53,16 @@ def _mem0_config_openrouter(
             "provider": "openai",
             "config": {
                 "model": llm_model,
-                "api_key": openrouter_api_key,
-                "openai_base_url": openrouter_base_url,
+                "api_key": openai_compatible_api_key,
+                "openai_base_url": openai_compatible_base_url,
             },
         },
         "embedder": {
             "provider": "openai",
             "config": {
                 "model": embedding_model,
-                "openai_base_url": openrouter_base_url,
-                "api_key": openrouter_api_key,
+                "openai_base_url": openai_compatible_base_url,
+                "api_key": openai_compatible_api_key,
             },
         },
         "vector_store": {
@@ -220,7 +220,7 @@ def main() -> None:
     settings = get_settings()
     project_root = Path(__file__).resolve().parents[2]
     _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
-    openrouter_api_key = (
+    openai_compatible_api_key = (
         settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env()
     )
     qdrant_path = Path(settings.mem0_qdrant_path)
@@ -229,11 +229,11 @@ def main() -> None:
 
     memory = MemoryService(
         user_id=settings.mem0_user_id,
-        config=_mem0_config_openrouter(
+        config=_mem0_config_openai_compatible(
             settings.memory_llm_model,
-            settings.openrouter_embedding_model,
-            openrouter_api_key,
-            settings.openrouter_base_url,
+            settings.openai_compatible_embedding_model,
+            openai_compatible_api_key,
+            settings.openai_compatible_base_url,
             str(qdrant_path),
             settings.mem0_qdrant_on_disk,
         ),
@@ -269,11 +269,11 @@ def main() -> None:
         wake_callback=_wake_callback,
     )
     agent_runtime: OpenTulpaLangGraphRuntime | None = None
-    if openrouter_api_key:
+    if openai_compatible_api_key:
         agent_runtime = OpenTulpaLangGraphRuntime(
             app_url=f"http://127.0.0.1:{settings.port}",
-            openrouter_api_key=openrouter_api_key,
-            openrouter_base_url=settings.openrouter_base_url,
+            openrouter_api_key=openai_compatible_api_key,
+            openrouter_base_url=settings.openai_compatible_base_url,
             model_name=settings.llm_model,
             reasoning_effort=settings.llm_reasoning_effort,
             wake_classifier_model_name=settings.wake_classifier_model,
