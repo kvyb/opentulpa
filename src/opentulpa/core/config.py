@@ -20,7 +20,6 @@ LEGACY_OPENROUTER_BASE_URL_ENV = "OPENROUTER_BASE_URL"
 PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV = "OPENAI_COMPATIBLE_EMBEDDING_MODEL"
 LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV = "OPENROUTER_EMBEDDING_MODEL"
 DEFAULT_CONFIG_FILENAME = "opentulpa.config.yaml"
-PACKAGE_CONFIG_PATH = Path(__file__).resolve().parents[1] / DEFAULT_CONFIG_FILENAME
 
 
 def get_openai_compatible_api_key_from_env() -> str | None:
@@ -381,7 +380,6 @@ class _YamlRuntimeDefaultsSource(PydanticBaseSettingsSource):
             _add_path(base / DEFAULT_CONFIG_FILENAME)
             for parent in base.parents:
                 _add_path(parent / DEFAULT_CONFIG_FILENAME)
-        _add_path(PACKAGE_CONFIG_PATH)
 
         return candidates
 

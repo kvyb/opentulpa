@@ -101,22 +101,3 @@ def test_settings_discovers_yaml_by_walking_parent_directories(
     settings = Settings()
 
     assert settings.llm_model == "from-parent"
-
-
-def test_settings_falls_back_to_packaged_yaml_defaults(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    settings = Settings(_env_file=None)
-
-    assert settings.agent_recursion_limit == 50
-    assert settings.agent_context_token_limit == 12000
-    assert settings.agent_context_recent_tokens == 3500
-    assert settings.agent_context_rollup_tokens == 2200
-
-
-def test_repo_and_packaged_yaml_defaults_stay_in_sync() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    repo_config = repo_root / "opentulpa.config.yaml"
-    packaged_config = repo_root / "src" / "opentulpa" / "opentulpa.config.yaml"
-
-    assert packaged_config.read_text(encoding="utf-8") == repo_config.read_text(encoding="utf-8")
