@@ -16,6 +16,7 @@ from opentulpa.scheduler.service import SchedulerService
 
 LIVE_FLAG = "OPENTULPA_ENABLE_LIVE_BROWSER_USE_E2E"
 TEST_CUSTOMER_ID = "cust_live_browser_use_google"
+pytestmark = [pytest.mark.e2e]
 
 if str(os.getenv(LIVE_FLAG, "")).strip().lower() not in {"1", "true", "yes"}:
     pytest.skip(

@@ -24,6 +24,7 @@ from opentulpa.scheduler.service import SchedulerService
 LIVE_E2E_FLAG = "OPENTULPA_ENABLE_LIVE_LLM_E2E"
 TEST_CUSTOMER_ID = "cust_live_llm_guardrail"
 E2E_LOG_DIR = Path(".opentulpa/logs/e2e").resolve()
+pytestmark = [pytest.mark.e2e, pytest.mark.live_llm]
 
 
 def _env_float(name: str, default: float) -> float:

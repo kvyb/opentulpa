@@ -23,6 +23,7 @@ from opentulpa.scheduler.service import SchedulerService
 
 TEST_CUSTOMER_ID = "cust_e2e_guardrail"
 E2E_LOG_DIR = Path(".opentulpa/logs/e2e").resolve()
+pytestmark = [pytest.mark.e2e]
 
 
 class _JsonlRecorder:
