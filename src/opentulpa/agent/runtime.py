@@ -124,6 +124,8 @@ _MEMORY_GROUNDING_KIND_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _LLM_CALL_TRACE_LIMIT = 100
+_DEFAULT_OPENROUTER_APP_REFERER = "https://github.com/kvyb/opentulpa"
+_DEFAULT_OPENROUTER_APP_TITLE = "OpenTulpa"
 
 
 def _redact_inline_trace_string(value: str) -> str:
@@ -287,6 +289,22 @@ def _json_safe(value: Any) -> Any:
         with suppress(Exception):
             return _json_safe(model_dump())
     return _redact_inline_trace_string(str(value))
+
+
+def _openrouter_app_headers(
+    *,
+    base_url: str | None,
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    if not _looks_like_openrouter_base_url(base_url):
+        return {}
+    source = env if env is not None else os.environ
+    title = str(source.get("OPENROUTER_APP_TITLE", "")).strip() or _DEFAULT_OPENROUTER_APP_TITLE
+    headers: dict[str, str] = {}
+    headers["HTTP-Referer"] = _DEFAULT_OPENROUTER_APP_REFERER
+    if title:
+        headers["X-OpenRouter-Title"] = title
+    return headers
 
 
 def _message_role(message: Any) -> str:
@@ -1074,6 +1092,9 @@ class OpenTulpaLangGraphRuntime:
             "temperature": 0,
             "max_completion_tokens": self._max_completion_tokens,
         }
+        default_headers = _openrouter_app_headers(base_url=self.openrouter_base_url)
+        if default_headers:
+            model_init_kwargs["default_headers"] = default_headers
         if self._reasoning_effort:
             model_init_kwargs["reasoning_effort"] = self._reasoning_effort
 
