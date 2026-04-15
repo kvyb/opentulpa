@@ -225,7 +225,7 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ainvoke_model_routes_glm51_with_fireworks_then_siliconflow_order() -> None:
+async def test_ainvoke_model_routes_glm51_with_extended_provider_order() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -245,7 +245,10 @@ async def test_ainvoke_model_routes_glm51_with_fireworks_then_siliconflow_order(
     assert isinstance(response, _CaptureResponse)
     assert len(model.calls) == 1
     provider = model.calls[0]["kwargs"]["extra_body"]["provider"]
-    assert provider == {"order": ["fireworks", "siliconflow"], "allow_fallbacks": False}
+    assert provider == {
+        "order": ["fireworks", "siliconflow", "friendli", "inceptron", "atlas-cloud"],
+        "allow_fallbacks": False,
+    }
 
 
 def test_model_request_attempts_skip_glm51_provider_routing_off_openrouter() -> None:
@@ -277,18 +280,30 @@ def test_model_request_attempts_route_glm51_nitro_variants_on_openrouter() -> No
 
     assert attempts == [
         {
-            "name": "fireworks_then_siliconflow",
+            "name": "glm51_ordered_providers",
             "invoke_extras": {
                 "extra_body": {
                     "provider": {
-                        "order": ["fireworks", "siliconflow"],
+                        "order": [
+                            "fireworks",
+                            "siliconflow",
+                            "friendli",
+                            "inceptron",
+                            "atlas-cloud",
+                        ],
                         "allow_fallbacks": False,
                     }
                 }
             },
             "call_context": {
-                "provider_route": "fireworks_then_siliconflow",
-                "provider_order": ["fireworks", "siliconflow"],
+                "provider_route": "glm51_ordered_providers",
+                "provider_order": [
+                    "fireworks",
+                    "siliconflow",
+                    "friendli",
+                    "inceptron",
+                    "atlas-cloud",
+                ],
                 "provider_allow_fallbacks": False,
             },
         }

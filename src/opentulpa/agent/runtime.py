@@ -255,6 +255,15 @@ def _is_glm_51_model_name(model_name: str | None) -> bool:
     return normalized.startswith("z-ai/glm-5.1")
 
 
+_GLM_51_OPENROUTER_PROVIDER_ORDER = [
+    "fireworks",
+    "siliconflow",
+    "friendli",
+    "inceptron",
+    "atlas-cloud",
+]
+
+
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (int, float, bool)):
         return value
@@ -1184,18 +1193,18 @@ class OpenTulpaLangGraphRuntime:
             return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
         return [
             {
-                "name": "fireworks_then_siliconflow",
+                "name": "glm51_ordered_providers",
                 "invoke_extras": {
                     "extra_body": {
                         "provider": {
-                            "order": ["fireworks", "siliconflow"],
+                            "order": list(_GLM_51_OPENROUTER_PROVIDER_ORDER),
                             "allow_fallbacks": False,
                         }
                     }
                 },
                 "call_context": {
-                    "provider_route": "fireworks_then_siliconflow",
-                    "provider_order": ["fireworks", "siliconflow"],
+                    "provider_route": "glm51_ordered_providers",
+                    "provider_order": list(_GLM_51_OPENROUTER_PROVIDER_ORDER),
                     "provider_allow_fallbacks": False,
                 },
             },

@@ -142,7 +142,7 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_structured_model_routes_glm51_with_fireworks_then_siliconflow_order() -> None:
+async def test_invoke_structured_model_routes_glm51_with_extended_provider_order() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime.model_name = "z-ai/glm-5.1"
@@ -163,7 +163,10 @@ async def test_invoke_structured_model_routes_glm51_with_fireworks_then_siliconf
     assert error is None
     assert len(model.runners) == 1
     provider = model.runners[0].calls[0]["kwargs"]["extra_body"]["provider"]
-    assert provider == {"order": ["fireworks", "siliconflow"], "allow_fallbacks": False}
+    assert provider == {
+        "order": ["fireworks", "siliconflow", "friendli", "inceptron", "atlas-cloud"],
+        "allow_fallbacks": False,
+    }
 
 
 @pytest.mark.asyncio
