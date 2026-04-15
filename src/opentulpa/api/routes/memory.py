@@ -37,8 +37,14 @@ def register_memory_routes(
     async def internal_memory_search(request: Request) -> Any:
         mem = get_memory()
         body = await request.json()
-        query = body.get("query", "")
+        query = str(body.get("query", "") or "")
         user_id = body.get("user_id") or mem.user_id
-        limit = body.get("limit", 5)
-        results = mem.search(query, user_id=user_id, limit=limit)
+        try:
+            limit = int(body.get("limit", 5))
+        except (TypeError, ValueError):
+            limit = 5
+        limit = max(1, min(limit, 25))
+        metadata = body.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else None
+        results = mem.search(query, user_id=user_id, limit=limit, metadata=metadata)
         return {"results": results}
