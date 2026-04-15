@@ -25,6 +25,7 @@ from opentulpa.api.routes import (
     register_skill_routes,
     register_system_routes,
     register_task_routes,
+    register_telegram_business_routes,
     register_telegram_webhook_routes,
     register_tulpa_routes,
     register_wake_and_search_routes,
@@ -44,6 +45,7 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.core.config import get_settings
 from opentulpa.intake import IntakeWorkflowService
+from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.memory.service import MemoryService
@@ -201,6 +203,14 @@ def create_app(
     def get_telegram_client() -> TelegramClient:
         return _require(telegram_client, "TelegramClient")
 
+    telegram_business = TelegramBusinessService(
+        db_path=PROJECT_ROOT / ".opentulpa" / "telegram_business.db",
+    )
+    telegram_business.client = telegram_client
+
+    def get_telegram_business() -> TelegramBusinessService:
+        return telegram_business
+
     def get_agent_runtime() -> Any:
         return runtime
 
@@ -210,6 +220,8 @@ def create_app(
         scheduler=scheduler_service,
         skill_store=skill_service,
         composio=composio,
+        telegram_business=telegram_business,
+        file_vault=vault_service,
         get_agent_runtime=get_agent_runtime if runtime is not None else (lambda: None),
     )
 
@@ -330,6 +342,7 @@ def create_app(
     app.state.turn_orchestrator = turn_orchestrator
     app.state.composio = composio
     app.state.intake_workflows = intake_service
+    app.state.telegram_business = telegram_business
 
     @app.middleware("http")
     async def enforce_public_route_boundary(
@@ -392,6 +405,10 @@ def create_app(
         app,
         get_intake_workflows=get_intake_workflows,
     )
+    register_telegram_business_routes(
+        app,
+        get_telegram_business=get_telegram_business,
+    )
     register_system_routes(app)
     register_composio_routes(app, get_composio=get_composio)
 
@@ -422,6 +439,8 @@ def create_app(
         app,
         settings=settings,
         get_telegram_client=get_telegram_client,
+        get_telegram_business=get_telegram_business,
+        get_intake_workflows=get_intake_workflows,
         get_telegram_chat=get_telegram_chat,
         get_approvals=get_approvals,
         get_agent_runtime=get_agent_runtime,

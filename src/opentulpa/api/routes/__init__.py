@@ -19,6 +19,7 @@ _ROUTE_IMPORTS = {
     "register_skill_routes": "opentulpa.api.routes.skills",
     "register_system_routes": "opentulpa.api.routes.system",
     "register_task_routes": "opentulpa.api.routes.tasks",
+    "register_telegram_business_routes": "opentulpa.api.routes.telegram_business",
     "register_telegram_webhook_routes": "opentulpa.api.routes.telegram_webhook",
     "register_tulpa_routes": "opentulpa.api.routes.tulpa",
     "register_wake_and_search_routes": "opentulpa.api.routes.wake_search",

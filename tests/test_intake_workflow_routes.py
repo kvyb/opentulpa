@@ -47,6 +47,8 @@ def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
                 "name": "Car Wash Intake",
                 "intent_description": "Handle booking requests that arrive in Instagram DMs.",
                 "required_fields": ["day", "time", "car_type", "wash_type"],
+                "assistant_instructions": "Be concise and helpful.",
+                "knowledge_file_ids": ["file_1"],
                 "sink_type": "local_csv",
                 "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
             },
@@ -68,6 +70,8 @@ def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
         )
         assert fetched.status_code == 200
         assert fetched.json()["workflow"]["name"] == "Car Wash Intake"
+        assert fetched.json()["workflow"]["assistant_instructions"] == "Be concise and helpful."
+        assert fetched.json()["workflow"]["knowledge_file_ids"] == ["file_1"]
 
         deleted = client.post(
             "/internal/intake/workflows/delete",
@@ -75,3 +79,55 @@ def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
+
+
+def test_telegram_business_workflow_route_upsert_reuses_existing_workflow(tmp_path: Path) -> None:
+    with _mk_client(tmp_path) as client:
+        first = client.post(
+            "/internal/intake/workflows/upsert",
+            json={
+                "customer_id": "telegram_123",
+                "name": "Salon Telegram Intake",
+                "channel": "telegram_business_dm",
+                "provider": "telegram_bot_api",
+                "source_config": {"business_connection_id": "bc_123"},
+                "intent_description": "Handle Telegram Business booking requests.",
+                "required_fields": ["name", "time"],
+                "sink_type": "local_csv",
+                "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            },
+        )
+        assert first.status_code == 200
+        first_workflow = first.json()["workflow"]
+
+        second = client.post(
+            "/internal/intake/workflows/upsert",
+            json={
+                "customer_id": "telegram_123",
+                "name": "Salon Telegram Intake Updated",
+                "channel": "telegram_business_dm",
+                "provider": "telegram_bot_api",
+                "source_config": {"business_connection_id": "bc_123"},
+                "intent_description": "Handle Telegram Business booking and reschedule requests.",
+                "required_fields": ["name", "time", "service"],
+                "assistant_instructions": "Be concise and confirm the service.",
+                "sink_type": "local_csv",
+                "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            },
+        )
+        assert second.status_code == 200
+        second_workflow = second.json()["workflow"]
+        assert second_workflow["workflow_id"] == first_workflow["workflow_id"]
+        assert second_workflow["name"] == "Salon Telegram Intake Updated"
+
+        listed = client.post(
+            "/internal/intake/workflows/list",
+            json={"customer_id": "telegram_123", "include_disabled": True},
+        )
+        assert listed.status_code == 200
+        telegram_workflows = [
+            item
+            for item in listed.json()["workflows"]
+            if item["channel"] == "telegram_business_dm"
+        ]
+        assert len(telegram_workflows) == 1

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from opentulpa.context.file_vault import FileVaultService
 from opentulpa.intake.service import IntakeWorkflowService
+from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -297,16 +300,49 @@ class _FailingSinkComposio(_FakeComposio):
         return {"successful": True, "data": {"ok": True, "tool_slug": tool_slug}}
 
 
+class _FakeTelegramClient:
+    def __init__(self) -> None:
+        self.sent_messages: list[dict[str, Any]] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int | str,
+        text: str,
+        parse_mode: str | None = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+        business_connection_id: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        self.sent_messages.append(
+            {
+                "chat_id": str(chat_id),
+                "text": text,
+                "parse_mode": parse_mode,
+                "reply_markup": dict(reply_markup or {}) if isinstance(reply_markup, dict) else None,
+                "business_connection_id": business_connection_id,
+                "reply_to_message_id": reply_to_message_id,
+            }
+        )
+        return True
+
+
 def _mk_service(
     tmp_path: Path,
     *,
     runtime: _FakeRuntime,
     composio: _FakeComposio,
-) -> tuple[IntakeWorkflowService, SchedulerService, SkillStoreService]:
+) -> tuple[IntakeWorkflowService, SchedulerService, SkillStoreService, TelegramBusinessService, FileVaultService]:
     scheduler = SchedulerService(db_path=tmp_path / "scheduler.db")
     skills = SkillStoreService(
         db_path=tmp_path / "skills.db",
         root_dir=tmp_path / "skills",
+    )
+    telegram_business = TelegramBusinessService(db_path=tmp_path / "telegram_business.db")
+    telegram_business.client = _FakeTelegramClient()
+    file_vault = FileVaultService(
+        root_dir=tmp_path / "file_vault",
+        db_path=tmp_path / "file_vault.db",
     )
     service = IntakeWorkflowService(
         db_path=tmp_path / "intake.db",
@@ -314,9 +350,11 @@ def _mk_service(
         scheduler=scheduler,
         skill_store=skills,
         composio=composio,
+        telegram_business=telegram_business,
+        file_vault=file_vault,
         get_agent_runtime=lambda: runtime,
     )
-    return service, scheduler, skills
+    return service, scheduler, skills, telegram_business, file_vault
 
 
 @pytest.mark.asyncio
@@ -333,7 +371,7 @@ async def test_intake_workflow_upsert_creates_routine_and_skill(tmp_path: Path) 
         latest_message_text="Need a car wash tomorrow 3pm, SUV, interior and exterior.",
         latest_message_time="2026-04-07T08:00:00+00:00",
     )
-    service, scheduler, skills = _mk_service(
+    service, scheduler, skills, _, _ = _mk_service(
         tmp_path,
         runtime=_FakeRuntime([]),
         composio=_FakeComposio(summary, conversation),
@@ -363,6 +401,120 @@ async def test_intake_workflow_upsert_creates_routine_and_skill(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Need a car wash tomorrow 3pm, SUV, interior and exterior.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    service, _, skills, _, file_vault = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio(summary, conversation),
+    )
+    record = file_vault.ingest_file(
+        customer_id="telegram_123",
+        chat_id=123,
+        kind="document",
+        telegram_file_id="tg_1",
+        original_filename="faq.txt",
+        mime_type="text/plain",
+        caption=None,
+        raw_bytes=b"Appointments are 45 minutes and require a $20 deposit.",
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Telegram Intake",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["name", "time"],
+        field_guidance={"time": "Always confirm the final appointment time explicitly."},
+        assistant_instructions="Be concise and never promise unavailable slots.",
+        knowledge_file_ids=[str(record["id"])],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    assert workflow["channel"] == "telegram_business_dm"
+    assert workflow["provider"] == "telegram_bot_api"
+    assert workflow["assistant_instructions"] == "Be concise and never promise unavailable slots."
+    assert workflow["knowledge_file_ids"] == [str(record["id"])]
+    skill = skills.get_skill(
+        customer_id="telegram_123",
+        name=f"intake-workflow-{workflow['workflow_id']}",
+        include_files=True,
+        include_global=False,
+    )
+    assert skill is not None
+    assert "Telegram Business DMs" in skill["skill_markdown"]
+    assert "## Workflow Goal" in skill["skill_markdown"]
+    assert "## Operating Context" in skill["skill_markdown"]
+    assert "## Save Behavior" in skill["skill_markdown"]
+    assert "single durable intake policy" in skill["skill_markdown"]
+    assert "Always confirm the final appointment time explicitly." in skill["skill_markdown"]
+    workflow_file = json.loads(skill["supporting_files"]["workflow.json"])
+    assert workflow_file["source_config"] == {"business_connection_id": "bc_123"}
+    assert workflow_file["field_guidance"] == {
+        "time": "Always confirm the final appointment time explicitly."
+    }
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_workflow_upsert_reuses_existing_workflow_for_customer(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio({}, {}),
+    )
+
+    first = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Telegram Intake",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Be concise.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+    second = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Telegram Intake Updated",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment and reschedule requests.",
+        required_fields=["name", "time", "service"],
+        assistant_instructions="Be concise and collect service details.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    assert second["workflow_id"] == first["workflow_id"]
+    assert second["name"] == "Salon Telegram Intake Updated"
+    assert second["required_fields"] == ["name", "time", "service"]
+    workflows = service.list_workflows(customer_id="telegram_123", include_disabled=True)
+    telegram_workflows = [
+        item for item in workflows if item["channel"] == "telegram_business_dm"
+    ]
+    assert len(telegram_workflows) == 1
+
+
+@pytest.mark.asyncio
 async def test_intake_workflow_upsert_normalizes_none_workflow_id_to_short_generated_id(
     tmp_path: Path,
 ) -> None:
@@ -378,7 +530,7 @@ async def test_intake_workflow_upsert_normalizes_none_workflow_id_to_short_gener
         latest_message_text="Need a car wash tomorrow 3pm, SUV, interior and exterior.",
         latest_message_time="2026-04-07T08:00:00+00:00",
     )
-    service, scheduler, _ = _mk_service(
+    service, scheduler, _, _, _ = _mk_service(
         tmp_path,
         runtime=_FakeRuntime([]),
         composio=_FakeComposio(summary, conversation),
@@ -447,7 +599,7 @@ async def test_intake_workflow_run_saves_local_csv_and_skips_reprocessing_same_m
         ]
     )
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -486,6 +638,108 @@ async def test_intake_workflow_run_saves_local_csv_and_skips_reprocessing_same_m
 
 
 @pytest.mark.asyncio
+async def test_telegram_business_workflow_uses_bound_files_and_replies_via_business_connection(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants an appointment.",
+                "extracted_fields": {"name": "Alice", "time": "3pm"},
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Booked for 3pm. Please bring your reference number.",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {"name": "Alice", "time": "3pm"},
+                "reason": "All booking fields are present.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, file_vault = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Hi, can I book 3pm today?",
+        },
+    )
+    knowledge = file_vault.ingest_file(
+        customer_id="telegram_123",
+        chat_id=123,
+        kind="document",
+        telegram_file_id="tg_knowledge",
+        original_filename="policy.txt",
+        mime_type="text/plain",
+        caption=None,
+        raw_bytes=b"Reference numbers are required for all appointments.",
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Be concise and confirm only explicit booking times.",
+        knowledge_file_ids=[str(knowledge["id"])],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert runtime.calls[0]["workflow"]["assistant_instructions"] == "Be concise and confirm only explicit booking times."
+    assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == [str(knowledge["id"])]
+    assert runtime.calls[0]["workflow"]["knowledge_files"][0]["id"] == str(knowledge["id"])
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["chat_id"] == "555"
+    assert sent["business_connection_id"] == "bc_123"
+    assert sent["reply_to_message_id"] == 10
+
+
+@pytest.mark.asyncio
 async def test_intake_workflow_run_skips_quiet_inbox_without_model_call(tmp_path: Path) -> None:
     summary = {
         "conversation_id": "conv_1",
@@ -507,7 +761,7 @@ async def test_intake_workflow_run_skips_quiet_inbox_without_model_call(tmp_path
     )
     runtime = _FakeRuntime([])
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -557,7 +811,7 @@ async def test_intake_workflow_run_skips_outbound_only_update_without_model_call
     )
     runtime = _FakeRuntime([])
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -633,7 +887,7 @@ async def test_intake_workflow_run_recovers_when_model_requests_update_active_wi
         ]
     )
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -694,7 +948,7 @@ async def test_intake_workflow_reply_uses_instagram_text_argument(tmp_path: Path
         ]
     )
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -763,7 +1017,7 @@ async def test_intake_workflow_emits_observability_for_successful_save_and_reply
         ]
     )
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -853,7 +1107,7 @@ async def test_intake_workflow_retries_with_execution_feedback_after_reply_failu
         ]
     )
     composio = _FailingReplyOnceComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -935,7 +1189,7 @@ async def test_intake_workflow_emits_observability_for_reply_failure(
         ]
     )
     composio = _AlwaysFailingReplyComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -1013,7 +1267,7 @@ async def test_intake_workflow_failed_apply_does_not_advance_cursor_and_retries_
         ]
     )
     composio = _AlwaysFailingReplyComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -1129,7 +1383,7 @@ async def test_intake_workflow_repeat_request_lifecycle_and_composio_sink(tmp_pa
         ]
     )
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -1252,7 +1506,7 @@ async def test_google_sheets_sink_normalizes_prefixed_slug_and_builds_headers_ro
         ]
     )
     composio = _FakeComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",
@@ -1362,7 +1616,7 @@ async def test_sink_failure_does_not_send_customer_confirmation_or_retry_reply(
         ]
     )
     composio = _FailingSinkComposio(summary, conversation)
-    service, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
         name="Car Wash Intake",

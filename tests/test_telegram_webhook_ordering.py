@@ -48,6 +48,18 @@ class _FakeTelegramChat:
         return None
 
 
+class _FakeTelegramBusiness:
+    def ingest_update(self, body: dict[str, object]) -> dict[str, object]:
+        _ = body
+        return {"handled": False}
+
+
+class _FakeIntakeWorkflows:
+    def list_workflows(self, **kwargs):  # type: ignore[no-untyped-def]
+        _ = kwargs
+        return []
+
+
 def test_webhook_flushes_approval_challenges_before_optional_follow_up_message() -> None:
     app = FastAPI()
     call_order: list[str] = []
@@ -65,6 +77,8 @@ def test_webhook_flushes_approval_challenges_before_optional_follow_up_message()
         app,
         settings=settings,
         get_telegram_client=lambda: client,
+        get_telegram_business=lambda: _FakeTelegramBusiness(),
+        get_intake_workflows=lambda: _FakeIntakeWorkflows(),
         get_telegram_chat=lambda: chat,
         get_approvals=lambda: approvals,
         get_agent_runtime=lambda: object(),
