@@ -35,7 +35,7 @@ The longer it runs, the more it knows, the less you have to explain, and the mor
 
 🔁 **Learns on the job** — repeated workflows get saved as reusable skills and scheduled routines. Your employee builds its own playbook.
 
-🔌 **Connects to your stack** — Telegram, email, calendars, CRMs, GitHub, Slack, Notion, and hundreds more through Composio. It works where you work.
+🔌 **Connects to your stack** — Telegram, Telegram Business inboxes, email, calendars, CRMs, GitHub, Slack, Notion, Instagram through Composio, and hundreds more. It works where you work.
 
 📅 **Works while you sleep** — cron-based routines and one-off scheduled tasks run in the background. Morning briefs, nightly reports, continuous monitoring.
 
@@ -58,6 +58,10 @@ Here's what your digital employee does:
 5. **Runs it again tomorrow** — better, because it remembers your feedback and preferences
 
 You don't re-explain. You don't re-prompt. You just get the brief.
+
+> *"Handle inbound Telegram Business leads, ask follow-up questions, use my uploaded FAQ and policy files when needed, and write booked appointments to my sheet."*
+
+OpenTulpa can now persist that as a durable intake workflow. The agent keeps the business brief, reloads the lead's conversation history on every new inbound message, and continues the same lead conversation until it has enough information to save the booking.
 
 ---
 
@@ -123,6 +127,24 @@ Telegram is the primary interface — think of it as your employee's desk where 
 ```
 
 `start.sh` handles Python deps, Playwright Chromium, and `cloudflared` tunnel setup automatically.
+
+### Telegram Business Intake
+
+OpenTulpa can also handle inbound Telegram Business leads on behalf of a connected business account.
+
+What this gives you:
+- configure the intake behavior through ordinary OpenTulpa conversation
+- persist a durable workflow + synced skill for that business inbox
+- handle multi-turn lead conversations before saving bookings
+- reply on behalf of the business owner through Telegram Business
+
+What you still set up manually in Telegram:
+1. create the bot in `@BotFather`
+2. enable Business Mode for that bot
+3. connect the bot to the Telegram Business account in Telegram
+4. grant the bot the required inbox/reply permissions
+
+OpenTulpa then receives Telegram Business webhook updates, persists the lead conversation locally, and continues each lead from saved state rather than a one-shot reply.
 
 ### Docker
 
@@ -258,6 +280,7 @@ The whole point is to hand off real work — not just ask questions.
 | **Inbox triage** | *"Summarize the most important unread items from my inbox and draft replies in my tone."* |
 | **Document review** | *"Read this PDF, extract the key decisions, and remember them for future reference."* |
 | **Status reporting** | *"Check what changed in this project since yesterday and draft a status update for the team."* |
+| **Lead intake** | *"Handle inbound Telegram Business or Instagram leads, ask for missing appointment details, use these files to answer questions, and write completed bookings to my Google Sheet."* |
 
 ### With Composio — Your Employee Gets Access to Your Stack
 

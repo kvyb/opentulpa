@@ -36,6 +36,15 @@ Telegram is the primary interface. For local use:
 1. set `TELEGRAM_BOT_TOKEN`
 2. run `./start.sh`
 
+Telegram Business intake uses the same bot token and webhook surface, but it has extra Telegram-side prerequisites:
+
+1. create the bot in `@BotFather`
+2. enable Business Mode for that bot
+3. connect the bot to the Telegram Business account in Telegram
+4. grant the bot the required business inbox permissions
+
+Once connected, OpenTulpa can ingest inbound Telegram Business leads from the shared `/webhook/telegram` endpoint and continue those lead conversations from persisted state.
+
 Optional Composio support:
 
 ```bash
@@ -102,6 +111,15 @@ Railway builds from the included `Dockerfile`.
 - `COMPOSIO_API_KEY`
 - `COMPOSIO_DEFAULT_CALLBACK_URL`
 - `AGENT_PROMPT_CACHING_ENABLED=1|0`
+
+### Telegram Business notes
+
+If you want Telegram Business intake in production:
+
+- the business account owner must connect the bot inside Telegram after deploy
+- `PUBLIC_BASE_URL` should be set so webhook registration is correct
+- the same deployed bot/webhook handles both ordinary Telegram chat and Telegram Business updates
+- OpenTulpa persists Telegram Business inbox state locally, so mount persistent storage the same way you would for the rest of `.opentulpa`
 
 ### Setup
 

@@ -13,11 +13,11 @@ This document describes the current runtime design, request flows, safety contro
 ## Layered modules
 
 - `src/opentulpa/api`: FastAPI composition and route registration.
-- `src/opentulpa/api/routes`: internal route surface (`/internal/*`), Telegram webhook, and Composio callback/status routes.
+- `src/opentulpa/api/routes`: internal route surface (`/internal/*`), Telegram webhook, Telegram Business status route, and Composio callback/status routes.
 - `src/opentulpa/application`: orchestration use-cases (`TurnOrchestrator`, `WakeOrchestrator`, `ApprovalExecutionOrchestrator`).
 - `src/opentulpa/domain`: domain contracts (for example conversation turn request/result).
 - `src/opentulpa/agent`: LangGraph runtime, graph nodes, compaction, tool registry.
-- `src/opentulpa/interfaces/telegram`: Telegram transport, parsing, and streaming relay.
+- `src/opentulpa/interfaces/telegram`: Telegram transport, parsing, streaming relay, and Telegram Business inbox persistence.
 - `src/opentulpa/approvals`: broker, adapters, store, approval models.
 - `src/opentulpa/policy`: approval intent/policy evaluator used by broker.
 - `src/opentulpa/context`: profiles, event backlog, file vault, thread rollups, link aliases.
@@ -36,6 +36,18 @@ This document describes the current runtime design, request flows, safety contro
 5. Assistant reply is streamed/posted to Telegram.
 6. If a tool transitions to `approval_pending`, runtime emits an immediate approval-interrupt signal and stops normal reply streaming for that action.
 7. Telegram webhook flow ensures approval challenge delivery before any optional assistant follow-up message in the same turn.
+
+### External DM intake flow
+
+1. A user configures an intake workflow through ordinary OpenTulpa conversation.
+2. OpenTulpa persists the workflow plus a synced durable workflow skill.
+3. Inbound external messages arrive through the configured source:
+   - Instagram via Composio conversation reads
+   - Telegram Business via `POST /webhook/telegram` business updates
+4. Intake service loads the external conversation plus any active/recent booking state for that lead.
+5. Runtime decides whether the message matches the workflow, whether a follow-up is needed, and whether the booking is ready to save.
+6. Intake service performs the idempotent reply/save step after the decision.
+7. Per-conversation cursors ensure the same inbound message is not reprocessed as new work.
 
 ### Direct API turn flow (non-Telegram)
 
@@ -108,6 +120,7 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
 ## Internal API boundary
 
 - `/webhook/*` is the public webhook ingress surface for Telegram plus the Composio OAuth callback path.
+- `/webhook/telegram` now handles both ordinary Telegram bot chat updates and Telegram Business inbox updates.
 - Public internet clients are denied for all non-webhook routes except health checks
   (`/healthz`, `/agent/healthz`) for platform liveness probing.
 - `/webhook/telegram` requires Telegram secret header auth
@@ -130,6 +143,8 @@ Compaction is hysteresis-based: compact at high watermark, then reduce toward lo
 - Link aliases: `.opentulpa/link_aliases.db`
 - Skills: `.opentulpa/skills.db`
 - File vault: `.opentulpa/file_vault.db` + file storage
+- Intake workflows/bookings: `.opentulpa/intake.db`
+- Telegram Business inbox state: `.opentulpa/telegram_business.db`
 - Tasks/wake queue: `.opentulpa/tasks.db`, `.opentulpa/wake_events.db`
 
 ## Observability and debugging
