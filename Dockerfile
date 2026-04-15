@@ -10,7 +10,6 @@ ENV UV_COMPILE_BYTECODE=1
 COPY pyproject.toml uv.lock README.md /app/
 COPY src /app/src
 COPY scripts /app/scripts
-COPY skills /app/skills
 COPY docs /app/docs
 
 RUN mkdir -p /app/tulpa_stuff \
