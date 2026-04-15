@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
+.tmp/
 *.egg-info/
 
 # Environment / secrets

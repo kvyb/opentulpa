@@ -245,6 +245,14 @@ class _ScriptedAgentModel:
     def _agent_reply(self, messages: list[Any], *, user_text: str, tool_text: str) -> AIMessage:
         lower_user = str(user_text or "").lower()
         lower_tool = str(tool_text or "").lower()
+        tool_payload: dict[str, Any] | None = None
+        if tool_text:
+            try:
+                parsed = json.loads(tool_text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                tool_payload = parsed
         last_turn_message: Any | None = None
         for item in reversed(messages):
             if isinstance(item, (HumanMessage, ToolMessage, AIMessage)):
@@ -261,23 +269,30 @@ class _ScriptedAgentModel:
                         f"approval_id={safe_id}"
                     )
                 )
-            if '"id": "rtn_' in lower_tool:
+            routine_id = ""
+            if isinstance(tool_payload, dict):
+                routine_id = str(tool_payload.get("id", "")).strip()
+            if not routine_id:
                 routine_match = re.search(r'"id"\s*:\s*"(rtn_[^"]+)"', tool_text)
-                routine_id = routine_match.group(1) if routine_match else "rtn_unknown"
+                routine_id = routine_match.group(1) if routine_match else ""
+            if routine_id.startswith("rtn_"):
                 return AIMessage(content=f"Routine created successfully. routine_id={routine_id}")
             if '"status": "executed"' in lower_tool and "routine_create" in lower_tool:
                 routine_match = re.search(r'"id"\s*:\s*"(rtn_[^"]+)"', tool_text)
                 routine_id = routine_match.group(1) if routine_match else "rtn_unknown"
                 return AIMessage(content=f"Routine created successfully. routine_id={routine_id}")
-            if '"execution_origin": "scheduled"' in lower_tool:
+            if (
+                (isinstance(tool_payload, dict) and str(tool_payload.get("execution_origin", "")).strip() == "scheduled")
+                or '"execution_origin": "scheduled"' in lower_tool
+            ):
                 return AIMessage(content="Scheduled run executed without a new approval prompt.")
-            if '"returncode"' in lower_tool:
+            if (isinstance(tool_payload, dict) and "returncode" in tool_payload) or '"returncode"' in lower_tool:
                 if "external read" in lower_user:
                     return AIMessage(content="External read action completed with no approval prompt.")
                 if "scheduled wake read" in lower_user:
                     return AIMessage(content="Scheduled read run completed without requesting approval.")
                 return AIMessage(content="Scheduled run completed without requesting approval.")
-            if '"error"' in lower_tool:
+            if (isinstance(tool_payload, dict) and "error" in tool_payload) or '"error"' in lower_tool:
                 return AIMessage(content="Run finished in scheduled mode and did not request approval.")
 
         if "previously approved action has just been executed" in lower_user:
