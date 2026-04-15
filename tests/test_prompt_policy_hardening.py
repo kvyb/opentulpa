@@ -23,6 +23,7 @@ from opentulpa.agent.turn_policy import (
     execution_origin_for_turn_mode,
     normalize_turn_mode,
 )
+from opentulpa.agent.utils import message_to_text
 
 
 def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
@@ -385,6 +386,79 @@ def test_sanitize_history_drops_internal_system_messages() -> None:
     assert len(sanitized) == 2
     assert isinstance(sanitized[0], HumanMessage)
     assert isinstance(sanitized[1], AIMessage)
+
+
+def test_sanitize_history_keeps_tool_calls_and_results_verbatim() -> None:
+    huge_command = "python3 -c \"" + ("print('x')\\n" * 200) + "\""
+    huge_stdout = "result line " * 400
+    messages = [
+        HumanMessage(content="run the solar math"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "tulpa_run_terminal",
+                    "args": {
+                        "command": huge_command,
+                        "working_dir": "tulpa_stuff",
+                        "path": "tulpa_stuff/solar_antarctica.py",
+                    },
+                }
+            ],
+        ),
+        ToolMessage(
+            content=(
+                '{"ok":true,"returncode":0,"cwd":"tulpa_stuff","stdout":"'
+                + huge_stdout
+                + '","stderr":"","execution_origin":"interactive"}'
+            ),
+            tool_call_id="call_1",
+        ),
+    ]
+
+    sanitized = _sanitize_history_messages_for_model(messages)
+
+    assert len(sanitized) == 3
+    assert isinstance(sanitized[1], AIMessage)
+    assert isinstance(sanitized[2], ToolMessage)
+    sanitized_call = sanitized[1].tool_calls[0]
+    assert sanitized_call["id"] == "call_1"
+    assert sanitized_call["name"] == "tulpa_run_terminal"
+    assert sanitized_call["args"]["working_dir"] == "tulpa_stuff"
+    assert sanitized_call["args"]["path"] == "tulpa_stuff/solar_antarctica.py"
+    assert sanitized_call["args"]["command"] == huge_command
+    sanitized_tool_text = str(sanitized[2].content or "")
+    assert sanitized_tool_text == (
+        '{"ok":true,"returncode":0,"cwd":"tulpa_stuff","stdout":"'
+        + huge_stdout
+        + '","stderr":"","execution_origin":"interactive"}'
+    )
+
+
+def test_message_to_text_uses_compact_json_for_tool_calls() -> None:
+    script = "\n".join(f"print({idx})" for idx in range(120))
+    message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "name": "tulpa_write_file",
+                "args": {
+                    "path": "tulpa_stuff/antarctica_solar.py",
+                    "content": script,
+                },
+            }
+        ],
+    )
+
+    text = message_to_text(message)
+
+    assert "tool_calls=" in text
+    assert "tulpa_write_file" in text
+    assert "tulpa_stuff/antarctica_solar.py" in text
+    assert '": "' not in text
+    assert '", "' not in text
 
 
 def test_enforce_tool_message_protocol_drops_incomplete_tool_call_segment() -> None:

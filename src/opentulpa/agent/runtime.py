@@ -93,6 +93,9 @@ from opentulpa.agent.utils import (
     normalize_model_name as _normalize_model_name,
 )
 from opentulpa.agent.utils import (
+    safe_json as _safe_json,
+)
+from opentulpa.agent.utils import (
     utc_offset_to_minutes as _utc_offset_to_minutes,
 )
 from opentulpa.context.customer_profile_models import (
@@ -229,6 +232,27 @@ def _provider_prompt_cache_invoke_extras(
     if profile.get("strategy") != "top_level":
         return {}
     return {"extra_body": {"cache_control": dict(profile.get("cache_control") or {})}}
+
+
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(existing, value)
+            continue
+        merged[key] = value
+    return merged
+
+
+def _looks_like_openrouter_base_url(base_url: str | None) -> bool:
+    normalized = str(base_url or "").strip().lower()
+    return "openrouter.ai" in normalized
+
+
+def _is_glm_51_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return normalized.startswith("z-ai/glm-5.1")
 
 
 def _json_safe(value: Any) -> Any:
@@ -1025,6 +1049,7 @@ class OpenTulpaLangGraphRuntime:
         )
         self._context_engineer = ContextEngineer()
         self._browser_use_local_manager: Any | None = None
+        self._headroom_service: Any | None = None
         self._interactive_sessions_lock = asyncio.Lock()
         self._interactive_sessions: dict[str, Any] = {}
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -1151,6 +1176,31 @@ class OpenTulpaLangGraphRuntime:
             )
         )
 
+    def _model_request_attempts(self, *, model_name: str | None = None) -> list[dict[str, Any]]:
+        target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
+        if not _looks_like_openrouter_base_url(getattr(self, "openrouter_base_url", "")):
+            return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
+        if not _is_glm_51_model_name(target_model_name):
+            return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
+        return [
+            {
+                "name": "fireworks_then_siliconflow",
+                "invoke_extras": {
+                    "extra_body": {
+                        "provider": {
+                            "order": ["fireworks", "siliconflow"],
+                            "allow_fallbacks": False,
+                        }
+                    }
+                },
+                "call_context": {
+                    "provider_route": "fireworks_then_siliconflow",
+                    "provider_order": ["fireworks", "siliconflow"],
+                    "provider_allow_fallbacks": False,
+                },
+            },
+        ]
+
     def _resolve_model_name_for_runtime_call(self, model: Any, explicit_name: str | None = None) -> str:
         if explicit_name:
             return str(explicit_name).strip()
@@ -1224,28 +1274,58 @@ class OpenTulpaLangGraphRuntime:
             model_name=resolved_model_name,
             stable_prefix_count=stable_prefix_count,
         )
-        invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
-        callback_target = self._model_with_callbacks(model, call_context=call_context)
-        response: Any | None = None
-        error_text: str | None = None
-        try:
-            if _supports_ainvoke_kwargs(callback_target, invoke_extras):
-                response = await callback_target.ainvoke(prepared_messages, **invoke_extras)
-            else:
-                response = await callback_target.ainvoke(prepared_messages)
-            return response
-        except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
-            self._record_llm_call_trace(
-                model_name=resolved_model_name,
-                prepared_messages=prepared_messages,
-                stable_prefix_count=stable_prefix_count,
-                response=response,
-                error=error_text,
-                call_context=call_context,
+        base_invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
+        attempts = self._model_request_attempts(model_name=resolved_model_name)
+        last_exc: Exception | None = None
+        for attempt_index, attempt in enumerate(attempts):
+            invoke_extras = _deep_merge_dicts(
+                dict(base_invoke_extras),
+                dict(attempt.get("invoke_extras") or {}),
             )
+            attempt_context = dict(call_context or {})
+            attempt_context.update(dict(attempt.get("call_context") or {}))
+            attempt_context["provider_attempt_name"] = str(attempt.get("name") or "").strip() or "default"
+            attempt_context["provider_attempt_index"] = attempt_index + 1
+            attempt_context["provider_attempt_count"] = len(attempts)
+            callback_target = self._model_with_callbacks(model, call_context=attempt_context)
+            response: Any | None = None
+            error_text: str | None = None
+            try:
+                if _supports_ainvoke_kwargs(callback_target, invoke_extras):
+                    response = await callback_target.ainvoke(prepared_messages, **invoke_extras)
+                else:
+                    response = await callback_target.ainvoke(prepared_messages)
+                return response
+            except Exception as exc:
+                error_text = f"{type(exc).__name__}: {exc}"
+                last_exc = exc
+                if attempt_index + 1 >= len(attempts):
+                    raise
+                logger.warning(
+                    "Model invocation via %s failed for %s; retrying with next provider route: %s",
+                    attempt_context["provider_attempt_name"],
+                    resolved_model_name,
+                    error_text,
+                )
+                self.log_behavior_event(
+                    event="llm.provider_fallback",
+                    model_name=resolved_model_name,
+                    failed_provider_attempt=attempt_context["provider_attempt_name"],
+                    next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip() or "default",
+                    error=error_text,
+                )
+            finally:
+                self._record_llm_call_trace(
+                    model_name=resolved_model_name,
+                    prepared_messages=prepared_messages,
+                    stable_prefix_count=stable_prefix_count,
+                    response=response,
+                    error=error_text,
+                    call_context=attempt_context,
+                )
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Model invocation failed without attempts.")
 
     @staticmethod
     def _looks_like_provisional_reply(text: str) -> bool:
@@ -1307,6 +1387,43 @@ class OpenTulpaLangGraphRuntime:
             )
         return self._browser_use_local_manager
 
+    def get_headroom_service(self) -> Any:
+        if self._headroom_service is None:
+            from opentulpa.integrations import HeadroomService
+
+            self._headroom_service = HeadroomService(model_name=self.model_name)
+        return self._headroom_service
+
+    def compress_tool_result_for_model(
+        self,
+        *,
+        tool_name: str,
+        args: Any,
+        result: Any,
+        user_text: str = "",
+        model_name: str | None = None,
+    ) -> str:
+        raw_result_text = _safe_json(result).strip()
+        if not raw_result_text:
+            return ""
+        service = self.get_headroom_service()
+        compress = getattr(service, "compress_tool_result", None)
+        if not callable(compress):
+            return raw_result_text
+        try:
+            compressed = compress(
+                tool_name=tool_name,
+                args=args,
+                result=result,
+                user_text=user_text,
+                model_name=model_name or self.model_name,
+            )
+        except Exception:
+            logger.exception("tool result compression failed for %s", str(tool_name or "").strip() or "tool")
+            return raw_result_text
+        normalized = str(compressed or "").strip()
+        return normalized or raw_result_text
+
     def log_behavior_event(self, *, event: str, **fields: Any) -> None:
         if not bool(getattr(self, "_behavior_log_enabled", False)):
             return
@@ -1335,6 +1452,38 @@ class OpenTulpaLangGraphRuntime:
             return
         with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
             f.write(serialized + "\n")
+
+    def capture_posthog_event(
+        self,
+        *,
+        event: str,
+        customer_id: str | None = None,
+        properties: dict[str, Any] | None = None,
+    ) -> None:
+        posthog_logger = getattr(self, "_posthog_logger", None)
+        capture = getattr(posthog_logger, "capture_event", None)
+        if not callable(capture):
+            return
+        capture(
+            distinct_id=str(customer_id or "").strip() or None,
+            event=str(event or "").strip(),
+            properties=_json_safe(properties or {}),
+        )
+
+    def record_observability_event(
+        self,
+        *,
+        event: str,
+        customer_id: str | None = None,
+        posthog_event: str | None = None,
+        **fields: Any,
+    ) -> None:
+        self.log_behavior_event(event=event, **fields)
+        self.capture_posthog_event(
+            event=str(posthog_event or event or "").strip(),
+            customer_id=customer_id,
+            properties={"behavior_event": str(event or "").strip(), **fields},
+        )
 
     @staticmethod
     def _normalize_llm_call_context(call_context: dict[str, Any] | None) -> dict[str, Any]:
@@ -1455,40 +1604,110 @@ class OpenTulpaLangGraphRuntime:
         schema: type[BaseModel],
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        call_context: dict[str, Any] | None = None,
     ) -> tuple[BaseModel | None, str | None]:
         last_error: str | None = None
-        structured = getattr(model, "with_structured_output", None)
         resolved_model_name = self._resolve_model_name_for_runtime_call(model, explicit_name=model_name)
         prepared_messages = self.prepare_messages_for_prompt_cache(
             list(messages),
             model_name=resolved_model_name,
             stable_prefix_count=stable_prefix_count,
         )
-        invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
-        if callable(structured):
-            try:
-                runner = structured(schema)
-                if _supports_ainvoke_kwargs(runner, invoke_extras):
-                    payload = await runner.ainvoke(prepared_messages, **invoke_extras)
-                else:
-                    payload = await runner.ainvoke(prepared_messages)
-                if isinstance(payload, schema):
-                    return payload, None
-                if isinstance(payload, dict):
-                    return schema.model_validate(payload), None
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+        base_invoke_extras = self.model_invoke_extras(model_name=resolved_model_name)
+        attempts = self._model_request_attempts(model_name=resolved_model_name)
+        for attempt_index, attempt in enumerate(attempts):
+            invoke_extras = _deep_merge_dicts(
+                dict(base_invoke_extras),
+                dict(attempt.get("invoke_extras") or {}),
+            )
+            attempt_context = dict(call_context or {})
+            attempt_context.update(dict(attempt.get("call_context") or {}))
+            attempt_context["provider_attempt_name"] = str(attempt.get("name") or "").strip() or "default"
+            attempt_context["provider_attempt_index"] = attempt_index + 1
+            attempt_context["provider_attempt_count"] = len(attempts)
+            callback_target = self._model_with_callbacks(model, call_context=attempt_context)
+            structured = getattr(callback_target, "with_structured_output", None)
+            payload: Any | None = None
+            error_text: str | None = None
+            trace_recorded = False
+            if callable(structured):
+                try:
+                    runner = structured(schema)
+                    if _supports_ainvoke_kwargs(runner, invoke_extras):
+                        payload = await runner.ainvoke(prepared_messages, **invoke_extras)
+                    else:
+                        payload = await runner.ainvoke(prepared_messages)
+                    if isinstance(payload, schema):
+                        self._record_llm_call_trace(
+                            model_name=resolved_model_name,
+                            prepared_messages=prepared_messages,
+                            stable_prefix_count=stable_prefix_count,
+                            response=payload,
+                            error=None,
+                            call_context=attempt_context,
+                        )
+                        trace_recorded = True
+                        return payload, None
+                    if isinstance(payload, dict):
+                        parsed = schema.model_validate(payload)
+                        self._record_llm_call_trace(
+                            model_name=resolved_model_name,
+                            prepared_messages=prepared_messages,
+                            stable_prefix_count=stable_prefix_count,
+                            response=parsed,
+                            error=None,
+                            call_context=attempt_context,
+                        )
+                        trace_recorded = True
+                        return parsed, None
+                    error_text = (
+                        f"TypeError: structured output returned unsupported type "
+                        f"{type(payload).__name__}"
+                    )
+                except Exception as exc:
+                    error_text = f"{type(exc).__name__}: {exc}"
+                finally:
+                    if not trace_recorded and (payload is not None or error_text):
+                        self._record_llm_call_trace(
+                            model_name=resolved_model_name,
+                            prepared_messages=prepared_messages,
+                            stable_prefix_count=stable_prefix_count,
+                            response=payload,
+                            error=error_text,
+                            call_context=attempt_context,
+                        )
+            if error_text:
+                last_error = error_text
+                if attempt_index + 1 >= len(attempts):
+                    break
+                logger.warning(
+                    "Structured model invocation via %s failed for %s; retrying with next provider route: %s",
+                    attempt_context["provider_attempt_name"],
+                    resolved_model_name,
+                    error_text,
+                )
+                self.log_behavior_event(
+                    event="llm.provider_fallback",
+                    model_name=resolved_model_name,
+                    failed_provider_attempt=attempt_context["provider_attempt_name"],
+                    next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip() or "default",
+                    error=error_text,
+                )
+                continue
         try:
             response = await self.ainvoke_model(
                 model,
                 list(messages),
                 model_name=resolved_model_name,
                 stable_prefix_count=stable_prefix_count,
-                call_context={"call_site": "structured_model_fallback"},
+                call_context={
+                    **dict(call_context or {}),
+                    "call_site": str((call_context or {}).get("call_site") or "structured_model_fallback"),
+                },
             )
             raw = _content_to_text(getattr(response, "content", response)).strip()
             if raw:
-                return schema.model_validate_json(raw), None
+                return schema.model_validate_json(_clean_json_text_block(raw)), None
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         return None, last_error
@@ -2558,6 +2777,8 @@ class OpenTulpaLangGraphRuntime:
             "approval_handoff": False,
             "claim_check_retry_count": 0,
             "claim_check_needs_retry": False,
+            "frozen_prompt_context": None,
+            "frozen_history_projection": None,
             **skill_state,
         }
 
@@ -3541,6 +3762,20 @@ class OpenTulpaLangGraphRuntime:
         """Return a structured decision for one intake workflow conversation."""
         invoke_error: str | None = None
         decision: _IntakeWorkflowDecision | None = None
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
+        conversation_summary = conversation.get("summary") if isinstance(conversation, dict) else {}
+        conversation_id = str(
+            (conversation_summary or {}).get("conversation_id", "")
+            if isinstance(conversation_summary, dict)
+            else ""
+        ).strip() or "conversation"
+        latest_inbound_id = str(
+            (conversation_summary or {}).get("latest_inbound_message_id", "")
+            if isinstance(conversation_summary, dict)
+            else ""
+        ).strip() or "latest"
+        structured_thread_id = f"intake_decision_{workflow_id}_{conversation_id}"
+        structured_trace_id = f"intake_{workflow_id}_{conversation_id}_{latest_inbound_id}"
         tool_enabled_runtime = (
             getattr(self, "_graph", None) is not None
             and getattr(self, "_wake_execution_model_with_tools", None) is not None
@@ -3564,6 +3799,17 @@ class OpenTulpaLangGraphRuntime:
                 ),
             ],
             stable_prefix_count=1,
+            call_context={
+                "call_site": "intake_workflow_decision",
+                "trace_id": structured_trace_id,
+                "thread_id": structured_thread_id,
+                "customer_id": customer_id,
+                "turn_mode": "routine_wake",
+                "prompt_mode": "structured_intake",
+                "workflow_id": workflow_id,
+                "conversation_id": conversation_id,
+                "latest_inbound_message_id": latest_inbound_id,
+            },
         )
         should_escalate = (
             decision is None
@@ -3571,14 +3817,6 @@ class OpenTulpaLangGraphRuntime:
             and bool(execution_feedback)
         )
         if should_escalate:
-            workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
-            conversation_summary = conversation.get("summary") if isinstance(conversation, dict) else {}
-            conversation_id = str(
-                (conversation_summary or {}).get("conversation_id", "") if isinstance(conversation_summary, dict) else ""
-            ).strip() or "conversation"
-            latest_inbound_id = str(
-                (conversation_summary or {}).get("latest_inbound_message_id", "") if isinstance(conversation_summary, dict) else ""
-            ).strip() or "latest"
             try:
                 raw = await self.ainvoke_text(
                     thread_id=f"wake_intake_{workflow_id}_{conversation_id}_{latest_inbound_id}",

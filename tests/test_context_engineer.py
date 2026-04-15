@@ -79,8 +79,8 @@ def test_context_engineer_preserves_active_tool_dependency_suffix() -> None:
     assert any(isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") == "call_live" for msg in result.raw_messages)
 
 
-def test_context_engineer_latest_five_stale_tool_calls_keep_full_content() -> None:
-    engineer = ContextEngineer(raw_chat_limit=1, raw_tool_limit=1, stale_summary_token_budget=5000)
+def test_context_engineer_latest_stale_tool_calls_follow_raw_tool_limit() -> None:
+    engineer = ContextEngineer(raw_chat_limit=1, raw_tool_limit=3, stale_summary_token_budget=5000)
     long_value = "x" * 140
     messages = [HumanMessage(content="old context"), AIMessage(content="older answer")]
     for idx in range(6):
@@ -117,7 +117,10 @@ def test_context_engineer_latest_five_stale_tool_calls_keep_full_content() -> No
 
     assert f"args-0-{long_value}" not in preserved_text
     assert f"result-0-{long_value}" not in preserved_text
-    for idx in range(1, 6):
+    for idx in range(1, 3):
+        assert f"args-{idx}-{long_value}" not in preserved_text
+        assert f"result-{idx}-{long_value}" not in preserved_text
+    for idx in range(3, 6):
         assert f"args-{idx}-{long_value}" in preserved_text
         assert f"result-{idx}-{long_value}" in preserved_text
 
@@ -129,3 +132,26 @@ def test_context_engineer_optional_context_rules() -> None:
     assert engineer.should_include_optional_context(kind="thread_rollup", prompt_mode="task_chat", should_retrieve=True) is True
     assert engineer.should_include_optional_context(kind="link_aliases", prompt_mode="task_chat", should_retrieve=False) is False
     assert engineer.should_include_optional_context(kind="pending_context", prompt_mode="execution", should_retrieve=False) is True
+
+
+def test_context_engineer_defaults_keep_twenty_chat_and_four_tool_messages_in_order() -> None:
+    engineer = ContextEngineer()
+    messages = []
+    for idx in range(24):
+        messages.append(HumanMessage(content=f"user {idx}"))
+        messages.append(AIMessage(content=f"assistant {idx}"))
+    for idx in range(6):
+        messages.append(ToolMessage(content=f'{{"status":"ok","result":"tool {idx}"}}', tool_call_id=f"call_{idx}"))
+
+    result = engineer.build_history_working_set(messages, token_budget=10000)
+
+    assert result.raw_chat_count == 20
+    assert result.raw_tool_count == 4
+    assert len(result.raw_messages) == 24
+    ordered_contents = [getattr(msg, "content", "") for msg in result.raw_messages]
+    assert ordered_contents[:4] == ["user 14", "assistant 14", "user 15", "assistant 15"]
+    assert ordered_contents[-3:] == [
+        '{"status":"ok","result":"tool 3"}',
+        '{"status":"ok","result":"tool 4"}',
+        '{"status":"ok","result":"tool 5"}',
+    ]

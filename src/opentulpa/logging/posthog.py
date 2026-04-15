@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -102,13 +101,30 @@ class PostHogLangGraphLogger:
     def enabled(self) -> bool:
         return bool(self._api_key and self._host)
 
-    def _ensure_imports(self) -> bool:
+    def _ensure_client(self) -> bool:
         if not self.enabled:
+            return False
+        if self._client is not None:
+            return True
+        try:
+            from posthog import Posthog
+        except Exception:
+            logger.exception("Failed to import PostHog SDK; disabling PostHog client.")
+            return False
+        try:
+            self._client = Posthog(self._api_key, host=self._host)
+            return True
+        except Exception:
+            logger.exception("Failed to initialize PostHog client; disabling PostHog callbacks.")
+            self._client = None
+            return False
+
+    def _ensure_imports(self) -> bool:
+        if not self._ensure_client():
             return False
         if self._client is not None and self._callback_handler_cls is not None:
             return True
         try:
-            from posthog import Posthog
             from posthog.ai.langchain import CallbackHandler as BaseCallbackHandler
             from posthog.ai.langchain.callbacks import (
                 ChatGeneration,
@@ -205,14 +221,12 @@ class PostHogLangGraphLogger:
                         groups=self._groups,
                     )
 
-            self._client = Posthog(self._api_key, host=self._host)
             self._callback_handler_cls = OpenTulpaPostHogCallbackHandler
             return True
         except Exception:
             logger.exception("Failed to initialize PostHog client; disabling PostHog callbacks.")
-            self._client = None
             self._callback_handler_cls = None
-            return False
+            return self._client is not None
 
     def build_callbacks(
         self,
@@ -261,6 +275,35 @@ class PostHogLangGraphLogger:
         finally:
             self._client = None
             self._callback_handler_cls = None
+
+    def capture_event(
+        self,
+        *,
+        distinct_id: str | None,
+        event: str,
+        properties: dict[str, Any] | None = None,
+        groups: dict[str, Any] | None = None,
+    ) -> None:
+        event_name = str(event or "").strip()
+        if not event_name or not self._ensure_client():
+            return
+        client = self._client
+        if client is None:
+            return
+        cleaned_properties = {
+            str(key): value
+            for key, value in (properties or {}).items()
+            if value not in (None, "", [], {}, ())
+        }
+        try:
+            client.capture(
+                distinct_id=str(distinct_id or "").strip() or event_name,
+                event=event_name,
+                properties=cleaned_properties or None,
+                groups=groups,
+            )
+        except Exception:
+            logger.exception("Failed to capture PostHog event '%s'.", event_name)
 
 
 def create_posthog_logger(*, api_key: str | None, host: str | None) -> PostHogLangGraphLogger | None:

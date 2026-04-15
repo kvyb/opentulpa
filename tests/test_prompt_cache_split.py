@@ -187,6 +187,15 @@ class _CaptureModel:
         return _CaptureResponse()
 
 
+class _ProviderRouteCaptureModel:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> _CaptureResponse:
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return _CaptureResponse()
+
+
 @pytest.mark.asyncio
 async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
     rt = OpenTulpaLangGraphRuntime(
@@ -213,6 +222,77 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
     assert isinstance(sent_messages, list)
     assert sent_messages[0].content[0]["cache_control"] == {"type": "ephemeral"}
     assert sent_messages[1].content == "Dynamic user question"
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_routes_glm51_with_fireworks_then_siliconflow_order() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=False,
+    )
+    model = _ProviderRouteCaptureModel()
+
+    response = await rt.ainvoke_model(
+        model,
+        [HumanMessage(content="Dynamic user question")],
+        model_name="z-ai/glm-5.1",
+    )
+
+    assert isinstance(response, _CaptureResponse)
+    assert len(model.calls) == 1
+    provider = model.calls[0]["kwargs"]["extra_body"]["provider"]
+    assert provider == {"order": ["fireworks", "siliconflow"], "allow_fallbacks": False}
+
+
+def test_model_request_attempts_skip_glm51_provider_routing_off_openrouter() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        openrouter_base_url="https://example.com/v1",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=False,
+    )
+
+    assert rt._model_request_attempts(model_name="z-ai/glm-5.1") == [
+        {"name": "default", "invoke_extras": {}, "call_context": {}}
+    ]
+
+
+def test_model_request_attempts_route_glm51_nitro_variants_on_openrouter() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        model_name="z-ai/glm-5.1:nitro",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=False,
+    )
+
+    attempts = rt._model_request_attempts(model_name="z-ai/glm-5.1:nitro")
+
+    assert attempts == [
+        {
+            "name": "fireworks_then_siliconflow",
+            "invoke_extras": {
+                "extra_body": {
+                    "provider": {
+                        "order": ["fireworks", "siliconflow"],
+                        "allow_fallbacks": False,
+                    }
+                }
+            },
+            "call_context": {
+                "provider_route": "fireworks_then_siliconflow",
+                "provider_order": ["fireworks", "siliconflow"],
+                "provider_allow_fallbacks": False,
+            },
+        }
+    ]
 
 
 def test_extract_response_usage_fields_normalizes_openrouter_usage() -> None:

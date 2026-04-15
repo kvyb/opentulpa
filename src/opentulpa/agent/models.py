@@ -45,3 +45,5 @@ class AgentState(TypedDict, total=False):
     claim_check_verdict: dict[str, Any]
     claim_check_needs_retry: bool
     claim_check_retry_count: int
+    frozen_prompt_context: dict[str, Any] | None
+    frozen_history_projection: dict[str, Any] | None

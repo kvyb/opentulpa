@@ -75,6 +75,57 @@ def test_create_posthog_logger_builds_callbacks_when_sdk_available(monkeypatch) 
     assert callback.kwargs["properties"]["thread_id"] == "chat_xyz"
 
 
+def test_posthog_logger_capture_event_uses_client_when_available(monkeypatch) -> None:
+    fake_posthog = types.ModuleType("posthog")
+    captured: list[dict[str, Any]] = []
+
+    class _FakePosthog:
+        def __init__(self, api_key: str, host: str) -> None:
+            self.api_key = api_key
+            self.host = host
+
+        def capture(
+            self,
+            *,
+            distinct_id: str,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            groups: dict[str, Any] | None = None,
+        ) -> None:
+            captured.append(
+                {
+                    "distinct_id": distinct_id,
+                    "event": event,
+                    "properties": properties,
+                    "groups": groups,
+                }
+            )
+
+        def shutdown(self) -> None:
+            return None
+
+    fake_posthog.Posthog = _FakePosthog
+    monkeypatch.setitem(sys.modules, "posthog", fake_posthog)
+
+    logger = create_posthog_logger(api_key="phc_test", host="https://us.i.posthog.com")
+
+    assert logger is not None
+    logger.capture_event(
+        distinct_id="telegram_123",
+        event="intake.decision.ok",
+        properties={"workflow_id": "iwf_1", "empty": "", "none": None},
+    )
+
+    assert captured == [
+        {
+            "distinct_id": "telegram_123",
+            "event": "intake.decision.ok",
+            "properties": {"workflow_id": "iwf_1"},
+            "groups": None,
+        }
+    ]
+
+
 def test_extract_openrouter_cost_fields_reads_usage_cost_from_completion_payload() -> None:
     output = types.SimpleNamespace(
         llm_output={
@@ -119,7 +170,7 @@ class _ConfigurableModel:
         self.configs: list[dict[str, Any]] = []
         self.calls: list[dict[str, Any]] = []
 
-    def with_config(self, config: dict[str, Any]) -> "_ConfigurableModel":
+    def with_config(self, config: dict[str, Any]) -> _ConfigurableModel:
         self.configs.append(config)
         return self
 
