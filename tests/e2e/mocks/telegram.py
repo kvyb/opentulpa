@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+class FakeTelegramClient:
+    def __init__(self, _token: str) -> None:
+        self.callback_answers: list[dict[str, Any]] = []
+        self.sent_messages: list[dict[str, Any]] = []
+        self.edited_messages: list[dict[str, Any]] = []
+        self.chat_actions: list[dict[str, Any]] = []
+
+    async def answer_callback_query(
+        self,
+        *,
+        callback_query_id: str,
+        text: str,
+        show_alert: bool = False,
+    ) -> bool:
+        self.callback_answers.append(
+            {
+                "callback_query_id": callback_query_id,
+                "text": text,
+                "show_alert": bool(show_alert),
+            }
+        )
+        return True
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int | str,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.sent_messages.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+                "reply_markup": reply_markup or {},
+            }
+        )
+        return {"ok": True}
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        self.edited_messages.append(
+            {
+                "chat_id": chat_id,
+                "message_id": int(message_id),
+                "text": text,
+                "parse_mode": parse_mode,
+                "reply_markup": reply_markup or {},
+            }
+        )
+        return True
+
+    async def edit_message_reply_markup(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        self.edited_messages.append(
+            {
+                "chat_id": chat_id,
+                "message_id": int(message_id),
+                "text": "",
+                "parse_mode": None,
+                "reply_markup": reply_markup or {},
+            }
+        )
+        return True
+
+    async def send_chat_action(self, *, chat_id: int | str, action: str = "typing") -> bool:
+        self.chat_actions.append({"chat_id": chat_id, "action": action})
+        return True
