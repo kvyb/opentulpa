@@ -56,6 +56,18 @@ def _require_customer_id(runtime: Any) -> str:
     return customer_id
 
 
+def _require_thread_id(runtime: Any) -> str:
+    getter = getattr(runtime, "get_active_thread_id", None)
+    thread_id = ""
+    if callable(getter):
+        thread_id = str(getter() or "").strip()
+    if not thread_id:
+        thread_id = str(getattr(runtime, "_active_thread_id", "") or "").strip()
+    if not thread_id:
+        raise RuntimeError("thread_id is missing in runtime context")
+    return thread_id
+
+
 def _get_browser_use_local_manager(runtime: Any) -> tuple[Any | None, str | None]:
     getter = getattr(runtime, "get_browser_use_local_manager", None)
     if not callable(getter):
@@ -848,6 +860,11 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         they match a business workflow, ask follow-up questions, and save the result.
 
         Important shaping rules:
+        - Prefer the intake workflow setup wizard for interactive workflow authoring and edits.
+        - In normal chat, use intake_workflow_setup_begin plus the setup tools to build the draft with the user.
+        - Reserve direct intake_workflow_upsert for the final persist step after the wizard draft is complete and explicitly confirmed.
+        - Outside workflow setup mode, do not use intake_workflow_upsert to author a brand-new workflow from scratch.
+        - In setup mode, call intake_workflow_upsert only when the draft already contains the exact workflow fields to save.
         - For a brand-new workflow, omit workflow_id or pass an empty string.
         - For updates, pass the existing workflow_id.
         - If the user is refining or editing an existing workflow, prefer intake_workflow_list and
@@ -928,61 +945,6 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         )
         if sink_error:
             return {"error": f"intake_workflow_upsert failed: {sink_error}"}
-
-        normalized_origin = _normalize_execution_origin(
-            thread_id=thread_id,
-            execution_origin=execution_origin,
-        )
-        guard_payload = guard_context if isinstance(guard_context, dict) else {}
-        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
-        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
-        approval_action_args = {
-            "name": safe_name,
-            "intent_description": safe_intent,
-            "required_fields": safe_required_fields,
-            "sink_type": safe_sink_type,
-            "sink_config": safe_sink_config,
-            "schedule": safe_schedule,
-            "channel": safe_channel,
-            "provider": safe_provider,
-            "source_config": safe_source_config,
-            "field_guidance": safe_field_guidance,
-            "assistant_instructions": safe_assistant_instructions,
-            "knowledge_file_ids": safe_knowledge_file_ids,
-            "notify_user": bool(notify_user),
-            "enabled": bool(enabled),
-            "workflow_id": safe_workflow_id,
-        }
-        decision = await boundary_guard.evaluate(
-            ExecutionBoundaryContext(
-                customer_id=safe_customer,
-                thread_id=str(thread_id or "").strip() or f"chat-{safe_customer}",
-                action_name="intake_workflow_upsert",
-                action_args=approval_action_args,
-                execution_origin=normalized_origin,
-                preapproved=bool(preapproved),
-                action_note=(
-                    "Persistent intake workflow creation/update with scheduled external reads and "
-                    "potential external writes via configured sink. "
-                    f"previous_user_message={previous_user[:800]} "
-                    f"previous_assistant_message={previous_assistant[:800]}"
-                ),
-            )
-        )
-        gate = str((decision or {}).get("gate", "allow")).strip().lower()
-        if gate == "require_approval":
-            return _approval_pending_payload(
-                action_name="intake_workflow_upsert",
-                command_preview=f"{safe_name} -> {safe_sink_type}",
-                decision=decision if isinstance(decision, dict) else {},
-            )
-        if gate == "deny":
-            return {
-                "ok": False,
-                "status": "denied",
-                "gate": "deny",
-                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
-            }
 
         r = await runtime._request_with_backoff(
             "POST",
@@ -1081,6 +1043,156 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         if r.status_code != 200:
             return {"error": f"intake_workflow_delete failed: {r.text}"}
         return r.json()
+
+    @tool
+    async def intake_workflow_setup_begin(mode: str, workflow_id: str = "") -> Any:
+        """Begin or resume a workflow setup wizard for the current thread.
+
+        Use this when the user wants to create a new intake workflow or edit an existing one.
+        - mode=create starts a new draft workflow setup session for this thread.
+        - mode=edit loads the existing workflow into the wizard draft and requires workflow_id.
+        - Once the wizard is active, stay in setup mode and use the setup tools until commit, pause, or cancel.
+        """
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        safe_mode = str(mode or "").strip().lower()
+        safe_workflow_id = str(workflow_id or "").strip()
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/begin",
+            json_body={
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "mode": safe_mode,
+                "workflow_id": safe_workflow_id or None,
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_begin failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_get(include_paused: bool = True) -> Any:
+        """Get the current workflow setup session for this thread."""
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/get",
+            json_body={
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "include_paused": bool(include_paused),
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_get failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_update(
+        draft_patch: dict[str, Any] | None = None,
+        scratchpad_patch: dict[str, Any] | None = None,
+    ) -> Any:
+        """Patch the workflow setup draft and scratchpad for the current thread.
+
+        Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
+        """
+        if not isinstance(draft_patch, dict) and not isinstance(scratchpad_patch, dict):
+            return {"error": "intake_workflow_setup_update failed: draft_patch or scratchpad_patch is required"}
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/update",
+            json_body={
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "draft_patch": draft_patch if isinstance(draft_patch, dict) else None,
+                "scratchpad_patch": scratchpad_patch if isinstance(scratchpad_patch, dict) else None,
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_update failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_mark_proposed() -> Any:
+        """Mark the current workflow setup draft as the proposal shown to the user."""
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/mark_proposed",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_mark_proposed failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_confirm_current() -> Any:
+        """Confirm the current proposed workflow draft for the active setup session."""
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/confirm_current",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_confirm_current failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_commit() -> Any:
+        """Persist the confirmed workflow setup draft and activate the workflow."""
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/commit",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_commit failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_pause() -> Any:
+        """Pause the active workflow setup session for the current thread."""
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/pause",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_pause failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
+    async def intake_workflow_setup_cancel() -> Any:
+        """Cancel the workflow setup session for the current thread."""
+        customer_id = _require_customer_id(runtime)
+        thread_id = _require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/cancel",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_cancel failed: {r.text}"}
+        return r.json().get("session", {})
 
     @tool
     async def intake_workflow_run(workflow_id: str, force: bool = False) -> Any:
@@ -2200,6 +2312,14 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         "intake_workflow_list": intake_workflow_list,
         "intake_workflow_get": intake_workflow_get,
         "intake_workflow_delete": intake_workflow_delete,
+        "intake_workflow_setup_begin": intake_workflow_setup_begin,
+        "intake_workflow_setup_get": intake_workflow_setup_get,
+        "intake_workflow_setup_update": intake_workflow_setup_update,
+        "intake_workflow_setup_mark_proposed": intake_workflow_setup_mark_proposed,
+        "intake_workflow_setup_confirm_current": intake_workflow_setup_confirm_current,
+        "intake_workflow_setup_commit": intake_workflow_setup_commit,
+        "intake_workflow_setup_pause": intake_workflow_setup_pause,
+        "intake_workflow_setup_cancel": intake_workflow_setup_cancel,
         "intake_workflow_run": intake_workflow_run,
         "telegram_business_status": telegram_business_status,
         "composio_status": composio_status,

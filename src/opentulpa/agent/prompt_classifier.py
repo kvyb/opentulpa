@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-PromptMode = Literal["literal_chat", "task_chat", "execution"]
+PromptMode = Literal["literal_chat", "task_chat", "execution", "workflow_setup"]
 
 _LITERAL_PATTERNS = [
     r"^\s*what does\b",
@@ -37,6 +37,8 @@ _EXECUTION_HINTS = (
 
 def classify_prompt_mode(user_text: str, *, turn_mode: str) -> PromptMode:
     normalized_turn_mode = str(turn_mode or "").strip().lower()
+    if normalized_turn_mode == "workflow_setup":
+        return "workflow_setup"
     if normalized_turn_mode in {"routine_wake", "approval_recovery", "event_notification"}:
         return "execution"
 

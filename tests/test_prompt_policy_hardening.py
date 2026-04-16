@@ -82,11 +82,14 @@ def test_extract_invoked_skill_snapshot_prefers_skill_markdown() -> None:
 
 def test_turn_mode_policy_messages_are_mode_specific() -> None:
     interactive = str(build_turn_mode_system_message("interactive").content)
+    workflow_setup = str(build_turn_mode_system_message("workflow_setup").content)
     routine_wake = str(build_turn_mode_system_message("routine_wake").content)
     approval_recovery = str(build_turn_mode_system_message("approval_recovery").content)
     event_notification = str(build_turn_mode_system_message("event_notification").content)
 
     assert "live user-guided turn" in interactive
+    assert "collaborating on an intake workflow draft" in workflow_setup
+    assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
     assert "previously approved action" in approval_recovery
@@ -101,11 +104,18 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
 
 def test_literal_chat_prompt_mode_discourages_random_follow_up_questions() -> None:
     literal_chat = str(build_prompt_mode_message("literal_chat").content)
+    workflow_setup = str(build_prompt_mode_message("workflow_setup").content)
 
     assert "Answer the visible user question directly." in literal_chat
     assert "If the user asks a greeting or how-you-are question" in literal_chat
     assert "Do not pivot into a new topic" in literal_chat
     assert "follow-up question" in literal_chat
+    assert "collaborative intake workflow setup session" in workflow_setup
+    assert "Only commit the workflow after explicit user confirmation." in workflow_setup
+
+
+def test_classify_prompt_mode_returns_workflow_setup_for_workflow_setup_turns() -> None:
+    assert classify_prompt_mode("show me the current draft", turn_mode="workflow_setup") == "workflow_setup"
 
 
 def test_validate_model_tool_call_rejects_runtime_managed_args() -> None:

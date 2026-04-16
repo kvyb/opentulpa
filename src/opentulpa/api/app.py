@@ -35,6 +35,7 @@ from opentulpa.application import (
     ApprovalExecutionOrchestrator,
     TurnOrchestrator,
     WakeOrchestrator,
+    WorkflowSetupOrchestrator,
 )
 from opentulpa.approvals.adapters.telegram import TelegramApprovalAdapter
 from opentulpa.approvals.broker import ApprovalBroker
@@ -44,7 +45,11 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.core.config import get_settings
-from opentulpa.intake import IntakeWorkflowService
+from opentulpa.intake import (
+    IntakeWorkflowService,
+    WorkflowSetupService,
+    WorkflowSetupSessionStore,
+)
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.chat_service import TelegramChatService
 from opentulpa.interfaces.telegram.client import TelegramClient
@@ -197,6 +202,9 @@ def create_app(
     def get_intake_workflows() -> IntakeWorkflowService:
         return _require(intake_service, "IntakeWorkflowService")
 
+    def get_workflow_setup_service() -> WorkflowSetupService:
+        return _require(workflow_setup_service, "WorkflowSetupService")
+
     def get_telegram_chat() -> TelegramChatService:
         return _require(telegram_chat, "TelegramChatService")
 
@@ -225,7 +233,21 @@ def create_app(
         get_agent_runtime=get_agent_runtime if runtime is not None else (lambda: None),
     )
 
-    turn_orchestrator = TurnOrchestrator(agent_runtime=runtime)
+    workflow_setup_store = WorkflowSetupSessionStore(
+        db_path=PROJECT_ROOT / ".opentulpa" / "intake_workflow_setup.db",
+    )
+    workflow_setup_service = WorkflowSetupService(
+        store=workflow_setup_store,
+        intake_workflows=intake_service,
+    )
+    workflow_setup_orchestrator = WorkflowSetupOrchestrator(
+        setup_service=workflow_setup_service,
+    )
+
+    turn_orchestrator = TurnOrchestrator(
+        agent_runtime=runtime,
+        workflow_setup_orchestrator=workflow_setup_orchestrator,
+    )
 
     def get_turn_orchestrator() -> TurnOrchestrator:
         return turn_orchestrator
@@ -342,6 +364,7 @@ def create_app(
     app.state.turn_orchestrator = turn_orchestrator
     app.state.composio = composio
     app.state.intake_workflows = intake_service
+    app.state.intake_workflow_setup = workflow_setup_service
     app.state.telegram_business = telegram_business
 
     @app.middleware("http")
@@ -404,6 +427,7 @@ def create_app(
     register_intake_workflow_routes(
         app,
         get_intake_workflows=get_intake_workflows,
+        get_workflow_setup_service=get_workflow_setup_service,
     )
     register_telegram_business_routes(
         app,

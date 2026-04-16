@@ -6,11 +6,13 @@ from typing import Literal
 
 from opentulpa.agent.lc_messages import SystemMessage
 
-TurnMode = Literal["interactive", "routine_wake", "approval_recovery", "event_notification"]
+TurnMode = Literal["interactive", "workflow_setup", "routine_wake", "approval_recovery", "event_notification"]
 
 
 def normalize_turn_mode(value: str | None) -> TurnMode:
     normalized = str(value or "").strip().lower()
+    if normalized == "workflow_setup":
+        return "workflow_setup"
     if normalized == "routine_wake":
         return "routine_wake"
     if normalized == "approval_recovery":
@@ -22,6 +24,19 @@ def normalize_turn_mode(value: str | None) -> TurnMode:
 
 def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
     normalized = normalize_turn_mode(turn_mode)
+    if normalized == "workflow_setup":
+        return SystemMessage(
+            content=(
+                "Turn mode: workflow_setup.\n"
+                "You are collaborating on an intake workflow draft, not executing a normal chat task.\n"
+                "Maintain the workflow setup draft and scratchpad through the dedicated setup tools.\n"
+                "Ask one high-value setup question at a time.\n"
+                "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it.\n"
+                "Do not dump the full draft unless the user asks for it.\n"
+                "If the user wants to stop setup for now, pause or cancel the setup session and hand back to normal chat.\n"
+                "If editing, modify the draft loaded from the existing workflow; do not treat the live workflow as already changed."
+            )
+        )
     if normalized == "routine_wake":
         return SystemMessage(
             content=(

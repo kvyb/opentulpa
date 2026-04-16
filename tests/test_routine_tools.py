@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from opentulpa.agent import tools_registry as tools_registry_module
 from opentulpa.agent.tools_registry import register_runtime_tools
 
 
@@ -19,10 +20,17 @@ class _Response:
 
 
 class _DummyRuntime:
-    def __init__(self, responses: list[_Response], *, customer_id: str = "telegram_123") -> None:
+    def __init__(
+        self,
+        responses: list[_Response],
+        *,
+        customer_id: str = "telegram_123",
+        thread_id: str = "thread_123",
+    ) -> None:
         self._responses = list(responses)
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self._active_customer_id = customer_id
+        self._active_thread_id = thread_id
 
     async def _request_with_backoff(self, method: str, path: str, **kwargs: Any) -> _Response:
         self.calls.append((method, path, kwargs))
@@ -104,6 +112,35 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_upsert_does_not_use_approval_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _unexpected_evaluate(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("approval guard should not run for intake_workflow_upsert")
+
+    monkeypatch.setattr(
+        tools_registry_module.ExecutionBoundaryGuard,
+        "evaluate",
+        _unexpected_evaluate,
+    )
+    runtime = _DummyRuntime([_Response(200, {"workflow": {"workflow_id": "iwf_abc"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        }
+    )
+
+    assert result["workflow_id"] == "iwf_abc"
+    assert runtime.calls[0][1] == "/internal/intake/workflows/upsert"
+
+
+@pytest.mark.asyncio
 async def test_intake_workflow_upsert_accepts_telegram_business_fields() -> None:
     runtime = _DummyRuntime([_Response(200, {"workflow": {"workflow_id": "iwf_tg"}})])
     tools = register_runtime_tools(runtime)
@@ -129,6 +166,35 @@ async def test_intake_workflow_upsert_accepts_telegram_business_fields() -> None
     assert payload["provider"] == "telegram_bot_api"
     assert payload["assistant_instructions"] == "Be concise and friendly."
     assert payload["knowledge_file_ids"] == ["file_1", "file_2"]
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_setup_begin_posts_expected_payload() -> None:
+    runtime = _DummyRuntime([_Response(200, {"session": {"session_id": "iwsetup_abc"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_setup_begin"].ainvoke({"mode": "create"})
+
+    assert result["session_id"] == "iwsetup_abc"
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/intake/setup/begin"
+    assert runtime.calls[0][2]["json_body"] == {
+        "customer_id": "telegram_123",
+        "thread_id": "thread_123",
+        "mode": "create",
+        "workflow_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_setup_update_requires_patch() -> None:
+    runtime = _DummyRuntime([])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_setup_update"].ainvoke({})
+
+    assert "draft_patch or scratchpad_patch is required" in str(result.get("error", ""))
+    assert runtime.calls == []
 
 
 @pytest.mark.asyncio

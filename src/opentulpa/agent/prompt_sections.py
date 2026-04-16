@@ -6,7 +6,7 @@ from typing import Literal
 
 from opentulpa.agent.lc_messages import SystemMessage
 
-PromptMode = Literal["literal_chat", "task_chat", "execution"]
+PromptMode = Literal["literal_chat", "task_chat", "execution", "workflow_setup"]
 
 # Placed between stable policy and per-turn injected context. Keeps the prefix
 # before this marker byte-stable for provider prompt caching (OpenAI/Gemini
@@ -34,6 +34,14 @@ def build_prompt_mode_message(prompt_mode: PromptMode) -> SystemMessage:
             "This turn likely needs tools, fresh state, or side effects.\n"
             "Use relevant retrieved context when it improves execution reliability.\n"
             "Prefer concrete status reporting over broad planning language."
+        )
+    elif prompt_mode == "workflow_setup":
+        text = (
+            "Prompt mode: workflow_setup.\n"
+            "This is a collaborative intake workflow setup session.\n"
+            "Treat the stored draft as the source of truth for the in-progress workflow configuration.\n"
+            "Prefer concise setup questions, draft updates, and proposal summaries over generic chat.\n"
+            "Only commit the workflow after explicit user confirmation."
         )
     else:
         text = (
