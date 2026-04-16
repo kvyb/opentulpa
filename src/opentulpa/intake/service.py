@@ -454,6 +454,10 @@ class IntakeWorkflowService:
         if safe_channel == "telegram_business_dm" and safe_provider != "telegram_bot_api":
             raise ValueError("telegram_business_dm workflows require provider=telegram_bot_api")
         if safe_channel == "telegram_business_dm":
+            safe_source_config = self._resolve_telegram_business_source_config(
+                customer_id=safe_customer,
+                source_config=safe_source_config,
+            )
             business_connection_id = str(safe_source_config.get("business_connection_id", "") or "").strip()
             if not business_connection_id:
                 raise ValueError("telegram_business_dm workflows require source_config.business_connection_id")
@@ -502,6 +506,42 @@ class IntakeWorkflowService:
             "enabled": bool(enabled),
             "routine_id": safe_routine_id,
         }
+
+    def _resolve_telegram_business_source_config(
+        self,
+        *,
+        customer_id: str,
+        source_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        safe_source_config = _safe_dict(source_config)
+        business_connection_id = str(
+            safe_source_config.get("business_connection_id", "") or ""
+        ).strip()
+        if business_connection_id:
+            return safe_source_config
+        telegram_business = self._telegram_business
+        if telegram_business is None or not hasattr(telegram_business, "status"):
+            return safe_source_config
+        status = _safe_dict(telegram_business.status(customer_id=customer_id))
+        enabled_connections = [
+            _safe_dict(item)
+            for item in _safe_list(status.get("connections"))
+            if bool(_safe_dict(item).get("is_enabled"))
+        ]
+        if len(enabled_connections) == 1:
+            resolved = dict(safe_source_config)
+            resolved["business_connection_id"] = str(
+                enabled_connections[0].get("business_connection_id", "") or ""
+            ).strip()
+            return resolved
+        if not enabled_connections:
+            raise ValueError(
+                "telegram_business_dm workflows require a connected Telegram Business account"
+            )
+        raise ValueError(
+            "telegram_business_dm workflows found multiple connected business accounts; "
+            "specify source_config.business_connection_id"
+        )
 
     def _normalize_sink_config(
         self,
@@ -649,10 +689,24 @@ class IntakeWorkflowService:
         safe_channel = str(channel or "instagram_dm").strip().lower() or "instagram_dm"
         if safe_workflow_id:
             existing = self.get_workflow(customer_id=customer_id, workflow_id=safe_workflow_id)
-        elif safe_channel == "telegram_business_dm":
-            existing = self._get_unique_telegram_business_workflow(customer_id=customer_id)
-            if existing is not None:
-                safe_workflow_id = str(existing.get("workflow_id", "") or "").strip()
+        if safe_channel == "telegram_business_dm":
+            existing_telegram_workflow = self._get_unique_telegram_business_workflow(
+                customer_id=customer_id
+            )
+            if existing_telegram_workflow is not None:
+                existing_telegram_workflow_id = str(
+                    existing_telegram_workflow.get("workflow_id", "") or ""
+                ).strip()
+                if existing is not None and safe_workflow_id == existing_telegram_workflow_id:
+                    raise ValueError(
+                        "telegram_business_dm workflows cannot be edited in place; fetch the "
+                        "existing workflow for context, delete it, then create a new workflow"
+                    )
+                if not safe_workflow_id:
+                    raise ValueError(
+                        "telegram_business_dm workflows cannot be updated in place; fetch the "
+                        "existing workflow for context, delete it, then create a new workflow"
+                    )
         workflow = self._normalize_workflow_payload(
             workflow_id=safe_workflow_id or None,
             customer_id=customer_id,

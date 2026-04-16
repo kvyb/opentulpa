@@ -851,7 +851,18 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         - For a brand-new workflow, omit workflow_id or pass an empty string.
         - For updates, pass the existing workflow_id.
         - If the user is refining or editing an existing workflow, prefer intake_workflow_list and
-          intake_workflow_get first, then update the matching workflow_id instead of creating a duplicate.
+          intake_workflow_get first so you have the full current workflow before changing anything.
+        - Telegram Business workflows cannot be edited in place.
+        - If the user wants to change an existing Telegram Business workflow, do this sequence:
+          1. intake_workflow_list or intake_workflow_get to fetch the current workflow for context
+          2. intake_workflow_delete for that workflow_id
+          3. intake_workflow_upsert with the replacement workflow
+        - When recreating a Telegram Business workflow, you do not need to manually carry
+          source_config.business_connection_id if this user has exactly one connected Telegram
+          Business account; the backend resolves it automatically.
+        - If the user has multiple connected Telegram Business accounts, specify
+          source_config.business_connection_id explicitly.
+        - Do not try to patch or overwrite an existing Telegram Business workflow by reusing its workflow_id.
         - required_fields must be a list of plain field names like ["date", "time", "car_type"].
         - field_guidance may be either:
           - a dict keyed by field name, or
@@ -862,7 +873,8 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
         - channel/provider pairs supported here:
           - instagram_dm + composio
           - telegram_business_dm + telegram_bot_api
-        - For Telegram Business, source_config.business_connection_id is required.
+        - For Telegram Business, source_config.business_connection_id may be omitted only when the
+          user has exactly one connected Telegram Business account; otherwise it must be provided.
         - assistant_instructions should store the durable business brief for the workflow:
           the user's goals, reply style, qualification rules, booking policy, escalation boundaries,
           important constraints, and any other operating instructions learned during the conversation that

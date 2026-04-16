@@ -44,3 +44,7 @@ def test_build_intake_workflow_skill_uses_shared_template_for_instagram_and_tele
     assert "Instagram DMs" in str(instagram["skill_markdown"])
     assert "Telegram Business DMs" in str(telegram["skill_markdown"])
     assert "single durable intake policy" in str(telegram["skill_markdown"])
+    assert "cannot be edited in place" in str(telegram["skill_markdown"])
+    assert "backend can reuse the single connected Telegram Business account automatically" in str(
+        telegram["skill_markdown"]
+    )

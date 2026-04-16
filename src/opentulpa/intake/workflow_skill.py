@@ -141,9 +141,12 @@ def build_intake_workflow_skill(
         "- If the user later changes how this workflow should behave, update this durable workflow rather than creating a near-duplicate.",
     ]
     if channel == "telegram_business_dm":
-        edit_rule_lines.append(
-            "- For Telegram Business, this workflow is the single durable intake policy for the connected business account."
-        )
+        edit_rule_lines = [
+            "- For Telegram Business, this workflow is the single durable intake policy for the connected business account.",
+            "- Telegram Business workflows cannot be edited in place.",
+            "- If the user wants to change this Telegram Business workflow, first fetch the current workflow for context, then delete it, then create a replacement workflow.",
+            "- When recreating it, the backend can reuse the single connected Telegram Business account automatically; only specify a different business_connection_id when the user explicitly wants another connected business account.",
+        ]
     instructions = (
         "## Purpose\n"
         f"Support the durable intake workflow `{safe_workflow['name']}`.\n\n"

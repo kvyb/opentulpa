@@ -483,6 +483,7 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
     assert "## Operating Context" in skill["skill_markdown"]
     assert "## Save Behavior" in skill["skill_markdown"]
     assert "single durable intake policy" in skill["skill_markdown"]
+    assert "cannot be edited in place" in skill["skill_markdown"]
     assert "Always confirm the final appointment time explicitly." in skill["skill_markdown"]
     workflow_file = json.loads(skill["supporting_files"]["workflow.json"])
     assert workflow_file["source_config"] == {"business_connection_id": "bc_123"}
@@ -492,7 +493,41 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_telegram_business_workflow_upsert_reuses_existing_workflow_for_customer(
+async def test_telegram_business_workflow_upsert_auto_resolves_single_connected_account(
+    tmp_path: Path,
+) -> None:
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio({}, {}),
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Telegram Intake",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Be concise.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    assert workflow["source_config"] == {"business_connection_id": "bc_123"}
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_workflow_upsert_requires_delete_then_recreate_for_customer(
     tmp_path: Path,
 ) -> None:
     service, _, _, _, _ = _mk_service(
@@ -513,22 +548,36 @@ async def test_telegram_business_workflow_upsert_reuses_existing_workflow_for_cu
         sink_type="local_csv",
         sink_config={"file_path": "tulpa_stuff/bookings.csv"},
     )
-    second = service.upsert_workflow(
-        customer_id="telegram_123",
-        name="Salon Telegram Intake Updated",
-        channel="telegram_business_dm",
-        provider="telegram_bot_api",
-        source_config={"business_connection_id": "bc_123"},
-        intent_description="Handle Telegram Business appointment and reschedule requests.",
-        required_fields=["name", "time", "service"],
-        assistant_instructions="Be concise and collect service details.",
-        sink_type="local_csv",
-        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
-    )
 
-    assert second["workflow_id"] == first["workflow_id"]
-    assert second["name"] == "Salon Telegram Intake Updated"
-    assert second["required_fields"] == ["name", "time", "service"]
+    with pytest.raises(ValueError, match="cannot be updated in place"):
+        service.upsert_workflow(
+            customer_id="telegram_123",
+            name="Salon Telegram Intake Updated",
+            channel="telegram_business_dm",
+            provider="telegram_bot_api",
+            source_config={"business_connection_id": "bc_123"},
+            intent_description="Handle Telegram Business appointment and reschedule requests.",
+            required_fields=["name", "time", "service"],
+            assistant_instructions="Be concise and collect service details.",
+            sink_type="local_csv",
+            sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        )
+
+    with pytest.raises(ValueError, match="cannot be edited in place"):
+        service.upsert_workflow(
+            customer_id="telegram_123",
+            workflow_id=first["workflow_id"],
+            name="Salon Telegram Intake Updated",
+            channel="telegram_business_dm",
+            provider="telegram_bot_api",
+            source_config={"business_connection_id": "bc_123"},
+            intent_description="Handle Telegram Business appointment and reschedule requests.",
+            required_fields=["name", "time", "service"],
+            assistant_instructions="Be concise and collect service details.",
+            sink_type="local_csv",
+            sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        )
+
     workflows = service.list_workflows(customer_id="telegram_123", include_disabled=True)
     telegram_workflows = [
         item for item in workflows if item["channel"] == "telegram_business_dm"
