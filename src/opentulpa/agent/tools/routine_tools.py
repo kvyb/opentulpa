@@ -1,0 +1,206 @@
+"""Routine tool registration."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from langchain.tools import tool
+
+from opentulpa.agent.tools.common import require_customer_id
+from opentulpa.agent.tools.guardrail_helpers import (
+    approval_pending_payload,
+    normalize_cleanup_paths,
+    normalize_command_for_working_dir,
+    normalize_execution_origin,
+)
+from opentulpa.agent.utils import looks_like_shell_command as _looks_like_shell_command
+from opentulpa.policy.execution_boundary import ExecutionBoundaryContext, ExecutionBoundaryGuard
+
+
+def register_routine_tools(runtime: Any) -> dict[str, Any]:
+    boundary_guard = ExecutionBoundaryGuard(runtime=runtime)
+
+    @tool
+    async def routine_create(
+        name: str,
+        schedule: str,
+        implementation_command: str,
+        instruction: str,
+        notify_user: bool = True,
+        cleanup_paths: list[str] | None = None,
+        thread_id: str = "",
+        execution_origin: str | None = None,
+        preapproved: bool = False,
+        guard_context: dict[str, Any] | None = None,
+    ) -> Any:
+        """
+        Create a scheduled routine.
+        - Recurring: cron (e.g. "0 9 * * *")
+        - One-time: local ISO datetime (e.g. "2026-02-18T23:45:00+08:00")
+        - instruction: explicit schedule-time scratchpad for each run. Include required scripts,
+          files/paths, keys to read from storage, and expected output/action.
+        - implementation_command: planned shell/script command used for guardrail evaluation.
+        - cleanup_paths: optional repo-relative file paths to remove when deleting this automation.
+        """
+        safe_name = str(name or "").strip()
+        safe_schedule = str(schedule or "").strip()
+        safe_instruction = str(instruction or "").strip()
+        safe_command = normalize_command_for_working_dir(
+            command=str(implementation_command or "").strip(),
+            working_dir="tulpa_stuff",
+        )
+        safe_customer = require_customer_id(runtime)
+        if not safe_name:
+            return {"error": "routine_create failed: name is required"}
+        if not safe_schedule:
+            return {"error": "routine_create failed: schedule is required"}
+        if not safe_instruction:
+            return {"error": "routine_create failed: instruction is required"}
+        if not safe_command:
+            return {
+                "error": (
+                    "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create requires "
+                    "implementation_command (concrete shell/script command)."
+                )
+            }
+        if not _looks_like_shell_command(safe_command):
+            return {
+                "error": (
+                    "ROUTINE_IMPLEMENTATION_COMMAND_INVALID: implementation_command must be a "
+                    "concrete shell command (executable + args)."
+                )
+            }
+
+        normalized_origin = normalize_execution_origin(
+            thread_id=thread_id,
+            execution_origin=execution_origin,
+        )
+
+        guard_payload = guard_context if isinstance(guard_context, dict) else {}
+        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
+        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
+        decision = await boundary_guard.evaluate(
+            ExecutionBoundaryContext(
+                customer_id=safe_customer,
+                thread_id=str(thread_id or "").strip() or f"chat-{safe_customer}",
+                action_name="routine_create",
+                action_args={
+                    "name": safe_name,
+                    "schedule": safe_schedule,
+                    "instruction": safe_instruction[:1200],
+                    "notify_user": bool(notify_user),
+                    "implementation_command": safe_command,
+                },
+                execution_origin=normalized_origin,
+                preapproved=bool(preapproved),
+                action_note=(
+                    "Routine creation with planned implementation command. "
+                    "Classify external write side effects for future scheduled behavior. "
+                    f"previous_user_message={previous_user[:800]} "
+                    f"previous_assistant_message={previous_assistant[:800]}"
+                ),
+            )
+        )
+        gate = str((decision or {}).get("gate", "allow")).strip().lower()
+        if gate == "require_approval":
+            return approval_pending_payload(
+                action_name="routine_create",
+                command_preview=safe_command,
+                decision=decision if isinstance(decision, dict) else {},
+            )
+        if gate == "deny":
+            return {
+                "ok": False,
+                "status": "denied",
+                "gate": "deny",
+                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
+            }
+
+        auto_notify = bool(notify_user)
+        safe_cleanup_paths = normalize_cleanup_paths(cleanup_paths)
+
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/scheduler/routine",
+            json_body={
+                "name": safe_name,
+                "schedule": safe_schedule,
+                "payload": {
+                    "instruction": safe_instruction,
+                    "customer_id": safe_customer,
+                    "notify_user": auto_notify,
+                    "notification_opt_out": not auto_notify,
+                    "cleanup_paths": safe_cleanup_paths,
+                },
+                "is_cron": " " in safe_schedule and len(safe_schedule.split()) >= 5,
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"routine_create failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def routine_list() -> Any:
+        """List routines for the current user."""
+        customer_id = require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "GET",
+            "/internal/scheduler/routines",
+            params={"customer_id": customer_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"routine_list failed: {r.text}"}
+        return r.json().get("routines", [])
+
+    @tool
+    async def routine_delete(routine_id: str) -> Any:
+        """Delete/stop one routine by id for the current user."""
+        customer_id = require_customer_id(runtime)
+        rid = str(routine_id or "").strip()
+        if not rid:
+            return {"error": "routine_delete failed: routine_id is required"}
+
+        r = await runtime._request_with_backoff(
+            "DELETE",
+            f"/internal/scheduler/routine/{rid}",
+            params={"customer_id": customer_id},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"routine_delete failed: {r.text}"}
+        payload = r.json() if r.content else {}
+        if not bool(payload.get("ok")):
+            return {
+                "error": "routine_delete failed: routine not found or not accessible",
+                "routine_id": rid,
+            }
+
+        verify = await runtime._request_with_backoff(
+            "GET",
+            "/internal/scheduler/routines",
+            params={"customer_id": customer_id},
+            timeout=10.0,
+        )
+        if verify.status_code != 200:
+            return {
+                "ok": True,
+                "routine_id": rid,
+                "verified_removed": False,
+                "warning": "delete succeeded but verification list failed",
+            }
+        routines = verify.json().get("routines", [])
+        still_present = any(str(item.get("id", "")) == rid for item in routines if isinstance(item, dict))
+        return {
+            "ok": not still_present,
+            "routine_id": rid,
+            "verified_removed": not still_present,
+            "remaining_routines": routines,
+        }
+
+    return {
+        "routine_create": routine_create,
+        "routine_list": routine_list,
+        "routine_delete": routine_delete,
+    }

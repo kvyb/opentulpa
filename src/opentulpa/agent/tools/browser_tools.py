@@ -1,0 +1,305 @@
+"""Browser Use tool registration."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlparse
+
+from langchain.tools import tool
+
+from opentulpa.agent.tools.common import require_customer_id
+
+
+def _get_browser_use_local_manager(runtime: Any) -> tuple[Any | None, str | None]:
+    getter = getattr(runtime, "get_browser_use_local_manager", None)
+    if not callable(getter):
+        return None, "browser_use local backend unavailable: runtime manager not initialized"
+    try:
+        manager = getter()
+    except Exception as exc:
+        return None, f"browser_use local backend unavailable: {exc}"
+    if manager is None:
+        return None, "browser_use local backend unavailable: manager is None"
+    return manager, None
+
+
+def _normalize_allowed_domains(allowed_domains: list[str] | None) -> list[str]:
+    if not isinstance(allowed_domains, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in allowed_domains:
+        raw = str(item or "").strip().lower()
+        if not raw:
+            continue
+        host = ""
+        if "://" in raw:
+            host = str(urlparse(raw).hostname or "").strip().lower()
+        else:
+            host = raw.split("/", 1)[0].split(":", 1)[0].strip().lower()
+        host = host.strip(".")
+        if not host or "." not in host:
+            continue
+        if not re.fullmatch(r"[a-z0-9.-]{1,253}", host):
+            continue
+        if host in seen:
+            continue
+        seen.add(host)
+        out.append(host)
+    return out
+
+
+def _compact_browser_use_task_view(
+    payload: dict[str, Any],
+    *,
+    include_steps: bool = False,
+    max_steps_preview: int = 3,
+    max_output_chars: int = 12000,
+) -> dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    steps = data.get("steps", [])
+    steps_list = steps if isinstance(steps, list) else []
+
+    output_text = data.get("output")
+    output = str(output_text) if output_text is not None else None
+    truncated_output = False
+    if output and len(output) > max_output_chars:
+        output = output[:max_output_chars] + "..."
+        truncated_output = True
+
+    output_files_raw = data.get("outputFiles", [])
+    output_files: list[dict[str, Any]] = []
+    if isinstance(output_files_raw, list):
+        for item in output_files_raw[:20]:
+            if isinstance(item, dict):
+                output_files.append(
+                    {
+                        "id": item.get("id"),
+                        "fileName": item.get("fileName"),
+                        "path": item.get("path"),
+                    }
+                )
+
+    result: dict[str, Any] = {
+        "id": data.get("id"),
+        "session_id": data.get("sessionId"),
+        "status": data.get("status"),
+        "is_success": data.get("isSuccess"),
+        "started_at": data.get("startedAt"),
+        "finished_at": data.get("finishedAt"),
+        "task": data.get("task"),
+        "llm": data.get("llm"),
+        "output": output,
+        "output_truncated": truncated_output,
+        "output_files": output_files,
+        "steps_count": len(steps_list),
+    }
+
+    if include_steps:
+        safe_preview = max(1, min(int(max_steps_preview), 10))
+        preview: list[dict[str, Any]] = []
+        for step in steps_list[:safe_preview]:
+            if not isinstance(step, dict):
+                continue
+            actions = step.get("actions", [])
+            actions_list = [str(a) for a in actions][:5] if isinstance(actions, list) else []
+            preview.append(
+                {
+                    "number": step.get("number"),
+                    "url": step.get("url"),
+                    "next_goal": str(step.get("nextGoal") or "")[:240],
+                    "actions": actions_list,
+                    "screenshot_url": step.get("screenshotUrl"),
+                }
+            )
+        result["steps_preview"] = preview
+        result["steps_preview_truncated"] = len(steps_list) > safe_preview
+    return result
+
+
+def register_browser_tools(runtime: Any) -> dict[str, Any]:
+    @tool
+    async def browser_use_session_list() -> Any:
+        """
+        List known Browser Use sessions so the agent can reuse an idle session_id
+        instead of spawning a fresh browser session.
+        """
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_session_list unavailable"}
+        return {"sessions": await manager.list_sessions()}
+
+    @tool
+    async def browser_use_run(
+        task: str,
+        allowed_domains: list[str] | None = None,
+        max_steps: int = 20,
+        wait_timeout_seconds: int = 600,
+        poll_interval_seconds: int = 4,
+        llm: str = "browser-use-llm",
+        start_url: str | None = None,
+        session_id: str | None = None,
+    ) -> Any:
+        """
+        Run a local Browser Use task and wait for completion.
+        Use for dynamic web tasks that need real browser interactions.
+        Reuse a prior session_id when continuing the same browsing workflow.
+        """
+        task_text = str(task or "").strip()
+        if not task_text:
+            return {"error": "browser_use_run requires a non-empty task"}
+        require_customer_id(runtime)
+
+        safe_max_steps = max(1, min(int(max_steps), 80))
+        safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
+        safe_poll_interval = max(2, min(int(poll_interval_seconds), 30))
+        safe_domains = _normalize_allowed_domains(allowed_domains)
+        safe_llm = str(llm or "").strip() or "browser-use-llm"
+        safe_start_url = str(start_url or "").strip()
+        safe_session_id = str(session_id or "").strip()
+
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_run unavailable"}
+
+        created = await manager.start_task(
+            task=task_text,
+            max_steps=safe_max_steps,
+            llm=safe_llm,
+            allowed_domains=safe_domains,
+            start_url=safe_start_url or None,
+            session_id=safe_session_id or None,
+        )
+        if isinstance(created, dict) and created.get("error"):
+            return {
+                "error": str(created.get("error")),
+                "session_id": created.get("sessionId") or safe_session_id or None,
+                "active_task_id": created.get("activeTaskId"),
+            }
+
+        task_id = str((created or {}).get("id") or "").strip()
+        result_session_id = str((created or {}).get("sessionId") or safe_session_id).strip()
+        if not task_id:
+            return {
+                "error": str((created or {}).get("error") or "browser_use_run create failed: missing task id"),
+                "session_id": result_session_id or None,
+                "active_task_id": (created or {}).get("activeTaskId"),
+            }
+
+        deadline = datetime.now(UTC).timestamp() + safe_wait_timeout
+        while True:
+            task_data = await manager.get_task(task_id)
+            if not isinstance(task_data, dict):
+                return {
+                    "error": f"browser_use_run poll failed: task not found ({task_id})",
+                    "task_id": task_id,
+                    "session_id": result_session_id or None,
+                }
+
+            status = str(task_data.get("status") or "").strip().lower()
+            if status in {"finished", "stopped", "failed"}:
+                compact = _compact_browser_use_task_view(task_data)
+                compact["task_id"] = task_id
+                compact["session_id"] = result_session_id or compact.get("session_id")
+                compact["status"] = status or str(compact.get("status") or "unknown")
+                compact["live_url"] = None
+                return compact
+
+            if datetime.now(UTC).timestamp() >= deadline:
+                return {
+                    "task_id": task_id,
+                    "session_id": result_session_id or None,
+                    "status": status or "started",
+                    "timed_out": True,
+                    "message": (
+                        "Task is still running. Use browser_use_task_get(task_id) "
+                        "to check progress or browser_use_task_control to stop."
+                    ),
+                }
+
+            await asyncio.sleep(safe_poll_interval)
+
+    @tool
+    async def browser_use_task_get(
+        task_id: str,
+        include_steps: bool = False,
+        max_steps_preview: int = 3,
+    ) -> Any:
+        """Get Browser Use task status/details by task_id (compact by default)."""
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_get requires task_id"}
+
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_task_get unavailable"}
+
+        payload = await manager.get_task(safe_task_id)
+        if not isinstance(payload, dict):
+            return {"error": f"browser_use_task_get failed: task not found ({safe_task_id})"}
+        return _compact_browser_use_task_view(
+            payload,
+            include_steps=bool(include_steps),
+            max_steps_preview=max_steps_preview,
+        )
+
+    @tool
+    async def browser_use_task_screenshot(
+        task_id: str,
+        full_page: bool = True,
+    ) -> Any:
+        """
+        Capture a screenshot from an existing Browser Use task/session, save it under
+        tulpa_stuff/, and return the local path. Use tulpa_file_send(path) to send it.
+        """
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_screenshot requires task_id"}
+
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_task_screenshot unavailable"}
+
+        payload = await manager.capture_screenshot(
+            task_id=safe_task_id,
+            full_page=bool(full_page),
+        )
+        if isinstance(payload, dict) and payload.get("error"):
+            return {"error": str(payload.get("error"))}
+        return payload if isinstance(payload, dict) else {"error": "browser_use_task_screenshot failed"}
+
+    @tool
+    async def browser_use_task_control(task_id: str, action: str = "stop_task_and_session") -> Any:
+        """Control Browser Use task execution (stop, pause, resume, or stop_task_and_session)."""
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_task_control requires task_id"}
+        safe_action = str(action or "").strip().lower()
+        allowed_actions = {"stop", "pause", "resume", "stop_task_and_session"}
+        if safe_action not in allowed_actions:
+            return {
+                "error": (
+                    "browser_use_task_control invalid action. "
+                    "Use one of: stop, pause, resume, stop_task_and_session"
+                )
+            }
+
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_task_control unavailable"}
+
+        payload = await manager.control_task(task_id=safe_task_id, action=safe_action)
+        if isinstance(payload, dict) and payload.get("error"):
+            return {"error": str(payload.get("error"))}
+        return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
+
+    return {
+        "browser_use_session_list": browser_use_session_list,
+        "browser_use_run": browser_use_run,
+        "browser_use_task_get": browser_use_task_get,
+        "browser_use_task_screenshot": browser_use_task_screenshot,
+        "browser_use_task_control": browser_use_task_control,
+    }
