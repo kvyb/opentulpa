@@ -23,6 +23,7 @@ _ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
 _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_write"}
 _DEFAULT_SCHEDULE = "*/5 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
+_MAX_LATEST_INBOUND_AGE = timedelta(minutes=1)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
 _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 
@@ -46,6 +47,13 @@ def _parse_datetime(value: Any) -> datetime | None:
                 return parsed.replace(tzinfo=UTC)
             return parsed.astimezone(UTC)
     return None
+
+
+def _is_older_than(value: Any, *, max_age: timedelta) -> bool:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return False
+    return (_utc_now() - parsed) > max_age
 
 
 def _json_dumps(value: Any) -> str:
@@ -1317,6 +1325,19 @@ class IntakeWorkflowService:
                     cursor=cursor,
                     force=force,
                 ):
+                    continue
+                if not force and _is_older_than(
+                    conversation_summary.get("latest_inbound_message_created_time"),
+                    max_age=_MAX_LATEST_INBOUND_AGE,
+                ):
+                    self._set_cursor(
+                        workflow_id=str(workflow["workflow_id"]),
+                        conversation_id=conversation_id,
+                        latest_inbound_message_id=latest_inbound_id,
+                        latest_inbound_message_time=latest_inbound_time,
+                        conversation_updated_time=conversation_updated_time,
+                        latest_outbound_message_id=latest_outbound_id,
+                    )
                     continue
 
                 processed += 1
