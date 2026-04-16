@@ -17,6 +17,15 @@ from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
 
 
+@pytest.fixture(autouse=True)
+def _freeze_intake_test_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: intake_service_module._parse_datetime("2026-04-07T08:30:00+00:00"),
+    )
+
+
 def _instagram_conversation(
     *,
     conversation_id: str,
@@ -524,6 +533,73 @@ async def test_telegram_business_workflow_upsert_reuses_existing_workflow_for_cu
         item for item in workflows if item["channel"] == "telegram_business_dm"
     ]
     assert len(telegram_workflows) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_ignores_latest_inbound_older_than_one_hour(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Book my sedan tomorrow at 3pm for a full wash.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Book sedan wash.",
+                "extracted_fields": {"date": "tomorrow"},
+                "missing_fields": ["time"],
+                "reply_action": "send_reply",
+                "reply_text": "What time works for you?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "clear booking request",
+            }
+        ]
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio(summary, conversation),
+    )
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: intake_service_module._parse_datetime("2026-04-07T10:00:01+00:00"),
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle booking requests.",
+        required_fields=["date", "time"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    assert result["processed_conversations"] == 0
+    assert result["matched_conversations"] == 0
+    assert result["summary"] == NO_NOTIFY_TOKEN
+    assert runtime.calls == []
+    cursor = service._get_cursor(workflow_id=workflow["workflow_id"], conversation_id="conv_1")  # noqa: SLF001
+    assert cursor["last_seen_inbound_message_id"] == "msg_1"
 
 
 @pytest.mark.asyncio

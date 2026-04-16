@@ -23,6 +23,7 @@ _ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
 _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_write"}
 _DEFAULT_SCHEDULE = "*/5 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
+_MAX_LATEST_INBOUND_AGE = timedelta(hours=1)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
 _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 
@@ -46,6 +47,14 @@ def _parse_datetime(value: Any) -> datetime | None:
                 return parsed.replace(tzinfo=UTC)
             return parsed.astimezone(UTC)
     return None
+
+
+def _is_older_than(value: Any, *, max_age: timedelta, now: datetime | None = None) -> bool:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return False
+    reference = now or _utc_now()
+    return parsed < (reference - max_age)
 
 
 def _json_dumps(value: Any) -> str:
@@ -1312,6 +1321,34 @@ class IntakeWorkflowService:
                     workflow_id=str(workflow["workflow_id"]),
                     conversation_id=conversation_id,
                 )
+                if not force and _is_older_than(
+                    conversation_summary.get("latest_inbound_message_created_time"),
+                    max_age=_MAX_LATEST_INBOUND_AGE,
+                ):
+                    self._set_cursor(
+                        workflow_id=str(workflow["workflow_id"]),
+                        conversation_id=conversation_id,
+                        latest_inbound_message_id=str(
+                            conversation_summary.get("latest_inbound_message_id", "") or ""
+                        ).strip(),
+                        latest_inbound_message_time=str(
+                            conversation_summary.get("latest_inbound_message_created_time", "") or ""
+                        ).strip(),
+                        conversation_updated_time=str(
+                            conversation_summary.get("conversation_updated_time", "") or ""
+                        ).strip(),
+                        latest_outbound_message_id=str(
+                            conversation_summary.get("latest_outbound_message_id", "") or ""
+                        ).strip(),
+                        agent_action_at=_utc_now_iso(),
+                    )
+                    self._emit_observability(
+                        event="intake.conversation.ignored",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        reason="stale_inbound_message",
+                    )
+                    continue
                 if not self._has_new_inbound_signal(
                     conversation_summary=conversation_summary,
                     cursor=cursor,
