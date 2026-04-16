@@ -1,13 +1,8 @@
 # Deployment Guide
 
-## Local
+This guide covers the practical ways to run OpenTulpa today.
 
-Requirements:
-- Python `3.12+`
-- [`uv`](https://docs.astral.sh/uv/)
-- an OpenAI-compatible API key
-
-Setup:
+If you just want the fastest local path, do this:
 
 ```bash
 git clone <repo-url>
@@ -15,60 +10,123 @@ cd opentulpa
 cp .env.example .env
 ```
 
-Set in `.env`:
+Set:
 
 ```bash
 OPENAI_COMPATIBLE_API_KEY=...
 ```
 
-Install and run:
+Then run:
 
 ```bash
 ./start.sh --app
 ```
 
 Health checks:
+
 - `http://127.0.0.1:8000/healthz`
 - `http://127.0.0.1:8000/agent/healthz`
 
-Telegram is the primary interface. For local use:
+## Choose a runtime mode
 
-1. set `TELEGRAM_BOT_TOKEN`
-2. run `./start.sh`
+`start.sh` supports two useful modes:
 
-Telegram Business intake uses the same bot token and webhook surface, but it has extra Telegram-side prerequisites:
+- `--app`: run the FastAPI app directly
+- default manager mode: run the app through the quick-tunnel manager flow
+
+In practice:
+
+- use `./start.sh --app` for direct local app runs
+- use `./start.sh` when you want the managed local Telegram flow with `cloudflared`
+
+## Local setup
+
+Requirements:
+
+- Python `3.12+`
+- [`uv`](https://docs.astral.sh/uv/)
+- an OpenAI-compatible API key
+
+Base setup:
+
+```bash
+git clone <repo-url>
+cd opentulpa
+cp .env.example .env
+```
+
+Required `.env` value:
+
+```bash
+OPENAI_COMPATIBLE_API_KEY=...
+```
+
+Run locally:
+
+```bash
+./start.sh --app
+```
+
+## Telegram setup
+
+Telegram is the main operator interface.
+
+For local use:
+
+1. create a bot in `@BotFather`
+2. set `TELEGRAM_BOT_TOKEN` in `.env`
+3. run `./start.sh`
+
+When you use the default manager flow, `start.sh` will also handle dependency setup for Playwright Chromium and `cloudflared` if needed.
+
+## Telegram Business intake
+
+Telegram Business uses the same bot token and webhook surface, but Telegram has extra setup requirements:
 
 1. create the bot in `@BotFather`
 2. enable Business Mode for that bot
-3. connect the bot to the Telegram Business account in Telegram
-4. grant the bot the required business inbox permissions
+3. connect the bot to the Telegram Business account
+4. grant the required business inbox permissions
 
-Once connected, OpenTulpa can ingest inbound Telegram Business leads from the shared `/webhook/telegram` endpoint and continue those lead conversations from persisted state.
+Once connected, OpenTulpa can ingest inbound Telegram Business leads from `/webhook/telegram`, persist their state locally, and continue those conversations across multiple turns.
 
-Optional Composio support:
+## Optional integrations
+
+### Composio
+
+If you want OpenTulpa to authenticate into supported third-party services:
 
 ```bash
 COMPOSIO_API_KEY=...
 ```
 
-OpenTulpa computes the Composio callback URL from your public base URL when possible. You only need this override if you want to force a specific callback URL:
+OpenTulpa derives the Composio callback URL from your public base URL when possible. Override only if you need to force a specific callback:
 
 ```bash
 COMPOSIO_DEFAULT_CALLBACK_URL=https://your-public-base/webhook/composio/callback
 ```
 
-If you want Browser Use locally:
+### Browser automation
 
-- it is installed by default when `./start.sh` runs
-- use `./start.sh --no-browser-use` to skip it
+Browser Use and Playwright Chromium are installed by default when `./start.sh` runs.
 
-Useful script modes:
-- `./start.sh`
-- `./start.sh --app`
-- `./start.sh install`
-- `./start.sh run --app`
+Skip browser installation with:
+
+```bash
+./start.sh --no-browser-use
+```
+
+## Useful startup commands
+
+| Command | Meaning |
+|---|---|
+| `./start.sh` | Install and run in manager mode |
+| `./start.sh --app` | Install and run in direct app mode |
+| `./start.sh install` | Install only |
+| `./start.sh run --app` | Run only |
 
 Useful `.env` knobs:
+
 - `START_MODE=auto|app|manager`
 - `INSTALL_BROWSER_USE=1|0`
 - `INSTALL_CLOUDFLARED=auto|1|0`
@@ -76,25 +134,27 @@ Useful `.env` knobs:
 
 ## Docker
 
-The included `Dockerfile` already installs Python dependencies, Node.js/npm, and Playwright Chromium:
+The included `Dockerfile` already installs Python dependencies, Node.js/npm, and Playwright Chromium.
+
+Build and run:
 
 ```bash
 docker build -t opentulpa .
 docker run --rm -p 8000:8000 --env-file .env opentulpa
 ```
 
-Use Docker for local API testing or as the base for cloud deploys.
+Use Docker for local API testing or as the base for cloud deployment.
 
 ## Railway
 
 Railway builds from the included `Dockerfile`.
 
-### Required
+### Required settings
 
 - `OPENAI_COMPATIBLE_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 
-### Recommended
+### Recommended settings
 
 - `TELEGRAM_WEBHOOK_SECRET`
 - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
@@ -104,27 +164,19 @@ Railway builds from the included `Dockerfile`.
 - `MEMORY_LLM_MODEL=google/gemini-3-flash-preview`
 - `MULTIMODAL_LLM=google/gemini-3-flash-preview`
 - `GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview`
-- Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
 
-### Optional
+Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
+
+### Optional settings
 
 - `COMPOSIO_API_KEY`
 - `COMPOSIO_DEFAULT_CALLBACK_URL`
 - `AGENT_PROMPT_CACHING_ENABLED=1|0`
 
-### Telegram Business notes
+### Railway setup checklist
 
-If you want Telegram Business intake in production:
-
-- the business account owner must connect the bot inside Telegram after deploy
-- `PUBLIC_BASE_URL` should be set so webhook registration is correct
-- the same deployed bot/webhook handles both ordinary Telegram chat and Telegram Business updates
-- OpenTulpa persists Telegram Business inbox state locally, so mount persistent storage the same way you would for the rest of `.opentulpa`
-
-### Setup
-
-1. Create a Railway project from this repo.
-2. Add one volume mounted at `/app/opentulpa_data`.
+1. Create a Railway project from this repo
+2. Add one volume mounted at `/app/opentulpa_data`
 3. Set:
    - `OPENAI_COMPATIBLE_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
@@ -134,7 +186,7 @@ If you want Telegram Business intake in production:
    - `PUBLIC_BASE_URL`
    - `COMPOSIO_API_KEY`
    - `COMPOSIO_DEFAULT_CALLBACK_URL`
-5. Deploy.
+5. Deploy
 
 ### What happens automatically
 
@@ -142,11 +194,19 @@ If you want Telegram Business intake in production:
 - Python dependencies are installed
 - Playwright Chromium is installed
 - Telegram webhook is auto-registered when a public URL is available
-- Composio callback URL is derived from the public base URL when Composio is configured, unless you override it explicitly
+- Composio callback URL is derived from the public base URL when Composio is configured unless you override it
 
-### Persistence
+### Telegram Business notes for production
 
-OpenTulpa stores state in:
+- the business account owner must connect the bot inside Telegram after deploy
+- `PUBLIC_BASE_URL` should be set so webhook registration is correct
+- the same deployed bot and webhook handle both ordinary Telegram chat and Telegram Business updates
+- OpenTulpa persists Telegram Business inbox state locally, so use persistent storage
+
+## Persistence
+
+OpenTulpa stores durable state in:
+
 - `.opentulpa`
 - `tulpa_stuff`
 
