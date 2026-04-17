@@ -1822,6 +1822,7 @@ class IntakeWorkflowService:
         sink_ref = dict(_safe_dict(target_booking.get("sink_record_ref")))
         sink_status = str(target_booking.get("sink_write_status", "pending") or "pending").strip()
         saved_summary = ""
+        sink_arguments = dict(_safe_dict(decision.get("sink_arguments")))
         if ready_to_save:
             save_payload = dict(_safe_dict(decision.get("save_payload")))
             if not save_payload:
@@ -1864,6 +1865,7 @@ class IntakeWorkflowService:
                 workflow=workflow,
                 booking=target_booking,
                 payload=save_payload,
+                sink_arguments=sink_arguments,
             )
             if sink_error is not None:
                 target_booking["status"] = "active"
@@ -2001,6 +2003,7 @@ class IntakeWorkflowService:
                 "reply_action": str(decision.get("reply_action", "") or "").strip().lower(),
                 "ready_to_save": bool(decision.get("ready_to_save")),
                 "missing_fields": _unique_string_list(decision.get("missing_fields")),
+                "sink_arguments": _safe_dict(decision.get("sink_arguments")),
             },
         }
 
@@ -2081,6 +2084,7 @@ class IntakeWorkflowService:
         workflow: dict[str, Any],
         booking: dict[str, Any],
         payload: dict[str, Any],
+        sink_arguments: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
         if sink_type == "local_csv":
@@ -2094,6 +2098,7 @@ class IntakeWorkflowService:
                 workflow=workflow,
                 booking=booking,
                 payload=payload,
+                sink_arguments=sink_arguments,
             )
         return {}, f"unsupported sink_type={sink_type}"
 
@@ -2161,6 +2166,7 @@ class IntakeWorkflowService:
         workflow: dict[str, Any],
         booking: dict[str, Any],
         payload: dict[str, Any],
+        sink_arguments: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
             return {}, "Composio is not available for sink execution"
@@ -2168,6 +2174,7 @@ class IntakeWorkflowService:
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
         field_mapping = _clean_mapping(sink_config.get("field_mapping"))
         static_arguments = _safe_dict(sink_config.get("static_arguments"))
+        override_arguments = _safe_dict(sink_arguments)
         enriched_payload = {
             **payload,
             "booking_id": str(booking["booking_id"]),
@@ -2205,6 +2212,7 @@ class IntakeWorkflowService:
             arguments = dict(static_arguments)
             for target_key, source_key in field_mapping.items():
                 arguments[target_key] = enriched_payload.get(source_key)
+        arguments.update(override_arguments)
         connected_account_id = str(sink_config.get("connected_account_id", "") or "").strip() or None
         try:
             result = self._composio.execute_tool(

@@ -274,7 +274,7 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decide_intake_workflow_prefers_compact_structured_path_even_when_tool_runtime_available() -> None:
+async def test_decide_intake_workflow_prefers_tool_runtime_first_for_composio_sinks() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.model_name = "google/gemini-3-flash-preview"
     runtime._prompt_caching_enabled = True
@@ -304,7 +304,13 @@ async def test_decide_intake_workflow_prefers_compact_structured_path_even_when_
     async def _fake_ainvoke_text(**kwargs: Any) -> str:
         captured.update(kwargs)
         captured["called"] = True
-        return "{}"
+        return (
+            '{"matches_workflow": true, "confidence": 0.95, "conversation_summary": '
+            '"Customer wants a car wash tomorrow at 4pm.", "extracted_fields": {"day": "tomorrow"}, '
+            '"missing_fields": ["time"], "reply_action": "send_reply", "reply_text": "What time works best?", '
+            '"ready_to_save": false, "booking_action": "create_new_booking", "save_payload": {}, '
+            '"sink_arguments": {}, "reason": "Need time before save."}'
+        )
 
     runtime.ainvoke_text = _fake_ainvoke_text
 
@@ -338,8 +344,12 @@ async def test_decide_intake_workflow_prefers_compact_structured_path_even_when_
     )
 
     assert decision["ok"] is True
-    assert captured["called"] is False
-    assert model.runner is not None
+    assert captured["called"] is True
+    assert captured["thread_id"] == "wake_intake_iwf_123_conv_1_msg_1"
+    assert captured["turn_mode"] == "routine_wake"
+    assert captured["include_pending_context"] is False
+    assert captured["prompt_mode_override"] == "literal_chat"
+    assert model.runner is None
 
 
 @pytest.mark.asyncio
@@ -362,6 +372,7 @@ async def test_decide_intake_workflow_escalates_to_tool_runtime_after_structured
             '"Customer wants a car wash tomorrow at 4pm.", "extracted_fields": {"day": "tomorrow"}, '
             '"missing_fields": ["time"], "reply_action": "send_reply", "reply_text": "What time works best?", '
             '"ready_to_save": false, "booking_action": "create_new_booking", "save_payload": {}, '
+            '"sink_arguments": {}, '
             '"reason": "Need time before save."}'
         )
 
@@ -406,6 +417,7 @@ async def test_decide_intake_workflow_escalates_to_tool_runtime_after_structured
     assert "composio_tool_search" in prompt
     assert "execution_feedback=" in prompt
     assert "Invalid request data provided" in prompt
+    assert "sink_arguments" in prompt
 
 
 @pytest.mark.asyncio
@@ -477,6 +489,68 @@ async def test_decide_intake_workflow_compacts_prompt_payload() -> None:
     assert human_text.count('"sender_role"') == 6
     assert ('"text": "' + ("x" * 301)) not in human_text
     assert human_text.count('"phase"') == 2
+    assert '"static_argument_keys": ["spreadsheet_id"]' in human_text
+    assert '"static_arguments": {"spreadsheet_id": "' in human_text
+
+
+@pytest.mark.asyncio
+async def test_decide_intake_workflow_returns_sink_arguments_from_tool_runtime() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.model_name = "google/gemini-3-flash-preview"
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
+    runtime._graph = object()
+    runtime._wake_execution_model_with_tools = object()
+    runtime._model = _BrokenStructuredThenFallbackModel("not json")
+    runtime._wake_execution_model = runtime._model
+    runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
+
+    async def _fake_ainvoke_text(**_: Any) -> str:
+        return (
+            '{"matches_workflow": true, "confidence": 0.97, "conversation_summary": '
+            '"Recovered by finding the correct sheet.", "extracted_fields": {"day": "tomorrow"}, '
+            '"missing_fields": [], "reply_action": "send_reply", "reply_text": "Booked.", '
+            '"ready_to_save": true, "booking_action": "update_active", "save_payload": {"day": "tomorrow"}, '
+            '"sink_arguments": {"sheetName": "Лист1"}, "reason": "Use the discovered tab."}'
+        )
+
+    runtime.ainvoke_text = _fake_ainvoke_text
+
+    decision = await runtime.decide_intake_workflow(
+        customer_id="telegram_123",
+        workflow={
+            "workflow_id": "iwf_123",
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day"],
+            "field_guidance": {},
+            "sink_type": "google_sheets_composio",
+            "sink_config": {
+                "tool_slug": "GOOGLESHEETS_ADD_ROW",
+                "field_mapping": {"day": "Date"},
+                "static_arguments": {"spreadsheet_id": "sheet_123"},
+            },
+        },
+        conversation={
+            "summary": {
+                "conversation_id": "conv_1",
+                "latest_inbound_message_id": "msg_1",
+            },
+            "recent_messages": [{"sender_role": "customer", "text": "Tomorrow works."}],
+        },
+        active_booking=None,
+        recent_completed_booking=None,
+        execution_feedback=[
+            {
+                "phase": "sink_execution",
+                "error": "Following fields are missing: {'sheetName'}",
+                "prior_decision": {"ready_to_save": True, "sink_arguments": {}},
+            }
+        ],
+    )
+
+    assert decision["ok"] is True
+    assert decision["sink_arguments"] == {"sheetName": "Лист1"}
 
 
 def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:

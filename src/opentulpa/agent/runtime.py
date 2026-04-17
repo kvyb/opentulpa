@@ -638,6 +638,7 @@ class _IntakeWorkflowDecision(BaseModel):
     ready_to_save: bool = False
     booking_action: str = "ignore"
     save_payload: dict[str, Any] = Field(default_factory=dict)
+    sink_arguments: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
 
 
@@ -659,7 +660,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "matches_workflow (bool), confidence (0..1), conversation_summary (string), "
         "extracted_fields (object), missing_fields (string array), reply_action (string), "
         "reply_text (string), ready_to_save (bool), booking_action (string), "
-        "save_payload (object), reason (string).\n\n"
+        "save_payload (object), sink_arguments (object), reason (string).\n\n"
         "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "Allowed reply_action values: none, send_reply, mark_cancelled.\n\n"
         "Decision policy:\n"
@@ -690,11 +691,15 @@ def _build_intake_workflow_system_prompt() -> str:
         "Recovery policy:\n"
         "- execution_feedback, when present in the human message, describes a real failure from the last attempted action.\n"
         "- Do not repeat the same failing action unchanged if execution_feedback shows it already failed.\n"
-        "- Replan using the error details. For example, change reply wording, avoid an invalid save, or ask a clarifying question instead.\n\n"
+        "- Replan using the error details. For example, change reply wording, inspect the sink with tools, "
+        "provide missing sink arguments, avoid an invalid save, or ask a clarifying question instead.\n\n"
         "Save policy:\n"
         "- Set ready_to_save=true only when all required fields are available with enough clarity to create/update the booking.\n"
         "- When ready_to_save=true, save_payload must contain the merged final field set that should be persisted now.\n"
+        "- sink_arguments may contain sink-tool arguments or overrides discovered via tools or context "
+        "(for example sheetName for Google Sheets). These are merged into the final sink write.\n"
         "- When ready_to_save=false, save_payload should usually be empty.\n"
+        "- When no sink overrides are needed, sink_arguments should usually be empty.\n"
         "- conversation_summary should be a short operational summary of what the customer currently wants.\n"
         "- reason should briefly explain the match decision and booking_action.\n\n"
         "Examples:\n"
@@ -713,6 +718,28 @@ def _trim_text_chars(value: Any, *, limit: int) -> str:
     if limit <= 3:
         return text[: max(0, int(limit))]
     return text[: max(0, int(limit) - 3)].rstrip() + "..."
+
+
+def _compact_jsonish_dict(
+    value: Any,
+    *,
+    item_limit: int = 8,
+    char_limit: int = 120,
+) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw_key, raw_value in list(value.items())[: max(0, int(item_limit))]:
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        rendered = (
+            json.dumps(raw_value, ensure_ascii=False, sort_keys=True)
+            if isinstance(raw_value, (dict, list))
+            else str(raw_value or "")
+        )
+        out[key] = _trim_text_chars(rendered, limit=char_limit)
+    return out
 
 
 def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
@@ -747,6 +774,7 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             for key in list(static_arguments.keys())[:8]
             if str(key or "").strip()
         ]
+        compact_sink["static_arguments"] = _compact_jsonish_dict(static_arguments)
     knowledge_files: list[dict[str, Any]] = []
     for item in list(safe_workflow.get("knowledge_files") or [])[:6]:
         if not isinstance(item, dict):
@@ -915,6 +943,8 @@ def _build_intake_workflow_agent_prompt(
         "composio_instagram_reply_precheck when they materially help.\n"
         "- If the workflow uses a Google Sheets or generic Composio sink and availability matters, inspect the "
         "relevant external state before setting ready_to_save=true.\n"
+        "- If the sink write needs concrete target metadata such as a Google Sheets tab name, inspect the sink "
+        "with Composio tools and return those values in sink_arguments.\n"
         "- If the workflow has bound knowledge files, use them before improvising answers.\n"
         "- Prefer minimal read-only tool usage first.\n"
         "- Do not create, update, delete, or run workflows/routines from inside this turn.\n"
@@ -925,13 +955,15 @@ def _build_intake_workflow_agent_prompt(
         "Final answer contract:\n"
         "- Return strict JSON only with keys:\n"
         "  matches_workflow, confidence, conversation_summary, extracted_fields, missing_fields, "
-        "reply_action, reply_text, ready_to_save, booking_action, save_payload, reason.\n"
+        "reply_action, reply_text, ready_to_save, booking_action, save_payload, sink_arguments, reason.\n"
         "- booking_action must be one of: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "- reply_action must be one of: none, send_reply, mark_cancelled.\n"
         "- If availability is blocked or conflicting, do not set ready_to_save=true.\n"
         "- If details are missing, ask one concise follow-up question in reply_text.\n"
         "- If execution_feedback is present, you are replanning after a real tool or application error. "
         "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
+        "- sink_arguments is for sink-specific write arguments or overrides discovered during this turn; "
+        "leave it empty when not needed.\n"
         "- False positives are worse than ignoring unrelated DMs.\n\n"
         f"customer_id={customer_id}\n"
         f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
@@ -3890,42 +3922,13 @@ class OpenTulpaLangGraphRuntime:
             and getattr(self, "_wake_execution_model_with_tools", None) is not None
             and callable(getattr(self, "ainvoke_text", None))
         )
+        sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
+        prefer_agent_runtime = tool_enabled_runtime and (
+            sink_type in {"google_sheets_composio", "generic_composio_write"}
+            or bool(execution_feedback)
+        )
         model = getattr(self, "_wake_execution_model", None) or self._model
-        decision, invoke_error = await self._invoke_structured_model(
-            model=model,
-            schema=_IntakeWorkflowDecision,
-            messages=[
-                SystemMessage(content=_build_intake_workflow_system_prompt()),
-                HumanMessage(
-                    content=_build_intake_workflow_human_prompt(
-                        customer_id=customer_id,
-                        workflow=workflow,
-                        conversation=conversation,
-                        active_booking=active_booking,
-                        recent_completed_booking=recent_completed_booking,
-                        execution_feedback=execution_feedback,
-                    )
-                ),
-            ],
-            stable_prefix_count=1,
-            call_context={
-                "call_site": "intake_workflow_decision",
-                "trace_id": structured_trace_id,
-                "thread_id": structured_thread_id,
-                "customer_id": customer_id,
-                "turn_mode": "routine_wake",
-                "prompt_mode": "structured_intake",
-                "workflow_id": workflow_id,
-                "conversation_id": conversation_id,
-                "latest_inbound_message_id": latest_inbound_id,
-            },
-        )
-        should_escalate = (
-            decision is None
-            and tool_enabled_runtime
-            and bool(execution_feedback)
-        )
-        if should_escalate:
+        if prefer_agent_runtime:
             try:
                 raw = await self.ainvoke_text(
                     thread_id=f"wake_intake_{workflow_id}_{conversation_id}_{latest_inbound_id}",
@@ -3948,6 +3951,36 @@ class OpenTulpaLangGraphRuntime:
                     invoke_error = None
             except Exception as exc:
                 invoke_error = f"{type(exc).__name__}: {exc}"
+        if decision is None:
+            decision, invoke_error = await self._invoke_structured_model(
+                model=model,
+                schema=_IntakeWorkflowDecision,
+                messages=[
+                    SystemMessage(content=_build_intake_workflow_system_prompt()),
+                    HumanMessage(
+                        content=_build_intake_workflow_human_prompt(
+                            customer_id=customer_id,
+                            workflow=workflow,
+                            conversation=conversation,
+                            active_booking=active_booking,
+                            recent_completed_booking=recent_completed_booking,
+                            execution_feedback=execution_feedback,
+                        )
+                    ),
+                ],
+                stable_prefix_count=1,
+                call_context={
+                    "call_site": "intake_workflow_decision",
+                    "trace_id": structured_trace_id,
+                    "thread_id": structured_thread_id,
+                    "customer_id": customer_id,
+                    "turn_mode": "routine_wake",
+                    "prompt_mode": "structured_intake",
+                    "workflow_id": workflow_id,
+                    "conversation_id": conversation_id,
+                    "latest_inbound_message_id": latest_inbound_id,
+                },
+            )
         if decision is None or not isinstance(decision, _IntakeWorkflowDecision):
             return {
                 "ok": False,
@@ -3969,6 +4002,7 @@ class OpenTulpaLangGraphRuntime:
             "ready_to_save": bool(decision.ready_to_save),
             "booking_action": str(decision.booking_action).strip().lower() or "ignore",
             "save_payload": dict(decision.save_payload),
+            "sink_arguments": dict(decision.sink_arguments),
             "reason": str(decision.reason).strip()[:500],
         }
 

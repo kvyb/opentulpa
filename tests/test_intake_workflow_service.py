@@ -349,6 +349,33 @@ class _FailingSinkOnceComposio(_FakeComposio):
         return result
 
 
+class _SheetNameRequiredSinkComposio(_FakeComposio):
+    def execute_tool(
+        self,
+        *,
+        customer_id: str,
+        tool_slug: str,
+        arguments: dict[str, Any] | None = None,
+        connected_account_id: str | None = None,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        result = super().execute_tool(
+            customer_id=customer_id,
+            tool_slug=tool_slug,
+            arguments=arguments,
+            connected_account_id=connected_account_id,
+            text=text,
+        )
+        if tool_slug == "GOOGLESHEETS_UPSERT_ROWS":
+            safe_arguments = dict(arguments or {})
+            if not str(safe_arguments.get("sheetName", "") or "").strip():
+                return {
+                    "successful": False,
+                    "error": "Invalid request data provided\n- Following fields are missing: {'sheetName'}",
+                }
+        return result
+
+
 class _FakeTelegramClient:
     def __init__(self) -> None:
         self.sent_messages: list[dict[str, Any]] = []
@@ -2197,6 +2224,121 @@ async def test_sink_failure_retries_with_execution_feedback_and_redoes_sheet_wri
     assert len(sink_calls) == 2
     reply_calls = [call for call in composio.execute_calls if call["tool_slug"] == "INSTAGRAM_SEND_TEXT_MESSAGE"]
     assert len(reply_calls) == 1
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "completed"
+    assert bookings[0]["sink_write_status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_sink_failure_can_recover_with_sink_argument_overrides(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="7pm is ok",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer confirmed 7pm.",
+                "extracted_fields": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Great! Your booking is confirmed.",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "sink_arguments": {},
+                "reason": "All required fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Recovered by inspecting the sheet and adding the sheet name.",
+                "extracted_fields": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Great! Your booking is confirmed.",
+                "ready_to_save": True,
+                "booking_action": "update_active",
+                "save_payload": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "sink_arguments": {"sheetName": "Лист1"},
+                "reason": "Retry with the discovered sheet name.",
+            },
+        ]
+    )
+    composio = _SheetNameRequiredSinkComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["date", "time", "car_type", "wash_type"],
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "date": "Date",
+                "time": "Time",
+                "car_type": "Car Type",
+                "wash_type": "Wash Type",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_123",
+            },
+        },
+    )
+
+    result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    assert len(runtime.calls) == 2
+    feedback = runtime.calls[1]["execution_feedback"]
+    assert isinstance(feedback, list)
+    assert feedback
+    assert feedback[0]["phase"] == "sink_execution"
+    sink_calls = [call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"]
+    assert len(sink_calls) == 2
+    assert "sheetName" not in sink_calls[0]["arguments"]
+    assert sink_calls[1]["arguments"]["sheetName"] == "Лист1"
     bookings = service.list_bookings(
         customer_id="telegram_123",
         workflow_id=workflow["workflow_id"],
