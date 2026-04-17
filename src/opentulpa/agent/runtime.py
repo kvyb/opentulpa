@@ -252,20 +252,6 @@ def _looks_like_openrouter_base_url(base_url: str | None) -> bool:
     return "openrouter.ai" in normalized
 
 
-def _is_glm_51_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return normalized.startswith("z-ai/glm-5.1")
-
-
-_GLM_51_OPENROUTER_PROVIDER_ORDER = [
-    "fireworks",
-    "siliconflow",
-    "friendli",
-    "inceptron",
-    "atlas-cloud",
-]
-
-
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (int, float, bool)):
         return value
@@ -1269,29 +1255,7 @@ class OpenTulpaLangGraphRuntime:
         )
 
     def _model_request_attempts(self, *, model_name: str | None = None) -> list[dict[str, Any]]:
-        target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
-        if not _looks_like_openrouter_base_url(getattr(self, "openrouter_base_url", "")):
-            return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
-        if not _is_glm_51_model_name(target_model_name):
-            return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
-        return [
-            {
-                "name": "glm51_ordered_providers",
-                "invoke_extras": {
-                    "extra_body": {
-                        "provider": {
-                            "order": list(_GLM_51_OPENROUTER_PROVIDER_ORDER),
-                            "allow_fallbacks": False,
-                        }
-                    }
-                },
-                "call_context": {
-                    "provider_route": "glm51_ordered_providers",
-                    "provider_order": list(_GLM_51_OPENROUTER_PROVIDER_ORDER),
-                    "provider_allow_fallbacks": False,
-                },
-            },
-        ]
+        return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
 
     def _resolve_model_name_for_runtime_call(self, model: Any, explicit_name: str | None = None) -> str:
         if explicit_name:

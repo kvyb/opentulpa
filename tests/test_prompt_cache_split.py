@@ -225,7 +225,7 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ainvoke_model_routes_glm51_with_extended_provider_order() -> None:
+async def test_ainvoke_model_does_not_add_provider_preference_for_glm51() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -244,14 +244,10 @@ async def test_ainvoke_model_routes_glm51_with_extended_provider_order() -> None
 
     assert isinstance(response, _CaptureResponse)
     assert len(model.calls) == 1
-    provider = model.calls[0]["kwargs"]["extra_body"]["provider"]
-    assert provider == {
-        "order": ["fireworks", "siliconflow", "friendli", "inceptron", "atlas-cloud"],
-        "allow_fallbacks": False,
-    }
+    assert model.calls[0]["kwargs"] == {}
 
 
-def test_model_request_attempts_skip_glm51_provider_routing_off_openrouter() -> None:
+def test_model_request_attempts_are_default_off_openrouter() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -266,7 +262,7 @@ def test_model_request_attempts_skip_glm51_provider_routing_off_openrouter() -> 
     ]
 
 
-def test_model_request_attempts_route_glm51_nitro_variants_on_openrouter() -> None:
+def test_model_request_attempts_are_default_for_glm51_nitro_on_openrouter() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -278,36 +274,7 @@ def test_model_request_attempts_route_glm51_nitro_variants_on_openrouter() -> No
 
     attempts = rt._model_request_attempts(model_name="z-ai/glm-5.1:nitro")
 
-    assert attempts == [
-        {
-            "name": "glm51_ordered_providers",
-            "invoke_extras": {
-                "extra_body": {
-                    "provider": {
-                        "order": [
-                            "fireworks",
-                            "siliconflow",
-                            "friendli",
-                            "inceptron",
-                            "atlas-cloud",
-                        ],
-                        "allow_fallbacks": False,
-                    }
-                }
-            },
-            "call_context": {
-                "provider_route": "glm51_ordered_providers",
-                "provider_order": [
-                    "fireworks",
-                    "siliconflow",
-                    "friendli",
-                    "inceptron",
-                    "atlas-cloud",
-                ],
-                "provider_allow_fallbacks": False,
-            },
-        }
-    ]
+    assert attempts == [{"name": "default", "invoke_extras": {}, "call_context": {}}]
 
 
 def test_extract_response_usage_fields_normalizes_openrouter_usage() -> None:

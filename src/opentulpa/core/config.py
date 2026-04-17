@@ -179,11 +179,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="z-ai/glm-5.1",
+        default="z-ai/glm-5.1:nitro",
         description=(
             "Model identifier accepted by the configured provider. "
-            "Recommended default is the OpenRouter slug z-ai/glm-5.1 for main chat turns. "
-            "OpenTulpa requests glm-5.1 with provider order [fireworks, siliconflow]."
+            "Recommended default is the OpenRouter slug z-ai/glm-5.1:nitro for main chat turns."
         ),
     )
     memory_llm_model: str = Field(
@@ -210,10 +209,10 @@ class Settings(BaseSettings):
         ),
     )
     wake_execution_model: str | None = Field(
-        default="z-ai/glm-5.1",
+        default="z-ai/glm-5.1:nitro",
         description=(
             "Model used for wake/routine execution turns that need stronger reasoning "
-            "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.1."
+            "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.1:nitro."
         ),
     )
     multimodal_llm: str = Field(

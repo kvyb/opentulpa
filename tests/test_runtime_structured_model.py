@@ -61,7 +61,7 @@ class _ProviderAwareStructuredRunner:
 
     async def ainvoke(self, _messages: object, **kwargs: Any) -> object:
         self.calls.append({"messages": _messages, "kwargs": kwargs})
-        return {"ok": True, "reason": "ordered_route"}
+        return {"ok": True, "reason": "default_route"}
 
 
 class _ProviderAwareStructuredModel:
@@ -142,7 +142,7 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_structured_model_routes_glm51_with_extended_provider_order() -> None:
+async def test_invoke_structured_model_does_not_add_provider_preference_for_glm51() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime.model_name = "z-ai/glm-5.1"
@@ -159,14 +159,10 @@ async def test_invoke_structured_model_routes_glm51_with_extended_provider_order
 
     assert isinstance(parsed, _Schema)
     assert parsed.ok is True
-    assert parsed.reason == "ordered_route"
+    assert parsed.reason == "default_route"
     assert error is None
     assert len(model.runners) == 1
-    provider = model.runners[0].calls[0]["kwargs"]["extra_body"]["provider"]
-    assert provider == {
-        "order": ["fireworks", "siliconflow", "friendli", "inceptron", "atlas-cloud"],
-        "allow_fallbacks": False,
-    }
+    assert model.runners[0].calls[0]["kwargs"] == {}
 
 
 @pytest.mark.asyncio
