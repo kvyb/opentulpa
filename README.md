@@ -15,6 +15,7 @@
   <a href="#quick-start">Quick Start</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="docs/DEPLOYMENT.md">Deployment</a> ·
+  <a href="docs/E2E_TESTING.md">E2E Testing</a> ·
   <a href="docs/CHAT_COOKBOOK.md">Prompt Cookbook</a>
 </p>
 
@@ -364,6 +365,25 @@ The image includes Python dependencies, Node.js/npm, and Playwright.
 5. Deploy
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full checklist.
+
+### E2E testing
+
+For realistic Telegram, intake, and live-LLM scenario testing, use:
+
+```bash
+uv run pytest tests/e2e/scenarios -q -rs
+```
+
+The e2e suite uses the same settings loader as the app, so running from the repo root will pick up `.env` automatically.
+
+There is a dedicated guide for:
+
+- live-LLM prerequisites
+- Telegram intake workflow e2e commands
+- scenario vs live integration tests
+- troubleshooting skips and backend/runtime failures
+
+See [docs/E2E_TESTING.md](docs/E2E_TESTING.md).
 
 <details>
 <summary><strong>More setup options</strong></summary>

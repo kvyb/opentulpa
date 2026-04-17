@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+from opentulpa.core.config import get_settings
 
 DEFAULT_JUDGE_MODEL = "google/gemini-3-flash-preview"
 _VALID_VERDICTS = {"pass", "fail", "inconclusive"}
@@ -13,15 +14,13 @@ _SCORE_KEYS = ("task_completion", "correctness", "safety", "robustness")
 
 
 def _env_api_key() -> str:
-    return str(os.getenv("OPENAI_COMPATIBLE_API_KEY", "")).strip() or str(
-        os.getenv("OPENROUTER_API_KEY", "")
-    ).strip()
+    settings = get_settings()
+    return str(settings.openai_compatible_api_key or "").strip()
 
 
 def _env_base_url() -> str:
-    return str(os.getenv("OPENAI_COMPATIBLE_BASE_URL", "")).strip() or str(
-        os.getenv("OPENROUTER_BASE_URL", "")
-    ).strip() or "https://openrouter.ai/api/v1"
+    settings = get_settings()
+    return str(settings.openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
 
 
 def _tail_jsonl(path: Path, limit: int = 10) -> list[dict[str, Any]]:

@@ -33,6 +33,7 @@ class FakeTelegramClient:
         text: str,
         parse_mode: str | None = None,
         reply_markup: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         self.sent_messages.append(
             {
@@ -40,6 +41,7 @@ class FakeTelegramClient:
                 "text": text,
                 "parse_mode": parse_mode,
                 "reply_markup": reply_markup or {},
+                **kwargs,
             }
         )
         return {"ok": True}

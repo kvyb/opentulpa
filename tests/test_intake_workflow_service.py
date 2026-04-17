@@ -322,6 +322,33 @@ class _FailingSinkComposio(_FakeComposio):
         return {"successful": True, "data": {"ok": True, "tool_slug": tool_slug}}
 
 
+class _FailingSinkOnceComposio(_FakeComposio):
+    def __init__(self, summary: dict[str, Any], conversation: dict[str, Any]) -> None:
+        super().__init__(summary, conversation)
+        self._failed_once = False
+
+    def execute_tool(
+        self,
+        *,
+        customer_id: str,
+        tool_slug: str,
+        arguments: dict[str, Any] | None = None,
+        connected_account_id: str | None = None,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        result = super().execute_tool(
+            customer_id=customer_id,
+            tool_slug=tool_slug,
+            arguments=arguments,
+            connected_account_id=connected_account_id,
+            text=text,
+        )
+        if tool_slug == "GOOGLESHEETS_UPSERT_ROWS" and not self._failed_once:
+            self._failed_once = True
+            return {"successful": False, "error": "sheet write failed"}
+        return result
+
+
 class _FakeTelegramClient:
     def __init__(self) -> None:
         self.sent_messages: list[dict[str, Any]] = []
@@ -1935,7 +1962,7 @@ async def test_google_sheets_sink_normalizes_prefixed_slug_and_builds_headers_ro
 
 
 @pytest.mark.asyncio
-async def test_sink_failure_does_not_send_customer_confirmation_or_retry_reply(
+async def test_sink_failure_retries_until_recovery_limit_then_stops_without_customer_confirmation(
     tmp_path: Path,
 ) -> None:
     summary = {
@@ -1981,7 +2008,7 @@ async def test_sink_failure_does_not_send_customer_confirmation_or_retry_reply(
                 "ok": True,
                 "matches_workflow": True,
                 "confidence": 0.95,
-                "conversation_summary": "Internal sink retry.",
+                "conversation_summary": "Retry the same sheet write after first sink failure.",
                 "extracted_fields": {
                     "date": "April 20",
                     "time": "7pm",
@@ -1990,11 +2017,40 @@ async def test_sink_failure_does_not_send_customer_confirmation_or_retry_reply(
                 },
                 "missing_fields": [],
                 "reply_action": "send_reply",
-                "reply_text": "We have a system delay.",
-                "ready_to_save": False,
+                "reply_text": "Great! Your booking is confirmed.",
+                "ready_to_save": True,
                 "booking_action": "update_active",
-                "save_payload": {},
+                "save_payload": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
                 "reason": "Retry after sink failure.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Retry the same sheet write after second sink failure.",
+                "extracted_fields": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Great! Your booking is confirmed.",
+                "ready_to_save": True,
+                "booking_action": "update_active",
+                "save_payload": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "reason": "Retry after second sink failure.",
             },
         ]
     )
@@ -2024,8 +2080,10 @@ async def test_sink_failure_does_not_send_customer_confirmation_or_retry_reply(
     result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
 
     assert result["ok"] is False
-    assert len(runtime.calls) == 1
+    assert len(runtime.calls) == 3
     assert all(call["tool_slug"] != "INSTAGRAM_SEND_TEXT_MESSAGE" for call in composio.execute_calls)
+    sink_calls = [call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"]
+    assert len(sink_calls) == 3
     bookings = service.list_bookings(
         customer_id="telegram_123",
         workflow_id=workflow["workflow_id"],
@@ -2033,3 +2091,117 @@ async def test_sink_failure_does_not_send_customer_confirmation_or_retry_reply(
     )
     assert len(bookings) == 1
     assert bookings[0]["sink_write_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_sink_failure_retries_with_execution_feedback_and_redoes_sheet_write(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="7pm is ok",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer confirmed 7pm.",
+                "extracted_fields": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Great! Your booking is confirmed.",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "reason": "All required fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Retry the sheet write after sink failure.",
+                "extracted_fields": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Great! Your booking is confirmed.",
+                "ready_to_save": True,
+                "booking_action": "update_active",
+                "save_payload": {
+                    "date": "April 20",
+                    "time": "7pm",
+                    "car_type": "sedan",
+                    "wash_type": "full wash with rims",
+                },
+                "reason": "Retry after sink failure.",
+            },
+        ]
+    )
+    composio = _FailingSinkOnceComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["date", "time", "car_type", "wash_type"],
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "date": "Date",
+                "time": "Time",
+                "car_type": "Car Type",
+                "wash_type": "Wash Type",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_123",
+                "sheetName": "Sheet1",
+            },
+        },
+    )
+
+    result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    assert len(runtime.calls) == 2
+    feedback = runtime.calls[1]["execution_feedback"]
+    assert isinstance(feedback, list)
+    assert feedback
+    assert feedback[0]["phase"] == "sink_execution"
+    sink_calls = [call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"]
+    assert len(sink_calls) == 2
+    reply_calls = [call for call in composio.execute_calls if call["tool_slug"] == "INSTAGRAM_SEND_TEXT_MESSAGE"]
+    assert len(reply_calls) == 1
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "completed"
+    assert bookings[0]["sink_write_status"] == "succeeded"

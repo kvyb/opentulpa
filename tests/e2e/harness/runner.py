@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.api.app import create_app
+from opentulpa.core.config import get_settings
 from opentulpa.scheduler.service import SchedulerService
 from harness.logging import JsonlRecorder
 from mocks.composio_instagram import FakeComposioInstagramService
@@ -187,12 +188,9 @@ class E2EHarness:
 
 
 def _require_openai_compatible_env() -> tuple[str, str]:
-    api_key = str(os.getenv("OPENAI_COMPATIBLE_API_KEY", "")).strip() or str(
-        os.getenv("OPENROUTER_API_KEY", "")
-    ).strip()
-    base_url = str(os.getenv("OPENAI_COMPATIBLE_BASE_URL", "")).strip() or str(
-        os.getenv("OPENROUTER_BASE_URL", "")
-    ).strip() or "https://openrouter.ai/api/v1"
+    settings = get_settings()
+    api_key = str(settings.openai_compatible_api_key or "").strip()
+    base_url = str(settings.openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
     return api_key, base_url
 
 
@@ -252,7 +250,6 @@ def build_harness(
     composio_service: FakeComposioInstagramService | None = None,
 ) -> E2EHarness:
     from opentulpa.api import app as app_module
-    from opentulpa.core.config import get_settings
 
     api_key, base_url = _require_openai_compatible_env()
     if not api_key:
@@ -277,10 +274,18 @@ def build_harness(
         app_url="http://testserver",
         openrouter_api_key=api_key,
         openrouter_base_url=base_url,
-        model_name=str(os.getenv("OPENTULPA_E2E_MODEL", "openai/gpt-4.1-mini")),
-        wake_classifier_model_name=str(os.getenv("OPENTULPA_E2E_WAKE_MODEL", "openai/gpt-4.1-mini")),
+        model_name=str(os.getenv("OPENTULPA_E2E_MODEL", settings.llm_model)),
+        wake_classifier_model_name=str(
+            os.getenv(
+                "OPENTULPA_E2E_WAKE_MODEL",
+                settings.wake_classifier_model or settings.llm_model,
+            )
+        ),
         guardrail_classifier_model_name=str(
-            os.getenv("OPENTULPA_E2E_GUARDRAIL_MODEL", "openai/gpt-4.1-mini")
+            os.getenv(
+                "OPENTULPA_E2E_GUARDRAIL_MODEL",
+                settings.guardrail_classifier_model or settings.llm_model,
+            )
         ),
         checkpoint_db_path=str(tmp_path / f"{scenario_name}_checkpoints.sqlite"),
         behavior_log_enabled=True,

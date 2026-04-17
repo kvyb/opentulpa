@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Iterator
 
 import pytest
+
+from opentulpa.core.config import get_settings
 
 _E2E_ROOT = Path(__file__).resolve().parent
 if str(_E2E_ROOT) not in sys.path:
@@ -19,10 +20,8 @@ pytestmark = [pytest.mark.e2e]
 
 
 def _has_live_llm_key() -> bool:
-    return bool(
-        str(os.getenv("OPENAI_COMPATIBLE_API_KEY", "")).strip()
-        or str(os.getenv("OPENROUTER_API_KEY", "")).strip()
-    )
+    settings = get_settings()
+    return bool(str(settings.openai_compatible_api_key or "").strip())
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -1523,7 +1523,6 @@ class IntakeWorkflowService:
                     if (
                         attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS
                         or feedback is None
-                        or str(feedback.get("phase", "")).strip() == "sink_execution"
                     ):
                         break
                     recovery_feedback.append(feedback)
