@@ -69,6 +69,7 @@ class ApprovalExecutionOrchestrator:
                 action_name="guardrail_execute_approved_action",
                 action_args={"approval_id": approval_id},
                 customer_id=customer_id,
+                thread_id=thread_id,
                 inject_customer_id=True,
             )
         except Exception as exc:
@@ -117,6 +118,7 @@ class ApprovalExecutionOrchestrator:
                     action_name="guardrail_execute_approved_action",
                     action_args={"approval_id": approval_id},
                     customer_id=customer_id,
+                    thread_id=thread_id,
                     inject_customer_id=True,
                 )
                 retry_error = _extract_execution_error_text(retry_result)

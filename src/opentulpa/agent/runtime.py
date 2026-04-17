@@ -1109,6 +1109,11 @@ class OpenTulpaLangGraphRuntime:
             default="",
         )
         self._active_customer_id = ""
+        self._active_thread_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "opentulpa_active_thread_id",
+            default="",
+        )
+        self._active_thread_id = ""
 
         model_init_kwargs: dict[str, Any] = {
             "model_provider": "openai",
@@ -3049,6 +3054,8 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=customer_id,
             )
             return ""
+        customer_scope_token = self.set_active_customer_id(customer_id)
+        thread_scope_token = self.set_active_thread_id(thread_id)
         try:
             if turn_state is not None or not (normalized_turn_mode == "interactive" and interactive_session is not None):
                 self.log_behavior_event(
@@ -3189,6 +3196,8 @@ class OpenTulpaLangGraphRuntime:
             )
             raise
         finally:
+            self.reset_active_thread_id(thread_scope_token)
+            self.reset_active_customer_id(customer_scope_token)
             self._thread_inputs.end_turn(turn_state)
 
     async def astream_text(
@@ -3235,6 +3244,8 @@ class OpenTulpaLangGraphRuntime:
                 turn_mode=normalized_turn_mode,
             )
             raise MergedInputSuppressedError("input merged into previous in-flight turn")
+        customer_scope_token = self.set_active_customer_id(customer_id)
+        thread_scope_token = self.set_active_thread_id(thread_id)
         try:
             logger.info(
                 "runtime.astream_text start thread_id=%s customer_id=%s text_chars=%s",
@@ -3752,6 +3763,8 @@ class OpenTulpaLangGraphRuntime:
             )
             raise
         finally:
+            self.reset_active_thread_id(thread_scope_token)
+            self.reset_active_customer_id(customer_scope_token)
             self._thread_inputs.end_turn(turn_state)
 
     async def _get_registered_interactive_session(self, *, thread_id: str) -> Any | None:
@@ -4317,12 +4330,35 @@ class OpenTulpaLangGraphRuntime:
         self._active_customer_id_ctx = ctx
         return ctx
 
+    def set_active_thread_id(self, thread_id: str):
+        tid = str(thread_id or "").strip()
+        token = self._ensure_active_thread_id_ctx().set(tid)
+        self._active_thread_id = tid
+        return token
+
+    def reset_active_thread_id(self, token: object) -> None:
+        ctx = self._ensure_active_thread_id_ctx()
+        ctx.reset(token)
+        self._active_thread_id = str(ctx.get() or "").strip()
+
+    def get_active_thread_id(self) -> str:
+        return str(self._ensure_active_thread_id_ctx().get() or "").strip()
+
+    def _ensure_active_thread_id_ctx(self) -> contextvars.ContextVar[str]:
+        ctx = getattr(self, "_active_thread_id_ctx", None)
+        if isinstance(ctx, contextvars.ContextVar):
+            return ctx
+        ctx = contextvars.ContextVar("opentulpa_active_thread_id", default="")
+        self._active_thread_id_ctx = ctx
+        return ctx
+
     async def execute_tool(
         self,
         *,
         action_name: str,
         action_args: dict[str, Any],
         customer_id: str | None = None,
+        thread_id: str | None = None,
         inject_customer_id: bool = False,
     ) -> Any:
         """
@@ -4353,7 +4389,8 @@ class OpenTulpaLangGraphRuntime:
             customer_id=cid,
             args=args,
         )
-        token = self.set_active_customer_id(cid)
+        customer_token = self.set_active_customer_id(cid)
+        thread_token = self.set_active_thread_id(str(thread_id or "").strip())
         try:
             result = await tool_fn.ainvoke(args)
         except Exception as exc:
@@ -4365,7 +4402,8 @@ class OpenTulpaLangGraphRuntime:
             )
             raise
         finally:
-            self.reset_active_customer_id(token)
+            self.reset_active_thread_id(thread_token)
+            self.reset_active_customer_id(customer_token)
         if cid:
             self.register_links_from_text(
                 customer_id=cid,
