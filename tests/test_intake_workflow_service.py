@@ -469,6 +469,8 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
 
     assert workflow["channel"] == "telegram_business_dm"
     assert workflow["provider"] == "telegram_bot_api"
+    assert workflow["schedule"] == ""
+    assert workflow["routine_id"] == ""
     assert workflow["assistant_instructions"] == "Be concise and never promise unavailable slots."
     assert workflow["knowledge_file_ids"] == [str(record["id"])]
     skill = skills.get_skill(
@@ -524,6 +526,36 @@ async def test_telegram_business_workflow_upsert_auto_resolves_single_connected_
     )
 
     assert workflow["source_config"] == {"business_connection_id": "bc_123"}
+    assert workflow["schedule"] == ""
+    assert workflow["routine_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_workflow_does_not_create_scheduler_routine(
+    tmp_path: Path,
+) -> None:
+    service, scheduler, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio({}, {}),
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Telegram Intake",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Be concise.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    assert workflow["schedule"] == ""
+    assert workflow["routine_id"] == ""
+    assert scheduler.list_routines() == []
 
 
 @pytest.mark.asyncio

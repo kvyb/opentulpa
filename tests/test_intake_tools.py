@@ -73,6 +73,7 @@ async def test_intake_workflow_upsert_accepts_telegram_business_fields() -> None
     payload = runtime.calls[0][2]["json_body"]
     assert payload["channel"] == "telegram_business_dm"
     assert payload["provider"] == "telegram_bot_api"
+    assert payload["schedule"] == ""
     assert payload["assistant_instructions"] == "Be concise and friendly."
     assert payload["knowledge_file_ids"] == ["file_1", "file_2"]
 

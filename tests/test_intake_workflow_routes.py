@@ -99,6 +99,8 @@ def test_telegram_business_workflow_route_requires_delete_then_recreate(tmp_path
         )
         assert first.status_code == 200
         first_workflow = first.json()["workflow"]
+        assert first_workflow["schedule"] == ""
+        assert first_workflow["routine_id"] == ""
 
         second = client.post(
             "/internal/intake/workflows/upsert",
@@ -148,6 +150,8 @@ def test_telegram_business_workflow_route_requires_delete_then_recreate(tmp_path
             if item["channel"] == "telegram_business_dm"
         ]
         assert len(telegram_workflows) == 1
+        assert telegram_workflows[0]["schedule"] == ""
+        assert telegram_workflows[0]["routine_id"] == ""
 
 
 def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> None:

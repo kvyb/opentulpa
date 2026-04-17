@@ -91,7 +91,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         preapproved: bool = False,
         guard_context: dict[str, Any] | None = None,
     ) -> Any:
-        """Create or update a scheduled intake workflow.
+        """Create or update an intake workflow.
 
         Use this when the user wants OpenTulpa to monitor inbound messages, decide whether
         they match a business workflow, ask follow-up questions, and save the result.
@@ -152,9 +152,9 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         safe_customer = require_customer_id(runtime)
         safe_name = str(name or "").strip()
         safe_intent = str(intent_description or "").strip()
-        safe_schedule = str(schedule or "").strip() or "*/5 * * * *"
         safe_channel = str(channel or "").strip() or "instagram_dm"
         safe_provider = str(provider or "").strip() or "composio"
+        safe_schedule = "" if safe_channel == "telegram_business_dm" else (str(schedule or "").strip() or "*/5 * * * *")
         safe_sink_type = str(sink_type or "").strip()
         safe_workflow_id = _normalize_optional_id(workflow_id)
         safe_required_fields = _unique_string_list(required_fields)

@@ -209,6 +209,24 @@ def test_workflow_setup_commit_edit_recreates_telegram_workflow(tmp_path: Path) 
     assert workflows[0]["name"] == "Updated Telegram Intake"
 
 
+def test_workflow_setup_update_clears_schedule_for_telegram_channel(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+
+    session = setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "channel": "telegram_business_dm",
+            "provider": "telegram_bot_api",
+            "schedule": "*/5 * * * *",
+        },
+    )
+
+    assert session["draft_upsert"]["channel"] == "telegram_business_dm"
+    assert session["draft_upsert"]["schedule"] == ""
+
+
 def test_workflow_setup_orchestrator_reports_active_and_paused_states(tmp_path: Path) -> None:
     setup, _, _ = _mk_setup_service(tmp_path)
     orchestrator = WorkflowSetupOrchestrator(setup_service=setup)

@@ -32,6 +32,16 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _normalize_schedule_for_channel(draft: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(draft)
+    channel = str(normalized.get("channel", "") or "").strip().lower()
+    if channel == "telegram_business_dm":
+        normalized["schedule"] = ""
+    else:
+        normalized["schedule"] = str(normalized.get("schedule", "*/5 * * * *") or "*/5 * * * *")
+    return normalized
+
+
 class WorkflowSetupService:
     """Owns workflow-setup session lifecycle and commit semantics."""
 
@@ -46,7 +56,8 @@ class WorkflowSetupService:
 
     @staticmethod
     def _draft_scaffold() -> dict[str, Any]:
-        return {
+        return _normalize_schedule_for_channel(
+            {
             "name": "",
             "channel": "instagram_dm",
             "provider": "composio",
@@ -61,7 +72,8 @@ class WorkflowSetupService:
             "schedule": "*/5 * * * *",
             "notify_user": True,
             "enabled": True,
-        }
+            }
+        )
 
     @staticmethod
     def _scratchpad_scaffold(*, mode: str, workflow_id: str = "") -> dict[str, Any]:
@@ -159,6 +171,7 @@ class WorkflowSetupService:
                     "enabled": bool(workflow_snapshot.get("enabled", True)),
                 }
             )
+            draft = _normalize_schedule_for_channel(draft)
         return self._store.create_session(
             customer_id=customer_id,
             thread_id=thread_id,
@@ -185,6 +198,7 @@ class WorkflowSetupService:
         if session is None:
             raise ValueError("active workflow setup session not found")
         updated_draft = _deep_merge(_safe_dict(session.get("draft_upsert")), _safe_dict(draft_patch))
+        updated_draft = _normalize_schedule_for_channel(updated_draft)
         updated_scratchpad = _deep_merge(_safe_dict(session.get("scratchpad")), _safe_dict(scratchpad_patch))
         return self._store.update_session(
             session_id=str(session["session_id"]),

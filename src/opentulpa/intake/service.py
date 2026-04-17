@@ -28,6 +28,10 @@ _MAX_DECISION_RECOVERY_ATTEMPTS = 2
 _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 
 
+def _channel_uses_scheduler(channel: str) -> bool:
+    return str(channel or "").strip().lower() != "telegram_business_dm"
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -461,6 +465,7 @@ class IntakeWorkflowService:
             business_connection_id = str(safe_source_config.get("business_connection_id", "") or "").strip()
             if not business_connection_id:
                 raise ValueError("telegram_business_dm workflows require source_config.business_connection_id")
+            safe_schedule = ""
         if not safe_intent:
             raise ValueError("intent_description is required")
         if not safe_required_fields:
@@ -482,11 +487,14 @@ class IntakeWorkflowService:
             workflow_id=safe_workflow_id,
             customer_id=safe_customer,
         )
-        safe_routine_id = (
-            str(existing_record.get("routine_id", "")).strip()
-            if existing is not None
-            else ""
-        ) or new_short_id("rtn")
+        if _channel_uses_scheduler(safe_channel):
+            safe_routine_id = (
+                str(existing_record.get("routine_id", "")).strip()
+                if existing is not None
+                else ""
+            ) or new_short_id("rtn")
+        else:
+            safe_routine_id = ""
         return {
             "workflow_id": safe_workflow_id,
             "customer_id": safe_customer,
@@ -905,6 +913,12 @@ class IntakeWorkflowService:
 
     def _sync_routine(self, workflow: dict[str, Any]) -> None:
         if self._scheduler is None:
+            return
+        if not _channel_uses_scheduler(str(workflow.get("channel", "") or "").strip()):
+            routine_id = str(workflow.get("routine_id", "") or "").strip()
+            if routine_id:
+                with suppress(Exception):
+                    self._scheduler.remove_routine(routine_id)
             return
         payload = {
             "instruction": (
