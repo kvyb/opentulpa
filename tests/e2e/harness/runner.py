@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.api.app import create_app
 from opentulpa.core.config import get_settings
+from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.scheduler.service import SchedulerService
 from harness.logging import JsonlRecorder
 from mocks.composio_instagram import FakeComposioInstagramService
@@ -250,6 +251,8 @@ def build_harness(
     composio_service: FakeComposioInstagramService | None = None,
 ) -> E2EHarness:
     from opentulpa.api import app as app_module
+    from opentulpa.interfaces.telegram import chat_service as chat_module
+    from opentulpa.tasks import sandbox as sandbox_module
 
     api_key, base_url = _require_openai_compatible_env()
     if not api_key:
@@ -265,10 +268,22 @@ def build_harness(
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-bot-token")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERNAMES", "")
     monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / f"{scenario_name}_approvals.sqlite"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / f"{scenario_name}_links.sqlite"))
+    isolated_project_root = tmp_path / "project_root"
+    isolated_project_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sandbox_module, "PROJECT_ROOT", isolated_project_root)
+    monkeypatch.setattr(app_module, "PROJECT_ROOT", isolated_project_root)
+    monkeypatch.setattr(
+        chat_module,
+        "STATE_STORE",
+        TelegramStateStore(isolated_project_root / ".opentulpa" / "telegram_state.json"),
+    )
     monkeypatch.setattr(app_module, "TelegramClient", lambda _token: fake_tg)
     get_settings.cache_clear()
+    settings = get_settings()
 
     runtime = OpenTulpaLangGraphRuntime(
         app_url="http://testserver",
