@@ -4310,13 +4310,23 @@ class OpenTulpaLangGraphRuntime:
 
     def set_active_customer_id(self, customer_id: str):
         cid = str(customer_id or "").strip()
-        token = self._ensure_active_customer_id_ctx().set(cid)
+        ctx = self._ensure_active_customer_id_ctx()
+        previous = str(ctx.get() or "").strip()
+        token = ctx.set(cid)
         self._active_customer_id = cid
-        return token
+        return (token, previous)
 
     def reset_active_customer_id(self, token: object) -> None:
         ctx = self._ensure_active_customer_id_ctx()
-        ctx.reset(token)
+        previous = ""
+        raw_token = token
+        if isinstance(token, tuple) and len(token) == 2:
+            raw_token, previous = token
+            previous = str(previous or "").strip()
+        try:
+            ctx.reset(raw_token)
+        except ValueError:
+            ctx.set(previous)
         self._active_customer_id = str(ctx.get() or "").strip()
 
     def get_active_customer_id(self) -> str:
@@ -4332,13 +4342,23 @@ class OpenTulpaLangGraphRuntime:
 
     def set_active_thread_id(self, thread_id: str):
         tid = str(thread_id or "").strip()
-        token = self._ensure_active_thread_id_ctx().set(tid)
+        ctx = self._ensure_active_thread_id_ctx()
+        previous = str(ctx.get() or "").strip()
+        token = ctx.set(tid)
         self._active_thread_id = tid
-        return token
+        return (token, previous)
 
     def reset_active_thread_id(self, token: object) -> None:
         ctx = self._ensure_active_thread_id_ctx()
-        ctx.reset(token)
+        previous = ""
+        raw_token = token
+        if isinstance(token, tuple) and len(token) == 2:
+            raw_token, previous = token
+            previous = str(previous or "").strip()
+        try:
+            ctx.reset(raw_token)
+        except ValueError:
+            ctx.set(previous)
         self._active_thread_id = str(ctx.get() or "").strip()
 
     def get_active_thread_id(self) -> str:
