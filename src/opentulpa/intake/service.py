@@ -562,7 +562,11 @@ class IntakeWorkflowService:
     ) -> dict[str, Any]:
         safe_config = _safe_dict(sink_config)
         if sink_type == "local_csv":
-            requested_path = str(safe_config.get("file_path", "") or "").strip()
+            requested_path = str(
+                safe_config.get("file_path", "")
+                or safe_config.get("filename", "")
+                or ""
+            ).strip()
             file_path = requested_path or f"tulpa_stuff/intake_{workflow_id or 'workflow'}.csv"
             return {"file_path": file_path}
 
@@ -1173,9 +1177,9 @@ class IntakeWorkflowService:
                 else []
             )
         )
-        if configured_conversation_ids and conversation_id not in configured_conversation_ids:
-            return False
-        return True
+        return not (
+            configured_conversation_ids and conversation_id not in configured_conversation_ids
+        )
 
     def _load_source_items(
         self,
@@ -2076,6 +2080,30 @@ class IntakeWorkflowService:
             return f"failed to send Telegram Business reply: {exc}"
         if not sent:
             return "Telegram Business reply failed"
+        result_message = {}
+        if isinstance(sent, dict):
+            candidate = sent.get("result")
+            if isinstance(candidate, dict):
+                result_message = dict(candidate)
+        if result_message:
+            result_message.setdefault("message_id", new_short_id("tgmsg"))
+            result_message.setdefault("date", int(_utc_now().timestamp()))
+            result_message.setdefault(
+                "chat",
+                {
+                    "id": conversation_id,
+                    "type": "private",
+                },
+            )
+            result_message.setdefault("text", reply_text)
+            result_message.setdefault("business_connection_id", business_connection_id)
+            result_message.setdefault("sender_business_bot", {"id": "opentulpa"})
+            with suppress(Exception):
+                telegram_business.upsert_message(
+                    business_connection_id=business_connection_id,
+                    customer_id=str(workflow["customer_id"]),
+                    message=result_message,
+                )
         return None
 
     def _write_to_sink(

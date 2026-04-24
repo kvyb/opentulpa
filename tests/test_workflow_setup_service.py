@@ -227,6 +227,77 @@ def test_workflow_setup_update_clears_schedule_for_telegram_channel(tmp_path: Pa
     assert session["draft_upsert"]["schedule"] == ""
 
 
+def test_workflow_setup_update_replaces_field_guidance_and_sink_field_mapping(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "field_guidance": {
+                "customer_name": "Collect the lead's name.",
+                "vehicle_type": "Collect the vehicle type.",
+            },
+            "sink_type": "google_sheets_composio",
+            "sink_config": {
+                "toolkit": "googlesheets",
+                "field_mapping": {
+                    "customer_name": "Customer Name",
+                    "vehicle_type": "Vehicle Type",
+                },
+                "static_arguments": {"spreadsheet_id": "sheet_123"},
+            },
+        },
+    )
+
+    session = setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "field_guidance": {
+                "car_model": "Collect the car model.",
+                "wash_type": "Collect the wash package.",
+            },
+            "sink_config": {
+                "field_mapping": {
+                    "car_model": "Car Model",
+                    "wash_type": "Wash Type",
+                }
+            },
+        },
+    )
+
+    assert session["draft_upsert"]["field_guidance"] == {
+        "car_model": "Collect the car model.",
+        "wash_type": "Collect the wash package.",
+    }
+    assert session["draft_upsert"]["sink_config"]["field_mapping"] == {
+        "car_model": "Car Model",
+        "wash_type": "Wash Type",
+    }
+    assert session["draft_upsert"]["sink_config"]["static_arguments"] == {
+        "spreadsheet_id": "sheet_123"
+    }
+
+
+def test_workflow_setup_update_normalizes_local_csv_filename_alias(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+
+    session = setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "sink_type": "local_csv",
+            "sink_config": {"filename": "tulpa_stuff/bookings.csv"},
+        },
+    )
+
+    assert session["draft_upsert"]["sink_config"] == {
+        "file_path": "tulpa_stuff/bookings.csv"
+    }
+
+
 def test_workflow_setup_orchestrator_reports_active_and_paused_states(tmp_path: Path) -> None:
     setup, _, _ = _mk_setup_service(tmp_path)
     orchestrator = WorkflowSetupOrchestrator(setup_service=setup)

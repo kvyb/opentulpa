@@ -72,6 +72,7 @@ uv run pytest tests/e2e -q -rs
 1. Owner Telegram chat creates a `telegram_business_dm` workflow through the actual Telegram webhook path
 2. Owner Telegram chat deletes an existing workflow through the same path
 3. A Telegram Business lead message hits an active workflow and the lead gets a real reply on the business connection
+4. Owner Telegram chat creates a car-wash workflow, a lead completes the booking over multiple Telegram DM turns, and the completed booking is persisted to the configured sink
 
 These are intentionally close to real usage:
 
@@ -115,6 +116,36 @@ This catches the exact class of bugs we hit recently:
 - workflow save/delete works, but the Telegram streamed turn crashes afterward
 - wizard path works in isolation, but not when triggered from real Telegram chat
 - Telegram Business workflows save correctly, but lead webhook execution breaks
+- multi-turn lead collection appears to work manually, but the booking never reaches the final storage sink
+
+## Recommended suite shape for intake flows
+
+For business-intake regressions, split the suite into two lanes:
+
+1. Stable PR-gating scenarios
+
+- use the real app, real runtime, real Telegram webhook path, and real live LLM decisions
+- keep external sinks fake or local so assertions stay exact
+- assert business outcomes, not just replies:
+  - workflow saved with the right channel/source
+  - missing-field follow-up happened before save
+  - booking reached `completed`
+  - sink write succeeded
+  - stored row contains the expected fields
+
+2. Exploratory realism runs
+
+- keep the same app-level harness, but replace the scripted lead with an LLM-driven lead simulator
+- use these on demand or nightly, not as the only gating signal
+- capture full artifacts so you can inspect failures:
+  - owner transcript
+  - lead inbound messages
+  - assistant outbound messages
+  - booking snapshots
+  - sink arguments / written rows
+  - behavior log and LLM trace log
+
+This gives you one lane that is consistent enough to block regressions, and another lane that is realistic enough to expose prompt and skill weaknesses.
 
 ## Model selection for e2e
 
@@ -123,6 +154,7 @@ By default, the e2e harness uses the same repo settings as normal runtime:
 - `settings.llm_model`
 - `settings.wake_classifier_model`
 - `settings.guardrail_classifier_model`
+- `google/gemini-3-flash-preview` for the optional lead simulator lane
 
 You can still override them explicitly for e2e-only runs:
 
@@ -130,8 +162,11 @@ You can still override them explicitly for e2e-only runs:
 OPENTULPA_E2E_MODEL=...
 OPENTULPA_E2E_WAKE_MODEL=...
 OPENTULPA_E2E_GUARDRAIL_MODEL=...
+OPENTULPA_E2E_LEAD_SIM_MODEL=google/gemini-3-flash-preview
 uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py -q -rs
 ```
+
+`OPENTULPA_E2E_LEAD_SIM_MODEL` controls the incoming-lead simulator used by the simulator-backed Telegram intake scenario.
 
 ## Reports and logs
 

@@ -82,12 +82,12 @@ class TelegramApprovalAdapter:
         if not chat_id:
             return False
         text, reply_markup = self._render_challenge(approval)
-        return await self._client.send_message(
+        return bool(await self._client.send_message(
             chat_id=chat_id,
             text=text,
             parse_mode="HTML",
             reply_markup=reply_markup,
-        )
+        ))
 
     async def queue_challenge(self, approval: ApprovalRecord) -> bool:
         chat_id = str(approval.origin_conversation_id or "").strip()

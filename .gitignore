@@ -27,6 +27,8 @@ tulpa_stuff/**
 !tulpa_stuff/**/
 tulpa_stuff/artifacts/**
 docs/SCRATCHPAD.md
+graphify-out/
+.graphify_*
 
 # IDE / OS
 .DS_Store

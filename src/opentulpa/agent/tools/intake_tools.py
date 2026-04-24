@@ -139,6 +139,8 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         - sink_config must contain the concrete configuration needed by the chosen sink_type.
         - Valid sink_type values here are local_csv, google_sheets_composio, or generic_composio_write.
         - Never invent sink_type=google_sheets.
+        - For local_csv, use sink_config={"file_path": "tulpa_stuff/bookings.csv"}.
+        - Do not use sink_config.filename for local_csv workflows.
         - For Google Sheets, pass toolkit-level configuration, not a concrete tool slug:
           sink_type=google_sheets_composio
           sink_config={"toolkit": "googlesheets", "field_mapping": {...}, "static_arguments": {...}}
@@ -337,6 +339,8 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         """Patch the workflow setup draft and scratchpad for the current thread.
 
         Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
+        For local_csv workflows, use draft_patch.sink_config={"file_path": "..."}.
+        When replacing field-specific guidance or sink_config.field_mapping, send the full current object.
         """
         if not isinstance(draft_patch, dict) and not isinstance(scratchpad_patch, dict):
             return {"error": "intake_workflow_setup_update failed: draft_patch or scratchpad_patch is required"}

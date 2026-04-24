@@ -330,7 +330,7 @@ async def _send_direct_telegram_reply(
 ) -> bool:
     client = TelegramClient(str(bot_token))
     try:
-        return await client.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        return bool(await client.send_message(chat_id=chat_id, text=text, parse_mode="HTML"))
     finally:
         if hasattr(client, "aclose"):
             with suppress(Exception):

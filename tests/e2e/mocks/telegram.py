@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 
@@ -9,6 +10,7 @@ class FakeTelegramClient:
         self.sent_messages: list[dict[str, Any]] = []
         self.edited_messages: list[dict[str, Any]] = []
         self.chat_actions: list[dict[str, Any]] = []
+        self._message_id = 10_000
 
     async def answer_callback_query(
         self,
@@ -35,6 +37,17 @@ class FakeTelegramClient:
         reply_markup: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        self._message_id += 1
+        result = {
+            "message_id": self._message_id,
+            "date": int(time.time()),
+            "chat": {"id": chat_id, "type": "private"},
+            "text": text,
+        }
+        safe_business_connection_id = str(kwargs.get("business_connection_id", "") or "").strip()
+        if safe_business_connection_id:
+            result["business_connection_id"] = safe_business_connection_id
+            result["sender_business_bot"] = {"id": "fake-bot"}
         self.sent_messages.append(
             {
                 "chat_id": chat_id,
@@ -42,9 +55,28 @@ class FakeTelegramClient:
                 "parse_mode": parse_mode,
                 "reply_markup": reply_markup or {},
                 **kwargs,
+                "message_id": self._message_id,
             }
         )
-        return {"ok": True}
+        return {"ok": True, "result": result}
+
+    async def send_message_draft(
+        self,
+        *,
+        chat_id: int | str,
+        draft_id: int,
+        text: str,
+        message_thread_id: int | None = None,
+        parse_mode: str | None = "HTML",
+    ) -> bool:
+        _ = {
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": text,
+            "message_thread_id": message_thread_id,
+            "parse_mode": parse_mode,
+        }
+        return False
 
     async def edit_message_text(
         self,
@@ -87,3 +119,6 @@ class FakeTelegramClient:
     async def send_chat_action(self, *, chat_id: int | str, action: str = "typing") -> bool:
         self.chat_actions.append({"chat_id": chat_id, "action": action})
         return True
+
+    async def aclose(self) -> None:
+        return None

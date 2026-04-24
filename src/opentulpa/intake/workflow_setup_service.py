@@ -32,6 +32,56 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _merge_sink_config(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in patch.items():
+        safe_key = str(key or "").strip()
+        if not safe_key:
+            continue
+        if safe_key == "field_mapping" and isinstance(value, dict):
+            merged[safe_key] = dict(value)
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(safe_key), dict):
+            merged[safe_key] = _deep_merge(_safe_dict(merged.get(safe_key)), value)
+            continue
+        merged[safe_key] = value
+    return merged
+
+
+def _merge_draft(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in patch.items():
+        safe_key = str(key or "").strip()
+        if not safe_key:
+            continue
+        if safe_key == "field_guidance" and isinstance(value, dict):
+            merged[safe_key] = dict(value)
+            continue
+        if safe_key == "sink_config" and isinstance(value, dict):
+            merged[safe_key] = _merge_sink_config(_safe_dict(merged.get(safe_key)), value)
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(safe_key), dict):
+            merged[safe_key] = _deep_merge(_safe_dict(merged.get(safe_key)), value)
+            continue
+        merged[safe_key] = value
+    return merged
+
+
+def _normalize_local_csv_draft_sink_config(draft: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(draft)
+    sink_type = str(normalized.get("sink_type", "") or "").strip().lower()
+    if sink_type != "local_csv":
+        return normalized
+    sink_config = _safe_dict(normalized.get("sink_config"))
+    file_path = str(
+        sink_config.get("file_path", "")
+        or sink_config.get("filename", "")
+        or ""
+    ).strip()
+    normalized["sink_config"] = {"file_path": file_path} if file_path else {}
+    return normalized
+
+
 def _normalize_schedule_for_channel(draft: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(draft)
     channel = str(normalized.get("channel", "") or "").strip().lower()
@@ -56,23 +106,25 @@ class WorkflowSetupService:
 
     @staticmethod
     def _draft_scaffold() -> dict[str, Any]:
-        return _normalize_schedule_for_channel(
+        return _normalize_local_csv_draft_sink_config(
+            _normalize_schedule_for_channel(
             {
-            "name": "",
-            "channel": "instagram_dm",
-            "provider": "composio",
-            "source_config": {},
-            "intent_description": "",
-            "required_fields": [],
-            "field_guidance": {},
-            "assistant_instructions": "",
-            "knowledge_file_ids": [],
-            "sink_type": "",
-            "sink_config": {},
-            "schedule": "*/5 * * * *",
-            "notify_user": True,
-            "enabled": True,
+                "name": "",
+                "channel": "instagram_dm",
+                "provider": "composio",
+                "source_config": {},
+                "intent_description": "",
+                "required_fields": [],
+                "field_guidance": {},
+                "assistant_instructions": "",
+                "knowledge_file_ids": [],
+                "sink_type": "",
+                "sink_config": {},
+                "schedule": "*/5 * * * *",
+                "notify_user": True,
+                "enabled": True,
             }
+            )
         )
 
     @staticmethod
@@ -197,8 +249,10 @@ class WorkflowSetupService:
         )
         if session is None:
             raise ValueError("active workflow setup session not found")
-        updated_draft = _deep_merge(_safe_dict(session.get("draft_upsert")), _safe_dict(draft_patch))
-        updated_draft = _normalize_schedule_for_channel(updated_draft)
+        updated_draft = _merge_draft(_safe_dict(session.get("draft_upsert")), _safe_dict(draft_patch))
+        updated_draft = _normalize_local_csv_draft_sink_config(
+            _normalize_schedule_for_channel(updated_draft)
+        )
         updated_scratchpad = _deep_merge(_safe_dict(session.get("scratchpad")), _safe_dict(scratchpad_patch))
         return self._store.update_session(
             session_id=str(session["session_id"]),

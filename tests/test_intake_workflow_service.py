@@ -379,6 +379,7 @@ class _SheetNameRequiredSinkComposio(_FakeComposio):
 class _FakeTelegramClient:
     def __init__(self) -> None:
         self.sent_messages: list[dict[str, Any]] = []
+        self._message_id = 1_000
 
     async def send_message(
         self,
@@ -389,7 +390,8 @@ class _FakeTelegramClient:
         reply_markup: dict[str, Any] | None = None,
         business_connection_id: str | None = None,
         reply_to_message_id: int | None = None,
-    ) -> bool:
+    ) -> dict[str, Any]:
+        self._message_id += 1
         self.sent_messages.append(
             {
                 "chat_id": str(chat_id),
@@ -398,9 +400,20 @@ class _FakeTelegramClient:
                 "reply_markup": dict(reply_markup or {}) if isinstance(reply_markup, dict) else None,
                 "business_connection_id": business_connection_id,
                 "reply_to_message_id": reply_to_message_id,
+                "message_id": self._message_id,
             }
         )
-        return True
+        return {
+            "ok": True,
+            "result": {
+                "message_id": self._message_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "chat": {"id": chat_id, "type": "private"},
+                "text": text,
+                "business_connection_id": business_connection_id,
+                "sender_business_bot": {"id": "fake-bot"},
+            },
+        }
 
 
 def _mk_service(
@@ -711,6 +724,40 @@ async def test_intake_workflow_upsert_normalizes_none_workflow_id_to_short_gener
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_upsert_accepts_local_csv_filename_alias(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Need a car wash tomorrow 3pm, SUV, interior and exterior.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio(summary, conversation),
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time", "car_type", "wash_type"],
+        sink_type="local_csv",
+        sink_config={"filename": "tulpa_stuff/bookings.csv"},
+    )
+
+    assert workflow["sink_config"] == {"file_path": "tulpa_stuff/bookings.csv"}
+
+
+@pytest.mark.asyncio
 async def test_intake_workflow_run_saves_local_csv_and_skips_reprocessing_same_message(
     tmp_path: Path,
 ) -> None:
@@ -960,6 +1007,100 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert sent["chat_id"] == "555"
     assert sent["business_connection_id"] == "bc_123"
     assert sent["reply_to_message_id"] == 10
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_reply_is_persisted_back_into_conversation_history(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a booking.",
+                "extracted_fields": {"telegram_username": "alice"},
+                "missing_fields": ["time"],
+                "reply_action": "send_reply",
+                "reply_text": "What time works for you?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need one more field before saving.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Can I book a wash?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["telegram_username", "time"],
+        assistant_instructions="Ask for time before saving.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    conversation = telegram_business.get_conversation(
+        customer_id="telegram_123",
+        business_connection_id="bc_123",
+        conversation_id="555",
+    )
+    assert conversation["ok"] is True
+    messages = conversation["conversation"]["messages"]
+    assert [item["sender_role"] for item in messages] == ["customer", "assistant"]
+    assert messages[1]["text"] == "What time works for you?"
+    assert conversation["summary"]["latest_outbound_message_id"]
 
 
 @pytest.mark.asyncio

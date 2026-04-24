@@ -138,7 +138,7 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
         business_connection_id: str | None = None,
         reply_to_message_id: int | None = None,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
         final_text, final_mode = prepare_text_and_mode(text, parse_mode)
         payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
         if final_mode:
@@ -151,7 +151,7 @@ class TelegramClient:
         if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
             payload["reply_parameters"] = {"message_id": reply_to_message_id}
         data = await self._post("sendMessage", payload)
-        return bool(data)
+        return data if isinstance(data, dict) else None
 
     async def send_message_draft(
         self,
@@ -415,7 +415,8 @@ def parse_telegram_callback_query(
             return None, None, None, None, None
         callback_id = str(callback.get("id", "")).strip() or None
         user_id = callback.get("from", {}).get("id")
-        message = callback.get("message") if isinstance(callback.get("message"), dict) else {}
+        raw_message = callback.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
         chat_id = message.get("chat", {}).get("id")
         message_id = message.get("message_id")
         data = str(callback.get("data", "")).strip() or None

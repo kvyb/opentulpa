@@ -9,18 +9,19 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from evaluation.judge import evaluate_e2e_scenario_with_llm_judge
 from fastapi.testclient import TestClient
+from harness.lead_simulator import LeadProfile, LeadSimulator
+from harness.logging import JsonlRecorder
+from mocks.composio_instagram import FakeComposioInstagramService
+from mocks.telegram import FakeTelegramClient
+from reports.status_report import write_status_report
 
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.api.app import create_app
 from opentulpa.core.config import get_settings
 from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.scheduler.service import SchedulerService
-from harness.logging import JsonlRecorder
-from mocks.composio_instagram import FakeComposioInstagramService
-from mocks.telegram import FakeTelegramClient
-from reports.status_report import write_status_report
-from evaluation.judge import evaluate_e2e_scenario_with_llm_judge
 
 
 @dataclass
@@ -34,6 +35,7 @@ class E2EHarness:
     llm_trace_path: Path
     telegram_client: FakeTelegramClient
     composio_service: FakeComposioInstagramService
+    lead_simulator: LeadSimulator
 
     def count_internal_api_calls(self) -> int:
         return self.recorder.count("internal_api_call")
@@ -98,6 +100,20 @@ class E2EHarness:
         )
         return {"status_code": int(response.status_code), "payload": payload}
 
+    def list_bookings(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        intake_service = self.client.app.state.intake_workflows
+        return intake_service.list_bookings(
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            conversation_id=conversation_id,
+        )
+
     def upsert_instagram_workflow(
         self,
         *,
@@ -135,6 +151,197 @@ class E2EHarness:
             payload=payload,
         )
         return {"status_code": int(response.status_code), "payload": payload}
+
+    def simulate_telegram_business_lead(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        business_connection_id: str,
+        lead_chat_id: int,
+        lead_user_id: int,
+        profile: LeadProfile,
+        initial_message_id: int = 500,
+        idle_timeout_seconds: float = 60.0,
+    ) -> dict[str, Any]:
+        transcript: list[dict[str, Any]] = []
+        plans: list[dict[str, Any]] = []
+        turn_results: list[dict[str, Any]] = []
+        max_turns = max(1, int(profile.max_turns or 6))
+        next_message_id = max(1, int(initial_message_id))
+        next_lead_text = str(profile.initial_message or "").strip()
+        if not next_lead_text:
+            raise ValueError("lead profile initial_message is required")
+
+        def _assistant_messages() -> list[dict[str, Any]]:
+            return [
+                item
+                for item in self.telegram_client.sent_messages
+                if int(item.get("chat_id", 0)) == int(lead_chat_id)
+                and str(item.get("business_connection_id", "")).strip() == business_connection_id
+            ]
+
+        for turn_index in range(max_turns):
+            assistant_count_before = len(_assistant_messages())
+            inbound_message = {
+                "update_id": int(time.time() * 1000),
+                "business_message": {
+                    "business_connection_id": business_connection_id,
+                    "message_id": next_message_id,
+                    "date": int(time.time()),
+                    "chat": {"id": lead_chat_id, "type": "private", "username": f"lead_{lead_user_id}"},
+                    "from": {"id": lead_user_id, "is_bot": False, "username": f"lead_{lead_user_id}"},
+                    "text": next_lead_text,
+                },
+            }
+            webhook_status = self.post_telegram(body=inbound_message)
+            transcript.append(
+                {
+                    "role": "lead",
+                    "text": next_lead_text,
+                    "message_id": next_message_id,
+                }
+            )
+            self.recorder.add(
+                "lead_simulator_inbound",
+                workflow_id=workflow_id,
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                lead_user_id=lead_user_id,
+                turn_index=turn_index,
+                status_code=webhook_status,
+                text=next_lead_text,
+            )
+            if webhook_status != 200:
+                return {
+                    "ok": False,
+                    "reason": "lead_webhook_rejected",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "bookings": self.list_bookings(
+                        customer_id=customer_id,
+                        workflow_id=workflow_id,
+                        conversation_id=str(lead_chat_id),
+                    ),
+                }
+
+            deadline = time.monotonic() + max(1.0, float(idle_timeout_seconds))
+            while time.monotonic() < deadline:
+                bookings = self.list_bookings(
+                    customer_id=customer_id,
+                    workflow_id=workflow_id,
+                    conversation_id=str(lead_chat_id),
+                )
+                completed = next(
+                    (
+                        item
+                        for item in bookings
+                        if str(item.get("status", "")).strip().lower() == "completed"
+                    ),
+                    None,
+                )
+                assistant_messages = _assistant_messages()
+                if len(assistant_messages) > assistant_count_before or completed is not None:
+                    break
+                time.sleep(0.2)
+
+            bookings = self.list_bookings(
+                customer_id=customer_id,
+                workflow_id=workflow_id,
+                conversation_id=str(lead_chat_id),
+            )
+            completed = next(
+                (
+                    item
+                    for item in bookings
+                    if str(item.get("status", "")).strip().lower() == "completed"
+                ),
+                None,
+            )
+            assistant_messages = _assistant_messages()
+            new_assistant_messages = assistant_messages[assistant_count_before:]
+            for item in new_assistant_messages:
+                transcript.append(
+                    {
+                        "role": "assistant",
+                        "text": str(item.get("text", "") or "").strip(),
+                        "message_id": item.get("message_id"),
+                    }
+                )
+            turn_result = {
+                "turn_index": turn_index,
+                "lead_text": next_lead_text,
+                "assistant_messages": new_assistant_messages,
+                "booking_completed": completed is not None,
+                "bookings": bookings,
+            }
+            turn_results.append(turn_result)
+            self.recorder.add(
+                "lead_simulator_turn_result",
+                workflow_id=workflow_id,
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                **turn_result,
+            )
+            if completed is not None:
+                return {
+                    "ok": True,
+                    "reason": "booking_completed",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "bookings": bookings,
+                    "completed_booking": completed,
+                }
+            if not new_assistant_messages:
+                return {
+                    "ok": False,
+                    "reason": "assistant_did_not_reply",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "bookings": bookings,
+                }
+
+            plan = self.lead_simulator.plan_next_turn(
+                profile=profile,
+                transcript=transcript,
+                booking_state=bookings[0] if bookings else {},
+            )
+            plans.append(plan.as_dict())
+            self.recorder.add(
+                "lead_simulator_plan",
+                workflow_id=workflow_id,
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                turn_index=turn_index,
+                plan=plan.as_dict(),
+            )
+            if plan.done or not str(plan.message or "").strip():
+                return {
+                    "ok": False,
+                    "reason": "lead_simulator_stopped_before_completion",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "bookings": bookings,
+                }
+            next_lead_text = str(plan.message or "").strip()
+            next_message_id += 1
+
+        return {
+            "ok": False,
+            "reason": "max_turns_exhausted",
+            "transcript": transcript,
+            "turn_plans": plans,
+            "turn_results": turn_results,
+            "bookings": self.list_bookings(
+                customer_id=customer_id,
+                workflow_id=workflow_id,
+                conversation_id=str(lead_chat_id),
+            ),
+        }
 
     def write_status_report(self, *, scenario: str, ok: bool, details: dict[str, Any]) -> Path:
         payload = {
@@ -252,6 +459,7 @@ def build_harness(
 ) -> E2EHarness:
     from opentulpa.api import app as app_module
     from opentulpa.interfaces.telegram import chat_service as chat_module
+    from opentulpa.interfaces.telegram import relay as relay_module
     from opentulpa.tasks import sandbox as sandbox_module
 
     api_key, base_url = _require_openai_compatible_env()
@@ -282,6 +490,8 @@ def build_harness(
         TelegramStateStore(isolated_project_root / ".opentulpa" / "telegram_state.json"),
     )
     monkeypatch.setattr(app_module, "TelegramClient", lambda _token: fake_tg)
+    monkeypatch.setattr(chat_module, "TelegramClient", lambda _token: fake_tg)
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda _token: fake_tg)
     get_settings.cache_clear()
     settings = get_settings()
 
@@ -323,6 +533,11 @@ def build_harness(
         llm_trace_path=llm_trace_path,
         telegram_client=fake_tg,
         composio_service=composio,
+        lead_simulator=LeadSimulator(
+            api_key=api_key,
+            base_url=base_url,
+            recorder=recorder,
+        ),
     )
 
 
