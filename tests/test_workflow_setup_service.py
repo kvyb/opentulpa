@@ -31,6 +31,61 @@ class _FakeComposio:
         return {"ok": True, "enabled": False}
 
 
+class _SheetsComposio:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def status(self) -> dict[str, object]:
+        return {"ok": True, "enabled": True}
+
+    def list_google_sheets_tab_names(
+        self,
+        *,
+        customer_id: str,
+        spreadsheet_id: str,
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "list_google_sheets_tab_names",
+                "customer_id": customer_id,
+                "spreadsheet_id": spreadsheet_id,
+                "connected_account_id": connected_account_id,
+            }
+        )
+        return {"ok": True, "sheet_names": ["Записи клиентов"]}
+
+    def search_tools(
+        self,
+        *,
+        query: str = "",
+        toolkits: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "search_tools",
+                "query": query,
+                "toolkits": list(toolkits or []),
+                "limit": limit,
+            }
+        )
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "slug": "GOOGLESHEETS_UPSERT_ROWS",
+                    "toolkit_slug": "googlesheets",
+                    "name": "Google Sheets Upsert Rows",
+                    "description": "Upsert rows in a Google Sheet.",
+                    "input_schema": {"type": "object", "properties": {"rows": {"type": "array"}}},
+                }
+            ],
+        }
+
+
 class _FakeTelegramClient:
     async def send_message(self, **kwargs: Any) -> bool:
         _ = kwargs
@@ -325,6 +380,52 @@ def test_workflow_setup_update_normalizes_local_csv_filename_alias(tmp_path: Pat
     assert session["draft_upsert"]["sink_config"] == {
         "file_path": "tulpa_stuff/bookings.csv"
     }
+
+
+def test_workflow_setup_preflight_normalizes_single_google_sheet_tab_and_dry_runs(
+    tmp_path: Path,
+) -> None:
+    composio = _SheetsComposio()
+    setup, _, _ = _mk_setup_service(tmp_path, composio=composio)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "name": "AutoSpa Telegram Intake",
+            "intent_description": "Записывать клиентов на мойку.",
+            "required_fields": ["тип услуги", "телефон клиента"],
+            "sink_type": "google_sheets_composio",
+            "sink_config": {
+                "toolkit": "googlesheets",
+                "field_mapping": {
+                    "тип услуги": "тип услуги",
+                    "телефон клиента": "телефон клиента",
+                },
+                "static_arguments": {"spreadsheet_id": "sheet_123"},
+            },
+        },
+    )
+
+    session = setup.preflight_current(customer_id="telegram_123", thread_id="thread_123")
+
+    preflight = session["preflight"]
+    assert preflight["ok"] is True
+    assert preflight["status"] == "ready"
+    assert preflight["sink_preflight"]["dry_run"]["will_execute"] is False
+    assert preflight["sink_preflight"]["dry_run"]["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"
+    static_arguments = session["draft_upsert"]["sink_config"]["static_arguments"]
+    assert static_arguments == {
+        "spreadsheetId": "sheet_123",
+        "sheetName": "Записи клиентов",
+    }
+    preview_args = preflight["sink_preflight"]["dry_run"]["arguments_preview"]
+    assert preview_args["spreadsheetId"] == "sheet_123"
+    assert preview_args["sheetName"] == "Записи клиентов"
+    assert preview_args["headers"][0] == "Booking ID"
+    assert set(preview_args["headers"][1:]) == {"тип услуги", "телефон клиента"}
+    assert "arguments_preview" not in session["scratchpad"]["last_preflight"]["dry_run"]
+    assert all(call["method"] != "execute_tool" for call in composio.calls)
 
 
 def test_workflow_setup_orchestrator_reports_active_and_paused_states(tmp_path: Path) -> None:

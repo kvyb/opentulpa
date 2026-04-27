@@ -108,6 +108,35 @@ async def test_intake_workflow_setup_update_requires_patch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_setup_preflight_posts_expected_payload() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(
+                200,
+                {
+                    "preflight": {
+                        "ok": True,
+                        "status": "ready",
+                        "sink_preflight": {"dry_run": {"will_execute": False}},
+                    }
+                },
+            )
+        ]
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_setup_preflight"].ainvoke({})
+
+    assert result["status"] == "ready"
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/intake/setup/preflight"
+    assert runtime.calls[0][2]["json_body"] == {
+        "customer_id": "telegram_123",
+        "thread_id": "thread_123",
+    }
+
+
+@pytest.mark.asyncio
 async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
     runtime = DummyRuntime(
         [

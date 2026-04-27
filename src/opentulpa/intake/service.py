@@ -73,6 +73,21 @@ def _safe_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _unique_strings(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        folded = text.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        out.append(text)
+    return out
+
+
 def _normalize_optional_id(value: Any) -> str:
     text = str(value or "").strip()
     if text.lower() in {"none", "null"}:
@@ -101,7 +116,7 @@ def _sheet_cell_value(value: Any) -> Any:
 def _normalize_google_sheets_arguments(value: dict[str, Any]) -> dict[str, Any]:
     out = dict(value)
     for canonical, aliases in {
-        "spreadsheetId": ("spreadsheet_id", "spreadsheetID", "spreadsheet"),
+        "spreadsheetId": ("spreadsheet_id",),
         "sheetName": ("sheet_name", "worksheet", "worksheet_name", "tab_name"),
     }.items():
         if str(out.get(canonical, "") or "").strip():
@@ -112,6 +127,22 @@ def _normalize_google_sheets_arguments(value: dict[str, Any]) -> dict[str, Any]:
                 out[canonical] = alias_value
                 break
     return out
+
+
+def _google_sheets_top_level_arguments(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value.get(key)
+        for key in (
+            "spreadsheetId",
+            "spreadsheet_id",
+            "sheetName",
+            "sheet_name",
+            "worksheet",
+            "worksheet_name",
+            "tab_name",
+        )
+        if key in value
+    }
 
 
 def _normalize_google_sheets_field_mapping(
@@ -643,6 +674,19 @@ class IntakeWorkflowService:
         if sink_type == "google_sheets_composio":
             toolkit = toolkit or _infer_toolkit_from_tool_slug(legacy_tool_slug) or "googlesheets"
             operation_hint = operation_hint or _infer_operation_hint_from_tool_slug(legacy_tool_slug) or "upsert rows"
+            static_arguments = _normalize_google_sheets_arguments(
+                {**_google_sheets_top_level_arguments(safe_config), **static_arguments}
+            )
+            if validate_target and not str(static_arguments.get("spreadsheetId", "") or "").strip():
+                raise ValueError(
+                    "google_sheets_composio requires sink_config.static_arguments.spreadsheetId"
+                )
+            static_arguments = self._resolve_google_sheets_sheet_name_for_sink(
+                customer_id=customer_id,
+                static_arguments=static_arguments,
+                connected_account_id=connected_account_id or None,
+                validate_target=validate_target,
+            )
         else:
             toolkit = toolkit or _infer_toolkit_from_tool_slug(legacy_tool_slug)
             operation_hint = operation_hint or _infer_operation_hint_from_tool_slug(legacy_tool_slug)
@@ -696,6 +740,60 @@ class IntakeWorkflowService:
         if sink_type == "generic_composio_write" and not operation_hint:
             raise ValueError("sink_config.operation_hint is required for generic_composio_write")
 
+    def _resolve_google_sheets_sheet_name_for_sink(
+        self,
+        *,
+        customer_id: str,
+        static_arguments: dict[str, Any],
+        connected_account_id: str | None,
+        validate_target: bool,
+    ) -> dict[str, Any]:
+        normalized = _normalize_google_sheets_arguments(static_arguments)
+        if str(normalized.get("sheetName", "") or "").strip():
+            return normalized
+        if not validate_target:
+            return normalized
+        spreadsheet_id = str(normalized.get("spreadsheetId", "") or "").strip()
+        if not spreadsheet_id:
+            return normalized
+        composio = self._composio
+        if composio is None or not bool(getattr(composio, "enabled", False)):
+            return normalized
+        list_tabs = getattr(composio, "list_google_sheets_tab_names", None)
+        if not callable(list_tabs):
+            return normalized
+        try:
+            result = list_tabs(
+                customer_id=customer_id,
+                spreadsheet_id=spreadsheet_id,
+                connected_account_id=connected_account_id,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "unable to inspect Google Sheets tabs; specify "
+                "sink_config.static_arguments.sheetName"
+            ) from exc
+        sheet_names = _unique_strings(_safe_list(_safe_dict(result).get("sheet_names")))
+        if len(sheet_names) == 1:
+            resolved = dict(normalized)
+            resolved["sheetName"] = sheet_names[0]
+            return resolved
+        if len(sheet_names) > 1:
+            preview = ", ".join(sheet_names[:10])
+            raise ValueError(
+                "google_sheets_composio requires sink_config.static_arguments.sheetName "
+                f"because spreadsheetId={spreadsheet_id} has multiple sheets: {preview}"
+            )
+        if bool(_safe_dict(result).get("ok", False)):
+            raise ValueError(
+                "unable to find any worksheets in the Google Sheets target; specify "
+                "sink_config.static_arguments.sheetName"
+            )
+        raise ValueError(
+            "unable to inspect Google Sheets tabs; specify "
+            "sink_config.static_arguments.sheetName"
+        )
+
     def _hydrate_workflow_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "workflow_id": str(row["workflow_id"]),
@@ -736,6 +834,249 @@ class IntakeWorkflowService:
             "edit_window_until": str(row["edit_window_until"] or ""),
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
+        }
+
+    @staticmethod
+    def _workflow_to_upsert_draft(workflow: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": str(workflow.get("name", "") or ""),
+            "channel": str(workflow.get("channel", "instagram_dm") or "instagram_dm"),
+            "provider": str(workflow.get("provider", "composio") or "composio"),
+            "source_config": _safe_dict(workflow.get("source_config")),
+            "intent_description": str(workflow.get("intent_description", "") or ""),
+            "required_fields": [
+                str(item or "").strip()
+                for item in _safe_list(workflow.get("required_fields"))
+                if str(item or "").strip()
+            ],
+            "field_guidance": _safe_dict(workflow.get("field_guidance")),
+            "assistant_instructions": str(workflow.get("assistant_instructions", "") or ""),
+            "knowledge_file_ids": [
+                str(item or "").strip()
+                for item in _safe_list(workflow.get("knowledge_file_ids"))
+                if str(item or "").strip()
+            ],
+            "sink_type": str(workflow.get("sink_type", "") or ""),
+            "sink_config": _safe_dict(workflow.get("sink_config")),
+            "schedule": str(workflow.get("schedule", _DEFAULT_SCHEDULE) or _DEFAULT_SCHEDULE),
+            "notify_user": bool(workflow.get("notify_user", True)),
+            "enabled": bool(workflow.get("enabled", True)),
+        }
+
+    def preflight_workflow_payload(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str | None = None,
+        name: str,
+        channel: str = "instagram_dm",
+        provider: str = "composio",
+        source_config: dict[str, Any] | None = None,
+        intent_description: str,
+        required_fields: list[str],
+        field_guidance: dict[str, Any] | None = None,
+        assistant_instructions: str = "",
+        knowledge_file_ids: list[str] | None = None,
+        sink_type: str,
+        sink_config: dict[str, Any] | None = None,
+        schedule: str = _DEFAULT_SCHEDULE,
+        notify_user: bool = True,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        try:
+            normalized = self._normalize_workflow_payload(
+                workflow_id=workflow_id,
+                customer_id=customer_id,
+                name=name,
+                channel=channel,
+                provider=provider,
+                source_config=source_config,
+                intent_description=intent_description,
+                required_fields=required_fields,
+                field_guidance=field_guidance,
+                assistant_instructions=assistant_instructions,
+                knowledge_file_ids=knowledge_file_ids or [],
+                sink_type=sink_type,
+                sink_config=sink_config,
+                schedule=schedule,
+                notify_user=notify_user,
+                enabled=enabled,
+                existing=None,
+            )
+        except Exception as exc:
+            error = str(exc)
+            return {
+                "ok": False,
+                "status": "needs_clarification",
+                "errors": [error],
+                "warnings": [],
+                "follow_up_questions": [self._preflight_follow_up_for_error(error)],
+            }
+
+        warnings: list[str] = []
+        dry_run = self._build_sink_dry_run_preview(normalized, warnings=warnings)
+        return {
+            "ok": True,
+            "status": "ready",
+            "errors": [],
+            "warnings": warnings,
+            "follow_up_questions": [],
+            "normalized_draft": self._workflow_to_upsert_draft(normalized),
+            "sink_preflight": {
+                "sink_type": str(normalized.get("sink_type", "") or ""),
+                "dry_run": dry_run,
+            },
+        }
+
+    @staticmethod
+    def _preflight_follow_up_for_error(error: str) -> str:
+        text = str(error or "").strip()
+        lowered = text.lower()
+        if "multiple sheets" in lowered:
+            return "Which Google Sheets tab should this workflow write to?"
+        if "sheetname" in lowered or "worksheet" in lowered:
+            return "Which Google Sheets tab should this workflow write to?"
+        if "spreadsheetid" in lowered:
+            return "Please provide the Google Sheet URL or spreadsheet ID."
+        if "business_connection_id" in lowered or "telegram business" in lowered:
+            return "Please connect Telegram Business or choose the exact business connection for this workflow."
+        if "required_fields" in lowered:
+            return "Which fields must be collected before saving a completed lead?"
+        if "intent_description" in lowered:
+            return "What inbound intent should this workflow handle?"
+        if "sink_config.field_mapping" in lowered or "field_mapping" in lowered:
+            return "How should workflow fields map to the output sink columns or arguments?"
+        return f"Please clarify the workflow setup issue: {text}"
+
+    def _build_sink_dry_run_preview(
+        self,
+        workflow: dict[str, Any],
+        *,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
+        sink_config = _safe_dict(workflow.get("sink_config"))
+        sample_payload = self._sample_sink_payload(workflow)
+        if sink_type == "local_csv":
+            relative_path = str(sink_config.get("file_path", "") or "").strip()
+            headers = [
+                "booking_id",
+                "workflow_id",
+                "workflow_name",
+                "conversation_id",
+                "customer_id",
+                "status",
+                "completed_at",
+                *sample_payload.keys(),
+            ]
+            return {
+                "mode": "non_destructive",
+                "will_execute": False,
+                "target": {"file_path": relative_path},
+                "headers_preview": _unique_strings(headers),
+                "sample_payload": sample_payload,
+            }
+        if sink_type in {"google_sheets_composio", "generic_composio_write"}:
+            return self._build_composio_sink_dry_run_preview(
+                workflow,
+                sample_payload=sample_payload,
+                warnings=warnings,
+            )
+        return {"mode": "non_destructive", "will_execute": False, "unsupported_sink_type": sink_type}
+
+    @staticmethod
+    def _sample_sink_payload(workflow: dict[str, Any]) -> dict[str, str]:
+        sink_config = _safe_dict(workflow.get("sink_config"))
+        field_mapping = _clean_mapping(sink_config.get("field_mapping"))
+        required_fields = [
+            str(item or "").strip()
+            for item in _safe_list(workflow.get("required_fields"))
+            if str(item or "").strip()
+        ]
+        source_fields = [*required_fields]
+        sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
+        if sink_type == "google_sheets_composio":
+            source_fields.extend(field_mapping.keys())
+            source_fields.extend(field_mapping.values())
+        else:
+            source_fields.extend(field_mapping.values())
+        payload: dict[str, str] = {}
+        for field in _unique_strings(source_fields):
+            if field in {
+                "booking_id",
+                "workflow_id",
+                "conversation_id",
+                "customer_id",
+            }:
+                continue
+            payload[field] = f"sample_{field}"
+        return payload
+
+    def _build_composio_sink_dry_run_preview(
+        self,
+        workflow: dict[str, Any],
+        *,
+        sample_payload: dict[str, str],
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        sink_config = _safe_dict(workflow.get("sink_config"))
+        sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
+        toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
+        connected_account_id = str(sink_config.get("connected_account_id", "") or "").strip() or None
+        tool_slug = ""
+        if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
+            warnings.append("Composio is not configured, so the write tool could not be validated.")
+        else:
+            try:
+                tool_slug = self._resolve_composio_sink_tool_slug(
+                    sink_type=sink_type,
+                    sink_config=sink_config,
+                )
+            except Exception as exc:
+                warnings.append(f"Could not resolve Composio write tool during dry run: {exc}")
+        enriched_payload = {
+            **sample_payload,
+            "booking_id": "sample_booking_id",
+            "workflow_id": str(workflow.get("workflow_id", "") or "sample_workflow_id"),
+            "conversation_id": "sample_conversation_id",
+            "customer_id": str(workflow.get("customer_id", "") or "sample_customer_id"),
+        }
+        static_arguments = _safe_dict(sink_config.get("static_arguments"))
+        field_mapping = _clean_mapping(sink_config.get("field_mapping"))
+        if sink_type == "google_sheets_composio":
+            static_arguments = _normalize_google_sheets_arguments(static_arguments)
+            field_mapping = _normalize_google_sheets_field_mapping(
+                field_mapping,
+                payload_keys=set(enriched_payload.keys()),
+            )
+            key_source = "booking_id"
+            key_header = str(field_mapping.get(key_source, "Booking ID") or "Booking ID").strip()
+            headers = [key_header]
+            row = [_sheet_cell_value(enriched_payload.get(key_source))]
+            for source_key, header_name in field_mapping.items():
+                safe_source = str(source_key or "").strip()
+                safe_header = str(header_name or "").strip()
+                if not safe_source or not safe_header or safe_source == key_source:
+                    continue
+                headers.append(safe_header)
+                row.append(_sheet_cell_value(enriched_payload.get(safe_source)))
+            arguments = {
+                **static_arguments,
+                "headers": headers,
+                "rows": [row],
+                "keyColumn": key_header,
+            }
+        else:
+            arguments = dict(static_arguments)
+            for target_key, source_key in field_mapping.items():
+                arguments[target_key] = enriched_payload.get(source_key)
+        return {
+            "mode": "non_destructive",
+            "will_execute": False,
+            "toolkit": toolkit,
+            "tool_slug": tool_slug,
+            "connected_account_id": connected_account_id,
+            "arguments_preview": arguments,
         }
 
     def upsert_workflow(
@@ -2514,12 +2855,30 @@ class IntakeWorkflowService:
         if sink_type == "google_sheets_composio":
             top_level_arguments = {
                 key: sink_config.get(key)
-                for key in ("spreadsheetId", "spreadsheet_id", "sheetName", "sheet_name")
+                for key in (
+                    "spreadsheetId",
+                    "spreadsheet_id",
+                    "sheetName",
+                    "sheet_name",
+                    "worksheet",
+                    "worksheet_name",
+                    "tab_name",
+                )
                 if key in sink_config
             }
             static_arguments = _normalize_google_sheets_arguments(
                 {**top_level_arguments, **static_arguments}
             )
+            try:
+                static_arguments = self._resolve_google_sheets_sheet_name_for_sink(
+                    customer_id=str(workflow["customer_id"]),
+                    static_arguments=static_arguments,
+                    connected_account_id=str(sink_config.get("connected_account_id", "") or "").strip()
+                    or None,
+                    validate_target=True,
+                )
+            except ValueError as exc:
+                return {}, str(exc)
             override_arguments = _normalize_google_sheets_arguments(override_arguments)
         enriched_payload = {
             **payload,

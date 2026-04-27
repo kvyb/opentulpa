@@ -96,6 +96,25 @@ def _normalize_schedule_for_channel(draft: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _compact_preflight_for_scratchpad(preflight: dict[str, Any]) -> dict[str, Any]:
+    sink_preflight = _safe_dict(preflight.get("sink_preflight"))
+    dry_run = _safe_dict(sink_preflight.get("dry_run"))
+    return {
+        "ok": bool(preflight.get("ok", False)),
+        "status": str(preflight.get("status", "") or ""),
+        "errors": _safe_list(preflight.get("errors")),
+        "warnings": _safe_list(preflight.get("warnings")),
+        "follow_up_questions": _safe_list(preflight.get("follow_up_questions")),
+        "sink_type": str(sink_preflight.get("sink_type", "") or ""),
+        "dry_run": {
+            "mode": str(dry_run.get("mode", "") or ""),
+            "will_execute": bool(dry_run.get("will_execute", False)),
+            "tool_slug": str(dry_run.get("tool_slug", "") or ""),
+            "target": _safe_dict(dry_run.get("target")),
+        },
+    }
+
+
 class WorkflowSetupService:
     """Owns workflow-setup session lifecycle and commit semantics."""
 
@@ -268,6 +287,49 @@ class WorkflowSetupService:
             scratchpad=updated_scratchpad,
             confirmed_draft_hash="",
         )
+
+    def preflight_current(self, *, customer_id: str, thread_id: str) -> dict[str, Any]:
+        session = self._store.get_thread_session(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            statuses=("active",),
+        )
+        if session is None:
+            raise ValueError("active workflow setup session not found")
+        draft = _safe_dict(session.get("draft_upsert"))
+        target_workflow_id = str(session.get("target_workflow_id", "") or "").strip() or None
+        preflight = self._intake_workflows.preflight_workflow_payload(
+            customer_id=customer_id,
+            workflow_id=target_workflow_id,
+            name=str(draft.get("name", "") or ""),
+            channel=str(draft.get("channel", "instagram_dm") or "instagram_dm"),
+            provider=str(draft.get("provider", "composio") or "composio"),
+            source_config=_safe_dict(draft.get("source_config")),
+            intent_description=str(draft.get("intent_description", "") or ""),
+            required_fields=_safe_list(draft.get("required_fields")),
+            field_guidance=_safe_dict(draft.get("field_guidance")),
+            assistant_instructions=str(draft.get("assistant_instructions", "") or ""),
+            knowledge_file_ids=_safe_list(draft.get("knowledge_file_ids")),
+            sink_type=str(draft.get("sink_type", "") or ""),
+            sink_config=_safe_dict(draft.get("sink_config")),
+            schedule=str(draft.get("schedule", "*/5 * * * *") or "*/5 * * * *"),
+            notify_user=bool(draft.get("notify_user", True)),
+            enabled=bool(draft.get("enabled", True)),
+        )
+        scratchpad = _deep_merge(
+            _safe_dict(session.get("scratchpad")),
+            {"last_preflight": _compact_preflight_for_scratchpad(preflight)},
+        )
+        update_kwargs: dict[str, Any] = {"scratchpad": scratchpad}
+        if bool(preflight.get("ok", False)) and isinstance(preflight.get("normalized_draft"), dict):
+            update_kwargs["draft_upsert"] = _safe_dict(preflight.get("normalized_draft"))
+            update_kwargs["confirmed_draft_hash"] = ""
+        updated = self._store.update_session(
+            session_id=str(session["session_id"]),
+            **update_kwargs,
+        )
+        updated["preflight"] = preflight
+        return updated
 
     def mark_proposed(self, *, customer_id: str, thread_id: str) -> dict[str, Any]:
         session = self._store.get_thread_session(

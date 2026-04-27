@@ -78,6 +78,84 @@ def _safe_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _unique_strings(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        folded = text.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        out.append(text)
+    return out
+
+
+def _extract_google_sheet_names(value: Any) -> list[str]:
+    """Extract worksheet names from common Google Sheets metadata payloads."""
+
+    names: list[Any] = []
+
+    def visit(node: Any, *, sheet_context: bool = False) -> None:
+        if isinstance(node, list):
+            if all(isinstance(item, str) for item in node):
+                names.extend(node)
+                return
+            for item in node:
+                if isinstance(item, str) and sheet_context:
+                    names.append(item)
+                    continue
+                visit(item, sheet_context=sheet_context)
+            return
+        if not isinstance(node, dict):
+            return
+
+        for key in (
+            "sheet_names",
+            "sheetNames",
+            "worksheet_names",
+            "worksheetNames",
+        ):
+            raw = node.get(key)
+            if isinstance(raw, list):
+                names.extend(raw)
+
+        for key in ("sheets", "worksheets", "tabs"):
+            raw = node.get(key)
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, str):
+                        names.append(item)
+                    elif isinstance(item, dict):
+                        props = _safe_dict(item.get("properties"))
+                        candidate = (
+                            item.get("sheetName")
+                            or item.get("sheet_name")
+                            or item.get("name")
+                            or item.get("title")
+                            or props.get("title")
+                            or props.get("sheetName")
+                            or props.get("name")
+                        )
+                        if str(candidate or "").strip():
+                            names.append(candidate)
+                        else:
+                            visit(item, sheet_context=True)
+
+        data = node.get("data")
+        if isinstance(data, dict | list):
+            visit(data, sheet_context=sheet_context)
+
+        result = node.get("result")
+        if isinstance(result, dict | list):
+            visit(result, sheet_context=sheet_context)
+
+    visit(value)
+    return _unique_strings(names)
+
+
 def _is_invalid_instagram_reply_to_error(error: Any) -> bool:
     text = str(error or "").lower()
     if not text:
@@ -438,6 +516,70 @@ class ComposioService:
             "successful": bool(result.get("successful", False)),
             "error": result.get("error"),
             "data": data,
+        }
+
+    def list_google_sheets_tab_names(
+        self,
+        *,
+        customer_id: str,
+        spreadsheet_id: str,
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        safe_customer = str(customer_id or "").strip()
+        safe_spreadsheet_id = str(spreadsheet_id or "").strip()
+        if not safe_customer:
+            raise ValueError("customer_id is required")
+        if not safe_spreadsheet_id:
+            raise ValueError("spreadsheet_id is required")
+
+        candidate_slugs = ["GOOGLESHEETS_GET_SHEET_NAMES"]
+        try:
+            with_tool_search = self.search_tools(
+                query="list sheets in google spreadsheet",
+                toolkits=["googlesheets"],
+                limit=20,
+            )
+        except Exception:
+            with_tool_search = {}
+        for item in _safe_list(with_tool_search.get("items")):
+            slug = str(_safe_dict(item).get("slug", "") or "").strip()
+            upper_slug = slug.upper()
+            if slug and (
+                "GET_SHEET_NAMES" in upper_slug
+                or "GET_SPREADSHEET_INFO" in upper_slug
+            ):
+                candidate_slugs.append(slug)
+        candidate_slugs = _unique_strings(candidate_slugs)
+
+        last_error = ""
+        for slug in candidate_slugs:
+            for arguments in (
+                {"spreadsheetId": safe_spreadsheet_id},
+                {"spreadsheet_id": safe_spreadsheet_id},
+            ):
+                result = self.execute_tool(
+                    customer_id=safe_customer,
+                    tool_slug=slug,
+                    arguments=arguments,
+                    connected_account_id=connected_account_id,
+                )
+                if not bool(result.get("successful", False)):
+                    last_error = str(result.get("error") or "sheet metadata lookup failed")
+                    continue
+                sheet_names = _extract_google_sheet_names(result.get("data"))
+                if sheet_names:
+                    return {
+                        "ok": True,
+                        "spreadsheet_id": safe_spreadsheet_id,
+                        "sheet_names": sheet_names,
+                        "tool_slug": slug,
+                    }
+                last_error = f"{slug} returned no sheet names"
+        return {
+            "ok": False,
+            "spreadsheet_id": safe_spreadsheet_id,
+            "sheet_names": [],
+            "error": last_error or "unable to discover Google Sheets worksheet names",
         }
 
     def inspect_instagram_reply_target(

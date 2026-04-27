@@ -102,6 +102,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         - Reserve direct intake_workflow_upsert for the final persist step after the wizard draft is complete and explicitly confirmed.
         - Outside workflow setup mode, do not use intake_workflow_upsert to author a brand-new workflow from scratch.
         - In setup mode, call intake_workflow_upsert only when the draft already contains the exact workflow fields to save.
+        - In workflow setup mode, call intake_workflow_setup_preflight before showing the final proposal.
         - For a brand-new workflow, omit workflow_id or pass an empty string.
         - For updates, pass the existing workflow_id.
         - If the user is refining or editing an existing workflow, prefer intake_workflow_list and
@@ -148,6 +149,10 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         - OpenTulpa resolves the concrete Composio tool at execution time from the toolkit.
         - If the user only gives a Google Sheet URL, extract the spreadsheet ID and pass it inside
           sink_config.static_arguments.
+        - For Google Sheets, include sink_config.static_arguments.sheetName when the target tab is known.
+          If it is unknown, do not guess names like Sheet1 or Лист1: pass the spreadsheetId and let the
+          backend auto-fill sheetName only when Composio can prove the spreadsheet has exactly one tab.
+          If the spreadsheet has multiple tabs, ask the user which tab to use.
         - For generic_composio_write, prefer:
           sink_config={"toolkit": "...", "operation_hint": "...", "field_mapping": {...}, "static_arguments": {...}}
         """
@@ -367,6 +372,27 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("session", {})
 
     @tool
+    async def intake_workflow_setup_preflight() -> Any:
+        """Validate the current setup draft before proposing it.
+
+        Use this after the draft has the intended channel, source, sink, required_fields, and knowledge files.
+        It is non-destructive: it may normalize safe sink details like a single discovered Google Sheets tab,
+        and it returns a dry-run preview of what the sink write would look like without writing rows.
+        If status is not ready, ask the returned focused follow-up question instead of proposing the workflow.
+        """
+        customer_id = require_customer_id(runtime)
+        thread_id = require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/preflight",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=30.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_preflight failed: {r.text}"}
+        return r.json().get("preflight", {})
+
+    @tool
     async def intake_workflow_setup_mark_proposed() -> Any:
         """Mark the current workflow setup draft as the proposal shown to the user."""
         customer_id = require_customer_id(runtime)
@@ -471,6 +497,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         "intake_workflow_setup_begin": intake_workflow_setup_begin,
         "intake_workflow_setup_get": intake_workflow_setup_get,
         "intake_workflow_setup_update": intake_workflow_setup_update,
+        "intake_workflow_setup_preflight": intake_workflow_setup_preflight,
         "intake_workflow_setup_mark_proposed": intake_workflow_setup_mark_proposed,
         "intake_workflow_setup_confirm_current": intake_workflow_setup_confirm_current,
         "intake_workflow_setup_commit": intake_workflow_setup_commit,

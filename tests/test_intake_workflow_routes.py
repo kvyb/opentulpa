@@ -184,6 +184,18 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
         assert updated.status_code == 200
         assert updated.json()["session"]["draft_upsert"]["name"] == "Car Wash Intake"
 
+        preflight = client.post(
+            "/internal/intake/setup/preflight",
+            json={"customer_id": "telegram_123", "thread_id": "thread_123"},
+        )
+        assert preflight.status_code == 200
+        preflight_payload = preflight.json()["preflight"]
+        assert preflight_payload["status"] == "ready"
+        assert preflight_payload["sink_preflight"]["dry_run"]["will_execute"] is False
+        assert preflight_payload["sink_preflight"]["dry_run"]["target"] == {
+            "file_path": "tulpa_stuff/bookings.csv"
+        }
+
         proposed = client.post(
             "/internal/intake/setup/mark_proposed",
             json={"customer_id": "telegram_123", "thread_id": "thread_123"},

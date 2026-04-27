@@ -45,6 +45,56 @@ class _FakeComposioService(ComposioService):
         }
 
 
+class _FakeGoogleSheetsComposioService(ComposioService):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.calls: list[dict[str, object]] = []
+
+    def search_tools(self, *, query="", toolkits=None, limit=20):  # type: ignore[override]
+        self.calls.append(
+            {
+                "method": "search_tools",
+                "query": query,
+                "toolkits": list(toolkits or []),
+                "limit": limit,
+            }
+        )
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "slug": "GOOGLESHEETS_GET_SHEET_NAMES",
+                    "toolkit_slug": "googlesheets",
+                }
+            ],
+        }
+
+    def execute_tool(  # type: ignore[override]
+        self,
+        *,
+        customer_id,
+        tool_slug,
+        arguments=None,
+        connected_account_id=None,
+        text=None,
+    ):
+        self.calls.append(
+            {
+                "method": "execute_tool",
+                "customer_id": customer_id,
+                "tool_slug": tool_slug,
+                "arguments": dict(arguments or {}),
+                "connected_account_id": connected_account_id,
+                "text": text,
+            }
+        )
+        return {
+            "successful": True,
+            "error": None,
+            "data": {"sheet_names": ["Заявки", "Архив", "Заявки"]},
+        }
+
+
 def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> None:
     service = _FakeComposioService(api_key="test-key")
 
@@ -64,3 +114,22 @@ def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> 
     assert service.calls[0]["arguments"]["reply_to_message_id"] == "mid_1"
     assert "reply_to_message_id" not in service.calls[1]["arguments"]
     assert result["data"]["retried_without_reply_to_message_id"] is True
+
+
+def test_list_google_sheets_tab_names_uses_composio_sheet_discovery_tool() -> None:
+    service = _FakeGoogleSheetsComposioService(api_key="test-key")
+
+    result = service.list_google_sheets_tab_names(
+        customer_id="telegram_1",
+        spreadsheet_id="sheet_123",
+        connected_account_id="acct_1",
+    )
+
+    assert result == {
+        "ok": True,
+        "spreadsheet_id": "sheet_123",
+        "sheet_names": ["Заявки", "Архив"],
+        "tool_slug": "GOOGLESHEETS_GET_SHEET_NAMES",
+    }
+    execute_calls = [call for call in service.calls if call["method"] == "execute_tool"]
+    assert execute_calls[0]["arguments"] == {"spreadsheetId": "sheet_123"}

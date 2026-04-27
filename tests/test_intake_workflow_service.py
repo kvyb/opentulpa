@@ -128,12 +128,23 @@ class _DelayedRuntime(_FakeRuntime):
 class _FakeComposio:
     enabled = True
 
-    def __init__(self, summary: dict[str, Any], conversation: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        summary: dict[str, Any],
+        conversation: dict[str, Any],
+        *,
+        sheet_names_by_spreadsheet: dict[str, list[str]] | None = None,
+    ) -> None:
         self.summary = summary
         self.conversation = conversation
+        self.sheet_names_by_spreadsheet = {
+            str(key): list(value)
+            for key, value in (sheet_names_by_spreadsheet or {}).items()
+        }
         self.execute_calls: list[dict[str, Any]] = []
         self.list_calls = 0
         self.get_calls = 0
+        self.list_sheet_names_calls: list[dict[str, Any]] = []
 
     def list_instagram_conversations(
         self,
@@ -248,6 +259,33 @@ class _FakeComposio:
                 "toolkit_slug": toolkit,
                 "input_schema": {"type": "object"},
             },
+        }
+
+    def list_google_sheets_tab_names(
+        self,
+        *,
+        customer_id: str,
+        spreadsheet_id: str,
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.list_sheet_names_calls.append(
+            {
+                "customer_id": customer_id,
+                "spreadsheet_id": spreadsheet_id,
+                "connected_account_id": connected_account_id,
+            }
+        )
+        if spreadsheet_id not in self.sheet_names_by_spreadsheet:
+            return {
+                "ok": False,
+                "spreadsheet_id": spreadsheet_id,
+                "sheet_names": [],
+                "error": "spreadsheet not found in fake",
+            }
+        return {
+            "ok": True,
+            "spreadsheet_id": spreadsheet_id,
+            "sheet_names": list(self.sheet_names_by_spreadsheet[spreadsheet_id]),
         }
 
 
@@ -2726,6 +2764,137 @@ async def test_google_sheets_sink_normalizes_aliases_reversed_booking_mapping_an
 
 
 @pytest.mark.asyncio
+async def test_google_sheets_sink_auto_resolves_single_unknown_sheet_name_at_setup(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Нужна мойка завтра в 10, телефон +79990000001.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Клиент хочет записаться на мойку.",
+                "extracted_fields": {
+                    "service": "Мойка",
+                    "time": "завтра 10:00",
+                    "phone": "+79990000001",
+                },
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {"service": "Мойка"},
+                "reason": "All required fields are present.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        summary,
+        conversation,
+        sheet_names_by_spreadsheet={"sheet_123": ["Заявки"]},
+    )
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="AutoSpa Intake",
+        intent_description="Записывать клиентов на мойку.",
+        required_fields=["service"],
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {"service": "Тип услуги", "phone": "Телефон"},
+            "static_arguments": {"spreadsheet_id": "sheet_123"},
+        },
+    )
+
+    assert workflow["sink_config"]["static_arguments"] == {
+        "spreadsheetId": "sheet_123",
+        "sheetName": "Заявки",
+    }
+    assert composio.list_sheet_names_calls == [
+        {
+            "customer_id": "telegram_123",
+            "spreadsheet_id": "sheet_123",
+            "connected_account_id": None,
+        }
+    ]
+
+    result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    sink_calls = [call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"]
+    assert len(sink_calls) == 1
+    assert sink_calls[0]["arguments"]["spreadsheetId"] == "sheet_123"
+    assert sink_calls[0]["arguments"]["sheetName"] == "Заявки"
+    written = dict(
+        zip(
+            sink_calls[0]["arguments"]["headers"],
+            sink_calls[0]["arguments"]["rows"][0],
+            strict=False,
+        )
+    )
+    assert written["Тип услуги"] == "Мойка"
+    assert written["Телефон"] == "+79990000001"
+
+
+def test_google_sheets_sink_requires_explicit_sheet_name_when_target_has_multiple_tabs(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Нужна мойка.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    composio = _FakeComposio(
+        summary,
+        conversation,
+        sheet_names_by_spreadsheet={"sheet_123": ["Заявки", "Архив"]},
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=composio,
+    )
+
+    with pytest.raises(ValueError, match="multiple sheets: Заявки, Архив"):
+        service.upsert_workflow(
+            customer_id="telegram_123",
+            name="AutoSpa Intake",
+            intent_description="Записывать клиентов на мойку.",
+            required_fields=["service"],
+            sink_type="google_sheets_composio",
+            sink_config={
+                "toolkit": "googlesheets",
+                "field_mapping": {"service": "Тип услуги"},
+                "static_arguments": {"spreadsheetId": "sheet_123"},
+            },
+        )
+
+
+@pytest.mark.asyncio
 async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheets(
     tmp_path: Path,
 ) -> None:
@@ -3498,6 +3667,7 @@ async def test_sink_failure_can_recover_with_sink_argument_overrides(
         ]
     )
     composio = _SheetNameRequiredSinkComposio(summary, conversation)
+    composio.list_google_sheets_tab_names = None  # type: ignore[method-assign]
     service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
     workflow = service.upsert_workflow(
         customer_id="telegram_123",
