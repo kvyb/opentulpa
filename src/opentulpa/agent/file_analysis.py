@@ -7,6 +7,7 @@ import base64
 import json
 import mimetypes
 import re
+from datetime import date, datetime
 from io import BytesIO
 from typing import Any
 from xml.etree import ElementTree
@@ -88,6 +89,60 @@ def extract_docx_text(raw_bytes: bytes) -> str:
     return " ".join(out).strip()
 
 
+def _spreadsheet_cell_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def extract_xlsx_text(raw_bytes: bytes, *, max_chars: int = 140000) -> str:
+    """Return a bounded, retrieval-friendly workbook preview."""
+    try:
+        from openpyxl import load_workbook
+    except Exception as exc:
+        raise RuntimeError("XLSX parser unavailable. Install openpyxl.") from exc
+    try:
+        workbook = load_workbook(BytesIO(raw_bytes), read_only=True, data_only=True)
+    except Exception as exc:
+        raise ValueError(f"XLSX parsing failed: {exc}") from exc
+
+    parts: list[str] = []
+    try:
+        for sheet_index, sheet in enumerate(workbook.worksheets[:20], start=1):
+            parts.append(
+                f"# Sheet {sheet_index}: {sheet.title} "
+                f"(rows={sheet.max_row or 0}, columns={sheet.max_column or 0})"
+            )
+            emitted_rows = 0
+            for row in sheet.iter_rows(
+                min_row=1,
+                max_row=min(sheet.max_row or 0, 80),
+                max_col=min(sheet.max_column or 0, 24),
+                values_only=True,
+            ):
+                cells = [_spreadsheet_cell_to_text(value) for value in row]
+                if not any(cells):
+                    continue
+                while cells and not cells[-1]:
+                    cells.pop()
+                parts.append(" | ".join(cells))
+                emitted_rows += 1
+                if len("\n".join(parts)) >= max_chars:
+                    break
+            if emitted_rows == 0:
+                parts.append("(no non-empty rows in preview)")
+            parts.append("")
+            if len("\n".join(parts)) >= max_chars:
+                break
+    finally:
+        workbook.close()
+    return "\n".join(parts).strip()[:max_chars]
+
+
 def extract_pdf_text(raw_bytes: bytes) -> str:
     try:
         from pypdf import PdfReader
@@ -127,6 +182,11 @@ def extract_uploaded_text(
             or name.endswith(".docx")
         ):
             text = extract_docx_text(raw_bytes)
+        elif (
+            mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            or name.endswith(".xlsx")
+        ):
+            text = extract_xlsx_text(raw_bytes, max_chars=max_chars)
     except Exception:
         text = ""
     return str(text or "").strip()[:max_chars]

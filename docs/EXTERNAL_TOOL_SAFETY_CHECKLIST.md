@@ -23,6 +23,14 @@ Use this checklist whenever you add or modify a tool/integration that can read/w
 - Keep approved action args immutable between approval and execution.
 - Fail closed if approval lookup or decision validation fails.
 
+For support act-as flows:
+
+- Evaluate the action against the bound customer tenant, not the support operator's own tenant.
+- Route approval prompts created from a support turn back to the support chat.
+- Do not leak support setup/debug chat into the owner thread.
+- Do not notify the owner about support setup/debug chatter unless the action intentionally produces a customer-facing or owner-facing event.
+- Record support user id, username, support chat id, bound customer id, support thread id, action/tool name, timestamp, and outcome in internal audit state.
+
 ## 4. Minimize data exposure
 
 - Do not include secrets in approval summaries or callback payloads.
@@ -44,6 +52,8 @@ Use this checklist whenever you add or modify a tool/integration that can read/w
 - Expired approval cannot execute.
 - Replay of used approval token fails.
 - Guardrail model error falls back to approval-required.
+- Support-originated approval routes to the support chat, not the owner chat.
+- Support act-as actions use the bound customer id and keep support history separate from owner history.
 
 ## 7. Document the integration
 

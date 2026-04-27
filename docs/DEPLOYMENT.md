@@ -159,7 +159,7 @@ Railway builds from the included `Dockerfile`.
 - `TELEGRAM_WEBHOOK_SECRET`
 - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
-- Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=moonshotai/kimi-k2.6`, `LLM_REASONING_EFFORT=high`, `WAKE_EXECUTION_MODEL=moonshotai/kimi-k2.6`, Gemini Flash for memory/media/guardrails)
+- Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=z-ai/glm-5.1`, `LLM_REASONING_EFFORT=medium`, `WAKE_EXECUTION_MODEL=z-ai/glm-5.1`, Gemini Flash for memory/media/guardrails)
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 
@@ -168,6 +168,8 @@ Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
 - `COMPOSIO_API_KEY`
 - `COMPOSIO_DEFAULT_CALLBACK_URL`
 - `AGENT_PROMPT_CACHING_ENABLED=1|0`
+- `TELEGRAM_ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERNAMES`
+- `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`
 
 ### Railway setup checklist
 
@@ -182,6 +184,8 @@ Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
    - `PUBLIC_BASE_URL`
    - `COMPOSIO_API_KEY`
    - `COMPOSIO_DEFAULT_CALLBACK_URL`
+   - `TELEGRAM_ALLOWED_USERNAMES`
+   - `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`
 5. Deploy
 
 ### What happens automatically
@@ -198,6 +202,28 @@ Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
 - `PUBLIC_BASE_URL` should be set so webhook registration is correct
 - the same deployed bot and webhook handle both ordinary Telegram chat and Telegram Business updates
 - OpenTulpa persists Telegram Business inbox state locally, so use persistent storage
+
+## Support operator access
+
+Support mode is optional. If no support allowlist is configured, support commands are disabled.
+
+Use support mode when an operator needs to set up or debug a customer's OpenTulpa tenant without sharing the owner's Telegram chat history.
+
+Configure one or both:
+
+```bash
+TELEGRAM_SUPPORT_USER_IDS=123456789,987654321
+TELEGRAM_SUPPORT_USERNAMES=operator1,operator2
+```
+
+Support operators can use:
+
+- `/support_customers` to list known customer tenants and operational signals
+- `/support_bind <number-or-customer_id>` to act as that customer tenant
+- `/support_whoami` to inspect the current binding and support thread
+- `/support_unbind` to clear the binding
+
+Support chat history stays in a support-specific thread. It does not pollute the owner's main chat history. Customer-facing proactive events still go to the owner by default.
 
 ## Persistence
 

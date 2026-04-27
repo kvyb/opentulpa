@@ -397,13 +397,13 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full checklist.
 
 ## E2E Testing
 
-For realistic Telegram, intake, and live-LLM scenario testing:
+For realistic Telegram and intake scenario testing:
 
 ```bash
-uv run pytest tests/e2e/scenarios -q -rs
+uv run pytest tests/e2e/scenarios --run-e2e -q -rs
 ```
 
-The E2E suite uses the same settings loader as the app, so running from the repo root will pick up `.env` automatically.
+The E2E suite uses the same settings loader as the app, so running from the repo root will pick up `.env` automatically. Live model scenarios add `--run-live-llm`.
 
 See [docs/E2E_TESTING.md](docs/E2E_TESTING.md) for live-LLM prerequisites, Telegram intake workflow commands, scenario-vs-live integration notes, and troubleshooting.
 

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from opentulpa.agent import runtime as runtime_module
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
 from opentulpa.agent.runtime import (
     STREAM_APPROVAL_HANDOFF_SIGNAL,
@@ -132,6 +133,30 @@ class _DraftThenToolThenAnswerGraph:
         ), {"langgraph_node": "agent"}
         yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
         yield AIMessage(content="I checked it. 3 priority emails found."), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
+
+class _EarlyVisibleThenToolThenAnswerGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(content="Проверяю подключение Google Sheets."), {"langgraph_node": "agent"}
+        yield AIMessage(
+            content="",
+            tool_calls=[{"id": "call_1", "name": "composio_tool_search", "args": {"query": "append row"}}],
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
+        yield AIMessage(content="Готово: Google Sheets подключён, прайс обработан."), {
+            "langgraph_node": "agent"
+        }
 
     async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
         del config
@@ -552,6 +577,53 @@ async def test_astream_text_holds_agent_draft_when_segment_declares_tool_calls(
     assert len(chunks) == 2
     assert chunks[0].startswith(STREAM_PROGRESS_PREFIX)
     assert chunks[1] == "I checked it. 3 priority emails found."
+
+
+@pytest.mark.asyncio
+async def test_astream_text_flushes_post_tool_answer_after_early_visible_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(runtime_module, "STREAM_PRECOMMIT_SECONDS", 0)
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _EarlyVisibleThenToolThenAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_post_tool_flush.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-post-tool-flush",
+        customer_id="telegram_post_tool_flush",
+        text="setup sheets",
+    ):
+        chunks.append(chunk)
+
+    assert chunks[-1] == "Готово: Google Sheets подключён, прайс обработан."
+    assert any(chunk.startswith(STREAM_PROGRESS_PREFIX) for chunk in chunks)
+
+    lines = runtime._behavior_log_path.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line)["event"] for line in lines if line.strip()]
+    assert "turn_stream_buffered_completion_flushed" in events
 
 
 @pytest.mark.asyncio

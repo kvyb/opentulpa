@@ -753,7 +753,9 @@ def _build_effective_telegram_text(
         else:
             effective_text = (
                 "User uploaded one or more files without extra text.\n"
-                "Summarize what is available and ask a focused follow-up question.\n\n"
+                "Use the internal file context below, but do not echo raw metadata. "
+                "Acknowledge the upload, summarize only meaningful available content, "
+                "and ask a focused follow-up question.\n\n"
                 f"{context_blob}"
             )
     if effective_text:

@@ -22,10 +22,35 @@ The best prompts usually include:
 - the output format
 - what to remember for next time
 - whether the work should become a routine
+- whether the work should become a workflow with connected tools and durable source material
 
 Example:
 
 > "Every weekday at 8am, check my calendar and unread priority messages, summarize what matters in five bullets, and send it on Telegram. Remember how I like the brief formatted."
+
+## General personal agent work
+
+OpenTulpa is useful before you create any workflow. You can ask it to research, inspect files, write scripts, debug errors, browse websites, and turn repeated work into something durable.
+
+### Script and run a task
+
+> "Write a small script that reads this CSV, groups rows by customer, outputs a summary Markdown file, runs it once, and saves the script so I can reuse it later."
+
+### Debug a failure
+
+> "Look at the latest server logs, explain what failed, patch the smallest likely fix, run the relevant tests, and tell me exactly what changed."
+
+### Build a small automation
+
+> "Pull a Giphy feed for this search term every morning, save the best 10 links to a file, and send me a Telegram summary only if there are new results."
+
+### Build an internal bot
+
+> "Create a small Slack bot workflow that listens for a keyword, drafts a response from our FAQ, and requires approval before posting externally."
+
+### Turn a repeat task into a skill
+
+> "Whenever I ask for a launch brief, use this structure: goal, audience, risks, launch steps, owner, deadline. Save that as a reusable skill."
 
 ## Daily operations
 
@@ -87,7 +112,7 @@ This is not just autoresponse behavior. The agent can continue the conversation 
 
 > "All incoming client messages are forwarded here. Treat them as booking requests, ask follow-up questions when details are missing, and complete the booking flow in my sheet once confirmed."
 
-This is a useful low-friction setup when you want to stand up intake behavior quickly through chat instead of building a separate bot product first.
+This is useful when the owner forwards messages to OpenTulpa for assistance. It is not the same as direct customer-facing reply handling. For OpenTulpa to reply directly to leads, connect Telegram Business, Instagram, or another real inbound channel.
 
 ### Follow-up driven intake
 
@@ -131,6 +156,17 @@ Good examples:
 - "Save this lead qualification behavior as a reusable skill"
 - "Remember that I prefer concise summaries with action items first"
 - "Use the same output format as last time unless I tell you otherwise"
+
+## Equipping a workflow with source material
+
+For broad source material, ask OpenTulpa to prepare the relevant operating context instead of blindly attaching everything.
+
+Good examples:
+
+- "Use these pricing files as source material, but only for the services in this workflow. Inspect them first and prepare the relevant knowledge before activating."
+- "Read these policies, extract the rules that affect customer replies, and bind the prepared policy summary to the workflow."
+- "Use this Google Sheet as the system of record, but ask me before activating any workflow that writes to it."
+- "If the source material does not contain a price or answer, say that directly and escalate instead of guessing."
 
 ## What usually works poorly
 

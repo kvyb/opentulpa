@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from opentulpa.agent.file_analysis import extract_uploaded_text
 from opentulpa.agent.knowledge_prep import (
     build_intake_knowledge_markdown,
     inspect_uploaded_file_structure,
@@ -85,6 +86,19 @@ def test_xlsx_inspection_returns_structure_and_search_matches() -> None:
     assert tire_sheet["sample_rows"][0]["source_ref"] == "Шиномонтаж!1"
     assert tire_sheet["table_candidates"][0]["row_start"] == 1
     assert tire_sheet["matches"][0]["source_ref"] == "Шиномонтаж!2"
+
+
+def test_xlsx_upload_text_extraction_returns_workbook_preview() -> None:
+    extracted = extract_uploaded_text(
+        raw_bytes=_autospa_workbook_bytes(),
+        filename="autospa.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    assert "# Sheet 1: Мойка" in extracted
+    assert "2х-фазная мойка кузова" in extracted
+    assert "# Sheet 2: Шиномонтаж" in extracted
+    assert "Комплект 19R" in extracted
 
 
 def test_xlsx_knowledge_pack_accepts_explicit_selected_sections_without_hints() -> None:

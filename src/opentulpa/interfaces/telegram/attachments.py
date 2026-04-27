@@ -12,6 +12,7 @@ from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.models import TelegramAttachment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _safe_segment(value: str, *, fallback: str) -> str:
@@ -105,20 +106,33 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
     if not records:
         return ""
     lines = [
-        "Uploaded files attached to this message were already ingested and indexed:",
+        "Internal uploaded-file context. Do not quote this metadata verbatim to the user.",
+        "Use file_id values with uploaded_file_* tools when deeper inspection is needed.",
+        "If a spreadsheet, price list, FAQ, or policy is intended for workflow setup, inspect structure first and prepare scoped workflow knowledge before activation.",
+        "User-facing reply guidance: briefly acknowledge the file by name, summarize only human-meaningful available content, and ask one focused follow-up question.",
     ]
     for rec in records:
-        local_path = str(rec.get("local_path", "")).strip()
-        vault_path = str(rec.get("stored_path", "")).strip()
+        mime_type = str(rec.get("mime_type", "")).strip()
+        summary = str(rec.get("summary", "")).strip()
+        if "ai_summary=" in summary:
+            summary = summary.split("ai_summary=", 1)[1].strip()
+        if (
+            (mime_type.lower() == XLSX_MIME_TYPE or str(rec.get("original_filename", "")).lower().endswith(".xlsx"))
+            and "no extractable text was available" in summary.lower()
+        ):
+            summary = (
+                "Spreadsheet file stored. Use uploaded_file_inspect_structure with this file_id "
+                "to inspect sheets, rows, and relevant sections before preparing workflow knowledge."
+            )
+        summary = re.sub(r"\s+", " ", summary)[:1200]
         lines.append(
-            "- id={id} name={name} kind={kind} local_path={local_path} vault_path={vault_path} created_at={created_at} summary={summary}".format(
+            "- file_id={id} name={name} kind={kind} mime_type={mime_type} created_at={created_at} summary={summary}".format(
                 id=str(rec.get("id", "")).strip(),
                 name=str(rec.get("original_filename", "")).strip(),
                 kind=str(rec.get("kind", "")).strip(),
-                local_path=local_path or "unknown",
-                vault_path=vault_path or "unknown",
+                mime_type=mime_type or "unknown",
                 created_at=str(rec.get("created_at", "")).strip(),
-                summary=str(rec.get("summary", "")).strip()[:700],
+                summary=summary or "stored; no summary available yet",
             )
         )
     return "\n".join(lines)

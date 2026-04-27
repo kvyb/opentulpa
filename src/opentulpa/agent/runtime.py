@@ -3648,7 +3648,7 @@ class OpenTulpaLangGraphRuntime:
             if prepared.through_id is not None and self._context_events is not None:
                 self._context_events.clear_events(customer_id, through_id=prepared.through_id)
             _finalize_segment()
-            if buffered_visible and not yielded_any and not approval_handoff_detected:
+            if buffered_visible and not approval_handoff_detected:
                 buffered_candidate = buffered_visible.strip()
                 if self._looks_like_provisional_reply(buffered_candidate):
                     self.log_behavior_event(
@@ -3664,12 +3664,17 @@ class OpenTulpaLangGraphRuntime:
                     buffered_visible_truncated = False
                     buffered_visible_source_chars = 0
                 else:
+                    flush_event = (
+                        "turn_stream_buffered_completion_flushed"
+                        if yielded_any
+                        else "turn_stream_precommit_flushed"
+                    )
                     yielded_any = True
                     stream_visible_yields += 1
                     if first_visible_yield_ms is None:
                         first_visible_yield_ms = int((time.monotonic() - stream_started_at) * 1000)
                     self.log_behavior_event(
-                        event="turn_stream_precommit_flushed",
+                        event=flush_event,
                         trace_id=turn_trace_id,
                         thread_id=thread_id,
                         customer_id=customer_id,

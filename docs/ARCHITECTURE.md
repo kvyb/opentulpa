@@ -16,6 +16,7 @@ OpenTulpa is designed around one core assumption: a useful agent should behave l
 - Keep agent decision logic centralized in the runtime graph
 - Keep domain boundaries explicit for easier testing and refactoring
 - Persist user context, directives, and artifacts across sessions
+- Prepare durable operating context from source material instead of injecting broad raw files forever
 - Enforce safety at tool-action time, not as an afterthought
 
 ## Main runtime pieces
@@ -49,7 +50,7 @@ The system is split so that transports and storage are replaceable, while the ag
 
 1. Telegram calls `POST /webhook/telegram`
 2. `interfaces/telegram/chat_service.py` parses text, files, and voice, then resolves `customer_id` and `thread_id`
-3. The streaming path calls `runtime.astream_text(...)`
+3. Owner/support chats resolve the active turn mode; active workflow setup threads use workflow setup prompting
 4. LangGraph runs nodes such as `agent`, `validate_tools`, `guardrail_precheck`, `tools`, and `claim_check`
 5. The assistant reply is streamed back to Telegram
 6. If a tool requires approval, the runtime emits the approval interrupt immediately and stops normal reply streaming for that action
@@ -66,6 +67,35 @@ This is the flow behind persistent lead handling such as Telegram Business inbox
 5. The runtime decides whether the message matches the workflow, whether follow-up is needed, and whether the booking is ready to save
 6. Intake service performs the idempotent reply or save step
 7. Per-conversation cursors prevent reprocessing the same inbound message as fresh work
+
+### Workflow setup and prepared knowledge flow
+
+This is the flow behind "brief and equip the employee."
+
+1. Owner or bound support operator describes the job in chat
+2. Runtime enters workflow setup mode when the setup tools/session are active
+3. Uploaded source files are stored in the file vault
+4. For broad source material, the agent inspects structure first, then selects relevant sections
+5. The selected material is compiled into a smaller workflow knowledge file
+6. The draft workflow stores that prepared file id in `knowledge_file_ids`
+7. Owner/support confirms the proposed workflow before activation
+8. Future intake decisions load the workflow, bound knowledge files, active booking state, and recent conversation state
+
+The runtime should not treat a large spreadsheet, PDF, or policy dump as permanent raw prompt context. The setup phase prepares the operational subset the worker needs, and the intake phase uses that durable prepared knowledge.
+
+### Support act-as flow
+
+Support operators are trusted operators configured by `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`.
+
+1. Support chat sends `/support_customers`
+2. Support binds to a customer with `/support_bind <number-or-customer_id>`
+3. Normal support messages run with `customer_id=<bound_customer_id>` and a support-specific `thread_id`
+4. `/fresh` resets only the support thread for that bound customer
+5. Owner chat history remains separate from support setup/debug history
+6. Customer-facing proactive events still route to the owner by default
+7. Support binding/unbinding and support-originated actions are recorded in internal support audit state
+
+This keeps tenant/customer state, owner chat history, and support-operator chat history separate.
 
 ### Direct API turn flow
 
@@ -155,6 +185,7 @@ Compaction is hysteresis-based: the runtime compacts at the high watermark, then
 - File vault: `.opentulpa/file_vault.db` plus file storage
 - Intake workflows and bookings: `.opentulpa/intake.db`
 - Telegram Business inbox state: `.opentulpa/telegram_business.db`
+- Telegram owner/support sessions and support audit: `.opentulpa/telegram_state.json`
 - Tasks and wake queue: `.opentulpa/tasks.db`, `.opentulpa/wake_events.db`
 
 ## Observability
