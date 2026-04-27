@@ -187,10 +187,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="deepseek/deepseek-v4-pro",
+        default="moonshotai/kimi-k2.6",
         description=(
             "Model identifier accepted by the configured provider. "
-            "Recommended default is the OpenRouter slug deepseek/deepseek-v4-pro for main chat turns."
+            "Recommended default is the OpenRouter slug moonshotai/kimi-k2.6 for main chat turns."
         ),
     )
     memory_llm_model: str = Field(
@@ -217,10 +217,10 @@ class Settings(BaseSettings):
         ),
     )
     wake_execution_model: str | None = Field(
-        default="deepseek/deepseek-v4-pro",
+        default="moonshotai/kimi-k2.6",
         description=(
             "Model used for wake/routine execution turns that need stronger reasoning "
-            "and tool use. Recommended default aligns this with the main chat model: deepseek/deepseek-v4-pro."
+            "and tool use. Recommended default aligns this with the main chat model: moonshotai/kimi-k2.6."
         ),
     )
     multimodal_llm: str = Field(

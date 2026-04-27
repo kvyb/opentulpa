@@ -61,6 +61,17 @@ def test_settings_accepts_legacy_telegram_media_model_alias() -> None:
     assert settings.multimodal_llm == "google/gemini-3-flash-preview"
 
 
+def test_settings_default_agent_models_use_kimi(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("WAKE_EXECUTION_MODEL", raising=False)
+
+    settings = Settings()
+
+    assert settings.llm_model == "moonshotai/kimi-k2.6"
+    assert settings.wake_execution_model == "moonshotai/kimi-k2.6"
+
+
 def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text(
