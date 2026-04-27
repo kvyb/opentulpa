@@ -33,6 +33,7 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "Ask one high-value setup question at a time.\n"
                 "If uploaded files are part of the workflow, track source_file_ids and prepared_knowledge_file_ids in the setup scratchpad.\n"
                 "Before proposing a file-grounded workflow, inspect source files and prepare scoped workflow knowledge from selected sections.\n"
+                "If file inspection, knowledge prep, or workflow compilation will take multiple tool calls, send the owner a concise send_owner_update progress message before continuing.\n"
                 "For telegram_business_dm workflows, do not ask for polling, scanning, or schedule intervals; inbound Telegram Business messages trigger the workflow directly.\n"
                 "Synthesize a concise intent_description from the user's stated goal instead of asking for it as a form field when the goal is already clear.\n"
                 "Once the draft has channel, purpose, required fields, sink, and behavior rules, propose it with explicit assumptions and wait for confirmation instead of asking optional questions.\n"
@@ -75,6 +76,7 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
         content=(
             "Turn mode: interactive.\n"
             "This is a live user-guided turn.\n"
+            "For long-running work with multiple tool calls, send one concise send_owner_update progress message before continuing.\n"
             "If the user intent is ambiguous about acting now vs drafting/planning, ask one concise clarifying question before taking side-effecting action."
         )
     )

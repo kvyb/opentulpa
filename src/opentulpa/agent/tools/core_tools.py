@@ -263,9 +263,10 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
     async def send_owner_update(message: str, dedupe_key: str = "") -> Any:
         """Send a short interim update to the current owner/support Telegram chat.
 
-        Use only during interactive chat when you will continue working with tools.
-        Do not use for final answers, inbound lead replies, routine wakes, or
-        background event notifications.
+        Use only during live owner/support turns when you will continue working
+        with tools. This is for long-running interactive or workflow setup work,
+        not final answers, inbound lead replies, routine wakes, approval recovery,
+        or background event notifications.
         """
         require_customer_id(runtime)
         require_thread_id(runtime)

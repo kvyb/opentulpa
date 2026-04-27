@@ -42,7 +42,10 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "stay in chat mode" in text
     assert "All non-tool text is user-visible" in text
     assert "Do not use assistant text as a placeholder progress update" in text
+    assert "live owner/support turns" in text
     assert "use send_owner_update for intentional interim progress messages" in text
+    assert "For long-running live owner/support work" in text
+    assert "Do not use send_owner_update for inbound lead/intake processing" in text
     assert "concrete result or a plain blocker/failure report" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
@@ -89,7 +92,9 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     event_notification = str(build_turn_mode_system_message("event_notification").content)
 
     assert "live user-guided turn" in interactive
+    assert "send one concise send_owner_update progress message" in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
+    assert "send the owner a concise send_owner_update progress message" in workflow_setup
     assert "track source_file_ids and prepared_knowledge_file_ids" in workflow_setup
     assert "do not ask for polling, scanning, or schedule intervals" in workflow_setup
     assert "propose it with explicit assumptions" in workflow_setup
