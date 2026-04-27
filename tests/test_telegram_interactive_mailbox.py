@@ -28,6 +28,7 @@ class _InteractiveRuntime:
     def __init__(self) -> None:
         self.registered_thread_ids: list[str] = []
         self.cleared_thread_ids: list[str] = []
+        self.update_senders: dict[str, Any] = {}
 
     async def register_interactive_session(self, *, thread_id: str, session: Any) -> None:
         del session
@@ -37,8 +38,51 @@ class _InteractiveRuntime:
         del session
         self.cleared_thread_ids.append(thread_id)
 
+    async def register_interactive_update_sender(self, *, thread_id: str, sender: Any) -> None:
+        self.update_senders[thread_id] = sender
+
+    async def clear_interactive_update_sender(
+        self,
+        *,
+        thread_id: str,
+        sender: Any | None = None,
+    ) -> None:
+        if sender is None or self.update_senders.get(thread_id) is sender:
+            self.update_senders.pop(thread_id, None)
+
+    async def emit_registered_update(self, *, thread_id: str, text: str) -> dict[str, Any]:
+        sender = self.update_senders[thread_id]
+        return await sender(text)
+
     def healthy(self) -> bool:
         return True
+
+
+class _FakeTelegramClient:
+    def __init__(self, bot_token: str) -> None:
+        self.bot_token = bot_token
+        self.message_calls: list[dict[str, Any]] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int | str,
+        text: str,
+        parse_mode: str | None = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.message_calls.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+                "reply_markup": reply_markup,
+            }
+        )
+        return {"ok": True}
+
+    async def aclose(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -116,6 +160,57 @@ async def test_telegram_interactive_inbox_merges_slow_media_then_followup_text(
     assert runtime.registered_thread_ids == ["chat-1"]
     assert runtime.cleared_thread_ids == ["chat-1"]
     assert fake_store.assistant_touches == [1]
+
+
+@pytest.mark.asyncio
+async def test_telegram_interactive_session_allows_explicit_owner_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
+    runtime = _InteractiveRuntime()
+    service = chat_module.TelegramChatService(
+        bot_token="123:abc",
+        file_vault=object(),
+        memory=None,
+    )
+    fake_client = _FakeTelegramClient("123:abc")
+
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+    monkeypatch.setattr(chat_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(chat_module, "get_openai_compatible_api_key_from_env", lambda: "key")
+    monkeypatch.setattr(chat_module, "is_user_allowed", lambda **kwargs: True)
+
+    async def _fake_stream_langgraph_reply_to_telegram(**kwargs: Any) -> tuple[str | None, bool]:
+        await kwargs["agent_runtime"].emit_registered_update(
+            thread_id=kwargs["thread_id"],
+            text="Проверяю прайс и подготовлю черновик.",
+        )
+        return "Черновик готов.", False
+
+    monkeypatch.setattr(chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram)
+
+    result = await service.handle_update(
+        body={
+            "message": {
+                "chat": {"id": 1},
+                "from": {"id": 100},
+                "text": "Настрой workflow.",
+            }
+        },
+        agent_runtime=runtime,
+    )
+
+    assert result is None
+    assert fake_client.message_calls == [
+        {
+            "chat_id": 1,
+            "text": "Проверяю прайс и подготовлю черновик.",
+            "parse_mode": "HTML",
+            "reply_markup": None,
+        }
+    ]
+    assert runtime.update_senders == {}
+    assert fake_store.assistant_touches == [1, 1]
 
 
 @pytest.mark.asyncio

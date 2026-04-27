@@ -555,6 +555,7 @@ def build_runtime_graph(runtime: Any):
     assert runtime._checkpointer is not None
 
     required_args: dict[str, tuple[str, ...]] = {
+        "send_owner_update": ("message",),
         "tulpa_write_file": ("path", "content"),
         "tulpa_validate_file": ("path",),
         "tulpa_reload": (),
@@ -622,6 +623,7 @@ def build_runtime_graph(runtime: Any):
         "guardrail_execute_approved_action": ("approval_id",),
     }
     customer_scoped_tools: set[str] = {
+        "send_owner_update",
         "memory_search",
         "memory_add",
         "uploaded_file_search",

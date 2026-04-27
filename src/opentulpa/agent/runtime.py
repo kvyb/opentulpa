@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import inspect
 import json
 import logging
@@ -1161,6 +1162,9 @@ class OpenTulpaLangGraphRuntime:
         self._headroom_service: Any | None = None
         self._interactive_sessions_lock = asyncio.Lock()
         self._interactive_sessions: dict[str, Any] = {}
+        self._interactive_update_senders_lock = asyncio.Lock()
+        self._interactive_update_senders: dict[str, Any] = {}
+        self._interactive_update_sent_keys: dict[str, set[str]] = {}
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_customer_id",
             default="",
@@ -3865,6 +3869,101 @@ class OpenTulpaLangGraphRuntime:
             current = sessions.get(safe_thread_id)
             if session is None or current is session:
                 sessions.pop(safe_thread_id, None)
+
+    async def register_interactive_update_sender(self, *, thread_id: str, sender: Any) -> None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id or sender is None:
+            return
+        if getattr(self, "_interactive_update_senders_lock", None) is None:
+            self._interactive_update_senders_lock = asyncio.Lock()
+        if getattr(self, "_interactive_update_senders", None) is None:
+            self._interactive_update_senders = {}
+        if getattr(self, "_interactive_update_sent_keys", None) is None:
+            self._interactive_update_sent_keys = {}
+        async with self._interactive_update_senders_lock:
+            self._interactive_update_senders[safe_thread_id] = sender
+            self._interactive_update_sent_keys[safe_thread_id] = set()
+
+    async def clear_interactive_update_sender(
+        self,
+        *,
+        thread_id: str,
+        sender: Any | None = None,
+    ) -> None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id:
+            return
+        lock = getattr(self, "_interactive_update_senders_lock", None)
+        senders = getattr(self, "_interactive_update_senders", None)
+        sent_keys = getattr(self, "_interactive_update_sent_keys", None)
+        if lock is None or senders is None:
+            return
+        async with lock:
+            current = senders.get(safe_thread_id)
+            if sender is None or current is sender:
+                senders.pop(safe_thread_id, None)
+                if isinstance(sent_keys, dict):
+                    sent_keys.pop(safe_thread_id, None)
+
+    async def emit_interactive_update(
+        self,
+        *,
+        text: str,
+        dedupe_key: str = "",
+    ) -> dict[str, Any]:
+        thread_id = self.get_active_thread_id()
+        if not thread_id:
+            return {"ok": False, "sent": False, "reason": "missing_thread_id"}
+        safe_text = str(text or "").strip()
+        if not safe_text:
+            return {"ok": False, "sent": False, "reason": "empty_message"}
+        key = str(dedupe_key or "").strip()
+        if not key:
+            key = hashlib.sha256(safe_text.encode("utf-8")).hexdigest()
+
+        lock = getattr(self, "_interactive_update_senders_lock", None)
+        senders = getattr(self, "_interactive_update_senders", None)
+        sent_keys_by_thread = getattr(self, "_interactive_update_sent_keys", None)
+        if lock is None or senders is None or sent_keys_by_thread is None:
+            return {"ok": False, "sent": False, "reason": "interactive_update_unavailable"}
+
+        async with lock:
+            sender = senders.get(thread_id)
+            if sender is None:
+                return {"ok": False, "sent": False, "reason": "interactive_update_unavailable"}
+            sent_keys = sent_keys_by_thread.setdefault(thread_id, set())
+            if key in sent_keys:
+                return {"ok": True, "sent": False, "duplicate": True}
+            sent_keys.add(key)
+
+        try:
+            result = sender(safe_text)
+            if inspect.isawaitable(result):
+                result = await result
+            sent = bool(result.get("sent", True)) if isinstance(result, dict) else bool(result)
+        except Exception as exc:
+            async with lock:
+                sent_keys_by_thread.setdefault(thread_id, set()).discard(key)
+            self.log_behavior_event(
+                event="interactive_owner_update_failed",
+                thread_id=thread_id,
+                customer_id=self.get_active_customer_id(),
+                error=type(exc).__name__,
+            )
+            return {"ok": False, "sent": False, "error": str(exc)}
+
+        if not sent:
+            async with lock:
+                sent_keys_by_thread.setdefault(thread_id, set()).discard(key)
+            return {"ok": False, "sent": False, "reason": "send_failed"}
+
+        self.log_behavior_event(
+            event="interactive_owner_update_sent",
+            thread_id=thread_id,
+            customer_id=self.get_active_customer_id(),
+            chars=len(safe_text),
+        )
+        return {"ok": True, "sent": True}
 
     async def drain_interactive_fragments(self, *, thread_id: str) -> list[str]:
         session = await self._get_registered_interactive_session(thread_id=thread_id)

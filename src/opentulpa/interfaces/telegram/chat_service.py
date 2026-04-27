@@ -890,11 +890,27 @@ async def _run_interactive_session(
             if await session.finish_runner_if_idle():
                 return
             continue
+
+        async def _send_interactive_owner_update(message: str) -> dict[str, Any]:
+            sent = await _send_direct_telegram_reply(
+                bot_token=bot_token,
+                chat_id=session.chat_id,
+                text=message,
+            )
+            if sent:
+                STATE_STORE.touch_assistant_message(session.chat_id)
+            return {"sent": bool(sent)}
+
         try:
             if hasattr(agent_runtime, "register_interactive_session"):
                 await agent_runtime.register_interactive_session(
                     thread_id=session.thread_id,
                     session=session,
+                )
+            if hasattr(agent_runtime, "register_interactive_update_sender"):
+                await agent_runtime.register_interactive_update_sender(
+                    thread_id=session.thread_id,
+                    sender=_send_interactive_owner_update,
                 )
             turn_mode = _resolve_turn_mode_for_thread(
                 workflow_setup_status=workflow_setup_status,
@@ -933,6 +949,11 @@ async def _run_interactive_session(
             final = None
             suppressed = False
         finally:
+            if hasattr(agent_runtime, "clear_interactive_update_sender"):
+                await agent_runtime.clear_interactive_update_sender(
+                    thread_id=session.thread_id,
+                    sender=_send_interactive_owner_update,
+                )
             if hasattr(agent_runtime, "clear_interactive_session"):
                 await agent_runtime.clear_interactive_session(
                     thread_id=session.thread_id,

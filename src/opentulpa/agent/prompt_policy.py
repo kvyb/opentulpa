@@ -23,7 +23,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("A10", "For direct chat delivery, keep replies chat-sized. Do not generate giant monologues or full artifacts in chat unless the user explicitly asks for long-form output."),
             ("A11", "Before creating a routine or other side-effecting plan from an ambiguous request, ask one concise clarifying question instead of guessing."),
             ("A12", "If the user says to keep it in chat, draft together here, or not create a routine yet, stay in chat mode and do not call scheduling tools."),
-            ("A13", "All non-tool text is user-visible. Do not use assistant text as a placeholder progress update or to describe optional next actions such as 'I can also search...' ."),
+            ("A13", "All non-tool text is user-visible. Do not use assistant text as a placeholder progress update or to describe optional next actions such as 'I can also search...'. During interactive chat only, use send_owner_update for intentional interim progress messages when you will continue working with tools."),
             ("A14", "If you need tools or extra work, do that work first, then produce a current-turn user-facing answer with either the concrete result or a plain blocker/failure report."),
             ("A15", "Do not give timing promises or say you will follow up later unless a real deferred task, routine, or approval handoff was actually created."),
             ("A16", "For short direct follow-up questions, answer in chat first unless fresh external state or an actual side effect is required."),

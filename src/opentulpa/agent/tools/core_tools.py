@@ -15,7 +15,7 @@ from langchain.tools import tool
 
 from opentulpa.agent.file_analysis import summarize_uploaded_blob
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
-from opentulpa.agent.tools.common import require_customer_id
+from opentulpa.agent.tools.common import require_customer_id, require_thread_id
 from opentulpa.agent.tools.guardrail_helpers import (
     approval_pending_payload,
     normalize_command_for_working_dir,
@@ -258,6 +258,29 @@ async def _sync_proactive_heartbeat(
 
 def register_core_tools(runtime: Any) -> dict[str, Any]:
     boundary_guard = ExecutionBoundaryGuard(runtime=runtime)
+
+    @tool
+    async def send_owner_update(message: str, dedupe_key: str = "") -> Any:
+        """Send a short interim update to the current owner/support Telegram chat.
+
+        Use only during interactive chat when you will continue working with tools.
+        Do not use for final answers, inbound lead replies, routine wakes, or
+        background event notifications.
+        """
+        require_customer_id(runtime)
+        require_thread_id(runtime)
+        safe_message = str(message or "").strip()
+        if not safe_message:
+            return {"ok": False, "sent": False, "reason": "empty_message"}
+        if len(safe_message) > 500:
+            safe_message = safe_message[:497].rstrip() + "..."
+        emitter = getattr(runtime, "emit_interactive_update", None)
+        if not callable(emitter):
+            return {"ok": False, "sent": False, "reason": "interactive_update_unavailable"}
+        return await emitter(
+            text=safe_message,
+            dedupe_key=str(dedupe_key or "").strip(),
+        )
 
     @tool
     async def memory_search(query: str) -> Any:
@@ -1016,6 +1039,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         }
 
     return {
+        "send_owner_update": send_owner_update,
         "memory_search": memory_search,
         "memory_add": memory_add,
         "uploaded_file_search": uploaded_file_search,

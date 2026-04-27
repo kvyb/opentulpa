@@ -42,6 +42,7 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "stay in chat mode" in text
     assert "All non-tool text is user-visible" in text
     assert "Do not use assistant text as a placeholder progress update" in text
+    assert "use send_owner_update for intentional interim progress messages" in text
     assert "concrete result or a plain blocker/failure report" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
