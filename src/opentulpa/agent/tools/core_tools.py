@@ -38,6 +38,18 @@ from opentulpa.context.customer_profile_models import (
 from opentulpa.policy.execution_boundary import ExecutionBoundaryContext, ExecutionBoundaryGuard
 
 
+def _tool_error_payload(tool_name: str, response: Any) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except Exception:
+        return {"error": f"{tool_name} failed: {response.text}"}
+    if not isinstance(payload, dict):
+        return {"error": f"{tool_name} failed: {response.text}"}
+    payload = dict(payload)
+    payload["error"] = f"{tool_name} failed ({response.status_code})"
+    return payload
+
+
 def _best_crawl4ai_text(result: Any) -> tuple[str, str | None]:
     title: str | None = None
     metadata = getattr(result, "metadata", None)
@@ -78,7 +90,7 @@ def _best_crawl4ai_text(result: Any) -> tuple[str, str | None]:
 
 async def _crawl4ai_extract(url: str) -> tuple[str, str | None, str | None]:
     try:
-        from crawl4ai import AsyncWebCrawler
+        from crawl4ai import AsyncWebCrawler  # type: ignore[import-untyped]
     except Exception as exc:
         return "", None, f"crawl4ai unavailable: {exc}"
 
@@ -424,6 +436,78 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"uploaded_file_analyze failed: {r.text}"}
+        return r.json()
+
+    @tool
+    async def uploaded_file_inspect_structure(
+        file_id: str,
+        search_terms: list[str] | str | None = None,
+    ) -> Any:
+        """Inspect an uploaded file's structure before selecting workflow knowledge.
+
+        Use this first for arbitrary spreadsheets or large source files. For XLSX files,
+        it opens the workbook, returns sheet names, dimensions, sample rows, table
+        candidates, and optional matches for search_terms derived from the user's
+        workflow goal. Then pass chosen sheet/row selections to
+        uploaded_file_prepare_intake_knowledge.
+        """
+        customer_id = require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/files/inspect_structure",
+            json_body={
+                "file_id": file_id,
+                "customer_id": customer_id,
+                "search_terms": search_terms,
+            },
+            timeout=60.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("uploaded_file_inspect_structure", r)
+        return r.json()
+
+    @tool
+    async def uploaded_file_prepare_intake_knowledge(
+        file_ids: list[str],
+        include_hints: list[str] | str | None = None,
+        selected_sections: list[dict[str, Any]] | list[str] | None = None,
+        workflow_goal: str = "",
+        output_name: str = "intake_workflow_knowledge.md",
+    ) -> Any:
+        """Compile uploaded source files into a small Markdown knowledge pack for an intake workflow.
+
+        Use this during workflow setup when the user wants uploaded files, spreadsheets,
+        price lists, FAQs, or policies bound to the workflow. For arbitrary XLSX files,
+        call uploaded_file_inspect_structure first, choose exact sheets/row ranges, and
+        pass them as selected_sections. include_hints may be workflow-derived terms from
+        the user's stated goal, but do not assume fixed sheet names or source format.
+        Bind the returned knowledge_file_id to the workflow's knowledge_file_ids.
+        """
+        customer_id = require_customer_id(runtime)
+        safe_file_ids = [
+            str(item or "").strip()
+            for item in list(file_ids or [])
+            if str(item or "").strip()
+        ][:8]
+        if not safe_file_ids:
+            return {"error": "uploaded_file_prepare_intake_knowledge failed: file_ids is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/files/prepare_intake_knowledge",
+            json_body={
+                "customer_id": customer_id,
+                "file_ids": safe_file_ids,
+                "include_hints": include_hints,
+                "selected_sections": selected_sections,
+                "workflow_goal": workflow_goal,
+                "output_name": output_name,
+            },
+            timeout=60.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("uploaded_file_prepare_intake_knowledge", r)
         return r.json()
 
     @tool
@@ -940,6 +1024,8 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         "tulpa_file_send": tulpa_file_send,
         "web_image_send": web_image_send,
         "uploaded_file_analyze": uploaded_file_analyze,
+        "uploaded_file_inspect_structure": uploaded_file_inspect_structure,
+        "uploaded_file_prepare_intake_knowledge": uploaded_file_prepare_intake_knowledge,
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,

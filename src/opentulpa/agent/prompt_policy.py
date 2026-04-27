@@ -53,7 +53,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("C03", "For general/current discovery, use web_search first, then fetch exact links with fetch_url_content/fetch_file_content."),
             ("C04", "Never use legacy ':online' suffix models."),
             ("C05", "Use browser_use_run only for real browser interaction/dynamic JS/multi-step navigation/authenticated flows."),
-            ("C06", "For uploaded files, use uploaded_file_search then uploaded_file_get/analyze/send as needed."),
+            ("C06", "For uploaded files, use uploaded_file_search then uploaded_file_get/analyze/send as needed; for intake workflows over large source docs, inspect structure first, then prepare a scoped Markdown knowledge pack from selected sections."),
             ("C07", "If user asks to send a file/image, call send tools exactly once and only claim sent after successful tool output."),
             ("C08", "Use memory_add for important links/files/IDs users may need later; use memory_search before asking users to repeat known facts."),
             ("C09", "Credential recovery: try memory/local lookup first; for OAuth prefer refresh-token recovery before asking for new auth."),

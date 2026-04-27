@@ -225,12 +225,12 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ainvoke_model_does_not_add_provider_preference_for_glm51() -> None:
+async def test_ainvoke_model_disables_deepseek_v4_pro_reasoning() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
         openrouter_base_url="https://openrouter.ai/api/v1",
-        model_name="z-ai/glm-5.1",
+        model_name="deepseek/deepseek-v4-pro",
         checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
         prompt_caching_enabled=False,
     )
@@ -239,12 +239,17 @@ async def test_ainvoke_model_does_not_add_provider_preference_for_glm51() -> Non
     response = await rt.ainvoke_model(
         model,
         [HumanMessage(content="Dynamic user question")],
-        model_name="z-ai/glm-5.1",
+        model_name="deepseek/deepseek-v4-pro",
     )
 
     assert isinstance(response, _CaptureResponse)
     assert len(model.calls) == 1
-    assert model.calls[0]["kwargs"] == {}
+    assert model.calls[0]["kwargs"] == {
+        "extra_body": {
+            "reasoning": {"effort": "none"},
+            "thinking": {"type": "disabled"},
+        },
+    }
 
 
 def test_model_request_attempts_are_default_off_openrouter() -> None:
@@ -252,27 +257,27 @@ def test_model_request_attempts_are_default_off_openrouter() -> None:
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
         openrouter_base_url="https://example.com/v1",
-        model_name="z-ai/glm-5.1",
+        model_name="deepseek/deepseek-v4-pro",
         checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
         prompt_caching_enabled=False,
     )
 
-    assert rt._model_request_attempts(model_name="z-ai/glm-5.1") == [
+    assert rt._model_request_attempts(model_name="deepseek/deepseek-v4-pro") == [
         {"name": "default", "invoke_extras": {}, "call_context": {}}
     ]
 
 
-def test_model_request_attempts_are_default_for_glm51_nitro_on_openrouter() -> None:
+def test_model_request_attempts_are_default_for_deepseek_v4_pro_on_openrouter() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
         openrouter_base_url="https://openrouter.ai/api/v1",
-        model_name="z-ai/glm-5.1:nitro",
+        model_name="deepseek/deepseek-v4-pro",
         checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
         prompt_caching_enabled=False,
     )
 
-    attempts = rt._model_request_attempts(model_name="z-ai/glm-5.1:nitro")
+    attempts = rt._model_request_attempts(model_name="deepseek/deepseek-v4-pro")
 
     assert attempts == [{"name": "default", "invoke_extras": {}, "call_context": {}}]
 

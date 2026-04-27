@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -12,6 +12,7 @@ class FakeComposioInstagramService:
     enabled: bool = True
     calls: list[dict[str, Any]] = field(default_factory=list)
     conversations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    sheet_writes: list[dict[str, Any]] = field(default_factory=list)
     reply_fail_once_for_invalid_mid: bool = True
 
     def status(self) -> dict[str, Any]:
@@ -21,6 +22,123 @@ class FakeComposioInstagramService:
             "callback_url_configured": True,
             "default_callback_url": "https://example.test/callback",
             "resolved_callback_url": "https://example.test/callback",
+        }
+
+    def list_toolkits(
+        self,
+        *,
+        customer_id: str = "",
+        toolkits: list[str] | None = None,
+        is_connected: bool | None = None,
+        limit: int = 50,
+        search: str = "",
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "list_toolkits",
+                "customer_id": customer_id,
+                "toolkits": list(toolkits or []),
+                "is_connected": is_connected,
+                "limit": limit,
+                "search": search,
+            }
+        )
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "slug": "googlesheets",
+                    "name": "Google Sheets",
+                    "is_connected": True,
+                    "connected_account_id": "ca_fake_googlesheets",
+                }
+            ][: max(1, int(limit))],
+        }
+
+    def list_connected_accounts(
+        self,
+        *,
+        customer_id: str = "",
+        toolkits: list[str] | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "list_connected_accounts",
+                "customer_id": customer_id,
+                "toolkits": list(toolkits or []),
+                "statuses": list(statuses or []),
+                "limit": limit,
+            }
+        )
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "id": "ca_fake_googlesheets",
+                    "toolkit": {"slug": "googlesheets"},
+                    "toolkit_slug": "googlesheets",
+                    "status": "ACTIVE",
+                }
+            ][: max(1, int(limit))],
+        }
+
+    def search_tools(
+        self,
+        *,
+        query: str = "",
+        toolkits: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "search_tools",
+                "query": query,
+                "toolkits": list(toolkits or []),
+                "limit": limit,
+            }
+        )
+        normalized_toolkits = {str(item or "").strip().lower() for item in (toolkits or [])}
+        if normalized_toolkits and "googlesheets" not in normalized_toolkits:
+            return {"ok": True, "items": []}
+        item = {
+            "slug": "GOOGLESHEETS_UPSERT_ROWS",
+            "toolkit_slug": "googlesheets",
+            "name": "Google Sheets Upsert Rows",
+            "description": "Upsert rows in a Google Sheet.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "spreadsheetId": {"type": "string"},
+                    "sheetName": {"type": "string"},
+                    "headers": {"type": "array"},
+                    "rows": {"type": "array"},
+                    "keyColumn": {"type": "string"},
+                },
+            },
+        }
+        return {"ok": True, "items": [item][: max(1, int(limit))]}
+
+    def get_tool_schema(self, *, tool_slug: str) -> dict[str, Any]:
+        safe_slug = str(tool_slug or "").strip() or "GOOGLESHEETS_UPSERT_ROWS"
+        self.calls.append({"method": "get_tool_schema", "tool_slug": safe_slug})
+        return {
+            "ok": True,
+            "tool": {
+                "slug": safe_slug,
+                "toolkit_slug": "googlesheets",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "spreadsheetId": {"type": "string"},
+                        "sheetName": {"type": "string"},
+                        "headers": {"type": "array"},
+                        "rows": {"type": "array"},
+                        "keyColumn": {"type": "string"},
+                    },
+                },
+            },
         }
 
     def list_instagram_conversations(
@@ -106,7 +224,7 @@ class FakeComposioInstagramService:
             "recipient_id": str(recipient_id or summary.get("recipient_id", "1789")),
             "conversation_id": cid,
             "latest_inbound_message_created_time": str(
-                summary.get("latest_message_created_time", datetime.now(timezone.utc).isoformat())
+                summary.get("latest_message_created_time", datetime.now(UTC).isoformat())
             ),
             "reply_window_status": "unconfirmed",
         }
@@ -145,7 +263,7 @@ class FakeComposioInstagramService:
                 ),
                 "data": {"status_code": 400},
             }
-        return {
+        result = {
             "successful": True,
             "error": None,
             "data": {
@@ -154,6 +272,29 @@ class FakeComposioInstagramService:
                 "retried_without_reply_to_message_id": "reply_to_message_id" not in args,
             },
         }
+        if str(tool_slug or "").upper() == "GOOGLESHEETS_UPSERT_ROWS":
+            write = {
+                "customer_id": customer_id,
+                "tool_slug": tool_slug,
+                "arguments": dict(args),
+                "connected_account_id": connected_account_id,
+            }
+            headers = args.get("headers")
+            rows = args.get("rows")
+            if isinstance(headers, list) and isinstance(rows, list):
+                write["normalized_rows"] = [
+                    dict(zip([str(item) for item in headers], list(row), strict=False))
+                    for row in rows
+                    if isinstance(row, list)
+                ]
+            self.sheet_writes.append(write)
+            result["data"] = {
+                "ok": True,
+                "spreadsheetId": args.get("spreadsheetId"),
+                "sheetName": args.get("sheetName"),
+                "updatedRows": len(args.get("rows") or []),
+            }
+        return result
 
 
 def build_instagram_conversation(

@@ -11,6 +11,8 @@ from opentulpa.core.config import get_settings
 DEFAULT_JUDGE_MODEL = "google/gemini-3-flash-preview"
 _VALID_VERDICTS = {"pass", "fail", "inconclusive"}
 _SCORE_KEYS = ("task_completion", "correctness", "safety", "robustness")
+_OMITTED_LIST_KEYS = {"prompt_messages"}
+_LONG_TEXT_KEYS = {"content", "response_content", "response_text", "text"}
 
 
 def _env_api_key() -> str:
@@ -21,6 +23,34 @@ def _env_api_key() -> str:
 def _env_base_url() -> str:
     settings = get_settings()
     return str(settings.openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
+
+
+def _compact_for_judge(value: Any, *, key: str = "", depth: int = 0) -> Any:
+    if depth > 6:
+        return "[truncated-depth]"
+    if isinstance(value, str):
+        limit = 700 if key in _LONG_TEXT_KEYS else 1200
+        return value if len(value) <= limit else value[:limit] + "...[truncated]"
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for raw_key, raw_value in list(value.items())[:40]:
+            child_key = str(raw_key)
+            if child_key in _OMITTED_LIST_KEYS and isinstance(raw_value, list):
+                compact[child_key] = f"[{len(raw_value)} items omitted]"
+                continue
+            compact[child_key] = _compact_for_judge(raw_value, key=child_key, depth=depth + 1)
+        if len(value) > 40:
+            compact["_omitted_keys"] = len(value) - 40
+        return compact
+    if isinstance(value, list):
+        items = value[-10:] if len(value) > 10 else value
+        compact_items = [_compact_for_judge(item, key=key, depth=depth + 1) for item in items]
+        if len(value) > 10:
+            return [{"omitted_items": len(value) - 10}, *compact_items]
+        return compact_items
+    return str(value)[:700]
 
 
 def _tail_jsonl(path: Path, limit: int = 10) -> list[dict[str, Any]]:
@@ -34,7 +64,8 @@ def _tail_jsonl(path: Path, limit: int = 10) -> list[dict[str, Any]]:
         except Exception:
             continue
         if isinstance(payload, dict):
-            out.append(payload)
+            compact = _compact_for_judge(payload)
+            out.append(compact if isinstance(compact, dict) else {"value": compact})
     return out
 
 

@@ -17,7 +17,7 @@ class _RoutingRuntime:
     def __init__(self) -> None:
         self._model = _RecordingModel("main")
         self._telegram_media_model = _RecordingModel("telegram-media")
-        self.model_name = "z-ai/glm-5.1"
+        self.model_name = "deepseek/deepseek-v4-pro"
         self._telegram_media_model_name = "google/gemini-3-flash-preview"
         self.calls: list[dict[str, Any]] = []
 
@@ -126,7 +126,7 @@ async def test_transcribe_audio_blob_uses_telegram_media_model_name(monkeypatch)
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             _ = (args, kwargs)
 
-        async def __aenter__(self) -> "_FakeAsyncClient":
+        async def __aenter__(self) -> _FakeAsyncClient:
             return self
 
         async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
@@ -142,7 +142,7 @@ async def test_transcribe_audio_blob_uses_telegram_media_model_name(monkeypatch)
     runtime = SimpleNamespace(
         openrouter_api_key="key",
         openrouter_base_url="https://openrouter.ai/api/v1",
-        model_name="z-ai/glm-5.1",
+        model_name="deepseek/deepseek-v4-pro",
         _telegram_media_model_name="google/gemini-3-flash-preview",
     )
     monkeypatch.setattr(file_analysis.httpx, "AsyncClient", _FakeAsyncClient)

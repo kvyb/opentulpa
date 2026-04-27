@@ -34,7 +34,7 @@ class E2EHarness:
     behavior_log_path: Path
     llm_trace_path: Path
     telegram_client: FakeTelegramClient
-    composio_service: FakeComposioInstagramService
+    composio_service: Any
     lead_simulator: LeadSimulator
 
     def count_internal_api_calls(self) -> int:
@@ -455,9 +455,10 @@ def build_harness(
     tmp_path: Path,
     monkeypatch: Any,
     scenario_name: str,
-    composio_service: FakeComposioInstagramService | None = None,
+    composio_service: Any | None = None,
 ) -> E2EHarness:
     from opentulpa.api import app as app_module
+    from opentulpa.interfaces.telegram import attachments as attachments_module
     from opentulpa.interfaces.telegram import chat_service as chat_module
     from opentulpa.interfaces.telegram import relay as relay_module
     from opentulpa.tasks import sandbox as sandbox_module
@@ -490,6 +491,7 @@ def build_harness(
         TelegramStateStore(isolated_project_root / ".opentulpa" / "telegram_state.json"),
     )
     monkeypatch.setattr(app_module, "TelegramClient", lambda _token: fake_tg)
+    monkeypatch.setattr(attachments_module, "TelegramClient", lambda _token: fake_tg)
     monkeypatch.setattr(chat_module, "TelegramClient", lambda _token: fake_tg)
     monkeypatch.setattr(relay_module, "TelegramClient", lambda _token: fake_tg)
     get_settings.cache_clear()

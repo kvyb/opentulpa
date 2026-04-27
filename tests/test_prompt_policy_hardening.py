@@ -89,6 +89,7 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
 
     assert "live user-guided turn" in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
+    assert "track source_file_ids and prepared_knowledge_file_ids" in workflow_setup
     assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
@@ -111,6 +112,7 @@ def test_literal_chat_prompt_mode_discourages_random_follow_up_questions() -> No
     assert "Do not pivot into a new topic" in literal_chat
     assert "follow-up question" in literal_chat
     assert "collaborative intake workflow setup session" in workflow_setup
+    assert "bind only prepared knowledge files" in workflow_setup
     assert "Only commit the workflow after explicit user confirmation." in workflow_setup
 
 

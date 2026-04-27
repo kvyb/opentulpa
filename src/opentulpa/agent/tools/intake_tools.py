@@ -134,6 +134,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
           important constraints, and any other operating instructions learned during the conversation that
           should persist for future inbox turns.
         - knowledge_file_ids is optional. Use it only when the user explicitly wants uploaded files bound to the workflow.
+        - For large spreadsheets or broad source docs, first call uploaded_file_inspect_structure, then call uploaded_file_prepare_intake_knowledge with selected sheets/row ranges, then bind the returned prepared Markdown file id here.
         - The workflow must still work when knowledge_file_ids is empty; in that case rely on the saved instructions
           and other workflow fields instead of pretending files exist.
         - sink_config must contain the concrete configuration needed by the chosen sink_type.
@@ -341,6 +342,10 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
         For local_csv workflows, use draft_patch.sink_config={"file_path": "..."}.
         When replacing field-specific guidance or sink_config.field_mapping, send the full current object.
+        If uploaded files are being used as workflow knowledge, patch scratchpad_patch.source_file_ids
+        with original uploaded file ids, inspect arbitrary spreadsheets first, prepare selected source sections
+        with uploaded_file_prepare_intake_knowledge, then patch scratchpad_patch.prepared_knowledge_file_ids
+        and draft_patch.knowledge_file_ids with the returned prepared file ids.
         """
         if not isinstance(draft_patch, dict) and not isinstance(scratchpad_patch, dict):
             return {"error": "intake_workflow_setup_update failed: draft_patch or scratchpad_patch is required"}

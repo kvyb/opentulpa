@@ -142,10 +142,10 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_structured_model_does_not_add_provider_preference_for_glm51() -> None:
+async def test_invoke_structured_model_disables_deepseek_v4_pro_reasoning() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
-    runtime.model_name = "z-ai/glm-5.1"
+    runtime.model_name = "deepseek/deepseek-v4-pro"
     runtime._prompt_caching_enabled = False
     runtime._prompt_cache_ttl_1h = False
     model = _ProviderAwareStructuredModel()
@@ -154,7 +154,7 @@ async def test_invoke_structured_model_does_not_add_provider_preference_for_glm5
         model=model,
         messages=[],
         schema=_Schema,
-        model_name="z-ai/glm-5.1",
+        model_name="deepseek/deepseek-v4-pro",
     )
 
     assert isinstance(parsed, _Schema)
@@ -162,7 +162,12 @@ async def test_invoke_structured_model_does_not_add_provider_preference_for_glm5
     assert parsed.reason == "default_route"
     assert error is None
     assert len(model.runners) == 1
-    assert model.runners[0].calls[0]["kwargs"] == {}
+    assert model.runners[0].calls[0]["kwargs"] == {
+        "extra_body": {
+            "reasoning": {"effort": "none"},
+            "thinking": {"type": "disabled"},
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -349,6 +354,74 @@ async def test_decide_intake_workflow_prefers_tool_runtime_first_for_composio_si
 
 
 @pytest.mark.asyncio
+async def test_decide_intake_workflow_prefers_tool_runtime_for_bound_knowledge_files() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.model_name = "google/gemini-3-flash-preview"
+    runtime._prompt_caching_enabled = True
+    runtime._prompt_cache_ttl_1h = False
+    runtime._graph = object()
+    runtime._wake_execution_model_with_tools = object()
+    model = _StructuredModel(
+        {
+            "matches_workflow": False,
+            "confidence": 0.2,
+            "conversation_summary": "Fallback structured model should not run.",
+            "extracted_fields": {},
+            "missing_fields": [],
+            "reply_action": "none",
+            "reply_text": "",
+            "ready_to_save": False,
+            "booking_action": "ignore",
+            "save_payload": {},
+            "reason": "not used",
+        }
+    )
+    runtime._model = model
+    runtime._wake_execution_model = model
+    runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
+    captured: dict[str, Any] = {}
+
+    async def _fake_ainvoke_text(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return (
+            '{"matches_workflow": true, "confidence": 0.95, "conversation_summary": '
+            '"Customer asks about a source-backed wash service.", "extracted_fields": {"wash_type": "2 phase"}, '
+            '"missing_fields": ["time"], "reply_action": "send_reply", "reply_text": "What time works?", '
+            '"ready_to_save": false, "booking_action": "create_new_booking", "save_payload": {}, '
+            '"sink_arguments": {}, "reason": "Need time."}'
+        )
+
+    runtime.ainvoke_text = _fake_ainvoke_text
+
+    decision = await runtime.decide_intake_workflow(
+        customer_id="telegram_123",
+        workflow={
+            "workflow_id": "iwf_knowledge",
+            "name": "Autospa Intake",
+            "intent_description": "Handle autospa bookings.",
+            "required_fields": ["wash_type", "time"],
+            "field_guidance": {},
+            "knowledge_file_ids": ["file_prepared"],
+            "sink_type": "local_csv",
+        },
+        conversation={
+            "summary": {
+                "conversation_id": "conv_1",
+                "latest_inbound_message_id": "msg_1",
+            },
+            "recent_messages": [{"sender_role": "customer", "text": "How much is 2 phase wash?"}],
+        },
+        active_booking=None,
+        recent_completed_booking=None,
+    )
+
+    assert decision["ok"] is True
+    assert captured["thread_id"] == "wake_intake_iwf_knowledge_conv_1_msg_1"
+    assert captured["turn_mode"] == "routine_wake"
+    assert model.runner is None
+
+
+@pytest.mark.asyncio
 async def test_decide_intake_workflow_escalates_to_tool_runtime_after_structured_failure_with_feedback() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.model_name = "google/gemini-3-flash-preview"
@@ -414,6 +487,8 @@ async def test_decide_intake_workflow_escalates_to_tool_runtime_after_structured
     assert "execution_feedback=" in prompt
     assert "Invalid request data provided" in prompt
     assert "sink_arguments" in prompt
+    assert "A write sink is not an availability source by default." in prompt
+    assert "do not check availability" in prompt
 
 
 @pytest.mark.asyncio

@@ -283,8 +283,8 @@ Default runtime settings live in `opentulpa.config.yaml`.
 Recommended model split in this repo:
 
 ```yaml
-llm_model: z-ai/glm-5.1
-wake_execution_model: z-ai/glm-5.1
+llm_model: deepseek/deepseek-v4-pro
+wake_execution_model: deepseek/deepseek-v4-pro
 memory_llm_model: google/gemini-3-flash-preview
 multimodal_llm: google/gemini-3-flash-preview
 guardrail_classifier_model: google/gemini-3-flash-preview

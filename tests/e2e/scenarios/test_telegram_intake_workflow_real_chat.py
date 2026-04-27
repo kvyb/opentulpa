@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import signal
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
+from evaluation.judge import DEFAULT_JUDGE_MODEL, evaluate_e2e_scenario_with_llm_judge
 from harness.lead_simulator import LeadProfile
 from harness.runner import E2EHarness
 
@@ -56,6 +61,36 @@ def _telegram_message(*, chat_id: int, user_id: int, text: str, message_id: int 
             "chat": {"id": chat_id, "type": "private"},
             "from": {"id": user_id, "is_bot": False, "username": f"user_{user_id}"},
             "text": text,
+        },
+    }
+
+
+def _telegram_document_message(
+    *,
+    chat_id: int,
+    user_id: int,
+    caption: str,
+    file_id: str,
+    file_name: str,
+    mime_type: str,
+    file_size: int,
+    message_id: int = 1,
+) -> dict[str, Any]:
+    return {
+        "update_id": int(time.time() * 1000),
+        "message": {
+            "message_id": message_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": user_id, "is_bot": False, "username": f"user_{user_id}"},
+            "caption": caption,
+            "document": {
+                "file_id": file_id,
+                "file_unique_id": f"unique_{file_id}",
+                "file_name": file_name,
+                "mime_type": mime_type,
+                "file_size": int(file_size),
+            },
         },
     }
 
@@ -178,6 +213,919 @@ def _addresses_pricing_question(text: str) -> bool:
             "rupiah",
         )
     )
+
+
+_AUTOSPA_PRICE_ASSET = Path(__file__).resolve().parents[1] / "assets" / "autospa_price.xlsx"
+_AUTOSPA_STAGE_TIMEOUT_SECONDS = 120.0
+
+
+def _live_google_sheets_target(harness: E2EHarness) -> Any | None:
+    return getattr(harness.composio_service, "live_google_sheets_target", None)
+
+
+def _owner_identity_for_autospa(harness: E2EHarness) -> tuple[int, int, str]:
+    target = _live_google_sheets_target(harness)
+    customer_id = str(getattr(target, "customer_id", "") or "").strip()
+    if customer_id.startswith("telegram_"):
+        raw_user_id = customer_id.removeprefix("telegram_").strip()
+        if raw_user_id.isdigit():
+            owner_user_id = int(raw_user_id)
+            return owner_user_id, owner_user_id + 1000, customer_id
+    return 901, 1901, "telegram_901"
+
+
+@contextmanager
+def _stage_timeout(stage_name: str, timeout_seconds: float = _AUTOSPA_STAGE_TIMEOUT_SECONDS) -> Any:
+    def _raise_timeout(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"stage timed out after {timeout_seconds:.0f}s: {stage_name}")
+
+    old_handler = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, max(1.0, float(timeout_seconds)))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def _write_json_artifact(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+
+def _filtered_autospa_internal_calls(harness: E2EHarness) -> list[dict[str, Any]]:
+    prefixes = (
+        "/internal/files/",
+        "/internal/intake/",
+        "/internal/composio/",
+        "/internal/telegram/business/",
+    )
+    return [
+        item
+        for item in harness.internal_api_calls_since(0)
+        if str(item.get("path", "")).startswith(prefixes)
+    ]
+
+
+def _workflow_knowledge_markdown(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    workflow: dict[str, Any],
+) -> str:
+    file_vault = getattr(harness.client.app.state.intake_workflows, "_file_vault", None)
+    if file_vault is None:
+        return ""
+    chunks: list[str] = []
+    for file_id in workflow.get("knowledge_file_ids") or []:
+        raw = file_vault.read_file_bytes(customer_id, str(file_id or "").strip())
+        if raw:
+            chunks.append(raw.decode("utf-8", errors="replace"))
+    return "\n\n".join(chunk.strip() for chunk in chunks if chunk.strip())
+
+
+def _current_autospa_artifacts(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    artifact_dir: Path,
+    customer_id: str,
+) -> dict[str, str]:
+    workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+    prepared_markdown = _workflow_knowledge_markdown(
+        harness,
+        customer_id=customer_id,
+        workflow=workflow,
+    )
+    if prepared_markdown:
+        content_hash = hashlib.sha256(prepared_markdown.encode("utf-8")).hexdigest()
+        if state.get("prepared_knowledge_hash") != content_hash:
+            state["prepared_knowledge_hash"] = content_hash
+            harness.recorder.add(
+                "prepared_knowledge_snapshot",
+                knowledge_file_ids=workflow.get("knowledge_file_ids") or [],
+                markdown_chars=len(prepared_markdown),
+                sha256=content_hash,
+            )
+
+    workflow_hash = hashlib.sha256(
+        json.dumps(workflow, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    if workflow and state.get("workflow_hash") != workflow_hash:
+        state["workflow_hash"] = workflow_hash
+        harness.recorder.add("workflow_snapshot", workflow=workflow)
+
+    paths = {
+        "owner_transcript": artifact_dir / "owner_transcript.json",
+        "lead_transcripts": artifact_dir / "lead_transcripts.json",
+        "prepared_knowledge": artifact_dir / "prepared_knowledge.md",
+        "workflow_snapshot": artifact_dir / "workflow_snapshot.json",
+        "sheet_writes": artifact_dir / "sheet_writes.json",
+        "internal_calls_filtered": artifact_dir / "internal_calls_filtered.json",
+        "stage_judgements": artifact_dir / "stage_judgements.json",
+    }
+    _write_json_artifact(paths["owner_transcript"], state.get("owner_transcript") or [])
+    _write_json_artifact(paths["lead_transcripts"], state.get("lead_transcripts") or [])
+    paths["prepared_knowledge"].write_text(prepared_markdown, encoding="utf-8")
+    _write_json_artifact(paths["workflow_snapshot"], workflow)
+    _write_json_artifact(
+        paths["sheet_writes"],
+        getattr(harness.composio_service, "sheet_writes", []),
+    )
+    _write_json_artifact(paths["internal_calls_filtered"], _filtered_autospa_internal_calls(harness))
+    _write_json_artifact(paths["stage_judgements"], state.get("stage_judgements") or [])
+    return {key: str(path) for key, path in paths.items()}
+
+
+def _write_autospa_failure_debug(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    artifact_dir: Path,
+    customer_id: str,
+    error: BaseException,
+) -> str:
+    path = artifact_dir / "failure_debug.json"
+    workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+    workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+    bookings = []
+    if workflow_id:
+        bookings = harness.list_bookings(customer_id=customer_id, workflow_id=workflow_id)
+    _write_json_artifact(
+        path,
+        {
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "owner_transcript": state.get("owner_transcript") or [],
+            "lead_transcripts": state.get("lead_transcripts") or [],
+            "workflow": workflow,
+            "workflows": _list_workflows(harness, customer_id=customer_id),
+            "bookings": bookings,
+            "telegram_sent_messages": harness.telegram_client.sent_messages,
+            "sheet_writes": getattr(harness.composio_service, "sheet_writes", []),
+            "internal_calls_filtered": _filtered_autospa_internal_calls(harness),
+        },
+    )
+    return str(path)
+
+
+def _stage_judge_details(
+    *,
+    state: dict[str, Any],
+    stage_name: str,
+    stage_goal: str,
+    stage_result: dict[str, Any],
+    artifact_paths: dict[str, str],
+    harness: E2EHarness,
+) -> dict[str, Any]:
+    workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+    return {
+        "stage_name": stage_name,
+        "stage_goal": stage_goal,
+        "stage_result": stage_result,
+        "owner_transcript": state.get("owner_transcript") or [],
+        "lead_transcripts": state.get("lead_transcripts") or [],
+        "workflow": workflow,
+        "sheet_writes": getattr(harness.composio_service, "sheet_writes", []),
+        "artifact_paths": artifact_paths,
+        "internal_call_count": len(_filtered_autospa_internal_calls(harness)),
+        "judge_instruction": (
+            "Оцени, достиг ли этап своей цели, используя только эти транскрипты и артефакты. "
+            "Если поведение продукта плохое, верни verdict='fail' и объясни, но это не должно "
+            "считаться ошибкой pytest."
+        ),
+    }
+
+
+def _judge_autospa_stage(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    stage_name: str,
+    stage_goal: str,
+    stage_result: dict[str, Any],
+    artifact_paths: dict[str, str],
+) -> dict[str, Any]:
+    result = evaluate_e2e_scenario_with_llm_judge(
+        scenario=f"autospa_telegram_intake:{stage_name}",
+        details=_stage_judge_details(
+            state=state,
+            stage_name=stage_name,
+            stage_goal=stage_goal,
+            stage_result=stage_result,
+            artifact_paths=artifact_paths,
+            harness=harness,
+        ),
+        system_log_path=harness.system_log_path,
+        behavior_log_path=harness.behavior_log_path,
+        llm_trace_path=harness.llm_trace_path,
+        model=DEFAULT_JUDGE_MODEL,
+        timeout_seconds=40.0,
+    )
+    parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+    entry = {
+        "stage": stage_name,
+        "model": result.get("model", DEFAULT_JUDGE_MODEL),
+        "input_artifact_paths": artifact_paths,
+        "ok": bool(result.get("ok", False)),
+        "attempted": bool(result.get("attempted", False)),
+        "reason": result.get("reason"),
+        "status_code": result.get("status_code"),
+        "verdict": str(parsed.get("verdict", "") or ""),
+        "summary": str(parsed.get("summary", "") or ""),
+        "failures": parsed.get("failures") if isinstance(parsed, dict) else [],
+        "confidence": parsed.get("confidence") if isinstance(parsed, dict) else None,
+        "raw_response": str(result.get("raw_response", "") or "")[:4000],
+    }
+    state.setdefault("stage_judgements", []).append(entry)
+    harness.recorder.add("stage_judge_eval", **entry)
+    judgements_path = Path(artifact_paths["stage_judgements"])
+    _write_json_artifact(judgements_path, state.get("stage_judgements") or [])
+    if not bool(result.get("ok", False)):
+        raise RuntimeError(f"stage judge failed for {stage_name}: {result}")
+    return entry
+
+
+def _run_autospa_stage(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    artifact_dir: Path,
+    customer_id: str,
+    stage_name: str,
+    stage_goal: str,
+    run: Any,
+) -> dict[str, Any]:
+    harness.recorder.add("stage_started", stage=stage_name, goal=stage_goal)
+    started = time.monotonic()
+    try:
+        with _stage_timeout(stage_name):
+            result = run()
+    except TimeoutError as exc:
+        harness.recorder.add("stage_timed_out", stage=stage_name, error=str(exc))
+        paths = _current_autospa_artifacts(
+            harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+        )
+        _write_autospa_failure_debug(
+            harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            error=exc,
+        )
+        _judge_autospa_stage(
+            harness,
+            state=state,
+            stage_name=stage_name,
+            stage_goal=stage_goal,
+            stage_result={"ok": False, "error": str(exc), "error_type": type(exc).__name__},
+            artifact_paths=paths,
+        )
+        raise RuntimeError(str(exc)) from exc
+    except Exception as exc:
+        harness.recorder.add("stage_failed", stage=stage_name, error=str(exc), error_type=type(exc).__name__)
+        paths = _current_autospa_artifacts(
+            harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+        )
+        _write_autospa_failure_debug(
+            harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            error=exc,
+        )
+        _judge_autospa_stage(
+            harness,
+            state=state,
+            stage_name=stage_name,
+            stage_goal=stage_goal,
+            stage_result={"ok": False, "error": str(exc), "error_type": type(exc).__name__},
+            artifact_paths=paths,
+        )
+        raise
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    stage_result = result if isinstance(result, dict) else {"result": result}
+    stage_result["elapsed_ms"] = elapsed_ms
+    harness.recorder.add("stage_completed", stage=stage_name, elapsed_ms=elapsed_ms, result=stage_result)
+    paths = _current_autospa_artifacts(
+        harness,
+        state=state,
+        artifact_dir=artifact_dir,
+        customer_id=customer_id,
+    )
+    _judge_autospa_stage(
+        harness,
+        state=state,
+        stage_name=stage_name,
+        stage_goal=stage_goal,
+        stage_result=stage_result,
+        artifact_paths=paths,
+    )
+    return stage_result
+
+
+def _post_owner_autospa_message(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    owner_chat_id: int,
+    owner_user_id: int,
+    text: str,
+    message_id: int,
+    document: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    state.setdefault("owner_transcript", []).append(
+        {"role": "owner", "message_id": message_id, "text": text}
+    )
+    harness.recorder.add("owner_message", message_id=message_id, text=text, has_document=bool(document))
+    start_index = len(harness.telegram_client.sent_messages)
+    if document:
+        body = _telegram_document_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            caption=text,
+            file_id=str(document["file_id"]),
+            file_name=str(document.get("file_name") or document.get("filename") or "autospa_price.xlsx"),
+            mime_type=str(document["mime_type"]),
+            file_size=int(document["file_size"]),
+            message_id=message_id,
+        )
+    else:
+        body = _telegram_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            text=text,
+            message_id=message_id,
+        )
+    status = harness.post_telegram(body=body)
+    if status != 200:
+        raise RuntimeError(f"owner Telegram webhook returned {status}")
+    if not _wait_until(
+        lambda: len(_messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)) >= 1,
+        timeout_seconds=110.0,
+    ):
+        raise RuntimeError("owner stage produced no assistant reply")
+    replies = _messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)
+    for item in replies:
+        payload = {
+            "role": "assistant",
+            "message_id": item.get("message_id"),
+            "text": str(item.get("text", "") or ""),
+        }
+        state.setdefault("owner_transcript", []).append(payload)
+        harness.recorder.add("owner_assistant_reply", **payload)
+    return replies
+
+
+def _send_autospa_lead_message(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    customer_id: str,
+    workflow_id: str,
+    business_connection_id: str,
+    lead_label: str,
+    lead_chat_id: int,
+    lead_user_id: int,
+    text: str,
+    message_id: int,
+    require_assistant_reply: bool = True,
+    require_completion_reply: bool = True,
+) -> dict[str, Any]:
+    transcript = state.setdefault("lead_transcripts", {}).setdefault(lead_label, [])
+    transcript.append({"role": "lead", "message_id": message_id, "text": text})
+    harness.recorder.add(
+        "lead_message",
+        lead_label=lead_label,
+        lead_chat_id=lead_chat_id,
+        message_id=message_id,
+        text=text,
+    )
+    start_index = len(harness.telegram_client.sent_messages)
+    previous_bookings = harness.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow_id,
+        conversation_id=str(lead_chat_id),
+    )
+    status = harness.post_telegram(
+        body=_telegram_business_message(
+            business_connection_id=business_connection_id,
+            lead_chat_id=lead_chat_id,
+            lead_user_id=lead_user_id,
+            text=text,
+            message_id=message_id,
+        )
+    )
+    if status != 200:
+        raise RuntimeError(f"lead Telegram webhook returned {status}")
+
+    def _has_progress() -> bool:
+        new_messages = [
+            item
+            for item in harness.telegram_client.sent_messages[start_index:]
+            if int(item.get("chat_id", 0)) == lead_chat_id
+        ]
+        bookings = harness.list_bookings(
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            conversation_id=str(lead_chat_id),
+        )
+        return bool(new_messages) or bookings != previous_bookings
+
+    if not _wait_until(_has_progress, timeout_seconds=110.0):
+        raise RuntimeError(f"lead stage produced no observable progress for {lead_label}")
+
+    assistant_messages = [
+        item
+        for item in harness.telegram_client.sent_messages[start_index:]
+        if int(item.get("chat_id", 0)) == lead_chat_id
+    ]
+    completed_before = {
+        str(item.get("booking_id", "") or "")
+        for item in previous_bookings
+        if str(item.get("status", "") or "").strip().lower() == "completed"
+    }
+    for item in assistant_messages:
+        payload = {
+            "role": "assistant",
+            "message_id": item.get("message_id"),
+            "text": str(item.get("text", "") or ""),
+        }
+        transcript.append(payload)
+        harness.recorder.add(
+            "lead_assistant_reply",
+            lead_label=lead_label,
+            lead_chat_id=lead_chat_id,
+            **payload,
+        )
+    bookings = harness.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow_id,
+        conversation_id=str(lead_chat_id),
+    )
+    newly_completed = [
+        item
+        for item in bookings
+        if str(item.get("status", "") or "").strip().lower() == "completed"
+        and str(item.get("booking_id", "") or "") not in completed_before
+    ]
+    if require_assistant_reply and not assistant_messages:
+        raise RuntimeError(f"lead turn produced no assistant reply for {lead_label}")
+    if require_completion_reply and newly_completed and not assistant_messages:
+        raise RuntimeError(
+            f"booking completed without customer-facing assistant reply for {lead_label}"
+        )
+    harness.recorder.add(
+        "booking_state",
+        lead_label=lead_label,
+        lead_chat_id=lead_chat_id,
+        bookings=bookings,
+    )
+    write_event = (
+        "real_google_sheets_write"
+        if _live_google_sheets_target(harness) is not None
+        else "fake_google_sheets_write"
+    )
+    for write in getattr(harness.composio_service, "sheet_writes", []):
+        harness.recorder.add(write_event, **write)
+    return {"assistant_messages": assistant_messages, "bookings": bookings}
+
+
+@pytest.mark.real_composio
+def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
+    e2e_harness: E2EHarness,
+) -> None:
+    if not _AUTOSPA_PRICE_ASSET.exists():
+        raise RuntimeError(f"AutoSpa E2E asset is missing: {_AUTOSPA_PRICE_ASSET}")
+
+    owner_user_id, owner_chat_id, customer_id = _owner_identity_for_autospa(e2e_harness)
+    live_google_sheets_target = _live_google_sheets_target(e2e_harness)
+    business_connection_id = _seed_telegram_business_connection(
+        e2e_harness,
+        owner_user_id=owner_user_id,
+        owner_chat_id=owner_chat_id,
+        business_connection_id="bc_e2e_autospa_stage_judged",
+    )
+    artifact_dir = e2e_harness.status_report_path.parent / "autospa_stage_judged_artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    state: dict[str, Any] = {
+        "owner_transcript": [],
+        "lead_transcripts": {},
+        "stage_judgements": [],
+        "workflow": {},
+        "live_google_sheets_target": live_google_sheets_target,
+    }
+
+    file_id = "tg_file_autospa_price"
+    registered = e2e_harness.telegram_client.register_file(
+        file_id=file_id,
+        path=_AUTOSPA_PRICE_ASSET,
+        filename="autospa_price.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    e2e_harness.recorder.add("owner_document_uploaded", **registered)
+
+    def stage_owner_upload() -> dict[str, Any]:
+        fresh_replies = _post_owner_autospa_message(
+            e2e_harness,
+            state=state,
+            owner_chat_id=owner_chat_id,
+            owner_user_id=owner_user_id,
+            text="/fresh",
+            message_id=1,
+        )
+        upload_text = (
+            "Хочу создать workflow для Telegram Business входящих сообщений. "
+            "Вот прайс AutoSpa. Агент должен использовать файл как источник знаний, "
+            "но работать только с категориями Мойка и Шиномонтаж. "
+            "Нужно отвечать клиентам в Telegram, помогать выбрать услугу, отвечать на вопросы "
+            "по цене из файла и записывать бронирования в Google Sheets. "
+            "Сначала подготовь workflow и спроси подтверждение перед активацией."
+        )
+        upload_replies = _post_owner_autospa_message(
+            e2e_harness,
+            state=state,
+            owner_chat_id=owner_chat_id,
+            owner_user_id=owner_user_id,
+            text=upload_text,
+            message_id=2,
+            document=registered,
+        )
+        return {
+            "fresh_replies": len(fresh_replies),
+            "upload_replies": len(upload_replies),
+            "registered_file": registered,
+            "downloaded_files": e2e_harness.telegram_client.downloaded_files,
+        }
+
+    def stage_owner_details() -> dict[str, Any]:
+        spreadsheet_id = "sheet_autospa_e2e"
+        sheet_name = "Bookings"
+        if live_google_sheets_target is not None:
+            spreadsheet_id = str(live_google_sheets_target.spreadsheet_id)
+            sheet_name = str(live_google_sheets_target.sheet_name)
+        text = (
+            "Дополняю настройки. Workflow назови «AutoSpa Мойка и Шиномонтаж». "
+            "Канал: Telegram Business DM. Подключение уже есть, используй его. "
+            "Интент входящих: клиент хочет узнать цену, уточнить услугу или записаться "
+            "на мойку или шиномонтаж. Вне этих двух категорий не продавай, лучше уточни, "
+            "что workflow покрывает только Мойку и Шиномонтаж. "
+            "Для бронирования собери: категория услуги, название услуги, автомобиль или класс авто, "
+            "дата, время, имя клиента, телефон, цена если найдена. "
+            "Прайс может быть большой, поэтому открой структуру файла, выбери только связанные "
+            "разделы для Мойка и Шиномонтаж, подготовь Markdown knowledge pack и прикрепи его к workflow. "
+            "Запись сохраняй в тестовую Google Sheets таблицу: "
+            f"spreadsheetId={spreadsheet_id}, sheetName={sheet_name}. "
+            "Используй sink_type google_sheets_composio, toolkit googlesheets, "
+            "field_mapping на понятные колонки: Category, Service, Vehicle, Date, Time, Lead Name, "
+            "Phone, Quoted Price, Conversation ID. Подготовь предложение и жди моего подтверждения."
+        )
+        replies = _post_owner_autospa_message(
+            e2e_harness,
+            state=state,
+            owner_chat_id=owner_chat_id,
+            owner_user_id=owner_user_id,
+            text=text,
+            message_id=3,
+        )
+        return {"owner_replies": len(replies)}
+
+    def stage_owner_confirm() -> dict[str, Any]:
+        replies = _post_owner_autospa_message(
+            e2e_harness,
+            state=state,
+            owner_chat_id=owner_chat_id,
+            owner_user_id=owner_user_id,
+            text=(
+                "Подтверждаю. Сохрани и активируй этот workflow сейчас. "
+                "Потом используй его для входящих Telegram лидов."
+            ),
+            message_id=4,
+        )
+        if not _wait_until(
+            lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) >= 1,
+            timeout_seconds=110.0,
+        ):
+            raise RuntimeError("workflow was not created after owner confirmation")
+        workflows = _list_workflows(e2e_harness, customer_id=customer_id)
+        state["workflow"] = workflows[-1]
+        return {"owner_replies": len(replies), "workflow": state["workflow"], "workflow_count": len(workflows)}
+
+    def stage_wash_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run wash lead stage without workflow_id")
+        first = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="wash",
+            lead_chat_id=2901,
+            lead_user_id=3901,
+            message_id=10,
+            text=(
+                "Здравствуйте. Подскажите, сколько стоит 2х-фазная мойка для Toyota RAV4? "
+                "Если цена нормальная, хотел бы записаться на завтра."
+            ),
+        )
+        second = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="wash",
+            lead_chat_id=2901,
+            lead_user_id=3901,
+            message_id=11,
+            text="Меня зовут Алексей, телефон +79990000001. Завтра в 10:00 удобно.",
+        )
+        return {"turns": [first, second]}
+
+    def stage_tire_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run tire lead stage without workflow_id")
+        first = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="tire",
+            lead_chat_id=2902,
+            lead_user_id=3902,
+            message_id=20,
+            text=(
+                "Добрый день. Нужно переобуть BMW X5, 19 радиус, низкий профиль. "
+                "Можно записаться на пятницу в 15:00? Я Мария, +79990000002."
+            ),
+        )
+        return {"turns": [first]}
+
+    def stage_out_of_scope_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run out-of-scope lead stage without workflow_id")
+        first = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="out_of_scope",
+            lead_chat_id=2903,
+            lead_user_id=3903,
+            message_id=30,
+            text="Здравствуйте. Сколько стоит оклейка PPF передней части машины?",
+        )
+        return {"turns": [first]}
+
+    def stage_missing_phone_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run missing-phone lead stage without workflow_id")
+        first = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="missing_phone",
+            lead_chat_id=2904,
+            lead_user_id=3904,
+            message_id=40,
+            text="Хочу записаться на 2х-фазную мойку Toyota Camry завтра в 12:00. Меня зовут Игорь.",
+        )
+        return {"turns": [first]}
+
+    def stage_ambiguous_car_class_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run ambiguous-car-class lead stage without workflow_id")
+        first = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="ambiguous_car_class",
+            lead_chat_id=2905,
+            lead_user_id=3905,
+            message_id=50,
+            text="Сколько будет стоить 2х-фазная мойка для обычной машины? Модель пока не помню.",
+        )
+        return {"turns": [first]}
+
+    def stage_unavailable_price_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run unavailable-price lead stage without workflow_id")
+        first = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="unavailable_price",
+            lead_chat_id=2906,
+            lead_user_id=3906,
+            message_id=60,
+            text="У вас есть цена на мойку мотоцикла или квадроцикла? Хочу понять бюджет.",
+        )
+        return {"turns": [first]}
+
+    def stage_update_cancel_lead() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not workflow_id:
+            raise RuntimeError("cannot run update/cancel lead stage without workflow_id")
+        update = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="update_cancel",
+            lead_chat_id=2901,
+            lead_user_id=3901,
+            message_id=70,
+            text="А можно мою запись на мойку перенести с 10:00 на 11:00?",
+        )
+        cancel = _send_autospa_lead_message(
+            e2e_harness,
+            state=state,
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            business_connection_id=business_connection_id,
+            lead_label="update_cancel",
+            lead_chat_id=2901,
+            lead_user_id=3901,
+            message_id=71,
+            text="Тогда отмените запись, пожалуйста.",
+        )
+        return {"turns": [update, cancel]}
+
+    def stage_final_review() -> dict[str, Any]:
+        workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        bookings = []
+        if workflow_id:
+            bookings = e2e_harness.list_bookings(customer_id=customer_id, workflow_id=workflow_id)
+        return {
+            "workflow": workflow,
+            "bookings": bookings,
+            "sheet_writes": getattr(e2e_harness.composio_service, "sheet_writes", []),
+            "telegram_sent_messages": len(e2e_harness.telegram_client.sent_messages),
+            "downloaded_files": e2e_harness.telegram_client.downloaded_files,
+        }
+
+    try:
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="owner_upload",
+            stage_goal="Владелец начинает свежий чат, загружает XLSX и описывает workflow.",
+            run=stage_owner_upload,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="owner_details",
+            stage_goal="Владелец задает детали workflow, Google Sheets sink и scoped knowledge.",
+            run=stage_owner_details,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="owner_confirm",
+            stage_goal="Владелец подтверждает предложение, workflow сохраняется и активируется.",
+            run=stage_owner_confirm,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="wash_lead",
+            stage_goal="Реалистичный русский лид спрашивает цену на мойку и пытается записаться.",
+            run=stage_wash_lead,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="tire_lead",
+            stage_goal="Реалистичный русский лид пытается записаться на шиномонтаж.",
+            run=stage_tire_lead,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="out_of_scope_lead",
+            stage_goal="Лид спрашивает услугу вне scoped workflow, агент должен ответить клиенту.",
+            run=stage_out_of_scope_lead,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="missing_phone_lead",
+            stage_goal="Лид хочет записаться, но не дает телефон; агент должен запросить недостающее.",
+            run=stage_missing_phone_lead,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="ambiguous_car_class_lead",
+            stage_goal="Лид задает ценовой вопрос без модели или класса авто.",
+            run=stage_ambiguous_car_class_lead,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="unavailable_price_lead",
+            stage_goal="Лид спрашивает цену в близкой категории, которой может не быть в прайсе.",
+            run=stage_unavailable_price_lead,
+        )
+        _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="update_cancel_lead",
+            stage_goal="Завершенный клиент пробует перенести и отменить запись.",
+            run=stage_update_cancel_lead,
+        )
+        final_stage = _run_autospa_stage(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            stage_name="final_review",
+            stage_goal="Собрать полный итоговый снимок workflow, диалогов, бронирований и Google Sheets.",
+            run=stage_final_review,
+        )
+    except Exception as exc:
+        _write_autospa_failure_debug(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            error=exc,
+        )
+        raise
+
+    artifact_paths = _current_autospa_artifacts(
+        e2e_harness,
+        state=state,
+        artifact_dir=artifact_dir,
+        customer_id=customer_id,
+    )
+    report = e2e_harness.write_status_report(
+        scenario="live_autospa_xlsx_russian_telegram_intake_with_stage_judging",
+        ok=True,
+        details={
+            "customer_id": customer_id,
+            "business_connection_id": business_connection_id,
+            "live_google_sheets_target": live_google_sheets_target,
+            "artifact_paths": artifact_paths,
+            "final_stage": final_stage,
+            "stage_judgements": state.get("stage_judgements") or [],
+        },
+    )
+    report_payload = json.loads(report.read_text(encoding="utf-8"))
+    evaluation = report_payload.get("evaluation") if isinstance(report_payload, dict) else {}
+    if not isinstance(evaluation, dict) or not bool(evaluation.get("ok", False)):
+        raise RuntimeError(f"final status report judge failed: {evaluation}")
 
 
 def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activate_it(

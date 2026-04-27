@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -10,7 +11,29 @@ class FakeTelegramClient:
         self.sent_messages: list[dict[str, Any]] = []
         self.edited_messages: list[dict[str, Any]] = []
         self.chat_actions: list[dict[str, Any]] = []
+        self.registered_files: dict[str, dict[str, Any]] = {}
+        self.downloaded_files: list[dict[str, Any]] = []
         self._message_id = 10_000
+
+    def register_file(
+        self,
+        *,
+        file_id: str,
+        path: Path,
+        filename: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        raw_bytes = path.read_bytes()
+        record = {
+            "file_id": str(file_id or "").strip(),
+            "file_path": str(path),
+            "filename": str(filename or path.name),
+            "mime_type": str(mime_type or "application/octet-stream"),
+            "file_size": len(raw_bytes),
+            "raw_bytes": raw_bytes,
+        }
+        self.registered_files[record["file_id"]] = record
+        return {k: v for k, v in record.items() if k != "raw_bytes"}
 
     async def answer_callback_query(
         self,
@@ -119,6 +142,19 @@ class FakeTelegramClient:
     async def send_chat_action(self, *, chat_id: int | str, action: str = "typing") -> bool:
         self.chat_actions.append({"chat_id": chat_id, "action": action})
         return True
+
+    async def download_file(self, *, file_id: str) -> dict[str, Any] | None:
+        safe_file_id = str(file_id or "").strip()
+        record = self.registered_files.get(safe_file_id)
+        self.downloaded_files.append({"file_id": safe_file_id, "found": record is not None})
+        if record is None:
+            return None
+        return {
+            "file_path": str(record.get("filename") or record.get("file_path") or safe_file_id),
+            "file_size": int(record.get("file_size") or 0),
+            "mime_type": str(record.get("mime_type") or "application/octet-stream"),
+            "raw_bytes": bytes(record.get("raw_bytes") or b""),
+        }
 
     async def aclose(self) -> None:
         return None

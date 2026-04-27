@@ -108,6 +108,74 @@ async def test_intake_workflow_setup_update_requires_patch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
+    runtime = DummyRuntime([Response(200, {"ok": True, "inspection": {"format": "xlsx"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["uploaded_file_inspect_structure"].ainvoke(
+        {
+            "file_id": "file_raw",
+            "search_terms": ["мойка", "шиномонтаж"],
+        }
+    )
+
+    assert result["inspection"]["format"] == "xlsx"
+    method, path, kwargs = runtime.calls[0]
+    assert method == "POST"
+    assert path == "/internal/files/inspect_structure"
+    assert kwargs["json_body"] == {
+        "customer_id": "telegram_123",
+        "file_id": "file_raw",
+        "search_terms": ["мойка", "шиномонтаж"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_uploaded_file_prepare_intake_knowledge_posts_expected_payload() -> None:
+    runtime = DummyRuntime(
+        [Response(200, {"ok": True, "knowledge_file_id": "file_prepared"})]
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["uploaded_file_prepare_intake_knowledge"].ainvoke(
+        {
+            "file_ids": ["file_raw"],
+            "include_hints": ["Мойка", "Шиномонтаж"],
+            "selected_sections": [
+                {
+                    "file_id": "file_raw",
+                    "sheet_name": "Мойка",
+                    "row_start": 1,
+                    "row_end": 20,
+                }
+            ],
+            "workflow_goal": "Handle car wash and tire fitting bookings.",
+            "output_name": "autospa_intake_knowledge.md",
+        }
+    )
+
+    assert result["knowledge_file_id"] == "file_prepared"
+    method, path, kwargs = runtime.calls[0]
+    assert method == "POST"
+    assert path == "/internal/files/prepare_intake_knowledge"
+    assert kwargs["json_body"] == {
+        "customer_id": "telegram_123",
+        "file_ids": ["file_raw"],
+        "include_hints": ["Мойка", "Шиномонтаж"],
+        "selected_sections": [
+            {
+                "file_id": "file_raw",
+                "sheet_name": "Мойка",
+                "row_start": 1,
+                "row_end": 20,
+            }
+        ],
+        "workflow_goal": "Handle car wash and tire fitting bookings.",
+        "output_name": "autospa_intake_knowledge.md",
+    }
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_status_posts_expected_payload() -> None:
     runtime = DummyRuntime([Response(200, {"ok": True, "connected": True, "connections": []})])
     tools = register_runtime_tools(runtime)

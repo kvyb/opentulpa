@@ -87,13 +87,13 @@ def workflow_skill_sink_summary(
     if field_mapping:
         parts.append(
             "mapped_fields=" + ", ".join(
-                [str(key or "").strip() for key in field_mapping.keys() if str(key or "").strip()]
+                [str(key or "").strip() for key in field_mapping if str(key or "").strip()]
             )
         )
     if static_arguments:
         parts.append(
             "static_argument_keys=" + ", ".join(
-                [str(key or "").strip() for key in static_arguments.keys() if str(key or "").strip()]
+                [str(key or "").strip() for key in static_arguments if str(key or "").strip()]
             )
         )
     detail = "; ".join(parts)
@@ -204,7 +204,7 @@ def build_intake_workflow_skill(
     if knowledge_file_ids:
         instructions += (
             "\n## Knowledge Files\n"
-            "- Use the workflow-bound uploaded files when answering customer questions.\n"
+            "- Fetch and use the workflow-bound prepared knowledge files when answering customer questions.\n"
             f"- Bound file ids: {', '.join(knowledge_file_ids)}\n"
         )
     else:

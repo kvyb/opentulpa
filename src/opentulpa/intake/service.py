@@ -1644,6 +1644,7 @@ class IntakeWorkflowService:
                 workflow=workflow,
             ),
             "sink_type": workflow.get("sink_type"),
+            "sink_config": workflow.get("sink_config"),
             "channel": workflow.get("channel"),
             "provider": workflow.get("provider"),
         }
@@ -1748,6 +1749,19 @@ class IntakeWorkflowService:
                 error=error,
                 decision=decision,
             )
+        if booking_action == "ignore" and reply_action == "send_reply":
+            extracted_fields = _safe_dict(decision.get("extracted_fields"))
+            missing_fields = _unique_string_list(decision.get("missing_fields"))
+            if extracted_fields or missing_fields:
+                booking_action = "update_active" if active_booking is not None else "create_new_booking"
+                self._emit_observability(
+                    event="intake.apply.normalized_booking_action",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    from_booking_action="ignore",
+                    to_booking_action=booking_action,
+                    reply_action=reply_action,
+                )
         if booking_action == "ignore":
             self._emit_observability(
                 event="intake.apply.ok",
@@ -1921,6 +1935,22 @@ class IntakeWorkflowService:
                 booking=target_booking,
                 conversation_summary=conversation_summary,
             )
+            if self._should_enforce_completion_reply(workflow=workflow) and (
+                reply_action != "send_reply" or not reply_text
+            ):
+                reply_action = "send_reply"
+                reply_text = self._build_completion_confirmation_reply(
+                    workflow=workflow,
+                    booking=target_booking,
+                    conversation_summary=conversation_summary,
+                )
+                self._emit_observability(
+                    event="intake.reply.normalized_completion_confirmation",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    reply_text=reply_text,
+                )
         else:
             if reply_action == "mark_cancelled":
                 target_booking["status"] = "cancelled"
@@ -2432,4 +2462,58 @@ class IntakeWorkflowService:
             if value:
                 parts.append(f"{key}={value}")
         parts.append(f"sink={workflow['sink_type']}")
+        return " ".join(parts)[:1000]
+
+    def _should_enforce_completion_reply(self, *, workflow: dict[str, Any]) -> bool:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        return channel == "telegram_business_dm" and provider == "telegram_bot_api"
+
+    def _build_completion_confirmation_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> str:
+        fields = _safe_dict(booking.get("extracted_fields"))
+        context_text = " ".join(
+            [
+                str(workflow.get("assistant_instructions", "") or ""),
+                str(workflow.get("intent_description", "") or ""),
+                str(conversation_summary.get("latest_inbound_message_text_preview", "") or ""),
+                " ".join(str(value or "") for value in fields.values()),
+            ]
+        )
+        russian = any("\u0400" <= char <= "\u04ff" for char in context_text)
+
+        def _first_value(*keys: str) -> str:
+            for key in keys:
+                value = str(fields.get(key, "") or "").strip()
+                if value:
+                    return value
+            return ""
+
+        service = _first_value("service_name", "service", "wash_type", "service_category")
+        date = _first_value("desired_date", "date", "day")
+        time_value = _first_value("desired_time", "time")
+        price = _first_value("quoted_price", "price", "cost")
+
+        if russian:
+            parts = ["Готово, запись сохранена."]
+            if service:
+                parts.append(f"Услуга: {service}.")
+            if date or time_value:
+                parts.append(f"Дата и время: {' '.join([date, time_value]).strip()}.")
+            if price:
+                parts.append(f"Цена: {price}.")
+            return " ".join(parts)[:1000]
+
+        parts = ["Done, your booking is saved."]
+        if service:
+            parts.append(f"Service: {service}.")
+        if date or time_value:
+            parts.append(f"Date/time: {' '.join([date, time_value]).strip()}.")
+        if price:
+            parts.append(f"Price: {price}.")
         return " ".join(parts)[:1000]

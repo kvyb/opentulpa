@@ -247,6 +247,36 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
     return merged
 
 
+def _disable_deepseek_v4_pro_thinking_extra(*, model_name: str, reasoning_effort: str | None) -> dict[str, Any]:
+    if reasoning_effort:
+        return {}
+    slug = str(model_name or "").strip().lower()
+    if slug != "deepseek/deepseek-v4-pro":
+        return {}
+    return {
+        "extra_body": {
+            "reasoning": {"effort": "none"},
+            "thinking": {"type": "disabled"},
+        },
+    }
+
+
+def _chat_model_init_kwargs_for_model(
+    base_kwargs: dict[str, Any],
+    *,
+    model_name: str,
+    reasoning_effort: str | None,
+) -> dict[str, Any]:
+    model_kwargs = dict(base_kwargs)
+    extra = _disable_deepseek_v4_pro_thinking_extra(
+        model_name=model_name,
+        reasoning_effort=reasoning_effort,
+    )
+    if extra:
+        model_kwargs = _deep_merge_dicts(model_kwargs, extra)
+    return model_kwargs
+
+
 def _looks_like_openrouter_base_url(base_url: str | None) -> bool:
     normalized = str(base_url or "").strip().lower()
     return "openrouter.ai" in normalized
@@ -539,6 +569,8 @@ _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "web_search": "Searching the web",
     "fetch_url_content": "Fetching a webpage",
     "fetch_file_content": "Fetching a file",
+    "uploaded_file_inspect_structure": "Inspecting uploaded file",
+    "uploaded_file_prepare_intake_knowledge": "Preparing workflow knowledge",
     "browser_use_run": "Using the browser",
 }
 
@@ -551,6 +583,8 @@ APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
     "tulpa_file_send",
     "web_image_send",
     "uploaded_file_analyze",
+    "uploaded_file_inspect_structure",
+    "uploaded_file_prepare_intake_knowledge",
     "skill_list",
     "skill_get",
     "skill_upsert",
@@ -770,6 +804,7 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
                 "id": str(item.get("id", "") or "").strip(),
                 "filename": _trim_text_chars(item.get("original_filename", ""), limit=80),
                 "summary": _trim_text_chars(item.get("summary", ""), limit=220),
+                "text_excerpt": _trim_text_chars(item.get("text_excerpt", ""), limit=14000),
             }
         )
     return {
@@ -921,17 +956,21 @@ def _build_intake_workflow_agent_prompt(
         "Primary goal:\n"
         "- Decide whether this conversation is an active match for the workflow.\n"
         "- Extract reliable booking fields.\n"
-        "- If necessary, inspect external state before deciding, especially for availability checks.\n"
+        "- Inspect external state only when the workflow explicitly requires it before this decision.\n"
         "- Return strict JSON only as the final answer.\n\n"
         "Tool-use guidance:\n"
         "- You may use normal tools, especially uploaded_file_get, uploaded_file_analyze, uploaded_file_search, "
         "composio_tool_search, composio_tool_schema, composio_tool_execute, and "
         "composio_instagram_reply_precheck when they materially help.\n"
-        "- If the workflow uses a Google Sheets or generic Composio sink and availability matters, inspect the "
-        "relevant external state before setting ready_to_save=true.\n"
-        "- If the sink write needs concrete target metadata such as a Google Sheets tab name, inspect the sink "
-        "with Composio tools and return those values in sink_arguments.\n"
-        "- If the workflow has bound knowledge files, use them before improvising answers.\n"
+        "- Do not read or search a sink just because it is Google Sheets or Composio. A write sink is not an "
+        "availability source by default.\n"
+        "- Check external availability only if the workflow explicitly says to check conflicts or open slots. "
+        "If the workflow says not to promise availability or to only record customer preferences, do not check availability.\n"
+        "- If sink_config already includes concrete target metadata such as spreadsheetId and sheetName, do not "
+        "search for sink schema or read tools; leave sink_arguments empty unless a required write argument is missing.\n"
+        "- If the sink write needs missing concrete target metadata such as a Google Sheets tab name, inspect the "
+        "sink with Composio tools and return only those discovered values in sink_arguments.\n"
+        "- If the workflow has bound knowledge files, fetch prepared Markdown knowledge packs before improvising answers.\n"
         "- Prefer minimal read-only tool usage first.\n"
         "- Do not create, update, delete, or run workflows/routines from inside this turn.\n"
         "- Do not call intake_workflow_upsert, intake_workflow_delete, intake_workflow_run, routine_create, or routine_delete.\n"
@@ -1143,12 +1182,17 @@ class OpenTulpaLangGraphRuntime:
         default_headers = _openrouter_app_headers(base_url=self.openrouter_base_url)
         if default_headers:
             model_init_kwargs["default_headers"] = default_headers
+            model_init_kwargs["use_responses_api"] = False
         if self._reasoning_effort:
             model_init_kwargs["reasoning_effort"] = self._reasoning_effort
 
         self._model = init_chat_model(
             self.model_name,
-            **model_init_kwargs,
+            **_chat_model_init_kwargs_for_model(
+                model_init_kwargs,
+                model_name=self.model_name,
+                reasoning_effort=self._reasoning_effort,
+            ),
         )
         if self._wake_classifier_model_name == self.model_name:
             self._wake_classifier_model = self._model
@@ -1156,7 +1200,11 @@ class OpenTulpaLangGraphRuntime:
             try:
                 self._wake_classifier_model = init_chat_model(
                     self._wake_classifier_model_name,
-                    **model_init_kwargs,
+                    **_chat_model_init_kwargs_for_model(
+                        model_init_kwargs,
+                        model_name=self._wake_classifier_model_name,
+                        reasoning_effort=self._reasoning_effort,
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -1173,7 +1221,11 @@ class OpenTulpaLangGraphRuntime:
             try:
                 self._wake_execution_model = init_chat_model(
                     self._wake_execution_model_name,
-                    **model_init_kwargs,
+                    **_chat_model_init_kwargs_for_model(
+                        model_init_kwargs,
+                        model_name=self._wake_execution_model_name,
+                        reasoning_effort=self._reasoning_effort,
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -1192,7 +1244,11 @@ class OpenTulpaLangGraphRuntime:
             try:
                 self._telegram_media_model = init_chat_model(
                     self._telegram_media_model_name,
-                    **model_init_kwargs,
+                    **_chat_model_init_kwargs_for_model(
+                        model_init_kwargs,
+                        model_name=self._telegram_media_model_name,
+                        reasoning_effort=self._reasoning_effort,
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -1213,7 +1269,11 @@ class OpenTulpaLangGraphRuntime:
             try:
                 self._guardrail_classifier_model = init_chat_model(
                     self._guardrail_classifier_model_name,
-                    **model_init_kwargs,
+                    **_chat_model_init_kwargs_for_model(
+                        model_init_kwargs,
+                        model_name=self._guardrail_classifier_model_name,
+                        reasoning_effort=self._reasoning_effort,
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -1246,12 +1306,19 @@ class OpenTulpaLangGraphRuntime:
     def model_invoke_extras(self, *, model_name: str | None = None) -> dict[str, Any]:
         """Extra kwargs for main agent model.ainvoke (e.g. OpenRouter prompt cache_control)."""
         target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
-        return dict(
+        invoke_extras = dict(
             _provider_prompt_cache_invoke_extras(
                 enabled=bool(getattr(self, "_prompt_caching_enabled", False)),
                 model_name=target_model_name,
                 ttl_1h=bool(getattr(self, "_prompt_cache_ttl_1h", False)),
             )
+        )
+        return _deep_merge_dicts(
+            invoke_extras,
+            _disable_deepseek_v4_pro_thinking_extra(
+                model_name=target_model_name,
+                reasoning_effort=getattr(self, "_reasoning_effort", None),
+            ),
         )
 
     def _model_request_attempts(self, *, model_name: str | None = None) -> list[dict[str, Any]]:
@@ -2370,8 +2437,9 @@ class OpenTulpaLangGraphRuntime:
                 for c in shortlist
             ]
         )
+        selection_model = getattr(self, "_guardrail_classifier_model", None) or self._model
         decision, _ = await self._invoke_structured_model(
-            model=self._model,
+            model=selection_model,
             schema=_SkillSelectionDecision,
             messages=[
                 SystemMessage(
@@ -3887,9 +3955,23 @@ class OpenTulpaLangGraphRuntime:
             and callable(getattr(self, "ainvoke_text", None))
         )
         sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
+        has_bound_knowledge = any(
+            str(item or "").strip()
+            for item in list(workflow.get("knowledge_file_ids") or [])
+        )
+        has_inline_knowledge = any(
+            isinstance(item, dict) and str(item.get("text_excerpt", "") or "").strip()
+            for item in list(workflow.get("knowledge_files") or [])
+        )
+        sink_config = workflow.get("sink_config") if isinstance(workflow.get("sink_config"), dict) else {}
+        static_arguments = sink_config.get("static_arguments") if isinstance(sink_config, dict) else {}
+        sink_needs_tool_metadata = sink_type in {"google_sheets_composio", "generic_composio_write"} and not bool(
+            static_arguments
+        )
         prefer_agent_runtime = tool_enabled_runtime and (
-            sink_type in {"google_sheets_composio", "generic_composio_write"}
-            or bool(execution_feedback)
+            bool(execution_feedback)
+            or (has_bound_knowledge and not has_inline_knowledge)
+            or sink_needs_tool_metadata
         )
         model = getattr(self, "_wake_execution_model", None) or self._model
         if prefer_agent_runtime:

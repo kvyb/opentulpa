@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 
 from opentulpa.intake.service import IntakeWorkflowService
-from opentulpa.intake.workflow_setup_store import WorkflowSetupSessionStore
+from opentulpa.intake.workflow_setup_store import (
+    SetupSessionMode,
+    SetupSessionStatus,
+    WorkflowSetupSessionStore,
+)
 
 
 def _safe_dict(value: Any) -> dict[str, Any]:
@@ -136,6 +140,9 @@ class WorkflowSetupService:
             "open_questions": [],
             "user_constraints": [],
             "assumptions": [],
+            "source_file_ids": [],
+            "prepared_knowledge_file_ids": [],
+            "candidate_files": [],
             "proposal_summary": "",
             "last_user_confirmable_summary": "",
         }
@@ -160,7 +167,7 @@ class WorkflowSetupService:
         return self._store.get_thread_session(
             customer_id=customer_id,
             thread_id=thread_id,
-            statuses=statuses,
+            statuses=cast(tuple[SetupSessionStatus, ...], statuses),
         )
 
     def begin_session(
@@ -174,6 +181,7 @@ class WorkflowSetupService:
         safe_mode = str(mode or "").strip().lower()
         if safe_mode not in {"create", "edit"}:
             raise ValueError("mode must be create|edit")
+        setup_mode = cast(SetupSessionMode, safe_mode)
         existing_thread_session = self.get_thread_session(
             customer_id=customer_id,
             thread_id=thread_id,
@@ -227,11 +235,11 @@ class WorkflowSetupService:
         return self._store.create_session(
             customer_id=customer_id,
             thread_id=thread_id,
-            mode=safe_mode,
+            mode=setup_mode,
             target_workflow_id=safe_workflow_id or None,
             target_workflow_snapshot=workflow_snapshot,
             draft_upsert=draft,
-            scratchpad=self._scratchpad_scaffold(mode=safe_mode, workflow_id=safe_workflow_id),
+            scratchpad=self._scratchpad_scaffold(mode=setup_mode, workflow_id=safe_workflow_id),
         )
 
     def update_session(

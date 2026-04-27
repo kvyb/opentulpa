@@ -81,6 +81,8 @@ def test_workflow_setup_begin_create_persists_session(tmp_path: Path) -> None:
     assert session["mode"] == "create"
     assert session["draft_upsert"]["channel"] == "instagram_dm"
     assert session["scratchpad"]["mode"] == "create"
+    assert session["scratchpad"]["source_file_ids"] == []
+    assert session["scratchpad"]["prepared_knowledge_file_ids"] == []
 
 
 def test_workflow_setup_begin_edit_loads_existing_workflow(tmp_path: Path) -> None:
@@ -278,6 +280,33 @@ def test_workflow_setup_update_replaces_field_guidance_and_sink_field_mapping(tm
     assert session["draft_upsert"]["sink_config"]["static_arguments"] == {
         "spreadsheet_id": "sheet_123"
     }
+
+
+def test_workflow_setup_update_tracks_source_and_prepared_knowledge_files(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+
+    session = setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={"knowledge_file_ids": ["file_prepared"]},
+        scratchpad_patch={
+            "source_file_ids": ["file_source"],
+            "prepared_knowledge_file_ids": ["file_prepared"],
+            "candidate_files": [
+                {
+                    "file_id": "file_source",
+                    "filename": "price-list.xlsx",
+                    "reason": "Owner uploaded it for the workflow.",
+                }
+            ],
+        },
+    )
+
+    assert session["draft_upsert"]["knowledge_file_ids"] == ["file_prepared"]
+    assert session["scratchpad"]["source_file_ids"] == ["file_source"]
+    assert session["scratchpad"]["prepared_knowledge_file_ids"] == ["file_prepared"]
+    assert session["scratchpad"]["candidate_files"][0]["filename"] == "price-list.xlsx"
 
 
 def test_workflow_setup_update_normalizes_local_csv_filename_alias(tmp_path: Path) -> None:

@@ -9,6 +9,10 @@ from typing import Any
 
 import pytest
 
+from opentulpa.agent.knowledge_prep import (
+    build_intake_knowledge_markdown,
+    inspect_uploaded_file_structure,
+)
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.intake import service as intake_service_module
 from opentulpa.intake.service import IntakeWorkflowService
@@ -444,6 +448,30 @@ def _mk_service(
         get_agent_runtime=lambda: runtime,
     )
     return service, scheduler, skills, telegram_business, file_vault
+
+
+def _autospa_price_list_path() -> Path:
+    return Path(__file__).resolve().parent / "e2e" / "assets" / "autospa_price.xlsx"
+
+
+def _telegram_business_inbound(
+    *,
+    business_connection_id: str,
+    chat_id: int,
+    user_id: int,
+    username: str,
+    message_id: int,
+    text: str,
+    date: int,
+) -> dict[str, Any]:
+    return {
+        "business_connection_id": business_connection_id,
+        "message_id": message_id,
+        "date": date,
+        "chat": {"id": chat_id, "type": "private", "username": username},
+        "from": {"id": user_id, "is_bot": False, "username": username},
+        "text": text,
+    }
 
 
 @pytest.mark.asyncio
@@ -1101,6 +1129,100 @@ async def test_telegram_business_reply_is_persisted_back_into_conversation_histo
     assert [item["sender_role"] for item in messages] == ["customer", "assistant"]
     assert messages[1]["text"] == "What time works for you?"
     assert conversation["summary"]["latest_outbound_message_id"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_reply_with_ignore_booking_action_still_sends_reply(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a booking but more fields are needed.",
+                "extracted_fields": {"service": "2х-фазная мойка", "price": "1200"},
+                "missing_fields": ["client_name", "phone", "desired_time"],
+                "reply_action": "send_reply",
+                "reply_text": "2х-фазная мойка для вашего авто стоит 1200 ₽. Как вас зовут и на какое время записать?",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Need missing fields before saving.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Сколько стоит 2х-фазная мойка?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["service", "client_name", "phone", "desired_time"],
+        assistant_instructions="Ask for missing fields before saving.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert telegram_business.client.sent_messages
+    assert "1200" in telegram_business.client.sent_messages[0]["text"]
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "active"
+    assert bookings[0]["extracted_fields"]["service"] == "2х-фазная мойка"
 
 
 @pytest.mark.asyncio
@@ -2130,6 +2252,341 @@ async def test_google_sheets_sink_normalizes_prefixed_slug_and_builds_headers_ro
 
 
 @pytest.mark.asyncio
+async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheets(
+    tmp_path: Path,
+) -> None:
+    price_list_path = _autospa_price_list_path()
+    if not price_list_path.exists():
+        pytest.skip(f"AutoSpa price list not found: {price_list_path}")
+    raw_bytes = price_list_path.read_bytes()
+
+    inspection = inspect_uploaded_file_structure(
+        raw_bytes=raw_bytes,
+        filename=price_list_path.name,
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        search_terms=["Мойка", "Шиномонтаж"],
+    )
+    sheets = inspection["structure"]["sheets"]
+    assert any(sheet["name"] == "Мойка" for sheet in sheets)
+    assert any(sheet["name"] == "Шиномонтаж" for sheet in sheets)
+
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.96,
+                "conversation_summary": "Lead asks for a source-backed wash price.",
+                "extracted_fields": {
+                    "service_category": "Мойка",
+                    "service_name": "2х-фазная мойка кузова",
+                    "vehicle_type": "S-Class / SUV",
+                    "quoted_price": "1200",
+                },
+                "missing_fields": ["time", "lead_name", "phone"],
+                "reply_action": "send_reply",
+                "reply_text": (
+                    "2х-фазная мойка кузова для S-Class / SUV стоит 1200. "
+                    "На какое время вас записать?"
+                ),
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Answered from workflow knowledge but still missing booking details.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Lead finished the wash booking.",
+                "extracted_fields": {
+                    "service_category": "Мойка",
+                    "service_name": "2х-фазная мойка кузова",
+                    "vehicle_type": "Toyota RAV4 / SUV",
+                    "quoted_price": "1200",
+                    "date": "tomorrow",
+                    "time": "10:00",
+                    "lead_name": "Алексей",
+                    "phone": "+79990000001",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Записал на 2х-фазную мойку завтра в 10:00.",
+                "ready_to_save": True,
+                "booking_action": "update_active",
+                "save_payload": {
+                    "service_category": "Мойка",
+                    "service_name": "2х-фазная мойка кузова",
+                    "vehicle_type": "Toyota RAV4 / SUV",
+                    "quoted_price": "1200",
+                    "date": "tomorrow",
+                    "time": "10:00",
+                    "lead_name": "Алексей",
+                    "phone": "+79990000001",
+                },
+                "reason": "All wash booking fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Lead wants tire fitting.",
+                "extracted_fields": {
+                    "service_category": "Шиномонтаж",
+                    "service_name": "Комплект 19`R",
+                    "vehicle_type": "кросовер + низкий профиль",
+                    "quoted_price": "4000",
+                    "date": "Friday",
+                    "time": "15:00",
+                    "lead_name": "Мария",
+                    "phone": "+79990000002",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Записал на шиномонтаж 19R в пятницу в 15:00.",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "service_category": "Шиномонтаж",
+                    "service_name": "Комплект 19`R",
+                    "vehicle_type": "кросовер + низкий профиль",
+                    "quoted_price": "4000",
+                    "date": "Friday",
+                    "time": "15:00",
+                    "lead_name": "Мария",
+                    "phone": "+79990000002",
+                },
+                "reason": "All tire fitting booking fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": False,
+                "confidence": 0.2,
+                "conversation_summary": "Lead asks about an out-of-scope PPF service.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "PPF is outside the workflow scope.",
+            },
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, file_vault = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    customer_id = "telegram_123"
+    business_connection_id = "bc_autospa"
+    telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    source_file = file_vault.ingest_file(
+        customer_id=customer_id,
+        chat_id=777,
+        kind="document",
+        telegram_file_id=None,
+        original_filename=price_list_path.name,
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        caption="AutoSpa price list source for workflow setup",
+        raw_bytes=raw_bytes,
+    )
+    prepared = build_intake_knowledge_markdown(
+        sources=[{"record": source_file, "raw_bytes": raw_bytes}],
+        workflow_goal="Handle only AutoSpa Мойка and Шиномонтаж inbound Telegram bookings.",
+        selected_sections=[
+            {"file_id": source_file["id"], "sheet_name": "Мойка"},
+            {"file_id": source_file["id"], "sheet_name": "Шиномонтаж"},
+        ],
+    )
+    assert prepared["requires_selection"] is False
+    markdown = str(prepared["markdown"])
+    assert "### Sheet: Мойка" in markdown
+    assert "### Sheet: Шиномонтаж" in markdown
+    assert "### Sheet: PPF" not in markdown
+    assert "2х-фазная мойка кузова" in markdown
+    assert "Комплект 19`R" in markdown
+    knowledge_file = file_vault.ingest_file(
+        customer_id=customer_id,
+        chat_id=None,
+        kind="workflow_knowledge",
+        telegram_file_id=None,
+        original_filename="autospa_wash_tire_knowledge.md",
+        mime_type="text/markdown",
+        caption="prepared workflow knowledge | sections=Мойка, Шиномонтаж",
+        raw_bytes=markdown.encode("utf-8"),
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id=customer_id,
+        name="AutoSpa Мойка + Шиномонтаж",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": business_connection_id},
+        intent_description=(
+            "Handle Telegram Business inbound leads only for AutoSpa car wash "
+            "and tire fitting requests. Answer source-backed price questions, "
+            "collect booking details, and save completed bookings."
+        ),
+        required_fields=[
+            "service_category",
+            "service_name",
+            "vehicle_type",
+            "date",
+            "time",
+            "lead_name",
+            "phone",
+        ],
+        field_guidance={
+            "service_category": "Must be exactly Мойка or Шиномонтаж.",
+            "quoted_price": "Use the prepared source knowledge; do not invent prices.",
+        },
+        assistant_instructions=(
+            "Scope is only Мойка and Шиномонтаж. If another service is requested, ignore or clarify scope."
+        ),
+        knowledge_file_ids=[str(knowledge_file["id"])],
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "service_category": "Category",
+                "service_name": "Service",
+                "vehicle_type": "Vehicle",
+                "quoted_price": "Quoted Price",
+                "date": "Date",
+                "time": "Time",
+                "lead_name": "Lead Name",
+                "phone": "Phone",
+                "conversation_id": "Conversation ID",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_autospa_test",
+                "sheetName": "Bookings",
+            },
+        },
+    )
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=1,
+            text="Сколько стоит 2х-фазная мойка для SUV? Можно завтра?",
+            date=1_775_552_400,
+        ),
+    )
+    first = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+    assert first["ok"] is True
+    assert composio.execute_calls == []
+    assert any("1200" in str(item.get("text", "")) for item in telegram_business.client.sent_messages)
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=2,
+            text="Алексей, +79990000001. Toyota RAV4, завтра в 10:00.",
+            date=1_775_552_460,
+        ),
+    )
+    wash = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+    assert wash["ok"] is True
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5102,
+            user_id=9102,
+            username="tire_lead",
+            message_id=1,
+            text="Нужен шиномонтаж 19R для кроссовера с низким профилем, Мария +79990000002, пятница 15:00.",
+            date=1_775_552_520,
+        ),
+    )
+    tire = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+    assert tire["ok"] is True
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5103,
+            user_id=9103,
+            username="ppf_lead",
+            message_id=1,
+            text="Сколько стоит PPF пакет?",
+            date=1_775_552_580,
+        ),
+    )
+    out_of_scope = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+    assert out_of_scope["ok"] is True
+
+    assert len(runtime.calls) == 4
+    for call in runtime.calls:
+        files = call["workflow"]["knowledge_files"]
+        assert len(files) == 1
+        assert files[0]["id"] == str(knowledge_file["id"])
+        assert "2х-фазная мойка кузова" in files[0]["text_excerpt"]
+
+    sink_calls = [
+        call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"
+    ]
+    assert len(sink_calls) == 2
+    assert all(call["arguments"]["spreadsheetId"] == "sheet_autospa_test" for call in sink_calls)
+    assert all(call["arguments"]["sheetName"] == "Bookings" for call in sink_calls)
+    written_rows = [
+        dict(zip(call["arguments"]["headers"], call["arguments"]["rows"][0], strict=False))
+        for call in sink_calls
+    ]
+    assert written_rows[0]["Category"] == "Мойка"
+    assert written_rows[0]["Service"] == "2х-фазная мойка кузова"
+    assert written_rows[0]["Quoted Price"] == "1200"
+    assert written_rows[1]["Category"] == "Шиномонтаж"
+    assert written_rows[1]["Service"] == "Комплект 19`R"
+    assert written_rows[1]["Quoted Price"] == "4000"
+
+    bookings = service.list_bookings(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+    completed = [item for item in bookings if item["status"] == "completed"]
+    assert len(completed) == 2
+    assert {item["conversation_id"] for item in completed} == {"5101", "5102"}
+    assert all(item["sink_write_status"] == "succeeded" for item in completed)
+
+
+@pytest.mark.asyncio
 async def test_sink_failure_retries_until_recovery_limit_then_stops_without_customer_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -2373,6 +2830,126 @@ async def test_sink_failure_retries_with_execution_feedback_and_redoes_sheet_wri
     assert len(bookings) == 1
     assert bookings[0]["status"] == "completed"
     assert bookings[0]["sink_write_status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_completed_booking_without_model_reply_sends_confirmation(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Клиент дал все данные для записи.",
+                "extracted_fields": {
+                    "service_category": "Мойка",
+                    "service_name": "2х-фазная мойка кузова",
+                    "vehicle": "Toyota RAV4",
+                    "desired_date": "завтра",
+                    "desired_time": "10:00",
+                    "client_name": "Алексей",
+                    "phone": "+79990000001",
+                    "quoted_price": "1200",
+                },
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "service_category": "Мойка",
+                    "service_name": "2х-фазная мойка кузова",
+                    "vehicle": "Toyota RAV4",
+                    "desired_date": "завтра",
+                    "desired_time": "10:00",
+                    "client_name": "Алексей",
+                    "phone": "+79990000001",
+                    "quoted_price": "1200",
+                },
+                "reason": "All fields are present, but the model omitted a reply.",
+            }
+        ]
+    )
+    composio = _FakeComposio({}, {})
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    customer_id = "telegram_123"
+    business_connection_id = "bc_autospa"
+    telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    workflow = service.upsert_workflow(
+        customer_id=customer_id,
+        name="AutoSpa Мойка",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": business_connection_id},
+        intent_description="Записывать клиентов на мойку.",
+        required_fields=[
+            "service_category",
+            "service_name",
+            "vehicle",
+            "desired_date",
+            "desired_time",
+            "client_name",
+            "phone",
+        ],
+        assistant_instructions="Отвечай клиенту на русском языке.",
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "service_category": "Category",
+                "service_name": "Service",
+                "vehicle": "Vehicle",
+                "desired_date": "Date",
+                "desired_time": "Time",
+                "client_name": "Lead Name",
+                "phone": "Phone",
+                "quoted_price": "Quoted Price",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_autospa_test",
+                "sheetName": "Bookings",
+            },
+        },
+    )
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=1,
+            text="Алексей, Toyota RAV4, завтра в 10:00, телефон +79990000001.",
+            date=1_775_552_400,
+        ),
+    )
+
+    result = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    assert len(composio.execute_calls) == 1
+    sent = telegram_business.client.sent_messages
+    assert len(sent) == 1
+    assert sent[0]["chat_id"] == "5101"
+    assert "запись сохранена" in sent[0]["text"].lower()
+    assert "2х-фазная мойка кузова" in sent[0]["text"]
+    assert "10:00" in sent[0]["text"]
+    assert "1200" in sent[0]["text"]
 
 
 @pytest.mark.asyncio

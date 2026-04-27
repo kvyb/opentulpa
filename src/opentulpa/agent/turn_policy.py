@@ -31,6 +31,8 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "You are collaborating on an intake workflow draft, not executing a normal chat task.\n"
                 "Maintain the workflow setup draft and scratchpad through the dedicated setup tools.\n"
                 "Ask one high-value setup question at a time.\n"
+                "If uploaded files are part of the workflow, track source_file_ids and prepared_knowledge_file_ids in the setup scratchpad.\n"
+                "Before proposing a file-grounded workflow, inspect source files and prepare scoped workflow knowledge from selected sections.\n"
                 "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it.\n"
                 "Do not dump the full draft unless the user asks for it.\n"
                 "If the user wants to stop setup for now, pause or cancel the setup session and hand back to normal chat.\n"
