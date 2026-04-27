@@ -39,6 +39,37 @@ def test_tulpa_loader_mounts_internal_router(tmp_path) -> None:
     assert set(result) == {"ok", "loaded", "warnings", "errors", "mount_prefix"}
 
 
+def test_tulpa_loader_skips_non_router_scripts_without_import_side_effects(tmp_path) -> None:
+    project_root = tmp_path / "project"
+    package_dir = project_root / "tulpa_stuff"
+    marker_path = project_root / "side_effect.txt"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text('"""tulpas."""\n', encoding="utf-8")
+    (package_dir / "script.py").write_text(
+        f"from pathlib import Path\nPath({str(marker_path)!r}).write_text('imported')\n",
+        encoding="utf-8",
+    )
+    (package_dir / "hook.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/health')\n"
+        "async def health():\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+    loader = TulpaRouterLoader(
+        project_root=project_root,
+        mount_router=APIRouter(),
+    )
+    result = loader.reload()
+
+    assert result["loaded"] == ["hook"]
+    assert result["errors"] == []
+    assert result["warnings"] == []
+    assert not marker_path.exists()
+
+
 def test_create_app_mounts_internal_tulpa_router_on_startup(tmp_path, monkeypatch) -> None:
     project_root = tmp_path / "project"
     package_dir = project_root / "tulpa_stuff"

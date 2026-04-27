@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import logging
 import sys
@@ -57,6 +58,14 @@ class TulpaRouterLoader:
             modules.append(name)
         return modules
 
+    def _appears_to_export_router(self, module_name: str) -> bool:
+        path = self.package_dir / f"{module_name}.py"
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), filename=str(path))
+        except Exception:
+            return False
+        return any(_is_router_assignment(stmt) for stmt in _module_level_statements(tree))
+
     def _import_module(self, module_name: str) -> ModuleType:
         full_name = f"{self.package_name}.{module_name}"
         if full_name in sys.modules:
@@ -73,6 +82,8 @@ class TulpaRouterLoader:
         warnings: list[dict[str, str]] = []
 
         for module_name in self._module_names():
+            if not self._appears_to_export_router(module_name):
+                continue
             try:
                 module = self._import_module(module_name)
                 router = getattr(module, "router", None)
@@ -110,3 +121,40 @@ class TulpaRouterLoader:
             "errors": errors,
             "mount_prefix": "/tulpa/<module_name>",
         }
+
+
+def _module_level_statements(tree: ast.Module) -> list[ast.stmt]:
+    out: list[ast.stmt] = []
+    for stmt in tree.body:
+        out.append(stmt)
+        if isinstance(stmt, ast.Try):
+            out.extend(stmt.body)
+            for handler in stmt.handlers:
+                out.extend(handler.body)
+            out.extend(stmt.orelse)
+    return out
+
+
+def _is_router_assignment(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Assign):
+        if not any(_is_router_target(target) for target in stmt.targets):
+            return False
+        return _is_apirouter_call(stmt.value)
+    if isinstance(stmt, ast.AnnAssign):
+        if not _is_router_target(stmt.target):
+            return False
+        return _is_apirouter_call(stmt.value)
+    return False
+
+
+def _is_router_target(target: ast.expr) -> bool:
+    return isinstance(target, ast.Name) and target.id == "router"
+
+
+def _is_apirouter_call(value: ast.expr | None) -> bool:
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    if isinstance(func, ast.Name):
+        return func.id == "APIRouter"
+    return isinstance(func, ast.Attribute) and func.attr == "APIRouter"
