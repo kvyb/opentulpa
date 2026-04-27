@@ -340,3 +340,22 @@ class FileVaultService:
                     (cid, like_q, like_q, like_q, like_q, safe_limit),
                 ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def list_customer_summaries(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT customer_id, COUNT(*) AS file_count, MAX(created_at) AS last_file_at
+                FROM uploaded_files
+                GROUP BY customer_id
+                ORDER BY last_file_at DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "customer_id": str(row["customer_id"]),
+                "file_count": int(row["file_count"] or 0),
+                "last_file_at": str(row["last_file_at"] or ""),
+            }
+            for row in rows
+        ]

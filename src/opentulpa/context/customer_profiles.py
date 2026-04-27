@@ -155,6 +155,23 @@ class CustomerProfileService:
             updated_at=str(row["updated_at"]),
         )
 
+    def list_customer_summaries(self) -> list[dict[str, str]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT customer_id, updated_at
+                FROM customer_profiles
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "customer_id": str(row["customer_id"]),
+                "last_profile_at": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
+
     def get_directive(self, customer_id: str) -> str | None:
         profile = self.get_profile(customer_id)
         if not profile:

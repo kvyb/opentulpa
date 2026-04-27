@@ -228,6 +228,29 @@ class TelegramBusinessService:
             "connections": items,
         }
 
+    def list_customer_summaries(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT customer_id,
+                       COUNT(*) AS business_connection_count,
+                       MAX(updated_at) AS last_business_at,
+                       MAX(is_enabled) AS any_enabled
+                FROM telegram_business_connections
+                GROUP BY customer_id
+                ORDER BY last_business_at DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "customer_id": str(row["customer_id"]),
+                "business_connection_count": int(row["business_connection_count"] or 0),
+                "telegram_business_connected": bool(row["any_enabled"]),
+                "last_business_at": str(row["last_business_at"] or ""),
+            }
+            for row in rows
+        ]
+
     @staticmethod
     def _sender_role(message: dict[str, Any]) -> str:
         if isinstance(message.get("sender_business_bot"), dict):

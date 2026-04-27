@@ -292,7 +292,7 @@ guardrail_classifier_model: google/gemini-3-flash-preview
 
 This repo currently assumes:
 
-- `GLM 5.1` for main chat and wake execution
+- `DeepSeek V4 Pro` for main chat and wake execution
 - `Gemini Flash` for memory extraction, multimodal work, and guardrail classification
 - `MULTIMODAL_LLM` should be set when your main model is not multimodal
 

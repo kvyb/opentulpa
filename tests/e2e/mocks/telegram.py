@@ -11,6 +11,7 @@ class FakeTelegramClient:
         self.sent_messages: list[dict[str, Any]] = []
         self.edited_messages: list[dict[str, Any]] = []
         self.chat_actions: list[dict[str, Any]] = []
+        self.command_menu_calls: list[dict[str, Any]] = []
         self.registered_files: dict[str, dict[str, Any]] = {}
         self.downloaded_files: list[dict[str, Any]] = []
         self._message_id = 10_000
@@ -141,6 +142,15 @@ class FakeTelegramClient:
 
     async def send_chat_action(self, *, chat_id: int | str, action: str = "typing") -> bool:
         self.chat_actions.append({"chat_id": chat_id, "action": action})
+        return True
+
+    async def set_my_commands(
+        self,
+        *,
+        commands: list[dict[str, str]],
+        scope: dict[str, Any] | None = None,
+    ) -> bool:
+        self.command_menu_calls.append({"commands": commands, "scope": scope or {}})
         return True
 
     async def download_file(self, *, file_id: str) -> dict[str, Any] | None:

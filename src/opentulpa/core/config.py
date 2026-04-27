@@ -133,6 +133,14 @@ class Settings(BaseSettings):
         default=None,
         description="Optional CSV allowlist of Telegram numeric user IDs.",
     )
+    telegram_support_user_ids: str | None = Field(
+        default=None,
+        description="Optional CSV allowlist of trusted Telegram support operator numeric user IDs.",
+    )
+    telegram_support_usernames: str | None = Field(
+        default=None,
+        description="Optional CSV allowlist of trusted Telegram support operator usernames.",
+    )
 
     telegram_webhook_secret: str | None = Field(
         default=None,

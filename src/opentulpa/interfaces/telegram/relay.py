@@ -418,6 +418,8 @@ async def relay_event_via_main_agent(
     slots = find_session_slots(customer_id)
     if not slots:
         return []
+    owner_slots = [slot for slot in slots if str(slot.get("role", "")).strip() != "support"]
+    slots = owner_slots or slots[:1]
     if agent_runtime is None:
         raise RuntimeError("Agent runtime unavailable for wake relay")
     routine_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -40,7 +41,7 @@ from opentulpa.interfaces.telegram.relay import (
 from opentulpa.interfaces.telegram.relay import (
     relay_task_event_via_main_agent as _relay_task_event_via_main_agent,
 )
-from opentulpa.interfaces.telegram.security import is_user_allowed
+from opentulpa.interfaces.telegram.security import is_user_allowed, parse_csv_set
 from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 
 STATE_STORE = TelegramStateStore(STATE_PATH)
@@ -98,6 +99,7 @@ def _reset_chat_session_context(
     *,
     chat_id: int,
     user_id: int,
+    username: str | None = None,
 ) -> tuple[str, str]:
     sessions = state.get("sessions")
     if not isinstance(sessions, dict):
@@ -112,9 +114,11 @@ def _reset_chat_session_context(
     wake_thread_id = new_short_id("wake")
     sessions[chat_key] = {
         "user_id": int(user_id),
+        "username": username or slot.get("username") or "",
         "customer_id": customer_id,
         "thread_id": thread_id,
         "wake_thread_id": wake_thread_id,
+        "role": "owner",
         "last_user_message_at": now_utc_iso,
         "last_assistant_message_at": None,
     }
@@ -157,6 +161,274 @@ def _telegram_command_name(text: str) -> str:
     if not head.startswith("/"):
         return ""
     return head.split("@", 1)[0]
+
+
+def support_bot_commands() -> list[dict[str, str]]:
+    return [
+        {"command": "support_customers", "description": "List customer tenants for support"},
+        {"command": "support_bind", "description": "Act as a customer tenant"},
+        {"command": "support_unbind", "description": "Clear support tenant binding"},
+        {"command": "support_whoami", "description": "Show current support binding"},
+    ]
+
+
+def _is_support_command(command_name: str) -> bool:
+    return str(command_name or "").strip().lower().startswith("/support_")
+
+
+def _is_support_user(
+    *,
+    user_id: int,
+    username: str | None,
+    support_user_ids_csv: str | None,
+    support_usernames_csv: str | None,
+) -> bool:
+    support_ids = parse_csv_set(support_user_ids_csv)
+    support_usernames = parse_csv_set(support_usernames_csv, normalize_username=True)
+    if not support_ids and not support_usernames:
+        return False
+    if str(user_id) in support_ids:
+        return True
+    return bool(username and username.lower() in support_usernames)
+
+
+def _support_bindings(state: dict[str, Any]) -> dict[str, Any]:
+    bindings = state.get("support_bindings")
+    if not isinstance(bindings, dict):
+        bindings = {}
+        state["support_bindings"] = bindings
+    return bindings
+
+
+def _append_support_audit(state: dict[str, Any], event: dict[str, Any]) -> None:
+    audit = state.get("support_audit")
+    if not isinstance(audit, list):
+        audit = []
+    audit.append(event)
+    state["support_audit"] = audit[-500:]
+
+
+def _support_binding_for_chat(state: dict[str, Any], chat_id: int | str) -> dict[str, Any] | None:
+    binding = _support_bindings(state).get(str(chat_id))
+    return binding if isinstance(binding, dict) else None
+
+
+def _current_support_binding(chat_id: int | str) -> dict[str, Any] | None:
+    bindings = STATE_STORE.load().get("support_bindings", {})
+    if not isinstance(bindings, dict):
+        return None
+    binding = bindings.get(str(chat_id))
+    return binding if isinstance(binding, dict) else None
+
+
+def _reset_support_thread_context(
+    state: dict[str, Any],
+    *,
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+    customer_id: str,
+) -> tuple[str, str]:
+    now_utc_iso = datetime.now(UTC).isoformat()
+    bindings = _support_bindings(state)
+    chat_key = str(chat_id)
+    binding = bindings.get(chat_key)
+    if not isinstance(binding, dict):
+        binding = {}
+    thread_id = new_short_id("chat")
+    wake_thread_id = new_short_id("wake")
+    by_customer = binding.get("thread_id_by_customer")
+    if not isinstance(by_customer, dict):
+        by_customer = {}
+    wake_by_customer = binding.get("wake_thread_id_by_customer")
+    if not isinstance(wake_by_customer, dict):
+        wake_by_customer = {}
+    by_customer[customer_id] = thread_id
+    wake_by_customer[customer_id] = wake_thread_id
+    bindings[chat_key] = {
+        **binding,
+        "support_user_id": int(user_id),
+        "support_username": username or "",
+        "bound_customer_id": customer_id,
+        "thread_id": thread_id,
+        "wake_thread_id": wake_thread_id,
+        "thread_id_by_customer": by_customer,
+        "wake_thread_id_by_customer": wake_by_customer,
+        "last_user_message_at": now_utc_iso,
+        "last_assistant_message_at": None,
+        "updated_at": now_utc_iso,
+    }
+    _append_support_audit(
+        state,
+        {
+            "event": "support_thread_reset",
+            "support_user_id": int(user_id),
+            "support_username": username or "",
+            "support_chat_id": int(chat_id),
+            "bound_customer_id": customer_id,
+            "thread_id": thread_id,
+            "wake_thread_id": wake_thread_id,
+            "created_at": now_utc_iso,
+        },
+    )
+    return thread_id, customer_id
+
+
+def _bind_support_customer(
+    state: dict[str, Any],
+    *,
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+    customer_id: str,
+) -> dict[str, Any]:
+    now_utc_iso = datetime.now(UTC).isoformat()
+    bindings = _support_bindings(state)
+    chat_key = str(chat_id)
+    binding = bindings.get(chat_key)
+    if not isinstance(binding, dict):
+        binding = {}
+    by_customer = binding.get("thread_id_by_customer")
+    if not isinstance(by_customer, dict):
+        by_customer = {}
+    wake_by_customer = binding.get("wake_thread_id_by_customer")
+    if not isinstance(wake_by_customer, dict):
+        wake_by_customer = {}
+    thread_id = _clean_thread_id(by_customer.get(customer_id)) or new_short_id("chat")
+    wake_thread_id = _clean_thread_id(wake_by_customer.get(customer_id)) or new_short_id("wake")
+    by_customer[customer_id] = thread_id
+    wake_by_customer[customer_id] = wake_thread_id
+    next_binding = {
+        **binding,
+        "support_user_id": int(user_id),
+        "support_username": username or "",
+        "bound_customer_id": customer_id,
+        "thread_id": thread_id,
+        "wake_thread_id": wake_thread_id,
+        "thread_id_by_customer": by_customer,
+        "wake_thread_id_by_customer": wake_by_customer,
+        "last_user_message_at": now_utc_iso,
+        "last_assistant_message_at": binding.get("last_assistant_message_at"),
+        "bound_at": binding.get("bound_at") or now_utc_iso,
+        "updated_at": now_utc_iso,
+    }
+    bindings[chat_key] = next_binding
+    _append_support_audit(
+        state,
+        {
+            "event": "support_bound",
+            "support_user_id": int(user_id),
+            "support_username": username or "",
+            "support_chat_id": int(chat_id),
+            "bound_customer_id": customer_id,
+            "thread_id": thread_id,
+            "created_at": now_utc_iso,
+        },
+    )
+    return next_binding
+
+
+def _unbind_support_customer(
+    state: dict[str, Any],
+    *,
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+) -> dict[str, Any] | None:
+    now_utc_iso = datetime.now(UTC).isoformat()
+    bindings = _support_bindings(state)
+    chat_key = str(chat_id)
+    binding = bindings.get(chat_key)
+    if not isinstance(binding, dict):
+        return None
+    previous = dict(binding)
+    binding["bound_customer_id"] = ""
+    binding["thread_id"] = ""
+    binding["wake_thread_id"] = ""
+    binding["support_user_id"] = int(user_id)
+    binding["support_username"] = username or ""
+    binding["updated_at"] = now_utc_iso
+    bindings[chat_key] = binding
+    _append_support_audit(
+        state,
+        {
+            "event": "support_unbound",
+            "support_user_id": int(user_id),
+            "support_username": username or "",
+            "support_chat_id": int(chat_id),
+            "previous_customer_id": str(previous.get("bound_customer_id", "") or ""),
+            "created_at": now_utc_iso,
+        },
+    )
+    return previous
+
+
+def _touch_support_turn(
+    state: dict[str, Any],
+    *,
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+    event: str,
+    outcome: str = "",
+) -> None:
+    now_utc_iso = datetime.now(UTC).isoformat()
+    binding = _support_binding_for_chat(state, chat_id)
+    customer_id = str((binding or {}).get("bound_customer_id", "") or "")
+    thread_id = str((binding or {}).get("thread_id", "") or "")
+    if binding is not None:
+        binding["support_user_id"] = int(user_id)
+        binding["support_username"] = username or ""
+        binding["last_user_message_at"] = now_utc_iso
+        binding["updated_at"] = now_utc_iso
+        _support_bindings(state)[str(chat_id)] = binding
+    _append_support_audit(
+        state,
+        {
+            "event": event,
+            "support_user_id": int(user_id),
+            "support_username": username or "",
+            "support_chat_id": int(chat_id),
+            "bound_customer_id": customer_id,
+            "thread_id": thread_id,
+            "outcome": outcome,
+            "created_at": now_utc_iso,
+        },
+    )
+
+
+async def _maybe_configure_support_commands_for_chat(
+    *,
+    bot_token: str | None,
+    chat_id: int,
+) -> None:
+    if not str(bot_token or "").strip():
+        return
+
+    def _mark_if_needed(state: dict[str, Any]) -> bool:
+        configured = state.get("support_command_chats")
+        if not isinstance(configured, dict):
+            configured = {}
+        key = str(chat_id)
+        if key in configured:
+            state["support_command_chats"] = configured
+            return False
+        configured[key] = datetime.now(UTC).isoformat()
+        state["support_command_chats"] = configured
+        return True
+
+    should_configure = bool(STATE_STORE.update(_mark_if_needed))
+    if not should_configure:
+        return
+    client = TelegramClient(str(bot_token))
+    try:
+        setter = getattr(client, "set_my_commands", None)
+        if callable(setter):
+            await setter(commands=support_bot_commands(), scope={"type": "chat", "chat_id": int(chat_id)})
+    finally:
+        if hasattr(client, "aclose"):
+            with suppress(Exception):
+                await client.aclose()
 
 
 async def _send_debug_logs_file(*, chat_id: int, bot_token: str | None) -> str | None:
@@ -206,6 +478,153 @@ async def _send_debug_logs_file(*, chat_id: int, bot_token: str | None) -> str |
     if not sent:
         return "I couldn't send the debug log files right now."
     return None
+
+
+def _customer_listing_items(
+    customer_listing: Callable[[], list[dict[str, Any]]] | None,
+) -> list[dict[str, Any]]:
+    if customer_listing is None:
+        return []
+    try:
+        items = customer_listing()
+    except Exception:
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _format_support_customer_line(index: int, item: dict[str, Any]) -> str:
+    customer_id = str(item.get("customer_id", "") or "").strip()
+    owner_username = str(item.get("owner_username", "") or "").strip()
+    owner_chat_id = str(item.get("owner_chat_id", "") or "").strip()
+    owner = owner_username or owner_chat_id or "unknown"
+    if owner_username:
+        owner = f"@{owner_username.lstrip('@')}"
+        if owner_chat_id:
+            owner = f"{owner} chat={owner_chat_id}"
+    business = "connected" if bool(item.get("telegram_business_connected", False)) else "none"
+    composio = "connected" if bool(item.get("composio_connected", False)) else "none"
+    workflow_count = int(item.get("workflow_count") or 0)
+    file_count = int(item.get("file_count") or 0)
+    last_activity = str(item.get("last_activity", "") or "unknown")
+    return (
+        f"{index}. {customer_id} | owner={owner} | "
+        f"business={business} | composio={composio} | "
+        f"workflows={workflow_count} | files={file_count} | last={last_activity}"
+    )
+
+
+def _format_support_customers(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "No customer tenants are known yet."
+    lines = ["Support customers:"]
+    lines.extend(_format_support_customer_line(index, item) for index, item in enumerate(items, start=1))
+    lines.append("")
+    lines.append("Bind with /support_bind <number> or /support_bind <customer_id>.")
+    return "\n".join(lines)
+
+
+def _resolve_support_customer_arg(
+    *,
+    raw_arg: str,
+    items: list[dict[str, Any]],
+) -> str:
+    arg = str(raw_arg or "").strip()
+    if not arg:
+        return ""
+    if arg.isdigit():
+        index = int(arg)
+        if 1 <= index <= len(items):
+            return str(items[index - 1].get("customer_id", "") or "").strip()
+    known = {str(item.get("customer_id", "") or "").strip() for item in items}
+    return arg if arg in known else ""
+
+
+def _format_support_whoami(
+    *,
+    user_id: int,
+    username: str | None,
+    chat_id: int,
+    binding: dict[str, Any] | None,
+) -> str:
+    bound_customer = str((binding or {}).get("bound_customer_id", "") or "").strip()
+    thread_id = str((binding or {}).get("thread_id", "") or "").strip()
+    wake_thread_id = str((binding or {}).get("wake_thread_id", "") or "").strip()
+    username_text = f"@{username}" if username else "unknown"
+    if not bound_customer:
+        return (
+            "Support operator: active\n"
+            f"User: {user_id} ({username_text})\n"
+            f"Chat: {chat_id}\n"
+            "Bound customer: none\n"
+            "Use /support_customers then /support_bind <number>."
+        )
+    return (
+        "Support operator: active\n"
+        f"User: {user_id} ({username_text})\n"
+        f"Chat: {chat_id}\n"
+        f"Bound customer: {bound_customer}\n"
+        f"Support thread: {thread_id}\n"
+        f"Wake thread: {wake_thread_id}"
+    )
+
+
+def _support_command_arg(text: str) -> str:
+    parts = str(text or "").strip().split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+async def _handle_support_command(
+    *,
+    command_name: str,
+    ctx: TelegramContext,
+    customer_listing: Callable[[], list[dict[str, Any]]] | None,
+) -> str:
+    if command_name == "/support_customers":
+        return _format_support_customers(_customer_listing_items(customer_listing))
+    if command_name == "/support_bind":
+        items = _customer_listing_items(customer_listing)
+        customer_id = _resolve_support_customer_arg(
+            raw_arg=_support_command_arg(ctx.text),
+            items=items,
+        )
+        if not customer_id:
+            return "Customer not found. Run /support_customers and bind by number or exact customer_id."
+        binding = STATE_STORE.update(
+            lambda state: _bind_support_customer(
+                state,
+                chat_id=ctx.chat_id,
+                user_id=ctx.user_id,
+                username=ctx.username,
+                customer_id=customer_id,
+            )
+        )
+        return (
+            f"Support bound to {customer_id}.\n"
+            f"Support thread: {binding.get('thread_id')}\n"
+            "Normal messages in this chat now act inside that customer tenant."
+        )
+    if command_name == "/support_unbind":
+        previous = STATE_STORE.update(
+            lambda state: _unbind_support_customer(
+                state,
+                chat_id=ctx.chat_id,
+                user_id=ctx.user_id,
+                username=ctx.username,
+            )
+        )
+        previous_customer = str((previous or {}).get("bound_customer_id", "") or "").strip()
+        if not previous_customer:
+            return "Support chat was not bound to a customer."
+        return f"Support unbound from {previous_customer}."
+    if command_name == "/support_whoami":
+        binding = _current_support_binding(ctx.chat_id)
+        return _format_support_whoami(
+            user_id=ctx.user_id,
+            username=ctx.username,
+            chat_id=ctx.chat_id,
+            binding=binding if isinstance(binding, dict) else None,
+        )
+    return "Unknown support command."
 
 
 async def relay_task_event_via_main_agent(
@@ -485,10 +904,13 @@ async def handle_telegram_text(
     bot_token: str | None = None,
     allowed_user_ids_csv: str | None = None,
     allowed_usernames_csv: str | None = None,
+    support_user_ids_csv: str | None = None,
+    support_usernames_csv: str | None = None,
     agent_runtime: Any | None = None,
     file_vault: FileVaultService | None = None,
     memory: Any | None = None,
     interactive_inbox: TelegramInteractiveInbox | None = None,
+    support_customer_listing: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> str | None:
     parsed = parse_telegram_update(body)
     if not parsed:
@@ -509,13 +931,25 @@ async def handle_telegram_text(
         text=(text or "").strip(),
     )
 
-    if not is_user_allowed(
+    normal_allowed = is_user_allowed(
         user_id=ctx.user_id,
         username=ctx.username,
         allowed_user_ids_csv=allowed_user_ids_csv,
         allowed_usernames_csv=allowed_usernames_csv,
-    ):
+    )
+    support_allowed = _is_support_user(
+        user_id=ctx.user_id,
+        username=ctx.username,
+        support_user_ids_csv=support_user_ids_csv,
+        support_usernames_csv=support_usernames_csv,
+    )
+    if not normal_allowed and not support_allowed:
         return "This bot is restricted and your Telegram account is not allowed."
+    if support_allowed:
+        await _maybe_configure_support_commands_for_chat(
+            bot_token=bot_token,
+            chat_id=ctx.chat_id,
+        )
 
     def _ensure_admin(state: dict[str, Any]) -> Any:
         admin_user_id = state.get("admin_user_id")
@@ -528,17 +962,48 @@ async def handle_telegram_text(
     _ = int(admin_user_id) == int(ctx.user_id)
 
     command_name = _telegram_command_name(ctx.text)
+    if _is_support_command(command_name):
+        if not support_allowed:
+            return "This support command is restricted to configured support operators."
+        return await _handle_support_command(
+            command_name=command_name,
+            ctx=ctx,
+            customer_listing=support_customer_listing,
+        )
     if command_name in {"/start", "/help"}:
         return _start_help_text()
     if command_name == "/status":
         agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
         return status_text(agent_up)
     if command_name == "/fresh":
+        if support_allowed:
+            binding = _current_support_binding(ctx.chat_id)
+            bound_customer = str((binding or {}).get("bound_customer_id", "") or "").strip()
+            if not bound_customer:
+                return "Support mode is active. Use /support_customers and /support_bind before /fresh."
+            thread_id, _ = STATE_STORE.update(
+                lambda state: _reset_support_thread_context(
+                    state,
+                    chat_id=ctx.chat_id,
+                    user_id=ctx.user_id,
+                    username=ctx.username,
+                    customer_id=bound_customer,
+                )
+            )
+            if interactive_inbox is not None:
+                await interactive_inbox.reset_chat(ctx.chat_id)
+            return (
+                "Started a fresh support chat context. "
+                f"Bound customer: {bound_customer}. "
+                f"New thread: {thread_id}. "
+                "Customer owner chat history is unchanged."
+            )
         thread_id, _ = STATE_STORE.update(
             lambda state: _reset_chat_session_context(
                 state,
                 chat_id=ctx.chat_id,
                 user_id=ctx.user_id,
+                username=ctx.username,
             )
         )
         if interactive_inbox is not None:
@@ -550,6 +1015,23 @@ async def handle_telegram_text(
         )
     if command_name == "/debug_logs":
         return await _send_debug_logs_file(chat_id=ctx.chat_id, bot_token=bot_token)
+
+    support_binding = None
+    if support_allowed:
+        support_binding = _current_support_binding(ctx.chat_id)
+        bound_customer = str((support_binding or {}).get("bound_customer_id", "") or "").strip()
+        if not bound_customer:
+            STATE_STORE.update(
+                lambda state: _touch_support_turn(
+                    state,
+                    chat_id=ctx.chat_id,
+                    user_id=ctx.user_id,
+                    username=ctx.username,
+                    event="support_turn_rejected_unbound",
+                    outcome="missing_binding",
+                )
+            )
+            return "Support mode is active. Use /support_customers and /support_bind before chatting as a customer."
 
     if not get_openai_compatible_api_key_from_env():
         return missing_key_prompt()
@@ -569,16 +1051,66 @@ async def handle_telegram_text(
         now_utc_iso = datetime.now(UTC).isoformat()
         sessions[str(ctx.chat_id)] = {
             "user_id": ctx.user_id,
+            "username": ctx.username or "",
             "customer_id": customer_id,
             "thread_id": thread_id,
             "wake_thread_id": wake_thread_id,
+            "role": "owner",
             "last_user_message_at": now_utc_iso,
             "last_assistant_message_at": slot.get("last_assistant_message_at"),
         }
         state["sessions"] = sessions
         return thread_id, customer_id
 
-    thread_id, customer_id = STATE_STORE.update(_upsert_session)
+    if support_allowed:
+        def _upsert_support_session(state: dict[str, Any]) -> tuple[str, str]:
+            binding = _support_binding_for_chat(state, ctx.chat_id)
+            if not isinstance(binding, dict):
+                raise RuntimeError("support binding missing")
+            bound_customer = str(binding.get("bound_customer_id", "") or "").strip()
+            if not bound_customer:
+                raise RuntimeError("support binding missing")
+            now_utc_iso = datetime.now(UTC).isoformat()
+            thread_id = _clean_thread_id(binding.get("thread_id")) or new_short_id("chat")
+            wake_thread_id = _clean_thread_id(binding.get("wake_thread_id")) or new_short_id("wake")
+            by_customer = binding.get("thread_id_by_customer")
+            if not isinstance(by_customer, dict):
+                by_customer = {}
+            wake_by_customer = binding.get("wake_thread_id_by_customer")
+            if not isinstance(wake_by_customer, dict):
+                wake_by_customer = {}
+            by_customer[bound_customer] = thread_id
+            wake_by_customer[bound_customer] = wake_thread_id
+            binding.update(
+                {
+                    "support_user_id": ctx.user_id,
+                    "support_username": ctx.username or "",
+                    "thread_id": thread_id,
+                    "wake_thread_id": wake_thread_id,
+                    "thread_id_by_customer": by_customer,
+                    "wake_thread_id_by_customer": wake_by_customer,
+                    "last_user_message_at": now_utc_iso,
+                    "updated_at": now_utc_iso,
+                }
+            )
+            _support_bindings(state)[str(ctx.chat_id)] = binding
+            _append_support_audit(
+                state,
+                {
+                    "event": "support_turn_started",
+                    "support_user_id": ctx.user_id,
+                    "support_username": ctx.username or "",
+                    "support_chat_id": ctx.chat_id,
+                    "bound_customer_id": bound_customer,
+                    "thread_id": thread_id,
+                    "created_at": now_utc_iso,
+                },
+            )
+            return thread_id, bound_customer
+
+        thread_id, customer_id = STATE_STORE.update(_upsert_support_session)
+    else:
+        thread_id, customer_id = STATE_STORE.update(_upsert_session)
 
     if interactive_inbox is not None and bot_token:
         if attachments and file_vault is None:
@@ -700,10 +1232,12 @@ class TelegramChatService:
         bot_token: str,
         file_vault: FileVaultService | None = None,
         memory: Any | None = None,
+        support_customer_listing: Callable[[], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.bot_token = str(bot_token or "").strip()
         self.file_vault = file_vault
         self.memory = memory
+        self.support_customer_listing = support_customer_listing
         self._interactive_inbox = TelegramInteractiveInbox()
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
@@ -714,6 +1248,9 @@ class TelegramChatService:
 
     def touch_assistant_message(self, chat_id: int) -> None:
         STATE_STORE.touch_assistant_message(chat_id)
+
+    def list_owner_customer_summaries(self) -> list[dict[str, Any]]:
+        return STATE_STORE.list_owner_customer_summaries()
 
     async def relay_task_event(
         self,
@@ -753,6 +1290,8 @@ class TelegramChatService:
         body: dict[str, Any],
         allowed_user_ids_csv: str | None = None,
         allowed_usernames_csv: str | None = None,
+        support_user_ids_csv: str | None = None,
+        support_usernames_csv: str | None = None,
         agent_runtime: Any | None = None,
     ) -> str | None:
         return await handle_telegram_text(
@@ -760,8 +1299,11 @@ class TelegramChatService:
             bot_token=self.bot_token,
             allowed_user_ids_csv=allowed_user_ids_csv,
             allowed_usernames_csv=allowed_usernames_csv,
+            support_user_ids_csv=support_user_ids_csv,
+            support_usernames_csv=support_usernames_csv,
             agent_runtime=agent_runtime,
             file_vault=self.file_vault,
             memory=self.memory,
             interactive_inbox=self._interactive_inbox,
+            support_customer_listing=self.support_customer_listing,
         )

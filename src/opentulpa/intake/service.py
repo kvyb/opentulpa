@@ -840,6 +840,25 @@ class IntakeWorkflowService:
             rows = conn.execute(query, params).fetchall()
         return [self._hydrate_workflow_row(row) for row in rows]
 
+    def list_customer_summaries(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT customer_id, COUNT(*) AS workflow_count, MAX(updated_at) AS last_workflow_at
+                FROM intake_workflows
+                GROUP BY customer_id
+                ORDER BY last_workflow_at DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "customer_id": str(row["customer_id"]),
+                "workflow_count": int(row["workflow_count"] or 0),
+                "last_workflow_at": str(row["last_workflow_at"] or ""),
+            }
+            for row in rows
+        ]
+
     def get_workflow(self, *, customer_id: str, workflow_id: str) -> dict[str, Any] | None:
         safe_customer = str(customer_id or "").strip()
         safe_workflow = str(workflow_id or "").strip()

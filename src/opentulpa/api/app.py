@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -232,6 +232,78 @@ def create_app(
         file_vault=vault_service,
         get_agent_runtime=get_agent_runtime if runtime is not None else (lambda: None),
     )
+
+    def support_customer_listing() -> list[dict[str, Any]]:
+        by_customer: dict[str, dict[str, Any]] = {}
+
+        def merge(customer_id: Any, **values: Any) -> None:
+            cid = str(customer_id or "").strip()
+            if not cid:
+                return
+            item = by_customer.setdefault(cid, {"customer_id": cid})
+            for key, value in values.items():
+                if value in (None, ""):
+                    continue
+                if key == "last_activity":
+                    item[key] = max(str(item.get(key, "") or ""), str(value))
+                elif key.endswith("_count"):
+                    item[key] = max(int(item.get(key) or 0), int(value or 0))
+                elif isinstance(value, bool):
+                    item[key] = bool(item.get(key, False)) or value
+                else:
+                    item.setdefault(key, value)
+
+        if telegram_chat is not None:
+            for item in telegram_chat.list_owner_customer_summaries():
+                merge(
+                    item.get("customer_id"),
+                    owner_chat_id=item.get("owner_chat_id"),
+                    owner_user_id=item.get("owner_user_id"),
+                    owner_username=item.get("owner_username"),
+                    last_activity=item.get("last_activity"),
+                )
+        for service, method_name in (
+            (telegram_business, "list_customer_summaries"),
+            (intake_service, "list_customer_summaries"),
+            (vault_service, "list_customer_summaries"),
+            (profile_service, "list_customer_summaries"),
+        ):
+            method = getattr(service, method_name, None)
+            if not callable(method):
+                continue
+            with suppress(Exception):
+                for item in method():
+                    if not isinstance(item, dict):
+                        continue
+                    last_activity = max(
+                        str(item.get("last_business_at", "") or ""),
+                        str(item.get("last_workflow_at", "") or ""),
+                        str(item.get("last_file_at", "") or ""),
+                        str(item.get("last_profile_at", "") or ""),
+                    )
+                    values = dict(item)
+                    values.pop("customer_id", None)
+                    merge(item.get("customer_id"), last_activity=last_activity, **values)
+        if bool(getattr(composio, "enabled", False)):
+            for cid in list(by_customer):
+                with suppress(Exception):
+                    accounts = composio.list_connected_accounts(
+                        customer_id=cid,
+                        statuses=["ACTIVE"],
+                        limit=1,
+                    )
+                    merge(
+                        cid,
+                        composio_connected=bool((accounts or {}).get("items")),
+                    )
+        return sorted(
+            by_customer.values(),
+            key=lambda item: (str(item.get("last_activity", "") or ""), str(item.get("customer_id", "") or "")),
+            reverse=True,
+        )
+
+    if telegram_chat is not None:
+        telegram_chat.support_customer_listing = support_customer_listing
 
     workflow_setup_store = WorkflowSetupSessionStore(
         db_path=PROJECT_ROOT / ".opentulpa" / "intake_workflow_setup.db",

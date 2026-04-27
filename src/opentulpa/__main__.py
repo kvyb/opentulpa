@@ -18,6 +18,8 @@ from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
 from opentulpa.core.public_urls import resolve_public_base_url
+from opentulpa.interfaces.telegram.chat_service import support_bot_commands
+from opentulpa.interfaces.telegram.security import parse_csv_set
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -146,6 +148,17 @@ def _telegram_bot_commands() -> list[dict[str, str]]:
     ]
 
 
+def _telegram_support_user_ids(settings: Any) -> list[int]:
+    values = sorted(parse_csv_set(getattr(settings, "telegram_support_user_ids", None)))
+    out: list[int] = []
+    for value in values:
+        try:
+            out.append(int(value))
+        except Exception:
+            continue
+    return out
+
+
 def _auto_configure_telegram_webhook(settings: Any) -> None:
     bot_token = str(settings.telegram_bot_token or "").strip()
     if not bot_token:
@@ -198,20 +211,39 @@ def _auto_configure_telegram_commands(settings: Any) -> None:
                 f"https://api.telegram.org/bot{bot_token}/setMyCommands",
                 json=payload,
             )
-        if response.status_code != 200:
-            print(
-                f"Telegram commands auto-config failed: HTTP {response.status_code} {response.text[:160]}",
-                file=sys.stderr,
-            )
-            return
-        data = response.json() if response.content else {}
-        if bool(data.get("ok")):
-            print("Telegram bot commands configured.")
-        else:
-            print(
-                f"Telegram commands auto-config failed: {data.get('description', 'unknown error')}",
-                file=sys.stderr,
-            )
+            if response.status_code != 200:
+                print(
+                    f"Telegram commands auto-config failed: HTTP {response.status_code} {response.text[:160]}",
+                    file=sys.stderr,
+                )
+                return
+            data = response.json() if response.content else {}
+            if bool(data.get("ok")):
+                print("Telegram bot commands configured.")
+            else:
+                print(
+                    f"Telegram commands auto-config failed: {data.get('description', 'unknown error')}",
+                    file=sys.stderr,
+                )
+                return
+            support_commands = support_bot_commands()
+            support_ids = _telegram_support_user_ids(settings)
+            for support_user_id in support_ids:
+                support_payload = {
+                    "commands": support_commands,
+                    "scope": {"type": "chat", "chat_id": int(support_user_id)},
+                }
+                support_response = client.post(
+                    f"https://api.telegram.org/bot{bot_token}/setMyCommands",
+                    json=support_payload,
+                )
+                if support_response.status_code != 200:
+                    print(
+                        "Telegram support commands auto-config failed for "
+                        f"{support_user_id}: HTTP {support_response.status_code} "
+                        f"{support_response.text[:160]}",
+                        file=sys.stderr,
+                    )
     except Exception as exc:
         print(f"Telegram commands auto-config failed: {exc}", file=sys.stderr)
 

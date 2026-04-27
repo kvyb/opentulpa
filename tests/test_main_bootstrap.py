@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
-from types import SimpleNamespace
 import types
+from pathlib import Path
+from types import SimpleNamespace
 
 apscheduler_module = types.ModuleType("apscheduler")
 schedulers_module = types.ModuleType("apscheduler.schedulers")
@@ -43,7 +43,7 @@ class _DummyAsyncIOScheduler:
 
 class _DummyCronTrigger:
     @classmethod
-    def from_crontab(cls, value: str) -> "_DummyCronTrigger":
+    def from_crontab(cls, value: str) -> _DummyCronTrigger:
         _ = value
         return cls()
 
@@ -77,7 +77,7 @@ sys.modules.setdefault("apscheduler.triggers.cron", cron_module)
 sys.modules.setdefault("apscheduler.triggers.date", date_module)
 sys.modules.setdefault("mem0", mem0_module)
 
-from opentulpa import __main__ as entry
+from opentulpa import __main__ as entry  # noqa: E402
 
 
 def test_resolve_public_base_url_prefers_explicit_public_base(monkeypatch) -> None:
@@ -153,7 +153,7 @@ def test_bootstrap_persistent_storage_keeps_existing_volume_contents(tmp_path: P
 
 
 def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> None:
-    called: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
 
     class _Resp:
         status_code = 200
@@ -167,15 +167,14 @@ def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> 
         def __init__(self, timeout: float) -> None:
             self.timeout = timeout
 
-        def __enter__(self) -> "_Client":
+        def __enter__(self) -> _Client:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
             return None
 
         def post(self, url: str, json: dict[str, object] | None = None) -> _Resp:
-            called["url"] = url
-            called["json"] = json or {}
+            calls.append({"url": url, "json": json or {}})
             return _Resp()
 
     import httpx
@@ -184,8 +183,8 @@ def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> 
     settings = SimpleNamespace(telegram_bot_token="123:abc")
     entry._auto_configure_telegram_commands(settings)
 
-    assert str(called.get("url", "")).endswith("/setMyCommands")
-    payload = called.get("json")
+    assert str(calls[0].get("url", "")).endswith("/setMyCommands")
+    payload = calls[0].get("json")
     assert isinstance(payload, dict)
     commands = payload.get("commands", [])
     assert isinstance(commands, list)
@@ -193,5 +192,53 @@ def test_auto_configure_telegram_commands_posts_set_my_commands(monkeypatch) -> 
     assert any(
         str(item.get("command", "")).strip() == "debug_logs"
         for item in commands
+        if isinstance(item, dict)
+    )
+    assert len(calls) == 1
+
+
+def test_auto_configure_telegram_commands_posts_support_chat_scope(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _Resp:
+        status_code = 200
+        content = b'{"ok":true}'
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, json: dict[str, object] | None = None) -> _Resp:
+            calls.append({"url": url, "json": json or {}})
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    settings = SimpleNamespace(
+        telegram_bot_token="123:abc",
+        telegram_support_user_ids="900,not-a-number",
+    )
+    entry._auto_configure_telegram_commands(settings)
+
+    assert len(calls) == 2
+    support_payload = calls[1]["json"]
+    assert isinstance(support_payload, dict)
+    assert support_payload["scope"] == {"type": "chat", "chat_id": 900}
+    support_commands = support_payload["commands"]
+    assert isinstance(support_commands, list)
+    assert any(
+        str(item.get("command", "")).strip() == "support_bind"
+        for item in support_commands
         if isinstance(item, dict)
     )

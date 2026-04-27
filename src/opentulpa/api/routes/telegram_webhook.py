@@ -336,6 +336,8 @@ def register_telegram_webhook_routes(
                 body=body,
                 allowed_user_ids_csv=settings.telegram_allowed_user_ids,
                 allowed_usernames_csv=settings.telegram_allowed_usernames,
+                support_user_ids_csv=getattr(settings, "telegram_support_user_ids", None),
+                support_usernames_csv=getattr(settings, "telegram_support_usernames", None),
                 agent_runtime=get_agent_runtime(),
             )
         except Exception as exc:

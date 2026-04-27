@@ -231,6 +231,18 @@ class TelegramClient:
         data = await self._post("answerCallbackQuery", payload)
         return bool(data)
 
+    async def set_my_commands(
+        self,
+        *,
+        commands: list[dict[str, str]],
+        scope: dict[str, Any] | None = None,
+    ) -> bool:
+        payload: dict[str, Any] = {"commands": commands}
+        if isinstance(scope, dict):
+            payload["scope"] = scope
+        data = await self._post("setMyCommands", payload)
+        return bool(data)
+
     async def send_chat_action(
         self,
         *,

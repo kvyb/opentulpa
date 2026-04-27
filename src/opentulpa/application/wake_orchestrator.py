@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import suppress
-import json
 from typing import Any
 
 from opentulpa.core.ids import new_short_id
@@ -278,6 +278,8 @@ class WakeOrchestrator:
             slots: list[dict[str, Any]] = []
             with suppress(Exception):
                 slots = self._get_telegram_chat().find_session_slots(customer_id)
+            owner_slots = [slot for slot in slots if str(slot.get("role", "")).strip() != "support"]
+            slots = owner_slots or slots[:1]
             if not slots:
                 self._backlog(
                     customer_id=customer_id,
