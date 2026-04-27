@@ -92,6 +92,56 @@ def _clean_mapping(value: Any) -> dict[str, str]:
     return out
 
 
+def _sheet_cell_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    return value
+
+
+def _normalize_google_sheets_arguments(value: dict[str, Any]) -> dict[str, Any]:
+    out = dict(value)
+    for canonical, aliases in {
+        "spreadsheetId": ("spreadsheet_id", "spreadsheetID", "spreadsheet"),
+        "sheetName": ("sheet_name", "worksheet", "worksheet_name", "tab_name"),
+    }.items():
+        if str(out.get(canonical, "") or "").strip():
+            continue
+        for alias in aliases:
+            alias_value = out.pop(alias, None)
+            if str(alias_value or "").strip():
+                out[canonical] = alias_value
+                break
+    return out
+
+
+def _normalize_google_sheets_field_mapping(
+    field_mapping: dict[str, str],
+    *,
+    payload_keys: set[str],
+) -> dict[str, str]:
+    """Return source-field -> sheet-header mapping.
+
+    Models sometimes produce the inverse shape for human-friendly headers, e.g.
+    {"Booking ID": "booking_id"}. Flip those entries when the value is a known
+    payload key.
+    """
+
+    out: dict[str, str] = {}
+    for raw_key, raw_value in field_mapping.items():
+        key = str(raw_key or "").strip()
+        value = str(raw_value or "").strip()
+        if not key or not value:
+            continue
+        if key in payload_keys:
+            out[key] = value
+            continue
+        if value in payload_keys:
+            out[value] = key
+            continue
+        out[key] = value
+    return out
+
+
 def _normalize_toolkit_slug(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "").replace("-", "")
 
@@ -2071,9 +2121,8 @@ class IntakeWorkflowService:
         saved_summary = ""
         sink_arguments = dict(_safe_dict(decision.get("sink_arguments")))
         if ready_to_save:
-            save_payload = dict(_safe_dict(decision.get("save_payload")))
-            if not save_payload:
-                save_payload = dict(extracted_fields)
+            save_payload = dict(extracted_fields)
+            save_payload.update(_safe_dict(decision.get("save_payload")))
             missing = [
                 field
                 for field in _unique_string_list(workflow.get("required_fields"))
@@ -2462,6 +2511,16 @@ class IntakeWorkflowService:
         field_mapping = _clean_mapping(sink_config.get("field_mapping"))
         static_arguments = _safe_dict(sink_config.get("static_arguments"))
         override_arguments = _safe_dict(sink_arguments)
+        if sink_type == "google_sheets_composio":
+            top_level_arguments = {
+                key: sink_config.get(key)
+                for key in ("spreadsheetId", "spreadsheet_id", "sheetName", "sheet_name")
+                if key in sink_config
+            }
+            static_arguments = _normalize_google_sheets_arguments(
+                {**top_level_arguments, **static_arguments}
+            )
+            override_arguments = _normalize_google_sheets_arguments(override_arguments)
         enriched_payload = {
             **payload,
             "booking_id": str(booking["booking_id"]),
@@ -2478,17 +2537,21 @@ class IntakeWorkflowService:
             return {}, f"could not resolve a Composio tool for toolkit={toolkit or 'unknown'}"
         arguments: dict[str, Any]
         if sink_type == "google_sheets_composio":
+            field_mapping = _normalize_google_sheets_field_mapping(
+                field_mapping,
+                payload_keys=set(enriched_payload.keys()),
+            )
             key_source = "booking_id"
             key_header = str(field_mapping.get(key_source, "Booking ID") or "Booking ID").strip()
             headers = [key_header]
-            row = [enriched_payload.get(key_source)]
+            row = [_sheet_cell_value(enriched_payload.get(key_source))]
             for source_key, header_name in field_mapping.items():
                 safe_source = str(source_key or "").strip()
                 safe_header = str(header_name or "").strip()
                 if not safe_source or not safe_header or safe_source == key_source:
                     continue
                 headers.append(safe_header)
-                row.append(enriched_payload.get(safe_source))
+                row.append(_sheet_cell_value(enriched_payload.get(safe_source)))
             arguments = {
                 **static_arguments,
                 "headers": headers,

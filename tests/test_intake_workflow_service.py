@@ -2562,6 +2562,170 @@ async def test_google_sheets_sink_normalizes_prefixed_slug_and_builds_headers_ro
 
 
 @pytest.mark.asyncio
+async def test_ready_save_merges_extracted_fields_into_save_payload_before_validation(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Семен, телефон 89516767677, нужна 3х-фазная мойка Rolls-Royce Cullinan.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer provided the final phone number.",
+                "extracted_fields": {
+                    "клиент": "Семен Артурыч",
+                    "телефон клиента": "89516767677",
+                    "тип услуги": "3х-фазная детейлинг-мойка",
+                    "модель автомобиля": "Rolls-Royce Cullinan",
+                    "время записи": "пятница, полдень",
+                },
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "клиент": "Семен Артурыч",
+                    "телефон клиента": "89516767677",
+                    "модель автомобиля": "Rolls-Royce Cullinan",
+                },
+                "reason": "The model forgot to duplicate service type into save_payload.",
+            }
+        ]
+    )
+    composio = _FakeComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="AutoSpa Intake",
+        intent_description="Записывать клиентов.",
+        required_fields=["клиент", "телефон клиента", "тип услуги", "модель автомобиля"],
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "клиент": "клиент",
+                "телефон клиента": "телефон клиента",
+                "тип услуги": "тип услуги",
+                "модель автомобиля": "модель автомобиля",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_123",
+                "sheetName": "Лист1",
+            },
+        },
+    )
+
+    result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    sink_calls = [call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"]
+    assert len(sink_calls) == 1
+    written = dict(
+        zip(
+            sink_calls[0]["arguments"]["headers"],
+            sink_calls[0]["arguments"]["rows"][0],
+            strict=False,
+        )
+    )
+    assert written["тип услуги"] == "3х-фазная детейлинг-мойка"
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    )
+    assert bookings[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_google_sheets_sink_normalizes_aliases_reversed_booking_mapping_and_blank_cells(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Book a wash.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a booking.",
+                "extracted_fields": {"service": "wash"},
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {"service": "wash"},
+                "reason": "All required fields are present.",
+            }
+        ]
+    )
+    composio = _FakeComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle bookings.",
+        required_fields=["service"],
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "Booking ID": "booking_id",
+                "service": "Service",
+                "optional_note": "Optional Note",
+            },
+            "static_arguments": {
+                "spreadsheet_id": "sheet_123",
+                "sheet_name": "Лист1",
+            },
+        },
+    )
+
+    result = await service.run_workflow(customer_id="telegram_123", workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    call = composio.execute_calls[-1]
+    assert call["arguments"]["spreadsheetId"] == "sheet_123"
+    assert call["arguments"]["sheetName"] == "Лист1"
+    assert "spreadsheet_id" not in call["arguments"]
+    assert "sheet_name" not in call["arguments"]
+    assert call["arguments"]["keyColumn"] == "Booking ID"
+    headers = call["arguments"]["headers"]
+    row = call["arguments"]["rows"][0]
+    assert headers[0] == "Booking ID"
+    written = dict(zip(headers, row, strict=False))
+    assert written["Booking ID"]
+    assert written["Service"] == "wash"
+    assert written["Optional Note"] == ""
+
+
+@pytest.mark.asyncio
 async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheets(
     tmp_path: Path,
 ) -> None:
