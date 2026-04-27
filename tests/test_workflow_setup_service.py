@@ -338,3 +338,51 @@ def test_workflow_setup_orchestrator_reports_active_and_paused_states(tmp_path: 
 
     setup.pause(customer_id="telegram_123", thread_id="thread_123")
     assert orchestrator.thread_status(customer_id="telegram_123", thread_id="thread_123")["status"] == "paused"
+
+
+def test_workflow_setup_orchestrator_marks_confirmable_proposal_reply(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    orchestrator = WorkflowSetupOrchestrator(setup_service=setup)
+
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "name": "Telegram booking",
+            "channel": "telegram_business_dm",
+            "provider": "telegram_bot_api",
+            "intent_description": "Book inbound Telegram leads.",
+            "required_fields": ["name", "time"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        },
+    )
+
+    result = orchestrator.after_reply(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        reply_text="Here's the proposed workflow. Does this look right? Confirm and I'll activate it.",
+    )
+
+    assert result["marked"] is True
+    session = setup.get_thread_session(customer_id="telegram_123", thread_id="thread_123")
+    assert session is not None
+    assert str(session["last_proposed_draft_hash"])
+
+
+def test_workflow_setup_orchestrator_does_not_mark_clarifying_question(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    orchestrator = WorkflowSetupOrchestrator(setup_service=setup)
+
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    result = orchestrator.after_reply(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        reply_text="Draft updated. Before I propose the final workflow, one clarifying question.",
+    )
+
+    assert result["marked"] is False
+    session = setup.get_thread_session(customer_id="telegram_123", thread_id="thread_123")
+    assert session is not None
+    assert session["last_proposed_draft_hash"] == ""

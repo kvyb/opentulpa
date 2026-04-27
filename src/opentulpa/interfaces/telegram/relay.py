@@ -18,6 +18,7 @@ from opentulpa.agent.runtime import (
     STREAM_WAIT_SIGNAL,
     MergedInputSuppressedError,
 )
+from opentulpa.agent.turn_policy import normalize_turn_mode
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
@@ -94,6 +95,7 @@ async def stream_langgraph_reply_to_telegram(
     text: str,
     bot_token: str,
     chat_id: int,
+    turn_mode: str = "interactive",
     interactive_session: Any | None = None,
 ) -> tuple[str | None, bool]:
     last_streamed = ""
@@ -102,7 +104,7 @@ async def stream_langgraph_reply_to_telegram(
     live_delivery_text = ""
     live_delivery_at = 0.0
     client = TelegramClient(bot_token)
-    draft_id = zlib.crc32(f"{thread_id}:{customer_id}:{chat_id}:{new_short_id('dft')}".encode("utf-8")) or 1
+    draft_id = zlib.crc32(f"{thread_id}:{customer_id}:{chat_id}:{new_short_id('dft')}".encode()) or 1
     draft_enabled = chat_id > 0
     waiting_for_segment = True
     typing_stop = asyncio.Event()
@@ -117,6 +119,7 @@ async def stream_langgraph_reply_to_telegram(
     consecutive_timeouts = 0
     max_consecutive_timeouts = 2
     stream_started_at = time.monotonic()
+    final_only = normalize_turn_mode(turn_mode) == "workflow_setup"
     next_chunk_task: asyncio.Task[Any] | None = None
     logger.info(
         "telegram.stream start chat_id=%s thread_id=%s customer_id=%s text_chars=%s",
@@ -149,7 +152,7 @@ async def stream_langgraph_reply_to_telegram(
                     thread_id=thread_id,
                     customer_id=customer_id,
                     text=text,
-                    turn_mode="interactive",
+                    turn_mode=turn_mode,
                 ),
                 timeout=90.0,
             )
@@ -204,107 +207,139 @@ async def stream_langgraph_reply_to_telegram(
         live_delivery_at = now
 
     try:
-        stream = agent_runtime.astream_text(
-            thread_id=thread_id,
-            customer_id=customer_id,
-            text=text,
-            turn_mode="interactive",
-        )
-        stream_iter = stream.__aiter__()
-        while True:
-            if not last_streamed:
-                timeout_s = (
-                    first_token_timeout_s
-                    if consecutive_timeouts == 0
-                    else first_token_retry_timeout_s
-                )
-            else:
-                timeout_s = (
-                    stream_idle_timeout_s
-                    if consecutive_timeouts == 0
-                    else stream_idle_retry_timeout_s
-                )
+        if final_only:
+            draft_enabled = False
             try:
-                if next_chunk_task is None:
-                    next_chunk_task = asyncio.create_task(stream_iter.__anext__())
-                partial = await asyncio.wait_for(
-                    asyncio.shield(next_chunk_task),
-                    timeout=timeout_s,
+                recovered = await asyncio.wait_for(
+                    agent_runtime.ainvoke_text(
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        text=text,
+                        turn_mode=turn_mode,
+                    ),
+                    timeout=180.0,
                 )
-                next_chunk_task = None
-            except StopAsyncIteration:
-                next_chunk_task = None
-                break
             except TimeoutError:
-                consecutive_timeouts += 1
-                if consecutive_timeouts < max_consecutive_timeouts:
-                    logger.warning(
-                        "telegram.stream timeout_retry chat_id=%s thread_id=%s customer_id=%s stage=%s",
-                        chat_id,
-                        thread_id,
-                        customer_id,
-                        "first_token" if not last_streamed else "idle",
-                    )
-                    continue
-                if next_chunk_task is not None and not next_chunk_task.done():
-                    next_chunk_task.cancel()
-                    with suppress(asyncio.CancelledError, Exception):
-                        async with asyncio.timeout(1.0):
-                            await next_chunk_task
-                next_chunk_task = None
-                with suppress(Exception):
-                    async with asyncio.timeout(1.0):
-                        await stream.aclose()
-                recovered_text = await _recover_after_stream_timeout()
-                if recovered_text:
-                    logger.warning(
-                        "telegram.stream timeout_recovered chat_id=%s thread_id=%s customer_id=%s stage=%s",
-                        chat_id,
-                        thread_id,
-                        customer_id,
-                        "first_token" if not last_streamed else "idle",
-                    )
-                    final_reply = recovered_text
-                    break
-                timeout_text = (
-                    "Still working, but the model response timed out. "
-                    "Please retry in a moment."
-                )
                 logger.error(
-                    "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
+                    "telegram.stream final_only_timeout chat_id=%s thread_id=%s customer_id=%s turn_mode=%s",
                     chat_id,
                     thread_id,
                     customer_id,
-                    "first_token" if not last_streamed else "idle",
+                    turn_mode,
                 )
-                final_reply = timeout_text
-                break
-            progress_text = partial if isinstance(partial, str) else ""
-            if progress_text and _is_progress_signal(progress_text):
-                if not waiting_for_segment:
+                final_reply = (
+                    "Still working, but the model response timed out. "
+                    "Please retry in a moment."
+                )
+            else:
+                safe = str(recovered or "").strip()
+                if safe == STREAM_APPROVAL_HANDOFF_SIGNAL:
+                    suppressed = True
+                    final_reply = None
+                elif safe and not is_low_signal_reply(safe):
+                    final_reply = safe
+        else:
+            stream = agent_runtime.astream_text(
+                thread_id=thread_id,
+                customer_id=customer_id,
+                text=text,
+                turn_mode=turn_mode,
+            )
+            stream_iter = stream.__aiter__()
+            while True:
+                if not last_streamed:
+                    timeout_s = (
+                        first_token_timeout_s
+                        if consecutive_timeouts == 0
+                        else first_token_retry_timeout_s
+                    )
+                else:
+                    timeout_s = (
+                        stream_idle_timeout_s
+                        if consecutive_timeouts == 0
+                        else stream_idle_retry_timeout_s
+                    )
+                try:
+                    if next_chunk_task is None:
+                        next_chunk_task = asyncio.create_task(stream_iter.__anext__())
+                    partial = await asyncio.wait_for(
+                        asyncio.shield(next_chunk_task),
+                        timeout=timeout_s,
+                    )
+                    next_chunk_task = None
+                except StopAsyncIteration:
+                    next_chunk_task = None
+                    break
+                except TimeoutError:
+                    consecutive_timeouts += 1
+                    if consecutive_timeouts < max_consecutive_timeouts:
+                        logger.warning(
+                            "telegram.stream timeout_retry chat_id=%s thread_id=%s customer_id=%s stage=%s",
+                            chat_id,
+                            thread_id,
+                            customer_id,
+                            "first_token" if not last_streamed else "idle",
+                        )
+                        continue
+                    if next_chunk_task is not None and not next_chunk_task.done():
+                        next_chunk_task.cancel()
+                        with suppress(asyncio.CancelledError, Exception):
+                            async with asyncio.timeout(1.0):
+                                await next_chunk_task
+                    next_chunk_task = None
+                    with suppress(Exception):
+                        async with asyncio.timeout(1.0):
+                            await stream.aclose()
+                    recovered_text = await _recover_after_stream_timeout()
+                    if recovered_text:
+                        logger.warning(
+                            "telegram.stream timeout_recovered chat_id=%s thread_id=%s customer_id=%s stage=%s",
+                            chat_id,
+                            thread_id,
+                            customer_id,
+                            "first_token" if not last_streamed else "idle",
+                        )
+                        final_reply = recovered_text
+                        break
+                    timeout_text = (
+                        "Still working, but the model response timed out. "
+                        "Please retry in a moment."
+                    )
+                    logger.error(
+                        "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
+                        chat_id,
+                        thread_id,
+                        customer_id,
+                        "first_token" if not last_streamed else "idle",
+                    )
+                    final_reply = timeout_text
+                    break
+                progress_text = partial if isinstance(partial, str) else ""
+                if progress_text and _is_progress_signal(progress_text):
+                    if not waiting_for_segment:
+                        waiting_for_segment = True
+                        last_streamed = ""
+                    continue
+                if isinstance(partial, str) and partial == STREAM_APPROVAL_HANDOFF_SIGNAL:
+                    # Approval UI delivery is handled out-of-band by approval adapters.
+                    draft_enabled = False
+                    suppressed = True
+                    final_reply = None
+                    break
+                if not isinstance(partial, str):
+                    continue
+                consecutive_timeouts = 0
+                current = partial.strip()
+                if not current or is_low_signal_reply(current) or current == last_streamed:
+                    continue
+                # Defensive boundary handling for streams that reset partial text without explicit signal.
+                if last_streamed and not current.startswith(last_streamed):
                     waiting_for_segment = True
                     last_streamed = ""
-                continue
-            if isinstance(partial, str) and partial == STREAM_APPROVAL_HANDOFF_SIGNAL:
-                # Approval UI delivery is handled out-of-band by approval adapters.
-                draft_enabled = False
-                suppressed = True
-                final_reply = None
-                break
-            if not isinstance(partial, str):
-                continue
-            consecutive_timeouts = 0
-            current = partial.strip()
-            if not current or is_low_signal_reply(current) or current == last_streamed:
-                continue
-            # Defensive boundary handling for streams that reset partial text without explicit signal.
-            if last_streamed and not current.startswith(last_streamed):
-                waiting_for_segment = True
-                last_streamed = ""
-            if waiting_for_segment:
-                waiting_for_segment = False
-            last_streamed = current
-            await _send_draft_reply(current)
+                if waiting_for_segment:
+                    waiting_for_segment = False
+                last_streamed = current
+                await _send_draft_reply(current)
     except MergedInputSuppressedError:
         logger.info(
             "telegram.stream suppressed_by_merge chat_id=%s thread_id=%s customer_id=%s",

@@ -4,7 +4,11 @@ import asyncio
 
 import pytest
 
-from opentulpa.agent.runtime import STREAM_APPROVAL_HANDOFF_SIGNAL, STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL
+from opentulpa.agent.runtime import (
+    STREAM_APPROVAL_HANDOFF_SIGNAL,
+    STREAM_PROGRESS_PREFIX,
+    STREAM_WAIT_SIGNAL,
+)
 from opentulpa.interfaces.telegram import relay as relay_module
 
 
@@ -27,6 +31,20 @@ class _ResultThenWaitRuntime:
     async def astream_text(self, **kwargs):
         yield "Here is the finished result."
         yield STREAM_WAIT_SIGNAL
+
+
+class _FinalOnlyWorkflowSetupRuntime:
+    def __init__(self) -> None:
+        self.ainvoke_calls: list[dict[str, object]] = []
+        self.astream_called = False
+
+    async def astream_text(self, **kwargs):
+        self.astream_called = True
+        yield "This pre-tool setup narration should not be sent."
+
+    async def ainvoke_text(self, **kwargs):
+        self.ainvoke_calls.append(kwargs)
+        return "Draft updated. Please confirm this workflow before I save it."
 
 
 class _UpdatingProgressRuntime:
@@ -185,6 +203,34 @@ async def test_wait_signal_does_not_emit_visible_progress_message(
     assert "priority emails" in str(final or "").lower()
     assert not any("working on it" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
     assert fake_client.message_calls == [(1, "I checked the inbox. 3 priority emails found.", "HTML")]
+
+
+@pytest.mark.asyncio
+async def test_workflow_setup_turn_uses_final_reply_without_draft_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy", draft_ok=False)
+    runtime = _FinalOnlyWorkflowSetupRuntime()
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=runtime,
+        thread_id="chat-setup",
+        customer_id="telegram_setup",
+        text="update workflow draft",
+        bot_token="dummy",
+        chat_id=1,
+        turn_mode="workflow_setup",
+    )
+
+    assert suppressed is False
+    assert final == "Draft updated. Please confirm this workflow before I save it."
+    assert runtime.astream_called is False
+    assert runtime.ainvoke_calls[0]["turn_mode"] == "workflow_setup"
+    assert fake_client.draft_calls == []
+    assert fake_client.message_calls == [
+        (1, "Draft updated. Please confirm this workflow before I save it.", "HTML")
+    ]
 
 
 @pytest.mark.asyncio

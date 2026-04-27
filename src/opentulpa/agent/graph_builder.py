@@ -1051,8 +1051,12 @@ def build_runtime_graph(runtime: Any):
             and int(frozen_history_projection_raw.get("turn_start_index", -1)) <= len(sanitized_history)
         ):
             turn_start_index = int(frozen_history_projection_raw.get("turn_start_index", 0))
-            older_history_messages = _normalize_frozen_history_messages(
-                frozen_history_projection_raw.get("older_history_messages")
+            older_history_messages = _enforce_tool_message_protocol(
+                _sanitize_history_messages_for_model(
+                    _normalize_frozen_history_messages(
+                        frozen_history_projection_raw.get("older_history_messages")
+                    )
+                )
             )
             stale_summary_text = str(frozen_history_projection_raw.get("stale_summary_text", "")).strip()
         else:

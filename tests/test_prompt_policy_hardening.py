@@ -90,6 +90,8 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "live user-guided turn" in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
     assert "track source_file_ids and prepared_knowledge_file_ids" in workflow_setup
+    assert "do not ask for polling, scanning, or schedule intervals" in workflow_setup
+    assert "propose it with explicit assumptions" in workflow_setup
     assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
@@ -112,6 +114,8 @@ def test_literal_chat_prompt_mode_discourages_random_follow_up_questions() -> No
     assert "Do not pivot into a new topic" in literal_chat
     assert "follow-up question" in literal_chat
     assert "collaborative intake workflow setup session" in workflow_setup
+    assert "Do not ask for Telegram Business DM polling/schedule intervals" in workflow_setup
+    assert "propose the workflow with stated assumptions" in workflow_setup
     assert "bind only prepared knowledge files" in workflow_setup
     assert "Only commit the workflow after explicit user confirmation." in workflow_setup
 
@@ -398,6 +402,31 @@ def test_sanitize_history_drops_internal_system_messages() -> None:
     assert len(sanitized) == 2
     assert isinstance(sanitized[0], HumanMessage)
     assert isinstance(sanitized[1], AIMessage)
+
+
+def test_sanitize_history_strips_unparsed_provider_tool_calls() -> None:
+    message = AIMessage(content="Let me update the draft.").model_copy(
+        update={
+            "additional_kwargs": {
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "intake_workflow_setup_update", "arguments": "{}"},
+                }
+            ],
+            "refusal": None,
+        },
+        }
+    )
+
+    sanitized = _sanitize_history_messages_for_model([HumanMessage(content="setup"), message])
+
+    assert len(sanitized) == 2
+    assert isinstance(sanitized[1], AIMessage)
+    assert not getattr(sanitized[1], "tool_calls", [])
+    assert "tool_calls" not in getattr(sanitized[1], "additional_kwargs", {})
+    assert "refusal" in getattr(sanitized[1], "additional_kwargs", {})
 
 
 def test_sanitize_history_keeps_tool_calls_and_results_verbatim() -> None:

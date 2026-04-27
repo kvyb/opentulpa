@@ -127,6 +127,44 @@ def _list_workflows(harness: E2EHarness, *, customer_id: str) -> list[dict[str, 
     return workflows if isinstance(workflows, list) else []
 
 
+def _workflow_setup_session(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    thread_id: str,
+) -> dict[str, Any]:
+    response = harness.client.post(
+        "/internal/intake/setup/get",
+        json={"customer_id": customer_id, "thread_id": thread_id, "include_paused": True},
+    )
+    if response.status_code != 200:
+        return {}
+    payload = response.json()
+    session = payload.get("session")
+    return session if isinstance(session, dict) else {}
+
+
+def _workflow_setup_has_proposal(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    thread_id: str,
+) -> bool:
+    session = _workflow_setup_session(harness, customer_id=customer_id, thread_id=thread_id)
+    return bool(str(session.get("last_proposed_draft_hash", "") or "").strip())
+
+
+def _telegram_owner_thread_id(*, chat_id: int) -> str:
+    from opentulpa.interfaces.telegram import chat_service as chat_module
+
+    state = chat_module.STATE_STORE.load()
+    sessions = state.get("sessions") if isinstance(state, dict) else {}
+    slot = sessions.get(str(chat_id)) if isinstance(sessions, dict) else {}
+    if not isinstance(slot, dict):
+        return ""
+    return str(slot.get("thread_id", "") or "").strip()
+
+
 def _latest_message_for_chat(
     harness: E2EHarness,
     *,
@@ -150,6 +188,34 @@ def _messages_for_chat(
         for item in harness.telegram_client.sent_messages[start_index:]
         if int(item.get("chat_id", 0)) == int(chat_id)
     ]
+
+
+def _behavior_events(harness: E2EHarness) -> list[dict[str, Any]]:
+    if not harness.behavior_log_path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for line in harness.behavior_log_path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events
+
+
+def _turn_modes_seen(harness: E2EHarness, *, customer_id: str) -> list[str]:
+    modes: list[str] = []
+    for event in _behavior_events(harness):
+        if str(event.get("customer_id", "") or "") != str(customer_id):
+            continue
+        mode = str(event.get("turn_mode", "") or "").strip()
+        if mode and mode not in modes:
+            modes.append(mode)
+    return modes
 
 
 def _csv_rows_for_relative_path(
@@ -1394,6 +1460,8 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
             for item in e2e_harness.telegram_client.sent_messages
         )
     )
+    owner_thread_id = _telegram_owner_thread_id(chat_id=owner_chat_id)
+    assert owner_thread_id
 
     start_index = len(e2e_harness.telegram_client.sent_messages)
     first_status = e2e_harness.post_telegram(
@@ -1438,12 +1506,60 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
     )
     assert second_status == 200
     assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=second_turn_start)) >= 1)
+    assert _wait_until(
+        lambda: "workflow_setup" in _turn_modes_seen(e2e_harness, customer_id=customer_id),
+        timeout_seconds=15.0,
+    )
     proposal_message = _latest_message_for_chat(
         e2e_harness,
         chat_id=owner_chat_id,
         start_index=second_turn_start,
     )
     assert proposal_message is not None
+
+    if not _wait_until(
+        lambda: _workflow_setup_has_proposal(
+            e2e_harness,
+            customer_id=customer_id,
+            thread_id=owner_thread_id,
+        ),
+        timeout_seconds=10.0,
+    ):
+        clarification_start = len(e2e_harness.telegram_client.sent_messages)
+        clarification_status = e2e_harness.post_telegram(
+            body=_telegram_message(
+                chat_id=owner_chat_id,
+                user_id=owner_user_id,
+                message_id=53,
+                text=(
+                    "Intent: answer Telegram leads who ask about full car wash pricing and booking, "
+                    "then collect enough details to book them. Full wash only for this test. "
+                    "Treat the listed small car and SUV full-wash prices as complete. "
+                    "Telegram Business DM has no polling or scan schedule; it runs on inbound messages. "
+                    "Use the connected Telegram Business account. Please propose the workflow now and wait for my confirmation."
+                ),
+            )
+        )
+        assert clarification_status == 200
+        assert _wait_until(
+            lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=clarification_start)) >= 1,
+            timeout_seconds=90.0,
+        )
+        proposal_message = _latest_message_for_chat(
+            e2e_harness,
+            chat_id=owner_chat_id,
+            start_index=clarification_start,
+        )
+        assert proposal_message is not None
+
+    assert _wait_until(
+        lambda: _workflow_setup_has_proposal(
+            e2e_harness,
+            customer_id=customer_id,
+            thread_id=owner_thread_id,
+        ),
+        timeout_seconds=60.0,
+    )
     proposal_text = str(proposal_message.get("text", "")).lower()
     assert "confirm" in proposal_text or "save" in proposal_text or "workflow" in proposal_text
 
@@ -1451,7 +1567,7 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         body=_telegram_message(
             chat_id=owner_chat_id,
             user_id=owner_user_id,
-            message_id=53,
+            message_id=54,
             text="Looks good. Save and activate that workflow now.",
         )
     )
@@ -1543,6 +1659,7 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         details={
             "customer_id": customer_id,
             "owner_transcript": owner_transcript,
+            "turn_modes_seen": _turn_modes_seen(e2e_harness, customer_id=customer_id),
             "workflow": workflow_snapshot,
             "lead_message": lead_text,
             "lead_reply_text": lead_reply_text[:1200],

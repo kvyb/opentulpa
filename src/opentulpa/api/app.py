@@ -315,6 +315,9 @@ def create_app(
     workflow_setup_orchestrator = WorkflowSetupOrchestrator(
         setup_service=workflow_setup_service,
     )
+    if telegram_chat is not None:
+        telegram_chat.workflow_setup_status = workflow_setup_orchestrator.thread_status
+        telegram_chat.workflow_setup_after_reply = workflow_setup_orchestrator.after_reply
 
     turn_orchestrator = TurnOrchestrator(
         agent_runtime=runtime,

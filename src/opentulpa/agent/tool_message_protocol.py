@@ -59,6 +59,16 @@ def sanitize_history_messages_for_model(messages: list[AnyMessage]) -> list[AnyM
     for msg in messages:
         if isinstance(msg, SystemMessage):
             continue
+        if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
+            additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+            if isinstance(additional_kwargs, dict) and (
+                additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call")
+            ):
+                clean_kwargs = dict(additional_kwargs)
+                clean_kwargs.pop("tool_calls", None)
+                clean_kwargs.pop("function_call", None)
+                sanitized.append(msg.model_copy(update={"additional_kwargs": clean_kwargs}))
+                continue
         if isinstance(msg, ToolMessage):
             compact = compact_approval_pending_tool_message(msg)
             if compact is not None:

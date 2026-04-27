@@ -64,9 +64,20 @@ class TurnOrchestrator:
             include_pending_context=bool(request.include_pending_context),
             recursion_limit_override=request.recursion_limit_override,
         )
+        response_text = str(output or "").strip()
+        if (
+            turn_mode == "workflow_setup"
+            and setup_orchestrator is not None
+            and hasattr(setup_orchestrator, "after_reply")
+        ):
+            setup_orchestrator.after_reply(
+                customer_id=customer_id,
+                thread_id=thread_id,
+                reply_text=response_text,
+            )
         return ConversationTurnResult(
             customer_id=customer_id,
             thread_id=thread_id,
-            text=str(output or "").strip(),
+            text=response_text,
             status="ok",
         )

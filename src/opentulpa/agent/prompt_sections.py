@@ -41,6 +41,8 @@ def build_prompt_mode_message(prompt_mode: PromptMode) -> SystemMessage:
             "This is a collaborative intake workflow setup session.\n"
             "Treat the stored draft as the source of truth for the in-progress workflow configuration.\n"
             "Prefer concise setup questions, draft updates, and proposal summaries over generic chat.\n"
+            "Do not ask for Telegram Business DM polling/schedule intervals; those workflows run from inbound messages.\n"
+            "When enough required fields are known, propose the workflow with stated assumptions instead of continuing optional clarification.\n"
             "When uploaded files are used, preserve source file ids in the scratchpad and bind only prepared knowledge files to the final workflow.\n"
             "Only commit the workflow after explicit user confirmation."
         )

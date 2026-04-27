@@ -573,6 +573,51 @@ def _support_command_arg(text: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def _resolve_turn_mode_for_thread(
+    *,
+    workflow_setup_status: Callable[..., dict[str, Any]] | None,
+    customer_id: str,
+    thread_id: str,
+) -> str:
+    if workflow_setup_status is None:
+        return "interactive"
+    try:
+        state = workflow_setup_status(customer_id=customer_id, thread_id=thread_id)
+    except Exception:
+        logger.exception(
+            "Failed to resolve Telegram workflow setup status (customer_id=%s, thread_id=%s)",
+            customer_id,
+            thread_id,
+        )
+        return "interactive"
+    if str((state or {}).get("status", "") or "").strip().lower() == "active":
+        return "workflow_setup"
+    return "interactive"
+
+
+def _apply_workflow_setup_after_reply(
+    *,
+    workflow_setup_after_reply: Callable[..., dict[str, Any]] | None,
+    customer_id: str,
+    thread_id: str,
+    reply_text: str | None,
+) -> None:
+    if workflow_setup_after_reply is None or not str(reply_text or "").strip():
+        return
+    try:
+        workflow_setup_after_reply(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            reply_text=str(reply_text or ""),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to apply Telegram workflow setup reply hook (customer_id=%s, thread_id=%s)",
+            customer_id,
+            thread_id,
+        )
+
+
 async def _handle_support_command(
     *,
     command_name: str,
@@ -808,6 +853,8 @@ async def _run_interactive_session(
     session: InteractiveSession,
     bot_token: str,
     agent_runtime: Any,
+    workflow_setup_status: Callable[..., dict[str, Any]] | None = None,
+    workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
 ) -> None:
     while True:
         ready = await session.wait_for_ready_head()
@@ -849,6 +896,11 @@ async def _run_interactive_session(
                     thread_id=session.thread_id,
                     session=session,
                 )
+            turn_mode = _resolve_turn_mode_for_thread(
+                workflow_setup_status=workflow_setup_status,
+                customer_id=session.customer_id,
+                thread_id=session.thread_id,
+            )
             final, suppressed = await stream_langgraph_reply_to_telegram(
                 agent_runtime=agent_runtime,
                 thread_id=session.thread_id,
@@ -856,8 +908,16 @@ async def _run_interactive_session(
                 text=effective_text,
                 bot_token=bot_token,
                 chat_id=session.chat_id,
+                turn_mode=turn_mode,
                 interactive_session=session,
             )
+            if turn_mode == "workflow_setup" and final and not suppressed:
+                _apply_workflow_setup_after_reply(
+                    workflow_setup_after_reply=workflow_setup_after_reply,
+                    customer_id=session.customer_id,
+                    thread_id=session.thread_id,
+                    reply_text=final,
+                )
         except Exception as exc:
             logger.exception(
                 "Telegram interactive runner failed (chat_id=%s, thread_id=%s): %s",
@@ -911,6 +971,8 @@ async def handle_telegram_text(
     memory: Any | None = None,
     interactive_inbox: TelegramInteractiveInbox | None = None,
     support_customer_listing: Callable[[], list[dict[str, Any]]] | None = None,
+    workflow_setup_status: Callable[..., dict[str, Any]] | None = None,
+    workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
 ) -> str | None:
     parsed = parse_telegram_update(body)
     if not parsed:
@@ -1142,6 +1204,8 @@ async def handle_telegram_text(
                 session=session,
                 bot_token=bot_token,
                 agent_runtime=agent_runtime,
+                workflow_setup_status=workflow_setup_status,
+                workflow_setup_after_reply=workflow_setup_after_reply,
             )
         finally:
             await interactive_inbox.prune_if_idle(session)
@@ -1174,6 +1238,11 @@ async def handle_telegram_text(
     if not effective_text:
         return None
 
+    turn_mode = _resolve_turn_mode_for_thread(
+        workflow_setup_status=workflow_setup_status,
+        customer_id=customer_id,
+        thread_id=thread_id,
+    )
     if bot_token:
         try:
             final, suppressed = await stream_langgraph_reply_to_telegram(
@@ -1183,6 +1252,7 @@ async def handle_telegram_text(
                 text=effective_text,
                 bot_token=bot_token,
                 chat_id=ctx.chat_id,
+                turn_mode=turn_mode,
             )
             if suppressed:
                 return None
@@ -1195,6 +1265,13 @@ async def handle_telegram_text(
             )
             return _format_agent_error_for_user(exc)
         if final:
+            if turn_mode == "workflow_setup":
+                _apply_workflow_setup_after_reply(
+                    workflow_setup_after_reply=workflow_setup_after_reply,
+                    customer_id=customer_id,
+                    thread_id=thread_id,
+                    reply_text=final,
+                )
             STATE_STORE.touch_assistant_message(ctx.chat_id)
             return None
         debug_log(
@@ -1210,8 +1287,15 @@ async def handle_telegram_text(
             thread_id=thread_id,
             customer_id=customer_id,
             text=effective_text,
-            turn_mode="interactive",
+            turn_mode=turn_mode,
         )
+        if turn_mode == "workflow_setup":
+            _apply_workflow_setup_after_reply(
+                workflow_setup_after_reply=workflow_setup_after_reply,
+                customer_id=customer_id,
+                thread_id=thread_id,
+                reply_text=str(response or ""),
+            )
         return response
     except Exception as exc:
         logger.exception(
@@ -1233,11 +1317,15 @@ class TelegramChatService:
         file_vault: FileVaultService | None = None,
         memory: Any | None = None,
         support_customer_listing: Callable[[], list[dict[str, Any]]] | None = None,
+        workflow_setup_status: Callable[..., dict[str, Any]] | None = None,
+        workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.bot_token = str(bot_token or "").strip()
         self.file_vault = file_vault
         self.memory = memory
         self.support_customer_listing = support_customer_listing
+        self.workflow_setup_status = workflow_setup_status
+        self.workflow_setup_after_reply = workflow_setup_after_reply
         self._interactive_inbox = TelegramInteractiveInbox()
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
@@ -1306,4 +1394,6 @@ class TelegramChatService:
             memory=self.memory,
             interactive_inbox=self._interactive_inbox,
             support_customer_listing=self.support_customer_listing,
+            workflow_setup_status=self.workflow_setup_status,
+            workflow_setup_after_reply=self.workflow_setup_after_reply,
         )
