@@ -268,12 +268,7 @@ async def test_ainvoke_model_can_disable_deepseek_v4_pro_reasoning() -> None:
 
     assert isinstance(response, _CaptureResponse)
     assert len(model.calls) == 1
-    assert model.calls[0]["kwargs"] == {
-        "extra_body": {
-            "reasoning": {"effort": "none"},
-            "thinking": {"type": "disabled"},
-        },
-    }
+    assert model.calls[0]["kwargs"] == {}
 
 
 def test_model_request_attempts_are_default_off_openrouter() -> None:

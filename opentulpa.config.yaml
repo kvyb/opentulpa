@@ -28,11 +28,11 @@ agent_context_compaction_source_tokens: 100000
 approvals_ttl_minutes: 10
 
 # LLM/provider configuration
-llm_model: moonshotai/kimi-k2.6
+llm_model: deepseek/deepseek-v4-pro
 memory_llm_model: google/gemini-3-flash-preview
 llm_reasoning_effort: high
 wake_classifier_model: null
-wake_execution_model: moonshotai/kimi-k2.6
+wake_execution_model: deepseek/deepseek-v4-pro
 multimodal_llm: google/gemini-3-flash-preview
 guardrail_classifier_model: google/gemini-3-flash-preview
 openai_compatible_embedding_model: openai/text-embedding-3-small

@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 from langchain.chat_models import init_chat_model
+from langchain_openrouter import ChatOpenRouter
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -262,6 +263,19 @@ def _disable_deepseek_v4_pro_thinking_extra(*, model_name: str, reasoning_effort
     }
 
 
+def _is_deepseek_model(model_name: str | None) -> bool:
+    return "deepseek" in str(model_name or "").strip().lower()
+
+
+def _uses_openrouter_reasoning_adapter(*, model_name: str | None, base_url: str | None) -> bool:
+    return _is_deepseek_model(model_name) and _looks_like_openrouter_base_url(base_url)
+
+
+def _openrouter_reasoning_config(reasoning_effort: str | None) -> dict[str, Any]:
+    effort = str(reasoning_effort or "").strip() or "none"
+    return {"effort": effort, "exclude": False}
+
+
 def _chat_model_init_kwargs_for_model(
     base_kwargs: dict[str, Any],
     *,
@@ -281,6 +295,39 @@ def _chat_model_init_kwargs_for_model(
 def _looks_like_openrouter_base_url(base_url: str | None) -> bool:
     normalized = str(base_url or "").strip().lower()
     return "openrouter.ai" in normalized
+
+
+def _init_runtime_chat_model(
+    model_name: str,
+    *,
+    base_kwargs: dict[str, Any],
+    openrouter_base_url: str | None,
+    reasoning_effort: str | None,
+) -> Any:
+    if _uses_openrouter_reasoning_adapter(model_name=model_name, base_url=openrouter_base_url):
+        app_headers = _openrouter_app_headers(base_url=openrouter_base_url)
+        adapter_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "api_key": base_kwargs.get("api_key"),
+            "base_url": openrouter_base_url or base_kwargs.get("base_url"),
+            "temperature": base_kwargs.get("temperature"),
+            "max_completion_tokens": base_kwargs.get("max_completion_tokens"),
+            "reasoning": _openrouter_reasoning_config(reasoning_effort),
+        }
+        if referer := app_headers.get("HTTP-Referer"):
+            adapter_kwargs["app_url"] = referer
+        if title := app_headers.get("X-OpenRouter-Title"):
+            adapter_kwargs["app_title"] = title
+        return ChatOpenRouter(**{key: value for key, value in adapter_kwargs.items() if value is not None})
+
+    return init_chat_model(
+        model_name,
+        **_chat_model_init_kwargs_for_model(
+            base_kwargs,
+            model_name=model_name,
+            reasoning_effort=reasoning_effort,
+        ),
+    )
 
 
 def _json_safe(value: Any) -> Any:
@@ -1190,25 +1237,21 @@ class OpenTulpaLangGraphRuntime:
         if self._reasoning_effort:
             model_init_kwargs["reasoning_effort"] = self._reasoning_effort
 
-        self._model = init_chat_model(
+        self._model = _init_runtime_chat_model(
             self.model_name,
-            **_chat_model_init_kwargs_for_model(
-                model_init_kwargs,
-                model_name=self.model_name,
-                reasoning_effort=self._reasoning_effort,
-            ),
+            base_kwargs=model_init_kwargs,
+            openrouter_base_url=self.openrouter_base_url,
+            reasoning_effort=self._reasoning_effort,
         )
         if self._wake_classifier_model_name == self.model_name:
             self._wake_classifier_model = self._model
         else:
             try:
-                self._wake_classifier_model = init_chat_model(
+                self._wake_classifier_model = _init_runtime_chat_model(
                     self._wake_classifier_model_name,
-                    **_chat_model_init_kwargs_for_model(
-                        model_init_kwargs,
-                        model_name=self._wake_classifier_model_name,
-                        reasoning_effort=self._reasoning_effort,
-                    ),
+                    base_kwargs=model_init_kwargs,
+                    openrouter_base_url=self.openrouter_base_url,
+                    reasoning_effort=self._reasoning_effort,
                 )
             except Exception:
                 logger.exception(
@@ -1223,13 +1266,11 @@ class OpenTulpaLangGraphRuntime:
             self._wake_execution_model = self._wake_classifier_model
         else:
             try:
-                self._wake_execution_model = init_chat_model(
+                self._wake_execution_model = _init_runtime_chat_model(
                     self._wake_execution_model_name,
-                    **_chat_model_init_kwargs_for_model(
-                        model_init_kwargs,
-                        model_name=self._wake_execution_model_name,
-                        reasoning_effort=self._reasoning_effort,
-                    ),
+                    base_kwargs=model_init_kwargs,
+                    openrouter_base_url=self.openrouter_base_url,
+                    reasoning_effort=self._reasoning_effort,
                 )
             except Exception:
                 logger.exception(
@@ -1246,13 +1287,11 @@ class OpenTulpaLangGraphRuntime:
             self._telegram_media_model = self._wake_execution_model
         else:
             try:
-                self._telegram_media_model = init_chat_model(
+                self._telegram_media_model = _init_runtime_chat_model(
                     self._telegram_media_model_name,
-                    **_chat_model_init_kwargs_for_model(
-                        model_init_kwargs,
-                        model_name=self._telegram_media_model_name,
-                        reasoning_effort=self._reasoning_effort,
-                    ),
+                    base_kwargs=model_init_kwargs,
+                    openrouter_base_url=self.openrouter_base_url,
+                    reasoning_effort=self._reasoning_effort,
                 )
             except Exception:
                 logger.exception(
@@ -1271,13 +1310,11 @@ class OpenTulpaLangGraphRuntime:
             self._guardrail_classifier_model = self._wake_execution_model
         else:
             try:
-                self._guardrail_classifier_model = init_chat_model(
+                self._guardrail_classifier_model = _init_runtime_chat_model(
                     self._guardrail_classifier_model_name,
-                    **_chat_model_init_kwargs_for_model(
-                        model_init_kwargs,
-                        model_name=self._guardrail_classifier_model_name,
-                        reasoning_effort=self._reasoning_effort,
-                    ),
+                    base_kwargs=model_init_kwargs,
+                    openrouter_base_url=self.openrouter_base_url,
+                    reasoning_effort=self._reasoning_effort,
                 )
             except Exception:
                 logger.exception(
@@ -1317,6 +1354,11 @@ class OpenTulpaLangGraphRuntime:
                 ttl_1h=bool(getattr(self, "_prompt_cache_ttl_1h", False)),
             )
         )
+        if _uses_openrouter_reasoning_adapter(
+            model_name=target_model_name,
+            base_url=getattr(self, "openrouter_base_url", None),
+        ):
+            return invoke_extras
         return _deep_merge_dicts(
             invoke_extras,
             _disable_deepseek_v4_pro_thinking_extra(

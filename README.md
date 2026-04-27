@@ -283,9 +283,9 @@ Default runtime settings live in `opentulpa.config.yaml`.
 Recommended model split in this repo:
 
 ```yaml
-llm_model: moonshotai/kimi-k2.6
+llm_model: deepseek/deepseek-v4-pro
 llm_reasoning_effort: high
-wake_execution_model: moonshotai/kimi-k2.6
+wake_execution_model: deepseek/deepseek-v4-pro
 memory_llm_model: google/gemini-3-flash-preview
 multimodal_llm: google/gemini-3-flash-preview
 guardrail_classifier_model: google/gemini-3-flash-preview
@@ -293,10 +293,12 @@ guardrail_classifier_model: google/gemini-3-flash-preview
 
 This repo currently assumes:
 
-- `Kimi K2.6` for main chat and wake execution
+- `DeepSeek V4 Pro` for main chat and wake execution
 - `high` reasoning effort for agent-owned LLM calls by default
 - `Gemini Flash` for memory extraction, multimodal work, and guardrail classification
 - `MULTIMODAL_LLM` should be set when your main model is not multimodal
+
+When a DeepSeek model is used through OpenRouter, OpenTulpa routes that model through the OpenRouter LangChain adapter so `reasoning_details` are preserved across tool-call loops, which DeepSeek thinking mode requires.
 
 ### Telegram setup
 

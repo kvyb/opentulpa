@@ -28,6 +28,7 @@ dependencies = [
     "posthog>=7.7.0",
     "headroom-ai>=0.5.25",
     "openpyxl>=3.1.5",
+    "langchain-openrouter>=0.2.1",
 ]
 
 [project.optional-dependencies]
