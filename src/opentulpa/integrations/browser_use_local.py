@@ -65,7 +65,7 @@ class BrowserUseLocalManager:
         openrouter_base_url: str,
         default_model: str,
         model_override: str | None = None,
-        reasoning_effort: str | None = "high",
+        reasoning_effort: str | None = "medium",
         headless: bool = True,
         max_concurrent_tasks: int = 2,
         task_retention_seconds: int = 1800,

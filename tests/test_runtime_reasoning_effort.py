@@ -32,7 +32,7 @@ def test_runtime_passes_reasoning_effort_to_init_chat_model(monkeypatch) -> None
     assert calls[0]["reasoning_effort"] == "medium"
 
 
-def test_runtime_defaults_reasoning_effort_high_for_all_agent_models(monkeypatch) -> None:
+def test_runtime_defaults_reasoning_effort_medium_for_all_agent_models(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
@@ -54,7 +54,7 @@ def test_runtime_defaults_reasoning_effort_high_for_all_agent_models(monkeypatch
     )
 
     assert calls
-    assert all(call["reasoning_effort"] == "high" for call in calls)
+    assert all(call["reasoning_effort"] == "medium" for call in calls)
     deepseek_call = next(call for call in calls if call["model"] == "deepseek/deepseek-v4-pro")
     assert "extra_body" not in deepseek_call
     gemini_calls = [call for call in calls if call["model"] == "google/gemini-3-flash-preview"]

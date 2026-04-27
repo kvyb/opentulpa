@@ -172,7 +172,7 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     assert payload["isSuccess"] is True
     assert payload["steps"]
     state = manager._tasks[task_id]
-    assert state.agent.llm.kwargs["reasoning_effort"] == "high"
+    assert state.agent.llm.kwargs["reasoning_effort"] == "medium"
 
 
 @pytest.mark.asyncio

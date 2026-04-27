@@ -676,6 +676,9 @@ def build_runtime_graph(runtime: Any):
     forbidden_tool_args: dict[str, set[str]] = {name: {"customer_id"} for name in customer_scoped_tools}
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}
 
+    def _model_uses_current_turn_raw_history_only() -> bool:
+        return "deepseek" in str(getattr(runtime, "model_name", "") or "").strip().lower()
+
     stable_system_message = _build_system_prompt_message()
     context_engineer = getattr(runtime, "_context_engineer", None)
     if not isinstance(context_engineer, ContextEngineer):
@@ -1099,19 +1102,32 @@ def build_runtime_graph(runtime: Any):
                     token_budget=history_budget,
                 )
             bounded_messages = _enforce_tool_message_protocol(history_working_set.raw_messages)
-            bounded_latest_turn = _latest_turn_messages(bounded_messages)
-            bounded_latest_turn_count = len(bounded_latest_turn)
-            if 0 < bounded_latest_turn_count < len(bounded_messages):
-                older_history_messages = bounded_messages[:-bounded_latest_turn_count]
-            else:
-                older_history_messages = []
+            if not _model_uses_current_turn_raw_history_only():
+                bounded_latest_turn = _latest_turn_messages(bounded_messages)
+                bounded_latest_turn_count = len(bounded_latest_turn)
+                if 0 < bounded_latest_turn_count < len(bounded_messages):
+                    older_history_messages = bounded_messages[:-bounded_latest_turn_count]
+                else:
+                    older_history_messages = []
             stale_summary_text = history_working_set.summary_text
             prompt_context_update["frozen_history_projection"] = {
                 "turn_start_index": turn_start_index,
                 "older_history_messages": older_history_messages,
                 "stale_summary_text": stale_summary_text,
             }
+        if _model_uses_current_turn_raw_history_only():
+            older_history_messages = []
         latest_turn_messages = _enforce_tool_message_protocol(sanitized_history[turn_start_index:])
+        if _model_uses_current_turn_raw_history_only():
+            latest_turn_messages, stale_summary_text = _compact_deepseek_turn_raw_history(
+                latest_turn_messages,
+                stale_summary_text=stale_summary_text,
+            )
+            prompt_context_update["frozen_history_projection"] = {
+                "turn_start_index": turn_start_index,
+                "older_history_messages": [],
+                "stale_summary_text": stale_summary_text,
+            }
         summary_entry = (
             _make_retrieved_context_entry(
                 section="stale_history_summary",
@@ -1588,6 +1604,41 @@ def build_runtime_graph(runtime: Any):
                 start = idx
                 break
         return messages[start:]
+
+    def _compact_deepseek_turn_raw_history(
+        turn_messages: list[AnyMessage],
+        *,
+        stale_summary_text: str,
+    ) -> tuple[list[AnyMessage], str]:
+        if not turn_messages or not isinstance(turn_messages[-1], ToolMessage):
+            return turn_messages, stale_summary_text
+        first_tool_idx = len(turn_messages) - 1
+        while first_tool_idx > 0 and isinstance(turn_messages[first_tool_idx - 1], ToolMessage):
+            first_tool_idx -= 1
+        assistant_idx = first_tool_idx - 1
+        if assistant_idx < 0:
+            return turn_messages, stale_summary_text
+        assistant = turn_messages[assistant_idx]
+        if not isinstance(assistant, AIMessage) or not getattr(assistant, "tool_calls", None):
+            return turn_messages, stale_summary_text
+        keep_indices = {assistant_idx, *range(first_tool_idx, len(turn_messages))}
+        for idx in range(len(turn_messages) - 1, -1, -1):
+            if isinstance(turn_messages[idx], HumanMessage):
+                keep_indices.add(idx)
+                break
+        dropped_messages = [message for idx, message in enumerate(turn_messages) if idx not in keep_indices]
+        if dropped_messages:
+            turn_summary = context_engineer._summarize_stale_messages(
+                dropped_messages,
+                latest_tool_call_ids=set(),
+            )
+            if turn_summary:
+                stale_summary_text = "\n".join(
+                    part for part in [stale_summary_text, turn_summary] if part.strip()
+                )
+                stale_summary_text = _trim_text_to_token_budget(stale_summary_text, token_budget=900)
+        kept_messages = [message for idx, message in enumerate(turn_messages) if idx in keep_indices]
+        return _enforce_tool_message_protocol(kept_messages), stale_summary_text
 
     def _collect_recent_tool_outputs(turn_messages: list[AnyMessage]) -> list[str]:
         if not turn_messages:

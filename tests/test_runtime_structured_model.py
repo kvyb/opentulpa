@@ -142,11 +142,11 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_structured_model_uses_deepseek_v4_pro_default_high_reasoning() -> None:
+async def test_invoke_structured_model_uses_deepseek_v4_pro_default_medium_reasoning() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime.model_name = "deepseek/deepseek-v4-pro"
-    runtime._reasoning_effort = "high"
+    runtime._reasoning_effort = "medium"
     runtime._prompt_caching_enabled = False
     runtime._prompt_cache_ttl_1h = False
     model = _ProviderAwareStructuredModel()
@@ -167,7 +167,7 @@ async def test_invoke_structured_model_uses_deepseek_v4_pro_default_high_reasoni
 
 
 @pytest.mark.asyncio
-async def test_invoke_structured_model_can_disable_deepseek_v4_pro_reasoning() -> None:
+async def test_invoke_structured_model_omits_legacy_deepseek_disable_payload_for_openrouter_adapter() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime.model_name = "deepseek/deepseek-v4-pro"
@@ -188,12 +188,7 @@ async def test_invoke_structured_model_can_disable_deepseek_v4_pro_reasoning() -
     assert parsed.reason == "default_route"
     assert error is None
     assert len(model.runners) == 1
-    assert model.runners[0].calls[0]["kwargs"] == {
-        "extra_body": {
-            "reasoning": {"effort": "none"},
-            "thinking": {"type": "disabled"},
-        },
-    }
+    assert model.runners[0].calls[0]["kwargs"] == {}
 
 
 @pytest.mark.asyncio

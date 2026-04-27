@@ -735,6 +735,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "- Be precise. False positives are worse than ignoring an unrelated DM.\n"
         "- Use matches_workflow=true only when the customer is clearly pursuing the workflow intent now.\n"
         "- If the message is ambiguous, casual, social, or not clearly about the workflow, return matches_workflow=false, booking_action=ignore, reply_action=none.\n"
+        "- If the customer asks a business/service/pricing/booking question that is close to the workflow but outside its configured scope, return matches_workflow=false, booking_action=ignore, reply_action=send_reply with a concise redirect based on workflow instructions.\n"
         "- Confidence should reflect how certain you are in the match and booking decision.\n"
         "- Confidence guide: 0.9+ very clear, 0.7-0.89 likely, 0.4-0.69 ambiguous, below 0.4 weak evidence.\n\n"
         "Field extraction policy:\n"
@@ -1033,6 +1034,7 @@ def _build_intake_workflow_agent_prompt(
         "- reply_action must be one of: none, send_reply, mark_cancelled.\n"
         "- If availability is blocked or conflicting, do not set ready_to_save=true.\n"
         "- If details are missing, ask one concise follow-up question in reply_text.\n"
+        "- If the customer asks a business/service/pricing/booking question that is close to the workflow but outside its configured scope, return matches_workflow=false, booking_action=ignore, reply_action=send_reply with a concise redirect based on workflow instructions.\n"
         "- If execution_feedback is present, you are replanning after a real tool or application error. "
         "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
         "- sink_arguments is for sink-specific write arguments or overrides discovered during this turn; "
@@ -1102,7 +1104,7 @@ class OpenTulpaLangGraphRuntime:
         app_url: str,
         openrouter_api_key: str,
         model_name: str,
-        reasoning_effort: str | None = "high",
+        reasoning_effort: str | None = "medium",
         openrouter_base_url: str = "https://openrouter.ai/api/v1",
         wake_classifier_model_name: str | None = None,
         wake_execution_model_name: str | None = None,

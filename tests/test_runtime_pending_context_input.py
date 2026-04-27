@@ -6,7 +6,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opentulpa.agent.graph_builder import build_runtime_graph
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 from opentulpa.agent.utils import approx_tokens as _approx_tokens
@@ -535,6 +535,202 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
     first_summary = _summary_block(captured_messages[0])
     second_summary = _summary_block(captured_messages[1])
     assert first_summary == second_summary
+
+
+@pytest.mark.asyncio
+async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_messages: list[Any] = []
+
+    async def _live_time(customer_id: str) -> dict[str, str]:
+        del customer_id
+        return {
+            "server_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "server_time_utc_iso": "2026-04-09T02:00:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "profile",
+        }
+
+    async def _directive(customer_id: str) -> str | None:
+        del customer_id
+        return None
+
+    async def _memory_grounding(**kwargs: Any) -> str:
+        del kwargs
+        return ""
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        captured_messages.extend(messages)
+        return AIMessage(content="Done.")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": True}
+
+    prior_messages: list[Any] = []
+    for idx in range(14):
+        prior_messages.append(HumanMessage(content=f"Earlier user note {idx}: old raw chat."))
+        prior_messages.append(AIMessage(content=f"Earlier assistant reply {idx}: old raw reply."))
+
+    runtime.model_name = "deepseek/deepseek-v4-pro"
+    runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
+    runtime._checkpointer = InMemorySaver()
+    runtime._model_with_tools = object()
+    runtime._thread_rollup_service = None
+    runtime._load_active_directive = _directive  # type: ignore[method-assign]
+    runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
+    runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
+    runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
+    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
+    runtime._tools = {}
+    runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
+    runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.model_with_tools_for_turn_mode = lambda turn_mode: object()  # type: ignore[assignment]
+    runtime._context_token_limit = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime.recursion_limit = 8
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [*prior_messages, HumanMessage(content="current live ask")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_test",
+        },
+        config={"configurable": {"thread_id": "chat_test"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Done."
+    human_texts = [str(getattr(msg, "content", "")) for msg in captured_messages if isinstance(msg, HumanMessage)]
+    assistant_texts = [str(getattr(msg, "content", "")) for msg in captured_messages if isinstance(msg, AIMessage)]
+    assert "current live ask" in human_texts
+    assert not any(text.startswith("Earlier user note") for text in human_texts)
+    assert not any(text.startswith("Earlier assistant reply") for text in assistant_texts)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_messages: list[list[Any]] = []
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            return {"status": "ok", "step": args.get("step")}
+
+    async def _live_time(customer_id: str) -> dict[str, str]:
+        del customer_id
+        return {
+            "server_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "server_time_utc_iso": "2026-04-09T02:00:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": "2026-04-09T10:00:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "profile",
+        }
+
+    async def _directive(customer_id: str) -> str | None:
+        del customer_id
+        return None
+
+    async def _memory_grounding(**kwargs: Any) -> str:
+        del kwargs
+        return ""
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        captured_messages.append(list(messages))
+        if len(captured_messages) == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {"step": 1}}],
+            )
+        if len(captured_messages) == 2:
+            return AIMessage(
+                content="",
+                tool_calls=[{"id": "call_2", "name": "fake_tool", "args": {"step": 2}}],
+            )
+        return AIMessage(content="Done.")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": True}
+
+    runtime.model_name = "deepseek/deepseek-v4-pro"
+    runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
+    runtime._checkpointer = InMemorySaver()
+    runtime._model_with_tools = object()
+    runtime._thread_rollup_service = None
+    runtime._load_active_directive = _directive  # type: ignore[method-assign]
+    runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
+    runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
+    runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
+    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
+    runtime._tools = {"fake_tool": _FakeTool()}
+    runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
+    runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.model_with_tools_for_turn_mode = lambda turn_mode: object()  # type: ignore[assignment]
+    runtime._context_token_limit = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime.recursion_limit = 10
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="run two tool steps")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_test",
+        },
+        config={"configurable": {"thread_id": "chat_test"}, "recursion_limit": 10},
+    )
+
+    assert result["final_response_text"] == "Done."
+    assert len(captured_messages) == 3
+    third_prompt = captured_messages[2]
+    raw_tool_ids = [
+        str(getattr(message, "tool_call_id", "") or "")
+        for message in third_prompt
+        if isinstance(message, ToolMessage)
+    ]
+    raw_ai_tool_ids = [
+        str(call.get("id", "") or "")
+        for message in third_prompt
+        if isinstance(message, AIMessage)
+        for call in (getattr(message, "tool_calls", []) or [])
+        if isinstance(call, dict)
+    ]
+    assert raw_tool_ids == ["call_2"]
+    assert raw_ai_tool_ids == ["call_2"]
 
 
 

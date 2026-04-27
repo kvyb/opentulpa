@@ -50,7 +50,7 @@ def test_extract_sources_collects_from_payload_and_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_web_search_requests_high_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_web_search_requests_medium_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     async def _fake_post(
@@ -77,4 +77,4 @@ async def test_web_search_requests_high_reasoning_effort(monkeypatch: pytest.Mon
     result = await web_search_module.web_search("current news")
 
     assert isinstance(result, dict)
-    assert captured["json"]["reasoning"] == {"effort": "high"}
+    assert captured["json"]["reasoning"] == {"effort": "medium"}

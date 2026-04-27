@@ -109,7 +109,56 @@ async def test_intake_workflow_setup_update_requires_patch() -> None:
 
 @pytest.mark.asyncio
 async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
-    runtime = DummyRuntime([Response(200, {"ok": True, "inspection": {"format": "xlsx"}})])
+    runtime = DummyRuntime(
+        [
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "file": {
+                        "id": "file_raw",
+                        "original_filename": "price.xlsx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "size_bytes": 123,
+                        "summary": "uploaded price | content_preview=" + ("x" * 2000),
+                    },
+                    "inspection": {
+                        "filename": "price.xlsx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "format": "xlsx",
+                        "structure": {
+                            "sheets": [
+                                {
+                                    "index": 1,
+                                    "name": "Мойка",
+                                    "matched_terms": ["мойка"],
+                                    "max_row": 120,
+                                    "max_column": 20,
+                                    "nonempty_rows": 80,
+                                    "sample_rows": [
+                                        {
+                                            "source_ref": "Мойка!1",
+                                            "row": 1,
+                                            "values": ["service", "price", "x" * 500],
+                                        }
+                                    ],
+                                    "matches": [
+                                        {
+                                            "source_ref": "Мойка!5",
+                                            "row": 5,
+                                            "values": ["2х-фазная мойка", "1200", "x" * 500],
+                                        }
+                                    ],
+                                    "table_candidates": [],
+                                }
+                            ],
+                            "selection_format": {"sheet_name": "exact sheet name"},
+                        },
+                    },
+                },
+            )
+        ]
+    )
     tools = register_runtime_tools(runtime)
 
     result = await tools["uploaded_file_inspect_structure"].ainvoke(
@@ -120,6 +169,10 @@ async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
     )
 
     assert result["inspection"]["format"] == "xlsx"
+    assert "sheet_inventory" in result["inspection"]["structure"]
+    assert "relevant_sheets" in result["inspection"]["structure"]
+    assert "content_preview" not in str(result)
+    assert len(str(result)) < 3000
     method, path, kwargs = runtime.calls[0]
     assert method == "POST"
     assert path == "/internal/files/inspect_structure"
@@ -133,7 +186,24 @@ async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
 @pytest.mark.asyncio
 async def test_uploaded_file_prepare_intake_knowledge_posts_expected_payload() -> None:
     runtime = DummyRuntime(
-        [Response(200, {"ok": True, "knowledge_file_id": "file_prepared"})]
+        [
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "knowledge_file_id": "file_prepared",
+                    "knowledge_file": {
+                        "id": "file_prepared",
+                        "original_filename": "knowledge.md",
+                        "mime_type": "text/markdown",
+                        "size_bytes": 20000,
+                        "summary": "workflow knowledge | content_preview=" + ("markdown " * 2000),
+                    },
+                    "source_file_ids": ["file_raw"],
+                    "matched_sections": ["price.xlsx:Мойка:1-20"],
+                },
+            )
+        ]
     )
     tools = register_runtime_tools(runtime)
 
@@ -155,6 +225,9 @@ async def test_uploaded_file_prepare_intake_knowledge_posts_expected_payload() -
     )
 
     assert result["knowledge_file_id"] == "file_prepared"
+    assert result["knowledge_file"]["id"] == "file_prepared"
+    assert "content_preview" not in str(result)
+    assert len(str(result)) < 1500
     method, path, kwargs = runtime.calls[0]
     assert method == "POST"
     assert path == "/internal/files/prepare_intake_knowledge"

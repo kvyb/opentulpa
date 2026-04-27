@@ -61,15 +61,15 @@ def test_settings_accepts_legacy_telegram_media_model_alias() -> None:
     assert settings.multimodal_llm == "google/gemini-3-flash-preview"
 
 
-def test_settings_default_agent_models_use_deepseek(monkeypatch, tmp_path: Path) -> None:
+def test_settings_default_agent_models_use_glm(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("WAKE_EXECUTION_MODEL", raising=False)
 
     settings = Settings()
 
-    assert settings.llm_model == "deepseek/deepseek-v4-pro"
-    assert settings.wake_execution_model == "deepseek/deepseek-v4-pro"
+    assert settings.llm_model == "z-ai/glm-5.1"
+    assert settings.wake_execution_model == "z-ai/glm-5.1"
 
 
 def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:

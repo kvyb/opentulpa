@@ -225,7 +225,7 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ainvoke_model_keeps_deepseek_v4_pro_reasoning_with_default_high_effort() -> None:
+async def test_ainvoke_model_keeps_deepseek_v4_pro_reasoning_with_default_medium_effort() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",

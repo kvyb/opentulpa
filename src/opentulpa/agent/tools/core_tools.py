@@ -50,6 +50,134 @@ def _tool_error_payload(tool_name: str, response: Any) -> dict[str, Any]:
     return payload
 
 
+def _trim_tool_text(value: Any, *, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 15)].rstrip() + " ...[truncated]"
+
+
+def _compact_file_record_for_tool(raw: Any) -> dict[str, Any]:
+    record = raw if isinstance(raw, dict) else {}
+    summary = str(record.get("summary", "") or "").strip()
+    if " | content_preview=" in summary:
+        summary = summary.split(" | content_preview=", 1)[0].strip()
+    return {
+        "id": str(record.get("id", "") or "").strip(),
+        "filename": str(record.get("original_filename", "") or "").strip(),
+        "mime_type": str(record.get("mime_type", "") or "").strip(),
+        "size_bytes": record.get("size_bytes"),
+        "summary": _trim_tool_text(summary, limit=320),
+    }
+
+
+def _compact_row_view(raw: Any, *, value_limit: int = 120, max_values: int = 8) -> dict[str, Any]:
+    row = raw if isinstance(raw, dict) else {}
+    values = row.get("values") if isinstance(row.get("values"), list) else []
+    return {
+        key: value
+        for key, value in {
+            "source_ref": row.get("source_ref"),
+            "row": row.get("row"),
+            "values": [_trim_tool_text(value, limit=value_limit) for value in values[:max_values]],
+        }.items()
+        if value not in (None, "", [])
+    }
+
+
+def _compact_uploaded_file_inspection(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    inspection = payload.get("inspection") if isinstance(payload.get("inspection"), dict) else {}
+    structure = inspection.get("structure") if isinstance(inspection.get("structure"), dict) else {}
+    raw_sheets = structure.get("sheets") if isinstance(structure.get("sheets"), list) else []
+    sheet_inventory: list[dict[str, Any]] = []
+    relevant_sheets: list[dict[str, Any]] = []
+    for raw_sheet in raw_sheets:
+        if not isinstance(raw_sheet, dict):
+            continue
+        matches = raw_sheet.get("matches") if isinstance(raw_sheet.get("matches"), list) else []
+        sample_rows = raw_sheet.get("sample_rows") if isinstance(raw_sheet.get("sample_rows"), list) else []
+        table_candidates = (
+            raw_sheet.get("table_candidates")
+            if isinstance(raw_sheet.get("table_candidates"), list)
+            else []
+        )
+        compact_sheet = {
+            "index": raw_sheet.get("index"),
+            "name": str(raw_sheet.get("name", "") or "").strip(),
+            "matched_terms": raw_sheet.get("matched_terms") or [],
+            "max_row": raw_sheet.get("max_row"),
+            "max_column": raw_sheet.get("max_column"),
+            "nonempty_rows": raw_sheet.get("nonempty_rows"),
+        }
+        sheet_inventory.append(compact_sheet)
+        is_relevant = bool(raw_sheet.get("matched_terms") or matches or sample_rows or table_candidates)
+        if is_relevant:
+            relevant = dict(compact_sheet)
+            relevant["sample_rows"] = [_compact_row_view(row) for row in sample_rows[:3]]
+            relevant["matches"] = [_compact_row_view(row) for row in matches[:4]]
+            relevant["table_candidates"] = [
+                {
+                    key: value
+                    for key, value in {
+                        "sheet_name": item.get("sheet_name") if isinstance(item, dict) else None,
+                        "row_start": item.get("row_start") if isinstance(item, dict) else None,
+                        "row_end": item.get("row_end") if isinstance(item, dict) else None,
+                        "sample_rows": [
+                            _compact_row_view(row, value_limit=80, max_values=6)
+                            for row in (
+                                item.get("sample_rows") if isinstance(item, dict) and isinstance(item.get("sample_rows"), list) else []
+                            )[:1]
+                        ],
+                    }.items()
+                    if value not in (None, "", [])
+                }
+                for item in table_candidates[:3]
+                if isinstance(item, dict)
+            ]
+            omitted = str(raw_sheet.get("omitted_detail_reason", "") or "").strip()
+            if omitted:
+                relevant["omitted_detail_reason"] = omitted
+            relevant_sheets.append(relevant)
+    return {
+        "ok": bool(payload.get("ok", False)),
+        "file": _compact_file_record_for_tool(payload.get("file")),
+        "inspection": {
+            "filename": str(inspection.get("filename", "") or "").strip(),
+            "mime_type": str(inspection.get("mime_type", "") or "").strip(),
+            "format": str(inspection.get("format", "") or "").strip(),
+            "warnings": inspection.get("warnings") or [],
+            "structure": {
+                "sheet_inventory": sheet_inventory,
+                "relevant_sheets": relevant_sheets,
+                "selection_format": structure.get("selection_format") or {},
+            },
+        },
+        "model_note": (
+            "Inspection is compacted for the model. Use sheet_inventory and relevant_sheets "
+            "to choose selected_sections; full source bytes stay in the file vault."
+        ),
+    }
+
+
+def _compact_prepared_knowledge_result(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        "ok": bool(payload.get("ok", False)),
+        "knowledge_file_id": str(payload.get("knowledge_file_id", "") or "").strip(),
+        "knowledge_file": _compact_file_record_for_tool(payload.get("knowledge_file")),
+        "source_file_ids": payload.get("source_file_ids") or [],
+        "matched_sections": payload.get("matched_sections") or [],
+        "warnings": payload.get("warnings") or [],
+        "model_note": (
+            "The full Markdown knowledge pack was saved in the file vault. "
+            "Bind knowledge_file_id to the workflow; do not recreate the pack unless scope changes."
+        ),
+    }
+
+
 def _best_crawl4ai_text(result: Any) -> tuple[str, str | None]:
     title: str | None = None
     metadata = getattr(result, "metadata", None)
@@ -489,7 +617,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return _tool_error_payload("uploaded_file_inspect_structure", r)
-        return r.json()
+        return _compact_uploaded_file_inspection(r.json())
 
     @tool
     async def uploaded_file_prepare_intake_knowledge(
@@ -532,7 +660,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return _tool_error_payload("uploaded_file_prepare_intake_knowledge", r)
-        return r.json()
+        return _compact_prepared_knowledge_result(r.json())
 
     @tool
     async def directive_get() -> Any:

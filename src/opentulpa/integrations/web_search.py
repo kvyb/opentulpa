@@ -147,7 +147,7 @@ async def web_search(query: str) -> dict[str, object] | str:
         "model": use_model,
         "messages": [{"role": "user", "content": query}],
         "max_tokens": 2048,
-        "reasoning": {"effort": "high"},
+        "reasoning": {"effort": "medium"},
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:

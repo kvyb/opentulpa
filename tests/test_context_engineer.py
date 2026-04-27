@@ -134,7 +134,7 @@ def test_context_engineer_optional_context_rules() -> None:
     assert engineer.should_include_optional_context(kind="pending_context", prompt_mode="execution", should_retrieve=False) is True
 
 
-def test_context_engineer_defaults_keep_twenty_chat_and_four_tool_messages_in_order() -> None:
+def test_context_engineer_defaults_keep_twenty_chat_and_five_tool_messages_in_order() -> None:
     engineer = ContextEngineer()
     messages = []
     for idx in range(24):
@@ -146,11 +146,13 @@ def test_context_engineer_defaults_keep_twenty_chat_and_four_tool_messages_in_or
     result = engineer.build_history_working_set(messages, token_budget=10000)
 
     assert result.raw_chat_count == 20
-    assert result.raw_tool_count == 4
-    assert len(result.raw_messages) == 24
+    assert result.raw_tool_count == 5
+    assert len(result.raw_messages) == 25
     ordered_contents = [getattr(msg, "content", "") for msg in result.raw_messages]
     assert ordered_contents[:4] == ["user 14", "assistant 14", "user 15", "assistant 15"]
-    assert ordered_contents[-3:] == [
+    assert ordered_contents[-5:] == [
+        '{"status":"ok","result":"tool 1"}',
+        '{"status":"ok","result":"tool 2"}',
         '{"status":"ok","result":"tool 3"}',
         '{"status":"ok","result":"tool 4"}',
         '{"status":"ok","result":"tool 5"}',

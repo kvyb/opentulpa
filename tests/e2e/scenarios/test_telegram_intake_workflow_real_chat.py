@@ -3,9 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import signal
 import time
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -282,7 +280,6 @@ def _addresses_pricing_question(text: str) -> bool:
 
 
 _AUTOSPA_PRICE_ASSET = Path(__file__).resolve().parents[1] / "assets" / "autospa_price.xlsx"
-_AUTOSPA_STAGE_TIMEOUT_SECONDS = 120.0
 
 
 def _live_google_sheets_target(harness: E2EHarness) -> Any | None:
@@ -298,20 +295,6 @@ def _owner_identity_for_autospa(harness: E2EHarness) -> tuple[int, int, str]:
             owner_user_id = int(raw_user_id)
             return owner_user_id, owner_user_id + 1000, customer_id
     return 901, 1901, "telegram_901"
-
-
-@contextmanager
-def _stage_timeout(stage_name: str, timeout_seconds: float = _AUTOSPA_STAGE_TIMEOUT_SECONDS) -> Any:
-    def _raise_timeout(_signum: int, _frame: Any) -> None:
-        raise TimeoutError(f"stage timed out after {timeout_seconds:.0f}s: {stage_name}")
-
-    old_handler = signal.signal(signal.SIGALRM, _raise_timeout)
-    signal.setitimer(signal.ITIMER_REAL, max(1.0, float(timeout_seconds)))
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _write_json_artifact(path: Path, payload: Any) -> None:
@@ -525,32 +508,7 @@ def _run_autospa_stage(
     harness.recorder.add("stage_started", stage=stage_name, goal=stage_goal)
     started = time.monotonic()
     try:
-        with _stage_timeout(stage_name):
-            result = run()
-    except TimeoutError as exc:
-        harness.recorder.add("stage_timed_out", stage=stage_name, error=str(exc))
-        paths = _current_autospa_artifacts(
-            harness,
-            state=state,
-            artifact_dir=artifact_dir,
-            customer_id=customer_id,
-        )
-        _write_autospa_failure_debug(
-            harness,
-            state=state,
-            artifact_dir=artifact_dir,
-            customer_id=customer_id,
-            error=exc,
-        )
-        _judge_autospa_stage(
-            harness,
-            state=state,
-            stage_name=stage_name,
-            stage_goal=stage_goal,
-            stage_result={"ok": False, "error": str(exc), "error_type": type(exc).__name__},
-            artifact_paths=paths,
-        )
-        raise RuntimeError(str(exc)) from exc
+        result = run()
     except Exception as exc:
         harness.recorder.add("stage_failed", stage=stage_name, error=str(exc), error_type=type(exc).__name__)
         paths = _current_autospa_artifacts(

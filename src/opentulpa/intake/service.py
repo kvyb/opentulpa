@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import re
 import sqlite3
 import threading
 from contextlib import suppress
@@ -145,6 +146,17 @@ def _unique_string_list(values: Any) -> list[str]:
         seen.add(folded)
         out.append(text)
     return out
+
+
+def _looks_like_cyrillic(*values: Any) -> bool:
+    text = " ".join(str(value or "") for value in values)
+    return any("\u0400" <= char <= "\u04ff" for char in text)
+
+
+def _extract_phone_hint(value: Any) -> str:
+    text = str(value or "")
+    match = re.search(r"\+?\d[\d\s().-]{6,}\d", text)
+    return match.group(0).strip(" .,-") if match else ""
 
 
 class IntakeWorkflowService:
@@ -1200,6 +1212,76 @@ class IntakeWorkflowService:
             configured_conversation_ids and conversation_id not in configured_conversation_ids
         )
 
+    def _fallback_out_of_scope_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        decision: dict[str, Any],
+    ) -> str:
+        latest_text = str(
+            conversation_summary.get("latest_inbound_message_text_preview", "") or ""
+        ).strip()
+        decision_text = " ".join(
+            [
+                str(decision.get("conversation_summary", "") or ""),
+                str(decision.get("reason", "") or ""),
+            ]
+        ).lower()
+        if not latest_text:
+            return ""
+        out_of_scope_markers = (
+            "out of scope",
+            "outside scope",
+            "outside the workflow",
+            "outside this workflow",
+            "outside the scoped workflow",
+            "вне scope",
+            "вне workflow",
+            "вне этого workflow",
+            "не входит",
+            "не покрывает",
+        )
+        if not any(marker in decision_text for marker in out_of_scope_markers):
+            return ""
+        latest_lower = latest_text.lower()
+        inquiry_markers = (
+            "?",
+            "сколько",
+            "стоим",
+            "цен",
+            "прайс",
+            "запис",
+            "можно",
+            "услуг",
+            "how much",
+            "price",
+            "cost",
+            "book",
+            "appointment",
+            "service",
+        )
+        if not any(marker in latest_lower for marker in inquiry_markers):
+            return ""
+        scope = str(workflow.get("name") or workflow.get("intent_description") or "").strip()
+        if len(scope) > 120:
+            scope = scope[:117].rstrip() + "..."
+        if not scope:
+            scope = "this workflow"
+        instructions = str(workflow.get("assistant_instructions", "") or "")
+        phone = _extract_phone_hint(instructions)
+        if _looks_like_cyrillic(latest_text, instructions, scope):
+            phone_part = f" по телефону {phone}" if phone else " напрямую"
+            return (
+                f"Здравствуйте! Сейчас я могу помочь только по workflow «{scope}». "
+                f"По этой услуге, пожалуйста, обратитесь{phone_part}."
+            )
+        phone_part = f" at {phone}" if phone else " directly"
+        return (
+            f"Hi! I can only help with the current workflow: {scope}. "
+            f"For this service, please contact the business{phone_part}."
+        )
+
     def _load_source_items(
         self,
         *,
@@ -1504,6 +1586,102 @@ class IntakeWorkflowService:
                     )
                     continue
                 if not bool(decision.get("matches_workflow")):
+                    reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
+                    reply_text = str(decision.get("reply_text", "") or "").strip()
+                    if reply_action != "send_reply" or not reply_text:
+                        fallback_reply = self._fallback_out_of_scope_reply(
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            decision=decision,
+                        )
+                        if fallback_reply:
+                            reply_action = "send_reply"
+                            reply_text = fallback_reply
+                            self._emit_observability(
+                                event="intake.reply.fallback_out_of_scope",
+                                workflow=workflow,
+                                conversation_summary=cursor_summary,
+                                reply_text=reply_text,
+                            )
+                    if reply_action == "send_reply" and reply_text:
+                        self._emit_observability(
+                            event="intake.apply.start",
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            booking_action="ignore",
+                            reply_action=reply_action,
+                            ready_to_save=False,
+                        )
+                        self._emit_observability(
+                            event="intake.reply.start",
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            booking_id="",
+                            reply_text=reply_text,
+                        )
+                        reply_error = await self._send_source_reply(
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            reply_text=reply_text,
+                        )
+                        if reply_error is not None:
+                            errors.append(f"{conversation_id}: {reply_error}")
+                            self._emit_observability(
+                                event="intake.reply.error",
+                                workflow=workflow,
+                                conversation_summary=cursor_summary,
+                                booking_id="",
+                                error=reply_error,
+                            )
+                            self._emit_observability(
+                                event="intake.conversation.error",
+                                workflow=workflow,
+                                conversation_summary=cursor_summary,
+                                phase="reply_execution",
+                                error=reply_error,
+                            )
+                            continue
+                        self._emit_observability(
+                            event="intake.reply.ok",
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            booking_id="",
+                        )
+                        self._emit_observability(
+                            event="intake.apply.ok",
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            status="ignored",
+                            booking_action="ignore",
+                            reply_action=reply_action,
+                            ready_to_save=False,
+                        )
+                        self._set_cursor(
+                            workflow_id=str(workflow["workflow_id"]),
+                            conversation_id=conversation_id,
+                            latest_inbound_message_id=latest_inbound_id,
+                            latest_inbound_message_time=latest_inbound_time,
+                            conversation_updated_time=conversation_updated_time,
+                            latest_outbound_message_id=latest_outbound_id,
+                            agent_action_at=_utc_now_iso(),
+                        )
+                        result_items.append(
+                            {
+                                "conversation_id": conversation_id,
+                                "matched": False,
+                                "status": "ignored",
+                                "replied": True,
+                            }
+                        )
+                        self._emit_observability(
+                            event="intake.conversation.complete",
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            matched=False,
+                            status="ignored",
+                            replied=True,
+                        )
+                        continue
                     self._set_cursor(
                         workflow_id=str(workflow["workflow_id"]),
                         conversation_id=conversation_id,
@@ -1768,32 +1946,64 @@ class IntakeWorkflowService:
                 error=error,
                 decision=decision,
             )
-        if booking_action == "ignore" and reply_action == "send_reply":
-            extracted_fields = _safe_dict(decision.get("extracted_fields"))
-            missing_fields = _unique_string_list(decision.get("missing_fields"))
-            if extracted_fields or missing_fields:
-                booking_action = "update_active" if active_booking is not None else "create_new_booking"
+        if booking_action == "ignore":
+            if reply_action == "send_reply":
                 self._emit_observability(
-                    event="intake.apply.normalized_booking_action",
+                    event="intake.reply.start",
                     workflow=workflow,
                     conversation_summary=conversation_summary,
-                    from_booking_action="ignore",
-                    to_booking_action=booking_action,
-                    reply_action=reply_action,
+                    booking_id="",
+                    reply_text=reply_text,
                 )
-        if booking_action == "ignore":
+                reply_error = await self._send_source_reply(
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    reply_text=reply_text,
+                )
+                if reply_error is not None:
+                    self._emit_observability(
+                        event="intake.reply.error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id="",
+                        error=reply_error,
+                    )
+                    self._emit_observability(
+                        event="intake.apply.error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        phase="reply_execution",
+                        error=reply_error,
+                        booking_id="",
+                    )
+                    return {}, reply_error, self._build_recovery_feedback(
+                        phase="reply_execution",
+                        error=reply_error,
+                        decision=decision,
+                    )
+                self._emit_observability(
+                    event="intake.reply.ok",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id="",
+                )
             self._emit_observability(
                 event="intake.apply.ok",
                 workflow=workflow,
                 conversation_summary=conversation_summary,
                 status="ignored",
                 booking_action=booking_action,
+                reply_action=reply_action,
+                ready_to_save=ready_to_save,
             )
-            return {
+            ignored_result = {
                 "conversation_id": str(conversation_summary.get("conversation_id", "") or ""),
                 "matched": True,
                 "status": "ignored",
-            }, None, None
+            }
+            if reply_action == "send_reply":
+                ignored_result["replied"] = True
+            return ignored_result, None, None
 
         target_booking: dict[str, Any] | None = None
         normalized_booking_action = booking_action

@@ -187,10 +187,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="deepseek/deepseek-v4-pro",
+        default="z-ai/glm-5.1",
         description=(
             "Model identifier accepted by the configured provider. "
-            "Recommended default is the OpenRouter slug deepseek/deepseek-v4-pro for main chat turns."
+            "Recommended default is the OpenRouter slug z-ai/glm-5.1 for main chat turns."
         ),
     )
     memory_llm_model: str = Field(
@@ -202,10 +202,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_reasoning_effort: str | None = Field(
-        default="high",
+        default="medium",
         description=(
             "Optional reasoning effort for providers/models that support it "
-            "(for example: low, medium, high). Defaults to high for agent-owned "
+            "(for example: low, medium, high). Defaults to medium for agent-owned "
             "LLM calls; set empty/null to avoid sending reasoning_effort."
         ),
     )
@@ -217,10 +217,10 @@ class Settings(BaseSettings):
         ),
     )
     wake_execution_model: str | None = Field(
-        default="deepseek/deepseek-v4-pro",
+        default="z-ai/glm-5.1",
         description=(
             "Model used for wake/routine execution turns that need stronger reasoning "
-            "and tool use. Recommended default aligns this with the main chat model: deepseek/deepseek-v4-pro."
+            "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.1."
         ),
     )
     multimodal_llm: str = Field(

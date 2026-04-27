@@ -51,7 +51,7 @@ class ContextEngineer:
         self,
         *,
         raw_chat_limit: int = 20,
-        raw_tool_limit: int = 4,
+        raw_tool_limit: int = 5,
         stale_summary_token_budget: int = 900,
     ) -> None:
         self.raw_chat_limit = max(4, int(raw_chat_limit))

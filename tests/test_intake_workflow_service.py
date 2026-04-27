@@ -1038,6 +1038,316 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
 
 
 @pytest.mark.asyncio
+async def test_telegram_business_out_of_scope_decision_can_reply_without_booking(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": False,
+                "confidence": 0.0,
+                "conversation_summary": "Customer asks about a service outside this workflow.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "This workflow only handles wash and tire fitting requests.",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "PPF is outside the scoped workflow.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "How much is PPF?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Wash Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business wash and tire fitting appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Reply politely when the request is outside scope.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert result["matched_conversations"] == 0
+    assert result["results"] == [
+        {
+            "conversation_id": "555",
+            "matched": False,
+            "status": "ignored",
+            "replied": True,
+        }
+    ]
+    assert service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    ) == []
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["chat_id"] == "555"
+    assert sent["business_connection_id"] == "bc_123"
+    assert sent["reply_to_message_id"] == 10
+    assert "only handles wash" in sent["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_out_of_scope_service_question_gets_fallback_reply(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": False,
+                "confidence": 0.0,
+                "conversation_summary": "Customer asks about a service outside this workflow.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "PPF is outside this workflow.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "How much is PPF?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Wash and tire booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business wash and tire fitting appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Reply politely when the request is outside scope. Phone: +1 555 123 4567.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert result["matched_conversations"] == 0
+    assert result["results"] == [
+        {
+            "conversation_id": "555",
+            "matched": False,
+            "status": "ignored",
+            "replied": True,
+        }
+    ]
+    assert service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    ) == []
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["chat_id"] == "555"
+    assert sent["business_connection_id"] == "bc_123"
+    assert sent["reply_to_message_id"] == 10
+    assert "current workflow" in sent["text"]
+    assert "+1 555 123 4567" in sent["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_matched_ignore_reply_does_not_open_booking(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.0,
+                "conversation_summary": "Customer asks about wash pricing for an unsupported vehicle.",
+                "extracted_fields": {"service_category": "Мойка"},
+                "missing_fields": ["service_name", "car_type", "quoted_price"],
+                "reply_action": "send_reply",
+                "reply_text": "В прайсе нет мойки мотоциклов. Позвоните нам, пожалуйста.",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "The category is in scope, but this vehicle type is not bookable from the price list.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Сколько стоит мойка мотоцикла?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Wash Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business wash and tire fitting appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Reply politely when the request cannot be booked from the price list.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert result["matched_conversations"] == 1
+    assert result["results"] == [
+        {
+            "conversation_id": "555",
+            "matched": True,
+            "status": "ignored",
+            "replied": True,
+        }
+    ]
+    assert service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    ) == []
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["chat_id"] == "555"
+    assert sent["business_connection_id"] == "bc_123"
+    assert sent["reply_to_message_id"] == 10
+    assert "мотоциклов" in sent["text"]
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_reply_is_persisted_back_into_conversation_history(
     tmp_path: Path,
 ) -> None:
@@ -1132,7 +1442,7 @@ async def test_telegram_business_reply_is_persisted_back_into_conversation_histo
 
 
 @pytest.mark.asyncio
-async def test_telegram_business_reply_with_ignore_booking_action_still_sends_reply(
+async def test_telegram_business_reply_with_create_booking_action_opens_pending_booking(
     tmp_path: Path,
 ) -> None:
     runtime = _FakeRuntime(
@@ -1147,7 +1457,7 @@ async def test_telegram_business_reply_with_ignore_booking_action_still_sends_re
                 "reply_action": "send_reply",
                 "reply_text": "2х-фазная мойка для вашего авто стоит 1200 ₽. Как вас зовут и на какое время записать?",
                 "ready_to_save": False,
-                "booking_action": "ignore",
+                "booking_action": "create_new_booking",
                 "save_payload": {},
                 "reason": "Need missing fields before saving.",
             }
