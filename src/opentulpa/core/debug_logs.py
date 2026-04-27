@@ -6,6 +6,7 @@ import io
 import sys
 import threading
 import zipfile
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,14 +15,24 @@ from typing import Any
 from opentulpa.tasks.sandbox import PROJECT_ROOT
 
 DEFAULT_DEBUG_LOG_LOOKBACK_DAYS = 7
+ProcessOutputEventCallback = Callable[[dict[str, Any]], None]
+_PROCESS_OUTPUT_EVENT_STATE = threading.local()
 
 
 class _ProcessOutputTee(io.TextIOBase):
-    def __init__(self, wrapped: Any, *, stream_name: str, project_root: Path) -> None:
+    def __init__(
+        self,
+        wrapped: Any,
+        *,
+        stream_name: str,
+        project_root: Path,
+        event_callback: ProcessOutputEventCallback | None = None,
+    ) -> None:
         self._wrapped = wrapped
         self._stream_name = stream_name
         self._project_root = project_root.resolve()
         self._lock = threading.Lock()
+        self._event_callback = event_callback
 
     @property
     def encoding(self) -> str:
@@ -53,13 +64,17 @@ class _ProcessOutputTee(io.TextIOBase):
             written = self._wrapped.write(raw)
         except Exception:
             written = len(raw)
-        self._append_to_server_log(raw)
+        now = datetime.now(UTC)
+        self._append_to_server_log(raw, now=now)
+        self._emit_output_events(raw, now=now)
         return int(written) if isinstance(written, int) else len(raw)
 
-    def _append_to_server_log(self, text: str) -> None:
+    def set_event_callback(self, callback: ProcessOutputEventCallback | None) -> None:
+        self._event_callback = callback
+
+    def _append_to_server_log(self, text: str, *, now: datetime) -> None:
         if not text:
             return
-        now = datetime.now(UTC)
         log_path = _server_log_path(project_root=self._project_root, now=now)
         prefix = f"{now.isoformat()} [{self._stream_name}] "
         try:
@@ -74,21 +89,69 @@ class _ProcessOutputTee(io.TextIOBase):
         except Exception:
             return
 
+    def _emit_output_events(self, text: str, *, now: datetime) -> None:
+        callback = self._event_callback
+        if callback is None or not text or bool(getattr(_PROCESS_OUTPUT_EVENT_STATE, "active", False)):
+            return
+        for chunk in text.splitlines(keepends=True):
+            message = chunk.rstrip("\r\n")
+            if not message:
+                continue
+            event = {
+                "ts": now.isoformat(),
+                "stream": self._stream_name,
+                "message": message,
+                "project_root": str(self._project_root),
+            }
+            try:
+                _PROCESS_OUTPUT_EVENT_STATE.active = True
+                callback(event)
+            except Exception:
+                return
+            finally:
+                _PROCESS_OUTPUT_EVENT_STATE.active = False
+
 
 def _server_log_path(*, project_root: Path, now: datetime | None = None) -> Path:
     stamp = (now or datetime.now(UTC)).astimezone(UTC).date().isoformat()
     return (project_root / ".opentulpa" / "logs" / "server" / f"server-{stamp}.log").resolve()
 
 
-def install_process_output_log_capture(*, project_root: Path | None = None) -> Path:
+def install_process_output_log_capture(
+    *,
+    project_root: Path | None = None,
+    event_callback: ProcessOutputEventCallback | None = None,
+) -> Path:
     """Tee Python stdout/stderr into a daily server log without hiding console output."""
 
     root = (project_root or PROJECT_ROOT).resolve()
     if not isinstance(sys.stdout, _ProcessOutputTee):
-        sys.stdout = _ProcessOutputTee(sys.stdout, stream_name="stdout", project_root=root)  # type: ignore[assignment]
+        sys.stdout = _ProcessOutputTee(
+            sys.stdout,
+            stream_name="stdout",
+            project_root=root,
+            event_callback=event_callback,
+        )  # type: ignore[assignment]
+    else:
+        sys.stdout.set_event_callback(event_callback)
     if not isinstance(sys.stderr, _ProcessOutputTee):
-        sys.stderr = _ProcessOutputTee(sys.stderr, stream_name="stderr", project_root=root)  # type: ignore[assignment]
+        sys.stderr = _ProcessOutputTee(
+            sys.stderr,
+            stream_name="stderr",
+            project_root=root,
+            event_callback=event_callback,
+        )  # type: ignore[assignment]
+    else:
+        sys.stderr.set_event_callback(event_callback)
     return _server_log_path(project_root=root)
+
+
+def configure_process_output_event_callback(
+    callback: ProcessOutputEventCallback | None,
+) -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, _ProcessOutputTee):
+            stream.set_event_callback(callback)
 
 
 def _debug_log_candidates() -> tuple[Path, ...]:

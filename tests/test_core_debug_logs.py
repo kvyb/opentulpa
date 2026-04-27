@@ -130,3 +130,44 @@ def test_install_process_output_log_capture_tees_stdout_and_stderr(
     text = server_log_path.read_text(encoding="utf-8")
     assert "[stdout] stdout line" in text
     assert "[stderr] stderr line" in text
+
+
+def test_install_process_output_log_capture_emits_output_events(
+    monkeypatch, tmp_path: Path
+) -> None:
+    debug_logs = _load_debug_logs_module()
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    debug_logs.install_process_output_log_capture(project_root=tmp_path, event_callback=events.append)
+    sys.stdout.write("stdout line\n")
+    sys.stderr.write("stderr line\n")
+
+    assert [event["stream"] for event in events] == ["stdout", "stderr"]
+    assert [event["message"] for event in events] == ["stdout line", "stderr line"]
+    assert all(event["project_root"] == str(tmp_path.resolve()) for event in events)
+
+
+def test_configure_process_output_event_callback_updates_existing_tees(
+    monkeypatch, tmp_path: Path
+) -> None:
+    debug_logs = _load_debug_logs_module()
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    first_events: list[dict[str, object]] = []
+    second_events: list[dict[str, object]] = []
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    debug_logs.install_process_output_log_capture(
+        project_root=tmp_path,
+        event_callback=first_events.append,
+    )
+    debug_logs.configure_process_output_event_callback(second_events.append)
+    sys.stdout.write("new callback\n")
+
+    assert first_events == []
+    assert [event["message"] for event in second_events] == ["new callback"]

@@ -309,14 +309,14 @@ class Settings(BaseSettings):
     posthog_api_key: str | None = Field(
         default=None,
         description=(
-            "Optional PostHog project API key for LangGraph/LLM analytics. "
+            "Optional PostHog project API key for LangGraph/LLM analytics and process log mirroring. "
             "PostHog instrumentation stays disabled unless both POSTHOG_API_KEY and POSTHOG_HOST are set."
         ),
     )
     posthog_host: str | None = Field(
         default=None,
         description=(
-            "Optional PostHog host URL for LangGraph/LLM analytics "
+            "Optional PostHog host URL for LangGraph/LLM analytics and process log mirroring "
             "(for example https://us.i.posthog.com). "
             "PostHog instrumentation stays disabled unless both POSTHOG_API_KEY and POSTHOG_HOST are set."
         ),

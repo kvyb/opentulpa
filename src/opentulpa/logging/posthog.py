@@ -3,9 +3,264 @@
 from __future__ import annotations
 
 import logging
+import re
+import threading
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
+
+PROCESS_LOG_EVENT = "opentulpa.process_log"
+_PROCESS_LOG_MESSAGE_LIMIT = 8000
+_LOG_EXTRA_VALUE_LIMIT = 2000
+_PROCESS_LOG_FIELD_VALUE_RE = r"[A-Za-z0-9_.:-]+"
+_LOG_LEVEL_RE = re.compile(r"\b(CRITICAL|ERROR|WARNING|WARN|INFO|DEBUG|TRACE)\b", re.IGNORECASE)
+_LOGGING_HANDLER_STATE = threading.local()
+_STANDARD_LOG_RECORD_ATTRS = set(
+    logging.LogRecord(
+        name="",
+        level=0,
+        pathname="",
+        lineno=0,
+        msg="",
+        args=(),
+        exc_info=None,
+    ).__dict__.keys()
+) | {"asctime", "message"}
+
+
+def _provider_value(provider: Callable[[], str] | None) -> str:
+    if provider is None:
+        return ""
+    try:
+        return str(provider() or "").strip()
+    except Exception:
+        return ""
+
+
+def _extract_process_log_field(text: str, field_name: str) -> str:
+    pattern = re.compile(
+        rf"(?:^|[\s,{{])['\"]?{re.escape(field_name)}['\"]?\s*[:=]\s*['\"]?"
+        rf"(?P<value>{_PROCESS_LOG_FIELD_VALUE_RE})",
+        re.IGNORECASE,
+    )
+    match = pattern.search(str(text or ""))
+    if not match:
+        return ""
+    return str(match.group("value") or "").strip()
+
+
+def _detect_process_log_level(text: str) -> str:
+    match = _LOG_LEVEL_RE.search(str(text or ""))
+    if not match:
+        return ""
+    value = match.group(1).lower()
+    return "warning" if value == "warn" else value
+
+
+def _safe_log_extra_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return value[:_LOG_EXTRA_VALUE_LIMIT]
+    if isinstance(value, list | tuple):
+        return [_safe_log_extra_value(item) for item in value[:20]]
+    if isinstance(value, dict):
+        return {
+            str(key)[:80]: _safe_log_extra_value(item)
+            for key, item in list(value.items())[:50]
+            if str(key or "").strip()
+        }
+    return str(value)[:_LOG_EXTRA_VALUE_LIMIT]
+
+
+def _log_record_extra_properties(record: logging.LogRecord) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    for key, value in record.__dict__.items():
+        safe_key = str(key or "").strip()
+        if (
+            not safe_key
+            or safe_key.startswith("_")
+            or safe_key in _STANDARD_LOG_RECORD_ATTRS
+            or safe_key in {"customer_id", "thread_id"}
+        ):
+            continue
+        properties[f"extra_{safe_key}"] = _safe_log_extra_value(value)
+    return properties
+
+
+class PostHogLoggingHandler(logging.Handler):
+    def __init__(
+        self,
+        *,
+        posthog_logger: Any,
+        public_base_url: str | None = None,
+        customer_id_provider: Callable[[], str] | None = None,
+        thread_id_provider: Callable[[], str] | None = None,
+    ) -> None:
+        super().__init__()
+        self._posthog_logger = posthog_logger
+        self._public_base_url = str(public_base_url or "").strip().rstrip("/")
+        self._customer_id_provider = customer_id_provider
+        self._thread_id_provider = thread_id_provider
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._should_skip_record(record) or bool(getattr(_LOGGING_HANDLER_STATE, "active", False)):
+            return
+        try:
+            _LOGGING_HANDLER_STATE.active = True
+            raw_message = record.getMessage()
+            message = raw_message[:_PROCESS_LOG_MESSAGE_LIMIT]
+            customer_id = (
+                _provider_value(self._customer_id_provider)
+                or str(getattr(record, "customer_id", "") or "").strip()
+                or _extract_process_log_field(raw_message, "customer_id")
+            )
+            thread_id = (
+                _provider_value(self._thread_id_provider)
+                or str(getattr(record, "thread_id", "") or "").strip()
+                or _extract_process_log_field(raw_message, "thread_id")
+            )
+            properties: dict[str, Any] = {
+                "source": "python_logging",
+                "logger_name": str(record.name or "").strip(),
+                "log_level": str(record.levelname or "").strip().lower(),
+                "log_levelno": int(record.levelno),
+                "message": message,
+                "message_template": str(record.msg or "")[:_PROCESS_LOG_MESSAGE_LIMIT],
+                "message_length": len(raw_message),
+                "message_truncated": len(raw_message) > len(message),
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "public_base_url": self._public_base_url,
+                "log_ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
+                "module": str(record.module or "").strip(),
+                "file": str(record.filename or "").strip(),
+                "pathname": str(record.pathname or "").strip(),
+                "line_number": int(record.lineno),
+                "function": str(record.funcName or "").strip(),
+                "process_id": int(record.process),
+                "process_name": str(record.processName or "").strip(),
+                "python_thread_id": int(record.thread),
+                "python_thread_name": str(record.threadName or "").strip(),
+            }
+            properties.update(_log_record_extra_properties(record))
+            if record.exc_info:
+                exc_type, exc_value, _ = record.exc_info
+                properties["exception_type"] = getattr(exc_type, "__name__", str(exc_type))
+                properties["exception_message"] = str(exc_value or "")[:_LOG_EXTRA_VALUE_LIMIT]
+                formatter = self.formatter or logging.Formatter()
+                properties["traceback"] = formatter.formatException(record.exc_info)
+            if record.stack_info:
+                properties["stack_info"] = str(record.stack_info)[:_PROCESS_LOG_MESSAGE_LIMIT]
+            if not customer_id:
+                properties["$process_person_profile"] = False
+            self._posthog_logger.capture_event(
+                distinct_id=customer_id or "opentulpa_server",
+                event=PROCESS_LOG_EVENT,
+                properties=properties,
+            )
+        except Exception:
+            return
+        finally:
+            _LOGGING_HANDLER_STATE.active = False
+
+    @staticmethod
+    def _should_skip_record(record: logging.LogRecord) -> bool:
+        logger_name = str(record.name or "").strip()
+        return (
+            logger_name == __name__
+            or logger_name.startswith("opentulpa.logging.posthog")
+            or logger_name == "posthog"
+            or logger_name.startswith("posthog.")
+        )
+
+
+def install_posthog_logging_handler(
+    *,
+    posthog_logger: Any,
+    public_base_url: str | None = None,
+    customer_id_provider: Callable[[], str] | None = None,
+    thread_id_provider: Callable[[], str] | None = None,
+    root_logger: logging.Logger | None = None,
+) -> PostHogLoggingHandler:
+    target_logger = root_logger or logging.getLogger()
+    for handler in target_logger.handlers:
+        if isinstance(handler, PostHogLoggingHandler) and handler._posthog_logger is posthog_logger:
+            return handler
+    handler = PostHogLoggingHandler(
+        posthog_logger=posthog_logger,
+        public_base_url=public_base_url,
+        customer_id_provider=customer_id_provider,
+        thread_id_provider=thread_id_provider,
+    )
+    target_logger.addHandler(handler)
+    return handler
+
+
+def uninstall_posthog_logging_handler(
+    handler: logging.Handler | None,
+    *,
+    root_logger: logging.Logger | None = None,
+) -> None:
+    if handler is None:
+        return
+    target_logger = root_logger or logging.getLogger()
+    try:
+        target_logger.removeHandler(handler)
+    except Exception:
+        return
+    try:
+        handler.close()
+    except Exception:
+        return
+
+
+def create_process_output_posthog_callback(
+    *,
+    posthog_logger: Any,
+    public_base_url: str | None = None,
+    customer_id_provider: Callable[[], str] | None = None,
+    thread_id_provider: Callable[[], str] | None = None,
+) -> Callable[[dict[str, Any]], None]:
+    resolved_public_base_url = str(public_base_url or "").strip().rstrip("/")
+
+    def capture_process_output(event: dict[str, Any]) -> None:
+        raw_message = str(event.get("message", "") or "")
+        if not raw_message:
+            return
+        message = raw_message[:_PROCESS_LOG_MESSAGE_LIMIT]
+        customer_id = (
+            _provider_value(customer_id_provider)
+            or _extract_process_log_field(raw_message, "customer_id")
+        )
+        thread_id = (
+            _provider_value(thread_id_provider)
+            or _extract_process_log_field(raw_message, "thread_id")
+        )
+        properties: dict[str, Any] = {
+            "source": "process_output",
+            "stream": str(event.get("stream", "") or "").strip(),
+            "message": message,
+            "message_length": len(raw_message),
+            "message_truncated": len(raw_message) > len(message),
+            "customer_id": customer_id,
+            "thread_id": thread_id,
+            "public_base_url": resolved_public_base_url,
+            "log_level": _detect_process_log_level(raw_message),
+            "log_ts": str(event.get("ts", "") or "").strip(),
+            "project_root": str(event.get("project_root", "") or "").strip(),
+        }
+        if not customer_id:
+            properties["$process_person_profile"] = False
+        posthog_logger.capture_event(
+            distinct_id=customer_id or "opentulpa_server",
+            event=PROCESS_LOG_EVENT,
+            properties=properties,
+        )
+
+    return capture_process_output
 
 
 def _maybe_float(value: Any) -> float | None:

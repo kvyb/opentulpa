@@ -17,10 +17,19 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
-from opentulpa.core.debug_logs import install_process_output_log_capture
+from opentulpa.core.debug_logs import (
+    configure_process_output_event_callback,
+    install_process_output_log_capture,
+)
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.interfaces.telegram.chat_service import support_bot_commands
 from opentulpa.interfaces.telegram.security import parse_csv_set
+from opentulpa.logging.posthog import (
+    create_posthog_logger,
+    create_process_output_posthog_callback,
+    install_posthog_logging_handler,
+    uninstall_posthog_logging_handler,
+)
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -81,6 +90,34 @@ def _mem0_config_openai_compatible(
 
 def _resolve_public_base_url() -> str:
     return resolve_public_base_url()
+
+
+def _runtime_active_customer_id(runtime: Any | None) -> str:
+    if runtime is None:
+        return ""
+    getter = getattr(runtime, "get_active_customer_id", None)
+    if callable(getter):
+        try:
+            value = str(getter() or "").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    return str(getattr(runtime, "_active_customer_id", "") or "").strip()
+
+
+def _runtime_active_thread_id(runtime: Any | None) -> str:
+    if runtime is None:
+        return ""
+    getter = getattr(runtime, "get_active_thread_id", None)
+    if callable(getter):
+        try:
+            value = str(getter() or "").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    return str(getattr(runtime, "_active_thread_id", "") or "").strip()
 
 
 def _seed_missing_directory_entries(source_dir: Path, target_dir: Path) -> None:
@@ -254,6 +291,28 @@ def main() -> None:
     _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
     install_process_output_log_capture(project_root=project_root)
     settings = get_settings()
+    public_base_url = _resolve_public_base_url()
+    agent_runtime: OpenTulpaLangGraphRuntime | None = None
+    process_posthog_logger = create_posthog_logger(
+        api_key=settings.posthog_api_key,
+        host=settings.posthog_host,
+    )
+    posthog_logging_handler = None
+    if process_posthog_logger is not None:
+        posthog_logging_handler = install_posthog_logging_handler(
+            posthog_logger=process_posthog_logger,
+            public_base_url=public_base_url,
+            customer_id_provider=lambda: _runtime_active_customer_id(agent_runtime),
+            thread_id_provider=lambda: _runtime_active_thread_id(agent_runtime),
+        )
+        configure_process_output_event_callback(
+            create_process_output_posthog_callback(
+                posthog_logger=process_posthog_logger,
+                public_base_url=public_base_url,
+                customer_id_provider=lambda: _runtime_active_customer_id(agent_runtime),
+                thread_id_provider=lambda: _runtime_active_thread_id(agent_runtime),
+            )
+        )
     openai_compatible_api_key = (
         settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env()
     )
@@ -302,7 +361,6 @@ def main() -> None:
         db_path=project_root / ".opentulpa" / "tasks.db",
         wake_callback=_wake_callback,
     )
-    agent_runtime: OpenTulpaLangGraphRuntime | None = None
     if openai_compatible_api_key:
         agent_runtime = OpenTulpaLangGraphRuntime(
             app_url=f"http://127.0.0.1:{settings.port}",
@@ -360,7 +418,13 @@ def main() -> None:
     _auto_configure_telegram_commands(settings)
     # OpenTulpa exposes HTTP/SSE routes only. Disabling Uvicorn's websocket
     # backend avoids noisy websockets deprecation warnings on local startup.
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", ws="none")
+    try:
+        uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", ws="none")
+    finally:
+        configure_process_output_event_callback(None)
+        uninstall_posthog_logging_handler(posthog_logging_handler)
+        if process_posthog_logger is not None:
+            process_posthog_logger.shutdown()
 
 
 if __name__ == "__main__":

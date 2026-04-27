@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import types
 from pathlib import Path
@@ -9,7 +10,15 @@ import pytest
 
 from opentulpa.agent.lc_messages import HumanMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
-from opentulpa.logging.posthog import _extract_openrouter_cost_fields, create_posthog_logger
+from opentulpa.logging.posthog import (
+    PROCESS_LOG_EVENT,
+    PostHogLoggingHandler,
+    _extract_openrouter_cost_fields,
+    create_posthog_logger,
+    create_process_output_posthog_callback,
+    install_posthog_logging_handler,
+    uninstall_posthog_logging_handler,
+)
 
 
 def test_create_posthog_logger_requires_both_env_values() -> None:
@@ -124,6 +133,262 @@ def test_posthog_logger_capture_event_uses_client_when_available(monkeypatch) ->
             "groups": None,
         }
     ]
+
+
+def test_process_output_posthog_callback_uses_active_customer_context() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakePostHogLogger:
+        def capture_event(
+            self,
+            *,
+            distinct_id: str | None,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            groups: dict[str, Any] | None = None,
+        ) -> None:
+            del groups
+            captured.append(
+                {
+                    "distinct_id": distinct_id,
+                    "event": event,
+                    "properties": dict(properties or {}),
+                }
+            )
+
+    callback = create_process_output_posthog_callback(
+        posthog_logger=_FakePostHogLogger(),
+        public_base_url="https://app.example.com/",
+        customer_id_provider=lambda: "telegram_123",
+        thread_id_provider=lambda: "chat_abc",
+    )
+
+    callback(
+        {
+            "stream": "stderr",
+            "message": "ERROR something failed",
+            "ts": "2026-04-28T00:00:00+00:00",
+            "project_root": "/repo",
+        }
+    )
+
+    assert captured[0]["distinct_id"] == "telegram_123"
+    assert captured[0]["event"] == PROCESS_LOG_EVENT
+    assert captured[0]["properties"]["customer_id"] == "telegram_123"
+    assert captured[0]["properties"]["thread_id"] == "chat_abc"
+    assert captured[0]["properties"]["public_base_url"] == "https://app.example.com"
+    assert captured[0]["properties"]["stream"] == "stderr"
+    assert captured[0]["properties"]["log_level"] == "error"
+    assert captured[0]["properties"]["message"] == "ERROR something failed"
+
+
+def test_process_output_posthog_callback_parses_customer_id_from_message() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakePostHogLogger:
+        def capture_event(
+            self,
+            *,
+            distinct_id: str | None,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            groups: dict[str, Any] | None = None,
+        ) -> None:
+            del event, groups
+            captured.append({"distinct_id": distinct_id, "properties": dict(properties or {})})
+
+    callback = create_process_output_posthog_callback(
+        posthog_logger=_FakePostHogLogger(),
+        public_base_url="https://app.example.com",
+    )
+
+    callback(
+        {
+            "stream": "stdout",
+            "message": "telegram.stream complete thread_id=chat_xyz customer_id=telegram_456",
+            "ts": "2026-04-28T00:00:00+00:00",
+            "project_root": "/repo",
+        }
+    )
+
+    assert captured[0]["distinct_id"] == "telegram_456"
+    assert captured[0]["properties"]["customer_id"] == "telegram_456"
+    assert captured[0]["properties"]["thread_id"] == "chat_xyz"
+
+
+def test_process_output_posthog_callback_marks_server_logs_without_customer() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakePostHogLogger:
+        def capture_event(
+            self,
+            *,
+            distinct_id: str | None,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            groups: dict[str, Any] | None = None,
+        ) -> None:
+            del event, groups
+            captured.append({"distinct_id": distinct_id, "properties": dict(properties or {})})
+
+    callback = create_process_output_posthog_callback(
+        posthog_logger=_FakePostHogLogger(),
+        public_base_url="https://app.example.com",
+    )
+
+    callback({"stream": "stdout", "message": "server started", "ts": "", "project_root": "/repo"})
+
+    assert captured[0]["distinct_id"] == "opentulpa_server"
+    assert captured[0]["properties"]["$process_person_profile"] is False
+
+
+def test_posthog_logging_handler_captures_structured_record_fields() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakePostHogLogger:
+        def capture_event(
+            self,
+            *,
+            distinct_id: str | None,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            groups: dict[str, Any] | None = None,
+        ) -> None:
+            del groups
+            captured.append(
+                {
+                    "distinct_id": distinct_id,
+                    "event": event,
+                    "properties": dict(properties or {}),
+                }
+            )
+
+    handler = PostHogLoggingHandler(
+        posthog_logger=_FakePostHogLogger(),
+        public_base_url="https://app.example.com/",
+    )
+    record = logging.getLogger("opentulpa.test").makeRecord(
+        name="opentulpa.test",
+        level=logging.WARNING,
+        fn="/repo/src/opentulpa/demo.py",
+        lno=42,
+        msg="workflow failed for %s",
+        args=("telegram_123",),
+        exc_info=None,
+        func="run_workflow",
+        extra={
+            "customer_id": "telegram_123",
+            "thread_id": "chat_abc",
+            "operation": "wake",
+        },
+    )
+
+    handler.handle(record)
+
+    assert captured[0]["distinct_id"] == "telegram_123"
+    assert captured[0]["event"] == PROCESS_LOG_EVENT
+    properties = captured[0]["properties"]
+    assert properties["source"] == "python_logging"
+    assert properties["logger_name"] == "opentulpa.test"
+    assert properties["log_level"] == "warning"
+    assert properties["message"] == "workflow failed for telegram_123"
+    assert properties["message_template"] == "workflow failed for %s"
+    assert properties["customer_id"] == "telegram_123"
+    assert properties["thread_id"] == "chat_abc"
+    assert properties["public_base_url"] == "https://app.example.com"
+    assert properties["module"] == "demo"
+    assert properties["file"] == "demo.py"
+    assert properties["line_number"] == 42
+    assert properties["function"] == "run_workflow"
+    assert properties["extra_operation"] == "wake"
+
+
+def test_posthog_logging_handler_captures_exception_traceback() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakePostHogLogger:
+        def capture_event(
+            self,
+            *,
+            distinct_id: str | None,
+            event: str,
+            properties: dict[str, Any] | None = None,
+            groups: dict[str, Any] | None = None,
+        ) -> None:
+            del distinct_id, event, groups
+            captured.append(dict(properties or {}))
+
+    try:
+        raise ValueError("bad config")
+    except ValueError:
+        exc_info = sys.exc_info()
+
+    handler = PostHogLoggingHandler(posthog_logger=_FakePostHogLogger())
+    record = logging.getLogger("opentulpa.test").makeRecord(
+        name="opentulpa.test",
+        level=logging.ERROR,
+        fn="/repo/src/opentulpa/demo.py",
+        lno=43,
+        msg="startup failed",
+        args=(),
+        exc_info=exc_info,
+        func="boot",
+        extra=None,
+    )
+
+    handler.handle(record)
+
+    assert captured[0]["exception_type"] == "ValueError"
+    assert captured[0]["exception_message"] == "bad config"
+    assert "ValueError: bad config" in captured[0]["traceback"]
+
+
+def test_posthog_logging_handler_skips_posthog_sdk_records() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakePostHogLogger:
+        def capture_event(self, **kwargs: Any) -> None:
+            captured.append(kwargs)
+
+    handler = PostHogLoggingHandler(posthog_logger=_FakePostHogLogger())
+    record = logging.getLogger("posthog.client").makeRecord(
+        name="posthog.client",
+        level=logging.ERROR,
+        fn="/site-packages/posthog/client.py",
+        lno=10,
+        msg="send failed",
+        args=(),
+        exc_info=None,
+        func="capture",
+        extra=None,
+    )
+
+    handler.handle(record)
+
+    assert captured == []
+
+
+def test_install_posthog_logging_handler_deduplicates_and_uninstalls() -> None:
+    logger = logging.getLogger("opentulpa.test.install")
+    logger.handlers.clear()
+    logger.propagate = False
+    fake_posthog_logger = object()
+
+    first = install_posthog_logging_handler(
+        posthog_logger=fake_posthog_logger,
+        root_logger=logger,
+    )
+    second = install_posthog_logging_handler(
+        posthog_logger=fake_posthog_logger,
+        root_logger=logger,
+    )
+
+    assert first is second
+    assert logger.handlers == [first]
+
+    uninstall_posthog_logging_handler(first, root_logger=logger)
+
+    assert logger.handlers == []
 
 
 def test_extract_openrouter_cost_fields_reads_usage_cost_from_completion_payload() -> None:
