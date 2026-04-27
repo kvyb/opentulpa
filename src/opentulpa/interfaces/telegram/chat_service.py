@@ -11,7 +11,10 @@ from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env
-from opentulpa.core.debug_logs import iter_available_debug_log_paths
+from opentulpa.core.debug_logs import (
+    DEFAULT_DEBUG_LOG_LOOKBACK_DAYS,
+    build_debug_logs_archive_bytes,
+)
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.attachments import (
     build_uploaded_files_context,
@@ -434,43 +437,21 @@ async def _maybe_configure_support_commands_for_chat(
 async def _send_debug_logs_file(*, chat_id: int, bot_token: str | None) -> str | None:
     if not str(bot_token or "").strip():
         return "Telegram file sending is unavailable because the bot token is not configured."
-    log_paths = iter_available_debug_log_paths()
-    if not log_paths:
+    archive = build_debug_logs_archive_bytes(lookback_days=DEFAULT_DEBUG_LOG_LOOKBACK_DAYS)
+    if archive is None:
         return "Debug log file is not available yet."
+    filename, raw_bytes = archive
     client = TelegramClient(str(bot_token))
     try:
-        upload_files: list[dict[str, Any]] = []
-        for path in log_paths:
-            try:
-                raw_bytes = path.read_bytes()
-            except Exception:
-                continue
-            upload_files.append(
-                {
-                    "filename": path.name,
-                    "raw_bytes": raw_bytes,
-                    "mime_type": "text/plain",
-                }
-            )
-        if not upload_files:
-            return "Debug log file is not available yet."
-        if len(upload_files) == 1:
-            sent = await client.send_file(
-                chat_id=chat_id,
-                filename=str(upload_files[0]["filename"]),
-                raw_bytes=bytes(upload_files[0]["raw_bytes"]),
-                kind="document",
-                mime_type=str(upload_files[0]["mime_type"]),
-                caption="OpenTulpa debug logs dump",
-                parse_mode="HTML",
-            )
-        else:
-            sent = await client.send_files(
-                chat_id=chat_id,
-                files=upload_files,
-                caption="OpenTulpa debug logs dump",
-                parse_mode="HTML",
-            )
+        sent = await client.send_file(
+            chat_id=chat_id,
+            filename=filename,
+            raw_bytes=raw_bytes,
+            kind="document",
+            mime_type="application/zip",
+            caption=f"OpenTulpa debug logs dump (last {DEFAULT_DEBUG_LOG_LOOKBACK_DAYS} days)",
+            parse_mode="HTML",
+        )
     finally:
         if hasattr(client, "aclose"):
             with suppress(Exception):

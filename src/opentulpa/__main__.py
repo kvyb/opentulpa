@@ -17,6 +17,7 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
+from opentulpa.core.debug_logs import install_process_output_log_capture
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.interfaces.telegram.chat_service import support_bot_commands
 from opentulpa.interfaces.telegram.security import parse_csv_set
@@ -144,7 +145,7 @@ def _telegram_bot_commands() -> list[dict[str, str]]:
         {"command": "start", "description": "Show quick help and onboarding"},
         {"command": "status", "description": "Check bot and agent status"},
         {"command": "fresh", "description": "Start a fresh chat context"},
-        {"command": "debug_logs", "description": "Send the current app log file"},
+        {"command": "debug_logs", "description": "Send the last 7 days of server logs"},
     ]
 
 
@@ -249,9 +250,10 @@ def _auto_configure_telegram_commands(settings: Any) -> None:
 
 
 def main() -> None:
-    settings = get_settings()
     project_root = Path(__file__).resolve().parents[2]
     _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
+    install_process_output_log_capture(project_root=project_root)
+    settings = get_settings()
     openai_compatible_api_key = (
         settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env()
     )
