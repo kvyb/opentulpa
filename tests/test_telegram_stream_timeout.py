@@ -82,7 +82,7 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
             if getattr(code, "co_name", "") == "wait":
                 return await original_wait_for(awaitable, timeout)
         calls["count"] += 1
-        raise asyncio.TimeoutError()
+        raise TimeoutError()
 
     monkeypatch.setattr(relay_module.asyncio, "wait_for", _fast_timeout)
     try:
@@ -125,7 +125,7 @@ async def test_stream_timeout_uses_non_stream_recovery_when_available(
                 return await original_wait_for(awaitable, timeout)
         calls["count"] += 1
         if calls["count"] <= 2:
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
         return await original_wait_for(awaitable, timeout)
 
     monkeypatch.setattr(relay_module.asyncio, "wait_for", _timeout_stream_then_allow)

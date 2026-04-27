@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import pytest
-
 from harness.runner import E2EHarness, load_jsonl
-
 
 pytestmark = [pytest.mark.e2e, pytest.mark.live_llm]
 

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-
 from harness.runner import E2EHarness, extract_approval_id
-
 
 pytestmark = [pytest.mark.e2e, pytest.mark.live_llm, pytest.mark.telegram]
 
@@ -24,7 +22,7 @@ def _wait_until(predicate: Any, timeout_seconds: float = 30.0) -> bool:
 def _seed_telegram_session(*, customer_id: str, thread_id: str, chat_id: int = 777, user_id: int = 999) -> None:
     from opentulpa.interfaces.telegram.chat_service import STATE_STORE
 
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
 
     def _mutate(state: dict[str, Any]) -> None:
         sessions = state.get("sessions")

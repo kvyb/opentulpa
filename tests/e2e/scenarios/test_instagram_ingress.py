@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from uuid import uuid4
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
-
 from harness.runner import E2EHarness
-
 
 pytestmark = [pytest.mark.e2e, pytest.mark.live_llm, pytest.mark.ingress]
 

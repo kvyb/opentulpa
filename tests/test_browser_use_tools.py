@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from opentulpa.agent.tools_registry import _normalize_allowed_domains, register_runtime_tools
+from opentulpa.agent.tools.browser_tools import _normalize_allowed_domains
+from opentulpa.agent.tools_registry import register_runtime_tools
 
 
 class _DummyRuntime:

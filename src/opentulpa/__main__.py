@@ -356,7 +356,9 @@ def main() -> None:
     )
     _auto_configure_telegram_webhook(settings)
     _auto_configure_telegram_commands(settings)
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    # OpenTulpa exposes HTTP/SSE routes only. Disabling Uvicorn's websocket
+    # backend avoids noisy websockets deprecation warnings on local startup.
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", ws="none")
 
 
 if __name__ == "__main__":

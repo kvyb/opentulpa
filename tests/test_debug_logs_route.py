@@ -5,8 +5,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from opentulpa.api.routes.debug_logs import register_debug_log_routes
 from opentulpa.api.routes import debug_logs as debug_logs_module
+from opentulpa.api.routes.debug_logs import register_debug_log_routes
 
 
 def test_debug_logs_route_returns_app_log(tmp_path: Path, monkeypatch) -> None:

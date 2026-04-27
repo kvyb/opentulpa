@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque
 
 
 @dataclass(slots=True)
@@ -35,7 +34,7 @@ class InteractiveSession:
         self.thread_id = str(thread_id or "").strip()
         self._runner_active = False
         self._condition = asyncio.Condition()
-        self._queue: Deque[_QueuedSubmission] = deque()
+        self._queue: deque[_QueuedSubmission] = deque()
 
     async def enqueue(self) -> tuple[_QueuedSubmission, bool]:
         async with self._condition:

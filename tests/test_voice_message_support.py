@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from opentulpa.agent.file_analysis import _infer_audio_format
-from opentulpa.interfaces.telegram.chat_service import _inject_voice_message_context
-from opentulpa.interfaces.telegram.chat_service import _telegram_command_name
+from opentulpa.interfaces.telegram.chat_service import (
+    _inject_voice_message_context,
+    _telegram_command_name,
+)
 
 
 def test_infer_audio_format_prefers_extension() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from opentulpa.agent.tools_registry import _compact_browser_use_task_view
+from opentulpa.agent.tools.browser_tools import _compact_browser_use_task_view
 
 
 def test_compact_browser_use_task_view_default_hides_steps_and_truncates_output() -> None:

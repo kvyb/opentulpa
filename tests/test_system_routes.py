@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -43,7 +43,7 @@ class _DummyAsyncIOScheduler:
 
 class _DummyCronTrigger:
     @classmethod
-    def from_crontab(cls, value: str) -> "_DummyCronTrigger":
+    def from_crontab(cls, value: str) -> _DummyCronTrigger:
         _ = value
         return cls()
 
@@ -77,8 +77,8 @@ sys.modules.setdefault("apscheduler.triggers.cron", cron_module)
 sys.modules.setdefault("apscheduler.triggers.date", date_module)
 sys.modules.setdefault("mem0", mem0_module)
 
-from opentulpa.api.app import create_app
-from opentulpa.skills.service import SkillStoreService
+from opentulpa.api.app import create_app  # noqa: E402
+from opentulpa.skills.service import SkillStoreService  # noqa: E402
 
 
 def _mk_client(tmp_path: Path) -> TestClient:

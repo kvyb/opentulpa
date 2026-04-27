@@ -275,7 +275,6 @@ class WorkflowSetupSessionStore:
             conn.commit()
 
     def clear_all(self) -> None:
-        with self._conn() as conn:
-            with suppress(sqlite3.OperationalError):
-                conn.execute("DELETE FROM intake_workflow_setup_sessions")
-                conn.commit()
+        with self._conn() as conn, suppress(sqlite3.OperationalError):
+            conn.execute("DELETE FROM intake_workflow_setup_sessions")
+            conn.commit()

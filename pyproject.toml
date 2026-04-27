@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "httpx>=0.26",
     "crawl4ai>=0.7.0",
+    "chardet<6",
     "mem0ai>=1.0.8",
     "pypdf>=5.0",
     "apscheduler>=3.10",
@@ -70,3 +71,10 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "e2e: end-to-end test suite",
+    "live_llm: requires OPENAI_COMPATIBLE_API_KEY",
+    "real_composio: may create/write real Composio-backed resources",
+    "telegram: exercises telegram webhook path",
+    "ingress: exercises instagram ingress/intake path",
+]

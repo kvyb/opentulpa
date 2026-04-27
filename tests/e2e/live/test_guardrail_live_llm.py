@@ -7,7 +7,7 @@ import re
 import signal
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,7 @@ class _JsonlRecorder:
 
     def add(self, kind: str, **payload: Any) -> None:
         entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "kind": str(kind or "").strip(),
             **payload,
         }
@@ -195,7 +195,7 @@ def _wait_until(predicate: Any, timeout_seconds: float = LIVE_E2E_WAIT_TIMEOUT_S
 def _seed_telegram_session(*, customer_id: str, thread_id: str, chat_id: int = 777, user_id: int = 999) -> None:
     from opentulpa.interfaces.telegram.chat_service import STATE_STORE
 
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
 
     def _mutate(state: dict[str, Any]) -> None:
         sessions = state.get("sessions")
