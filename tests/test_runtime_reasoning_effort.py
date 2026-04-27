@@ -29,7 +29,7 @@ def test_runtime_passes_reasoning_effort_to_init_chat_model(monkeypatch) -> None
     assert calls[0]["reasoning_effort"] == "medium"
 
 
-def test_runtime_disables_deepseek_v4_pro_thinking_without_reasoning_effort(monkeypatch) -> None:
+def test_runtime_defaults_reasoning_effort_high_for_all_agent_models(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
@@ -43,6 +43,37 @@ def test_runtime_disables_deepseek_v4_pro_thinking_without_reasoning_effort(monk
         openrouter_api_key="test-key",
         openrouter_base_url="https://example.com/v1",
         model_name="deepseek/deepseek-v4-pro",
+        wake_classifier_model_name="google/gemini-3-flash-preview",
+        wake_execution_model_name="google/gemini-3-flash-preview",
+        telegram_media_model_name="google/gemini-3-flash-preview",
+        guardrail_classifier_model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=".opentulpa/test.sqlite",
+    )
+
+    assert calls
+    assert all(call["reasoning_effort"] == "high" for call in calls)
+    deepseek_call = next(call for call in calls if call["model"] == "deepseek/deepseek-v4-pro")
+    assert "extra_body" not in deepseek_call
+    gemini_calls = [call for call in calls if call["model"] == "google/gemini-3-flash-preview"]
+    assert gemini_calls
+    assert all("extra_body" not in call for call in gemini_calls)
+
+
+def test_runtime_can_disable_deepseek_v4_pro_thinking_with_empty_reasoning_effort(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
+        calls.append({"model": model, **kwargs})
+        return object()
+
+    monkeypatch.setattr(runtime_module, "init_chat_model", _fake_init_chat_model)
+
+    runtime_module.OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="test-key",
+        openrouter_base_url="https://example.com/v1",
+        model_name="deepseek/deepseek-v4-pro",
+        reasoning_effort="",
         wake_classifier_model_name="google/gemini-3-flash-preview",
         wake_execution_model_name="google/gemini-3-flash-preview",
         telegram_media_model_name="google/gemini-3-flash-preview",

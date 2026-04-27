@@ -30,7 +30,7 @@ approvals_ttl_minutes: 10
 # LLM/provider configuration
 llm_model: deepseek/deepseek-v4-pro
 memory_llm_model: google/gemini-3-flash-preview
-llm_reasoning_effort: null
+llm_reasoning_effort: high
 wake_classifier_model: null
 wake_execution_model: deepseek/deepseek-v4-pro
 multimodal_llm: google/gemini-3-flash-preview

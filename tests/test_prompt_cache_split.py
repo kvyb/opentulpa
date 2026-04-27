@@ -225,12 +225,36 @@ async def test_ainvoke_model_adds_breakpoint_content_for_gemini() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ainvoke_model_disables_deepseek_v4_pro_reasoning() -> None:
+async def test_ainvoke_model_keeps_deepseek_v4_pro_reasoning_with_default_high_effort() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
         openrouter_base_url="https://openrouter.ai/api/v1",
         model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=False,
+    )
+    model = _ProviderRouteCaptureModel()
+
+    response = await rt.ainvoke_model(
+        model,
+        [HumanMessage(content="Dynamic user question")],
+        model_name="deepseek/deepseek-v4-pro",
+    )
+
+    assert isinstance(response, _CaptureResponse)
+    assert len(model.calls) == 1
+    assert model.calls[0]["kwargs"] == {}
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_can_disable_deepseek_v4_pro_reasoning() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        model_name="deepseek/deepseek-v4-pro",
+        reasoning_effort="",
         checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
         prompt_caching_enabled=False,
     )

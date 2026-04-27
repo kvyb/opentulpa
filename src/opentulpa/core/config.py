@@ -202,11 +202,11 @@ class Settings(BaseSettings):
         ),
     )
     llm_reasoning_effort: str | None = Field(
-        default=None,
+        default="high",
         description=(
             "Optional reasoning effort for providers/models that support it "
-            "(for example: low, medium, high). If unset, no reasoning_effort "
-            "parameter is sent."
+            "(for example: low, medium, high). Defaults to high for agent-owned "
+            "LLM calls; set empty/null to avoid sending reasoning_effort."
         ),
     )
     wake_classifier_model: str | None = Field(

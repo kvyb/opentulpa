@@ -159,11 +159,7 @@ Railway builds from the included `Dockerfile`.
 - `TELEGRAM_WEBHOOK_SECRET`
 - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
-- `LLM_MODEL=deepseek/deepseek-v4-pro`
-- `WAKE_EXECUTION_MODEL=deepseek/deepseek-v4-pro`
-- `MEMORY_LLM_MODEL=google/gemini-3-flash-preview`
-- `MULTIMODAL_LLM=google/gemini-3-flash-preview`
-- `GUARDRAIL_CLASSIFIER_MODEL=google/gemini-3-flash-preview`
+- Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=deepseek/deepseek-v4-pro`, `LLM_REASONING_EFFORT=high`, `WAKE_EXECUTION_MODEL=deepseek/deepseek-v4-pro`, Gemini Flash for memory/media/guardrails)
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 

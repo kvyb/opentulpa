@@ -65,6 +65,7 @@ class BrowserUseLocalManager:
         openrouter_base_url: str,
         default_model: str,
         model_override: str | None = None,
+        reasoning_effort: str | None = "high",
         headless: bool = True,
         max_concurrent_tasks: int = 2,
         task_retention_seconds: int = 1800,
@@ -73,6 +74,7 @@ class BrowserUseLocalManager:
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")
         self._default_model = str(default_model or "").strip()
         self._model_override = str(model_override or "").strip()
+        self._reasoning_effort = str(reasoning_effort or "").strip() or None
         self._headless = bool(headless)
         self._task_retention_seconds = max(60, int(task_retention_seconds))
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
@@ -476,6 +478,7 @@ class BrowserUseLocalManager:
                 model=model_name,
                 api_key=self._openrouter_api_key,
                 base_url=self._openrouter_base_url,
+                reasoning_effort=self._reasoning_effort or "none",
             )
             composed_task = task_text
             if start_url:
