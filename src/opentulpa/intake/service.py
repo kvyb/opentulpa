@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -27,6 +28,13 @@ _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
 _MAX_LATEST_INBOUND_AGE = timedelta(minutes=1)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
 _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
+_TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS = 0.0
+_TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS = 3.0
+_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE = "telegram_business_webhook_settled"
+_PENDING_RUN_POLL_SECONDS = 0.2
+_PENDING_RUN_MAX_CONCURRENCY = 4
+
+logger = logging.getLogger(__name__)
 
 
 def _channel_uses_scheduler(channel: str) -> bool:
@@ -265,7 +273,38 @@ class IntakeWorkflowService:
         self._get_agent_runtime = get_agent_runtime
         self._conversation_locks_guard = threading.Lock()
         self._conversation_locks: dict[str, asyncio.Lock] = {}
+        self._pending_worker_task: asyncio.Task[None] | None = None
+        self._pending_worker_stop: asyncio.Event | None = None
+        self._pending_run_tasks: set[asyncio.Task[None]] = set()
         self._init_db()
+
+    async def start(self) -> None:
+        if self._pending_worker_task is not None and not self._pending_worker_task.done():
+            return
+        self._recover_interrupted_pending_runs()
+        self._pending_worker_stop = asyncio.Event()
+        self._pending_worker_task = asyncio.create_task(
+            self._pending_run_worker_loop(),
+            name="opentulpa-intake-pending-runs",
+        )
+
+    async def shutdown(self) -> None:
+        task = self._pending_worker_task
+        stop_event = self._pending_worker_stop
+        if stop_event is not None:
+            stop_event.set()
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        active_tasks = list(self._pending_run_tasks)
+        for active_task in active_tasks:
+            active_task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        self._pending_run_tasks.clear()
+        self._pending_worker_task = None
+        self._pending_worker_stop = None
 
     def _runtime_for_observability(self) -> Any | None:
         getter = self._get_agent_runtime
@@ -364,6 +403,387 @@ class IntakeWorkflowService:
             return _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS
         return 0.0
 
+    @staticmethod
+    def _is_telegram_business_webhook_event(event_type: str) -> bool:
+        return str(event_type or "").strip() in {
+            "telegram_business_webhook",
+            _TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
+        }
+
+    @staticmethod
+    def _uses_telegram_business_stale_guard(
+        *,
+        workflow: dict[str, Any],
+        event_type: str,
+        force: bool,
+    ) -> bool:
+        if force:
+            return False
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        return (
+            channel == "telegram_business_dm"
+            and provider == "telegram_bot_api"
+            and IntakeWorkflowService._is_telegram_business_webhook_event(event_type)
+        )
+
+    @staticmethod
+    def _pending_due_at(delay_seconds: float) -> str:
+        return (_utc_now() + timedelta(seconds=max(0.0, float(delay_seconds)))).isoformat()
+
+    @staticmethod
+    def _latest_inbound_changed(
+        *,
+        decided_summary: dict[str, Any],
+        latest_summary: dict[str, Any],
+    ) -> bool:
+        decided_id = str(decided_summary.get("latest_inbound_message_id", "") or "").strip()
+        latest_id = str(latest_summary.get("latest_inbound_message_id", "") or "").strip()
+        if latest_id and decided_id and latest_id != decided_id:
+            return True
+        if latest_id and not decided_id:
+            return True
+        decided_time = _parse_datetime(decided_summary.get("latest_inbound_message_created_time"))
+        latest_time = _parse_datetime(latest_summary.get("latest_inbound_message_created_time"))
+        return bool(decided_time and latest_time and latest_time > decided_time)
+
+    def _recover_interrupted_pending_runs(self) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE intake_pending_runs
+                SET status = 'pending',
+                    running_generation = 0,
+                    due_at = ?,
+                    updated_at = ?
+                WHERE status = 'running'
+                """,
+                (_utc_now_iso(), _utc_now_iso()),
+            )
+            conn.commit()
+
+    def _queue_pending_run(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        event_type: str,
+        owner_chat_id: str = "",
+        delay_seconds: float = _TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS,
+        last_inbound_message_id: str = "",
+    ) -> dict[str, Any]:
+        safe_workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        safe_customer_id = str(workflow.get("customer_id", "") or "").strip()
+        safe_conversation_id = str(conversation_id or "").strip()
+        if not safe_workflow_id or not safe_customer_id or not safe_conversation_id:
+            return {"ok": False, "queued": False, "summary": "pending run requires workflow and conversation ids"}
+        now = _utc_now_iso()
+        due_at = self._pending_due_at(delay_seconds)
+        safe_owner_chat_id = str(owner_chat_id or "").strip()
+        safe_last_inbound_id = str(last_inbound_message_id or "").strip()
+        safe_event_type = str(event_type or "").strip() or _TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT generation, status, owner_chat_id, created_at
+                FROM intake_pending_runs
+                WHERE workflow_id = ? AND conversation_id = ?
+                """,
+                (safe_workflow_id, safe_conversation_id),
+            ).fetchone()
+            generation = int(row["generation"] or 0) + 1 if row is not None else 1
+            status = str(row["status"] or "").strip() if row is not None else ""
+            next_status = "running" if status == "running" else "pending"
+            created_at = str(row["created_at"] or now) if row is not None else now
+            if not safe_owner_chat_id and row is not None:
+                safe_owner_chat_id = str(row["owner_chat_id"] or "").strip()
+            conn.execute(
+                """
+                INSERT INTO intake_pending_runs (
+                    workflow_id, conversation_id, customer_id, event_type, owner_chat_id,
+                    generation, running_generation, status, due_at,
+                    last_inbound_message_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_id, conversation_id) DO UPDATE SET
+                    customer_id=excluded.customer_id,
+                    event_type=excluded.event_type,
+                    owner_chat_id=excluded.owner_chat_id,
+                    generation=excluded.generation,
+                    status=excluded.status,
+                    due_at=excluded.due_at,
+                    last_inbound_message_id=excluded.last_inbound_message_id,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    safe_workflow_id,
+                    safe_conversation_id,
+                    safe_customer_id,
+                    safe_event_type,
+                    safe_owner_chat_id,
+                    generation,
+                    next_status,
+                    due_at,
+                    safe_last_inbound_id,
+                    created_at,
+                    now,
+                ),
+            )
+            conn.commit()
+        return {
+            "ok": True,
+            "queued": True,
+            "workflow_id": safe_workflow_id,
+            "conversation_id": safe_conversation_id,
+            "generation": generation,
+            "due_at": due_at,
+            "summary": NO_NOTIFY_TOKEN,
+        }
+
+    async def enqueue_telegram_business_workflow_run(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        conversation_id: str,
+        owner_chat_id: str = "",
+        event_type: str = "telegram_business_webhook",
+    ) -> dict[str, Any]:
+        workflow = self.get_workflow(customer_id=customer_id, workflow_id=workflow_id)
+        if workflow is None:
+            return {
+                "ok": False,
+                "queued": False,
+                "workflow_id": workflow_id,
+                "summary": f"Intake workflow {workflow_id} was not found.",
+            }
+        if not bool(workflow.get("enabled")):
+            return {
+                "ok": True,
+                "queued": False,
+                "workflow_id": workflow_id,
+                "summary": NO_NOTIFY_TOKEN,
+                "reason": "workflow_disabled",
+            }
+        latest_inbound_id = ""
+        summary, refresh_error = self._reload_conversation_summary(
+            workflow=workflow,
+            conversation_id=str(conversation_id or "").strip(),
+            fallback={},
+        )
+        if refresh_error:
+            return {
+                "ok": False,
+                "queued": False,
+                "workflow_id": workflow_id,
+                "summary": refresh_error,
+            }
+        latest_inbound_id = str(summary.get("latest_inbound_message_id", "") or "").strip()
+        return self._queue_pending_run(
+            workflow=workflow,
+            conversation_id=conversation_id,
+            event_type=_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE
+            if self._is_telegram_business_webhook_event(event_type)
+            else event_type,
+            owner_chat_id=owner_chat_id,
+            delay_seconds=_TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS,
+            last_inbound_message_id=latest_inbound_id,
+        )
+
+    def _claim_due_pending_runs(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 10), 50))
+        now = _utc_now_iso()
+        claimed: list[dict[str, Any]] = []
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM intake_pending_runs
+                WHERE status = 'pending' AND due_at <= ?
+                ORDER BY due_at ASC, updated_at ASC
+                LIMIT ?
+                """,
+                (now, safe_limit),
+            ).fetchall()
+            for row in rows:
+                generation = int(row["generation"] or 0)
+                result = conn.execute(
+                    """
+                    UPDATE intake_pending_runs
+                    SET status = 'running',
+                        running_generation = ?,
+                        updated_at = ?
+                    WHERE workflow_id = ?
+                      AND conversation_id = ?
+                      AND generation = ?
+                      AND status = 'pending'
+                    """,
+                    (
+                        generation,
+                        now,
+                        str(row["workflow_id"]),
+                        str(row["conversation_id"]),
+                        generation,
+                    ),
+                )
+                if int(getattr(result, "rowcount", 0) or 0) == 1:
+                    claimed.append(dict(row))
+            conn.commit()
+        return claimed
+
+    async def drain_due_pending_runs(self, *, limit: int = 10) -> int:
+        rows = self._claim_due_pending_runs(limit=limit)
+        if not rows:
+            return 0
+        semaphore = asyncio.Semaphore(max(1, int(_PENDING_RUN_MAX_CONCURRENCY)))
+
+        async def _run(row: dict[str, Any]) -> None:
+            async with semaphore:
+                await self._run_pending_row(row)
+
+        results = await asyncio.gather(*(_run(row) for row in rows), return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                self._log_pending_run_failure("intake pending run failed during drain", result)
+        return len(rows)
+
+    async def _schedule_due_pending_runs(self, *, limit: int = 10) -> int:
+        max_concurrency = max(1, int(_PENDING_RUN_MAX_CONCURRENCY))
+        capacity = max(0, min(int(limit or 10), max_concurrency - len(self._pending_run_tasks)))
+        if capacity <= 0:
+            return 0
+        rows = self._claim_due_pending_runs(limit=capacity)
+        for row in rows:
+            task = asyncio.create_task(
+                self._run_pending_row(row),
+                name=f"opentulpa-intake-pending-run-{row.get('workflow_id')}-{row.get('conversation_id')}",
+            )
+            self._pending_run_tasks.add(task)
+            task.add_done_callback(self._on_pending_run_task_done)
+        return len(rows)
+
+    def _on_pending_run_task_done(self, task: asyncio.Task[None]) -> None:
+        self._pending_run_tasks.discard(task)
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self._log_pending_run_failure("intake pending run failed during worker task", exc)
+
+    @staticmethod
+    def _log_pending_run_failure(message: str, exc: BaseException) -> None:
+        logger.error(message, exc_info=(type(exc), exc, exc.__traceback__))
+
+    async def _pending_run_worker_loop(self) -> None:
+        while True:
+            stop_event = self._pending_worker_stop
+            if stop_event is not None and stop_event.is_set():
+                return
+            try:
+                await self._schedule_due_pending_runs(limit=10)
+            except Exception:
+                logger.exception("intake pending run worker failed while claiming due work")
+            stop_event = self._pending_worker_stop
+            if stop_event is None:
+                await asyncio.sleep(_PENDING_RUN_POLL_SECONDS)
+                continue
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=_PENDING_RUN_POLL_SECONDS)
+            except TimeoutError:
+                continue
+
+    async def _run_pending_row(self, row: dict[str, Any]) -> None:
+        workflow_id = str(row.get("workflow_id", "") or "").strip()
+        conversation_id = str(row.get("conversation_id", "") or "").strip()
+        customer_id = str(row.get("customer_id", "") or "").strip()
+        owner_chat_id = str(row.get("owner_chat_id", "") or "").strip()
+        generation = int(row.get("generation") or 0)
+        result: dict[str, Any]
+        try:
+            result = await self.run_workflow(
+                customer_id=customer_id,
+                workflow_id=workflow_id,
+                event_type=_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "workflow_id": workflow_id,
+                "summary": f"Intake workflow {workflow_id} failed: {exc}",
+            }
+        if (
+            not bool(result.get("ok", False))
+            and owner_chat_id
+            and str(result.get("summary", "") or "").strip()
+            and str(result.get("summary", "") or "").strip() != NO_NOTIFY_TOKEN
+        ):
+            await self._notify_pending_run_owner(
+                owner_chat_id=owner_chat_id,
+                summary=str(result.get("summary", "") or "").strip(),
+            )
+        self._finish_pending_run(
+            workflow_id=workflow_id,
+            conversation_id=conversation_id,
+            generation=generation,
+        )
+
+    async def _notify_pending_run_owner(self, *, owner_chat_id: str, summary: str) -> None:
+        telegram_business = self._telegram_business
+        client = getattr(telegram_business, "client", None)
+        if client is None:
+            return
+        with suppress(Exception):
+            await client.send_message(
+                chat_id=owner_chat_id,
+                text=f"Telegram Business workflow issue: {summary}",
+                parse_mode="HTML",
+            )
+
+    def _finish_pending_run(
+        self,
+        *,
+        workflow_id: str,
+        conversation_id: str,
+        generation: int,
+    ) -> None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT generation, due_at
+                FROM intake_pending_runs
+                WHERE workflow_id = ? AND conversation_id = ?
+                """,
+                (workflow_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                return
+            current_generation = int(row["generation"] or 0)
+            if current_generation > int(generation or 0):
+                due_at = str(row["due_at"] or "").strip()
+                parsed_due = _parse_datetime(due_at)
+                min_due = _utc_now() + timedelta(seconds=_TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS)
+                next_due_at = due_at if parsed_due is not None and parsed_due > _utc_now() else min_due.isoformat()
+                conn.execute(
+                    """
+                    UPDATE intake_pending_runs
+                    SET status = 'pending',
+                        running_generation = 0,
+                        due_at = ?,
+                        updated_at = ?
+                    WHERE workflow_id = ? AND conversation_id = ?
+                    """,
+                    (next_due_at, _utc_now_iso(), workflow_id, conversation_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM intake_pending_runs
+                    WHERE workflow_id = ? AND conversation_id = ?
+                    """,
+                    (workflow_id, conversation_id),
+                )
+            conn.commit()
+
     def _reload_conversation_summary(
         self,
         *,
@@ -379,6 +799,89 @@ class IntakeWorkflowService:
             if str(summary.get("conversation_id", "") or "").strip() == conversation_id:
                 return summary, None
         return fallback, None
+
+    def _conversation_became_stale(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        decided_summary: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any], str | None]:
+        latest_summary, refresh_error = self._reload_conversation_summary(
+            workflow=workflow,
+            conversation_id=conversation_id,
+            fallback=decided_summary,
+        )
+        if refresh_error is not None:
+            return False, decided_summary, refresh_error
+        return (
+            self._latest_inbound_changed(
+                decided_summary=decided_summary,
+                latest_summary=latest_summary,
+            ),
+            latest_summary,
+            None,
+        )
+
+    def _requeue_stale_telegram_business_run(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        latest_summary: dict[str, Any],
+    ) -> None:
+        self._queue_pending_run(
+            workflow=workflow,
+            conversation_id=conversation_id,
+            event_type=_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
+            delay_seconds=_TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS,
+            last_inbound_message_id=str(
+                latest_summary.get("latest_inbound_message_id", "") or ""
+            ).strip(),
+        )
+
+    def _requeue_if_conversation_stale(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        conversation_summary: dict[str, Any],
+        matched: bool,
+    ) -> dict[str, Any] | None:
+        stale, latest_summary, stale_error = self._conversation_became_stale(
+            workflow=workflow,
+            conversation_id=conversation_id,
+            decided_summary=conversation_summary,
+        )
+        if stale_error:
+            self._emit_observability(
+                event="intake.conversation.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                phase="stale_check",
+                error=stale_error,
+            )
+        if not stale:
+            return None
+        self._requeue_stale_telegram_business_run(
+            workflow=workflow,
+            conversation_id=conversation_id,
+            latest_summary=latest_summary,
+        )
+        self._emit_observability(
+            event="intake.conversation.stale",
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            latest_inbound_message_id=str(
+                latest_summary.get("latest_inbound_message_id", "") or ""
+            ).strip(),
+        )
+        return {
+            "conversation_id": conversation_id,
+            "matched": bool(matched),
+            "status": "stale_requeued",
+            "replied": False,
+        }
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -445,6 +948,24 @@ class IntakeWorkflowService:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (workflow_id, conversation_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS intake_pending_runs (
+                    workflow_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    owner_chat_id TEXT NOT NULL DEFAULT '',
+                    generation INTEGER NOT NULL,
+                    running_generation INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    last_inbound_message_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, conversation_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_intake_pending_runs_due
+                    ON intake_pending_runs(status, due_at);
                 """
             )
             self._ensure_cursor_columns(conn)
@@ -1290,6 +1811,10 @@ class IntakeWorkflowService:
                 "DELETE FROM intake_conversation_cursors WHERE workflow_id = ?",
                 (workflow["workflow_id"],),
             )
+            conn.execute(
+                "DELETE FROM intake_pending_runs WHERE workflow_id = ?",
+                (workflow["workflow_id"],),
+            )
             conn.commit()
         if self._scheduler is not None:
             with suppress(Exception):
@@ -1976,6 +2501,20 @@ class IntakeWorkflowService:
                         error=error,
                     )
                     continue
+                if self._uses_telegram_business_stale_guard(
+                    workflow=workflow,
+                    event_type=event_type,
+                    force=force,
+                ):
+                    stale_result = self._requeue_if_conversation_stale(
+                        workflow=workflow,
+                        conversation_id=conversation_id,
+                        conversation_summary=cursor_summary,
+                        matched=bool(decision.get("matches_workflow")),
+                    )
+                    if stale_result is not None:
+                        result_items.append(stale_result)
+                        continue
                 if not bool(decision.get("matches_workflow")):
                     reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
                     reply_text = str(decision.get("reply_text", "") or "").strip()
@@ -1995,6 +2534,20 @@ class IntakeWorkflowService:
                                 reply_text=reply_text,
                             )
                     if reply_action == "send_reply" and reply_text:
+                        if self._uses_telegram_business_stale_guard(
+                            workflow=workflow,
+                            event_type=event_type,
+                            force=force,
+                        ):
+                            stale_result = self._requeue_if_conversation_stale(
+                                workflow=workflow,
+                                conversation_id=conversation_id,
+                                conversation_summary=cursor_summary,
+                                matched=False,
+                            )
+                            if stale_result is not None:
+                                result_items.append(stale_result)
+                                continue
                         self._emit_observability(
                             event="intake.apply.start",
                             workflow=workflow,
@@ -2109,6 +2662,11 @@ class IntakeWorkflowService:
                         active_booking=active_booking,
                         recent_completed_booking=recent_completed_booking,
                         decision=decision,
+                        stale_guard=self._uses_telegram_business_stale_guard(
+                            workflow=workflow,
+                            event_type=event_type,
+                            force=force,
+                        ),
                     )
                     if apply_error is None:
                         break
@@ -2151,6 +2709,9 @@ class IntakeWorkflowService:
                         phase="apply",
                         error=apply_error,
                     )
+                    continue
+                if str(applied.get("status", "") or "").strip() == "stale_requeued":
+                    result_items.append(applied)
                     continue
                 self._set_cursor(
                     workflow_id=str(workflow["workflow_id"]),
@@ -2304,6 +2865,7 @@ class IntakeWorkflowService:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         decision: dict[str, Any],
+        stale_guard: bool = False,
     ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
         booking_action = str(decision.get("booking_action", "ignore") or "ignore").strip().lower()
         ready_to_save = bool(decision.get("ready_to_save"))
@@ -2339,6 +2901,15 @@ class IntakeWorkflowService:
             )
         if booking_action == "ignore":
             if reply_action == "send_reply":
+                if stale_guard:
+                    stale_result = self._requeue_if_conversation_stale(
+                        workflow=workflow,
+                        conversation_id=str(conversation_summary.get("conversation_id", "") or ""),
+                        conversation_summary=conversation_summary,
+                        matched=True,
+                    )
+                    if stale_result is not None:
+                        return stale_result, None, None
                 self._emit_observability(
                     event="intake.reply.start",
                     workflow=workflow,
@@ -2490,6 +3061,15 @@ class IntakeWorkflowService:
                     error=f"ready_to_save missing required fields: {', '.join(missing)}",
                     decision=decision,
                 )
+            if stale_guard:
+                stale_result = self._requeue_if_conversation_stale(
+                    workflow=workflow,
+                    conversation_id=str(conversation_summary.get("conversation_id", "") or ""),
+                    conversation_summary=conversation_summary,
+                    matched=True,
+                )
+                if stale_result is not None:
+                    return stale_result, None, None
             self._emit_observability(
                 event="intake.sink_write.start",
                 workflow=workflow,
@@ -2575,12 +3155,30 @@ class IntakeWorkflowService:
                 target_booking["status"] = "cancelled"
             else:
                 target_booking["status"] = "active"
+            if stale_guard:
+                stale_result = self._requeue_if_conversation_stale(
+                    workflow=workflow,
+                    conversation_id=str(conversation_summary.get("conversation_id", "") or ""),
+                    conversation_summary=conversation_summary,
+                    matched=True,
+                )
+                if stale_result is not None:
+                    return stale_result, None, None
             target_booking["sink_write_status"] = sink_status
             target_booking["sink_record_ref"] = sink_ref
             target_booking["updated_at"] = _utc_now_iso()
             self._upsert_booking(target_booking)
 
         if reply_action == "send_reply":
+            if stale_guard:
+                stale_result = self._requeue_if_conversation_stale(
+                    workflow=workflow,
+                    conversation_id=str(conversation_summary.get("conversation_id", "") or ""),
+                    conversation_summary=conversation_summary,
+                    matched=True,
+                )
+                if stale_result is not None:
+                    return stale_result, None, None
             self._emit_observability(
                 event="intake.reply.start",
                 workflow=workflow,

@@ -417,7 +417,11 @@ def create_app(
             await task_runner.start()
         if wake_queue_service:
             await wake_queue_service.start()
+        if intake_service and hasattr(intake_service, "start"):
+            await intake_service.start()
         yield
+        if intake_service and hasattr(intake_service, "shutdown"):
+            await intake_service.shutdown()
         if scheduler_service:
             scheduler_service.shutdown(wait=True)
         if task_runner:

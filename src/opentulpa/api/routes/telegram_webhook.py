@@ -240,11 +240,26 @@ def register_telegram_webhook_routes(
                             conversation_id=conversation_id,
                         ):
                             continue
-                        result = await get_intake_workflows().run_workflow(
-                            customer_id=customer_id,
-                            workflow_id=str(workflow.get("workflow_id", "") or "").strip(),
-                            event_type="telegram_business_webhook",
+                        intake_workflows = get_intake_workflows()
+                        enqueue_run = getattr(
+                            intake_workflows,
+                            "enqueue_telegram_business_workflow_run",
+                            None,
                         )
+                        if callable(enqueue_run):
+                            result = await enqueue_run(
+                                customer_id=customer_id,
+                                workflow_id=str(workflow.get("workflow_id", "") or "").strip(),
+                                conversation_id=conversation_id,
+                                owner_chat_id=owner_chat_id,
+                                event_type="telegram_business_webhook",
+                            )
+                        else:
+                            result = await intake_workflows.run_workflow(
+                                customer_id=customer_id,
+                                workflow_id=str(workflow.get("workflow_id", "") or "").strip(),
+                                event_type="telegram_business_webhook",
+                            )
                         summary = str(result.get("summary", "") or "").strip()
                         if (
                             not bool(result.get("ok", False))
