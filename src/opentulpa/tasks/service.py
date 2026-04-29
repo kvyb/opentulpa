@@ -7,6 +7,8 @@ import contextlib
 import json
 import logging
 import sqlite3
+
+from opentulpa.persistence.sqlite import connect_sqlite
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -68,9 +70,7 @@ class TaskService:
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_sqlite(self.db_path, wal=True)
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+
+from opentulpa.persistence.sqlite import connect_sqlite
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -113,9 +115,7 @@ class FileVaultService:
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_sqlite(self.db_path, wal=True)
 
     def _init_db(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
