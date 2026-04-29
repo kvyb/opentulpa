@@ -131,6 +131,9 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         - source_config is optional.
         - If source_config.conversation_id is omitted, the workflow scans recent conversations
           for the configured source instead of pinning one specific thread.
+        - By default, do not filter inbound messages by intent before the workflow can reply.
+          Only set source_config.intent_match_required=true when the user explicitly asks for
+          this workflow to handle only messages matching a specific intent.
         - channel/provider pairs supported here:
           - instagram_dm + composio
           - telegram_business_dm + telegram_bot_api
@@ -358,6 +361,8 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         draft_patch.required_fields must be stable ASCII snake_case ids, not display labels.
         Put localized wording, owner terminology, and extraction hints in draft_patch.field_guidance
         or draft_patch.assistant_instructions. field_guidance keys must match required_fields ids.
+        Do not set draft_patch.source_config.intent_match_required by default; set it to true only
+        when the owner explicitly wants the workflow to ignore messages that do not match the stated intent.
         When replacing field-specific guidance or sink_config.field_mapping, send the full current object.
         If uploaded files are being used as workflow knowledge, patch scratchpad_patch.source_file_ids
         with original uploaded file ids, prepare them with business_knowledge_index, and set

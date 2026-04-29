@@ -288,8 +288,8 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     assert isinstance(messages[0].content, list)
     assert messages[0].content[0]["cache_control"] == {"type": "ephemeral"}
     assert isinstance(messages[1].content, str)
-    assert "False positives are worse than ignoring an unrelated DM." in system_text
-    assert "If the message is ambiguous" in system_text
+    assert "Default mode is not an intent filter" in system_text
+    assert "workflow.intent_match_required is true" in system_text
     assert "If customer messages conflict, prefer the latest customer-provided value" in system_text
     assert "Ask at most one compact question at a time" in system_text
     assert "When ready_to_save=true, save_payload must contain the merged final field set" in system_text

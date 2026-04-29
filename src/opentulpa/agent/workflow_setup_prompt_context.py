@@ -19,6 +19,12 @@ def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
 
 
+def _truthy_config_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "on", "required", "strict"}
+
+
 def _draft_hash(draft: dict[str, Any]) -> str:
     payload = json.dumps(_safe_dict(draft), ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -108,6 +114,8 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
     name = str(draft.get("name", "") or "").strip()
     channel = str(draft.get("channel", "") or "").strip()
     intent = str(draft.get("intent_description", "") or "").strip()
+    source_config = _safe_dict(draft.get("source_config"))
+    intent_match_required = _truthy_config_flag(source_config.get("intent_match_required"))
     required_fields = _nonempty_list(draft.get("required_fields"))
     knowledge_file_ids = _nonempty_list(draft.get("knowledge_file_ids"))
     source_file_ids = _nonempty_list(scratchpad.get("source_file_ids"))
@@ -203,6 +211,7 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
         f"- has_name: {_yes_no(bool(name))}",
         f"- channel: {channel or 'missing'}",
         f"- has_intent_description: {_yes_no(bool(intent))}",
+        f"- intent_match_required: {_yes_no(intent_match_required)}",
         f"- required_field_count: {len(required_fields)}",
         f"- sink_type: {sink_type or 'missing'}",
         f"- sink_status: {sink_status}",

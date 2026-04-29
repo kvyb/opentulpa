@@ -263,6 +263,18 @@ def _disable_deepseek_v4_pro_thinking_extra(*, model_name: str, reasoning_effort
     }
 
 
+def _cap_max_completion_tokens_for_model(model_kwargs: dict[str, Any], *, model_name: str) -> dict[str, Any]:
+    if str(model_name or "").strip().casefold() != "google/gemini-3.1-flash-lite-preview":
+        return model_kwargs
+    capped = dict(model_kwargs)
+    try:
+        current = int(capped.get("max_completion_tokens", 1000) or 1000)
+    except (TypeError, ValueError):
+        current = 1000
+    capped["max_completion_tokens"] = min(max(1, current), 1000)
+    return capped
+
+
 def _is_deepseek_model(model_name: str | None) -> bool:
     return "deepseek" in str(model_name or "").strip().lower()
 
@@ -282,7 +294,7 @@ def _chat_model_init_kwargs_for_model(
     model_name: str,
     reasoning_effort: str | None,
 ) -> dict[str, Any]:
-    model_kwargs = dict(base_kwargs)
+    model_kwargs = _cap_max_completion_tokens_for_model(dict(base_kwargs), model_name=model_name)
     extra = _disable_deepseek_v4_pro_thinking_extra(
         model_name=model_name,
         reasoning_effort=reasoning_effort,
@@ -749,9 +761,10 @@ def _build_intake_workflow_system_prompt() -> str:
         "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "Allowed reply_action values: none, send_reply, mark_cancelled.\n\n"
         "Decision policy:\n"
-        "- Be precise. False positives are worse than ignoring an unrelated DM.\n"
-        "- Use matches_workflow=true only when the customer is clearly pursuing the workflow intent now.\n"
-        "- If the message is ambiguous, casual, social, or not clearly about the workflow, return matches_workflow=false, booking_action=ignore, reply_action=none.\n"
+        "- Default mode is not an intent filter: unless workflow.intent_match_required is true, treat messages from the configured source as candidates for this workflow.\n"
+        "- In default mode, set matches_workflow=true for greetings, casual openers, ambiguous early-stage messages, and business-adjacent questions when a useful reply can move the conversation forward.\n"
+        "- Only when workflow.intent_match_required is true, use matches_workflow=false for messages that are not clearly pursuing the workflow intent.\n"
+        "- Use matches_workflow=false in default mode only for clearly unrelated conversations where no useful workflow reply should be sent.\n"
         "- If the customer asks a business/service/pricing/booking question that is close to the workflow but outside its configured scope, return matches_workflow=false, booking_action=ignore, reply_action=send_reply with a concise redirect based on workflow instructions.\n"
         "- Confidence should reflect how certain you are in the match and booking decision.\n"
         "- Confidence guide: 0.9+ very clear, 0.7-0.89 likely, 0.4-0.69 ambiguous, below 0.4 weak evidence.\n\n"
@@ -818,9 +831,10 @@ def _build_intake_workflow_system_prompt() -> str:
         "1. Customer asks for a wash, gives day and car type, but no time -> matches_workflow=true, booking_action=create_new_booking or update_active, reply_action=send_reply, missing_fields includes time, ready_to_save=false.\n"
         "2. Customer says 'actually make it 4pm instead' after a recent completed booking -> matches_workflow=true, booking_action=edit_recent_completed, extracted_fields.time='4pm'.\n"
         "3. Customer says 'also book my other car tomorrow evening' after an earlier finished booking -> matches_workflow=true, booking_action=create_new_booking.\n"
-        "4. Customer only reacts with 'thanks' or sends unrelated chat -> matches_workflow=false, booking_action=ignore, reply_action=none.\n"
-        "5. Customer says 'cancel it please' after an active or recent completed booking -> matches_workflow=true, booking_action=update_active or edit_recent_completed, reply_action=mark_cancelled, reply_text confirms cancellation.\n"
-        "6. Customer asks for a price from bound knowledge and workflow.knowledge_answer is empty -> needs_business_knowledge=true with a concise business_knowledge_query.\n"
+        "4. Default mode greeting like 'hi' or 'привет' -> matches_workflow=true, booking_action=ignore, reply_action=send_reply with a concise useful opener.\n"
+        "5. Strict intent mode unrelated chat -> matches_workflow=false, booking_action=ignore, reply_action=none.\n"
+        "6. Customer says 'cancel it please' after an active or recent completed booking -> matches_workflow=true, booking_action=update_active or edit_recent_completed, reply_action=mark_cancelled, reply_text confirms cancellation.\n"
+        "7. Customer asks for a price from bound knowledge and workflow.knowledge_answer is empty -> needs_business_knowledge=true with a concise business_knowledge_query.\n"
         "No markdown. No extra keys."
     )
 
@@ -897,6 +911,7 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             safe_workflow.get("intent_description", ""),
             limit=500,
         ),
+        "intent_match_required": bool(safe_workflow.get("intent_match_required", False)),
         "required_fields": [
             str(item or "").strip()
             for item in list(safe_workflow.get("required_fields") or [])[:12]
@@ -1086,7 +1101,7 @@ def _build_intake_workflow_agent_prompt(
         "- For source-backed business facts in reply_text or save_payload, leave knowledge_source_refs empty and set grounding_status=grounded only when workflow.knowledge_answer or business_knowledge_query directly supports the fact. If no business knowledge answer supports a fact, set grounding_status=no_source and ask to confirm instead.\n"
         "- sink_arguments is for sink-specific write arguments or overrides discovered during this turn; "
         "leave it empty when not needed.\n"
-        "- False positives are worse than ignoring unrelated DMs.\n\n"
+        "- Unless workflow.intent_match_required is true, do not use intent as a front-door filter; reply usefully when the source conversation can be moved forward.\n\n"
         f"customer_id={customer_id}\n"
         f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
         f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
