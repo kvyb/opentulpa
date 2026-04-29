@@ -47,6 +47,58 @@ class _FinalOnlyWorkflowSetupRuntime:
         return "Draft updated. Please confirm this workflow before I save it."
 
 
+class _SlowWorkflowSetupRuntime:
+    def __init__(self) -> None:
+        self.ainvoke_calls: list[dict[str, object]] = []
+        self.classifier_calls: list[dict[str, object]] = []
+        self.release = asyncio.Event()
+
+    async def astream_text(self, **kwargs):
+        yield "This should not stream in workflow setup mode."
+
+    async def ainvoke_text(self, **kwargs):
+        self.ainvoke_calls.append(kwargs)
+        await self.release.wait()
+        return "Workflow proposal: ready. Please confirm to activate it."
+
+    async def classify_workflow_setup_interruption(self, **kwargs):
+        self.classifier_calls.append(kwargs)
+        return {
+            "ok": True,
+            "kind": "status_nudge",
+            "confidence": 0.99,
+            "status_reply": str(kwargs["status"]["reply_if_status_nudge"]),
+            "reason": "User asked for progress only.",
+        }
+
+
+class _QueuedWorkflowSetupRuntime:
+    def __init__(self) -> None:
+        self.ainvoke_calls: list[dict[str, object]] = []
+        self.classifier_calls: list[dict[str, object]] = []
+        self.release_first = asyncio.Event()
+
+    async def astream_text(self, **kwargs):
+        yield "This should not stream in workflow setup mode."
+
+    async def ainvoke_text(self, **kwargs):
+        self.ainvoke_calls.append(kwargs)
+        if len(self.ainvoke_calls) == 1:
+            await self.release_first.wait()
+            return "Old workflow proposal: please confirm to activate it."
+        return "Updated workflow proposal: includes the new fields. Please confirm to activate it."
+
+    async def classify_workflow_setup_interruption(self, **kwargs):
+        self.classifier_calls.append(kwargs)
+        return {
+            "ok": True,
+            "kind": "setup_input",
+            "confidence": 0.98,
+            "status_reply": "",
+            "reason": "Message contains workflow fields.",
+        }
+
+
 class _UpdatingProgressRuntime:
     async def astream_text(self, **kwargs):
         yield f"{STREAM_PROGRESS_PREFIX}Searching the web…"
@@ -158,6 +210,28 @@ class _FakeTelegramClient:
         return True
 
 
+async def _cancel_workflow_setup_runs() -> None:
+    runs = list(relay_module._WORKFLOW_SETUP_RUNS.values())
+    relay_module._WORKFLOW_SETUP_RUNS.clear()
+    tasks: list[asyncio.Task] = []
+    for run in runs:
+        tasks.append(run.task)
+        if run.delivery_task is not None:
+            tasks.append(run.delivery_task)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _wait_for_message(fake_client: _FakeTelegramClient, needle: str) -> None:
+    for _ in range(100):
+        if any(needle in text for _, text, _ in fake_client.message_calls):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"message containing {needle!r} was not sent")
+
+
 @pytest.mark.asyncio
 async def test_stream_uses_drafts_for_live_partials_without_separate_final_send(
     monkeypatch: pytest.MonkeyPatch,
@@ -178,7 +252,9 @@ async def test_stream_uses_drafts_for_live_partials_without_separate_final_send(
     assert "priority emails" in str(final or "").lower()
     assert fake_client.draft_calls
     assert len({draft_id for _, draft_id, _, _, _ in fake_client.draft_calls}) == 1
-    assert fake_client.message_calls == [(1, "I checked your inbox. 3 priority emails found.", "HTML")]
+    assert fake_client.message_calls == [
+        (1, "I checked your inbox. 3 priority emails found.", "HTML")
+    ]
     assert fake_client.chat_actions
     assert not fake_client.deleted_messages
 
@@ -202,7 +278,9 @@ async def test_wait_signal_does_not_emit_visible_progress_message(
     assert suppressed is False
     assert "priority emails" in str(final or "").lower()
     assert not any("working on it" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
-    assert fake_client.message_calls == [(1, "I checked the inbox. 3 priority emails found.", "HTML")]
+    assert fake_client.message_calls == [
+        (1, "I checked the inbox. 3 priority emails found.", "HTML")
+    ]
 
 
 @pytest.mark.asyncio
@@ -234,6 +312,114 @@ async def test_workflow_setup_turn_uses_final_reply_without_draft_streaming(
 
 
 @pytest.mark.asyncio
+async def test_slow_workflow_setup_turn_backgrounds_and_status_nudges_do_not_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _cancel_workflow_setup_runs()
+    fake_client = _FakeTelegramClient("dummy", draft_ok=False)
+    runtime = _SlowWorkflowSetupRuntime()
+    delivered_replies: list[str] = []
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS", 0.01)
+
+    try:
+        final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+            agent_runtime=runtime,
+            thread_id="chat-setup-slow",
+            customer_id="telegram_setup_slow",
+            text="build workflow",
+            bot_token="dummy",
+            chat_id=1,
+            turn_mode="workflow_setup",
+            final_reply_callback=delivered_replies.append,
+        )
+        follow_up, follow_up_suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+            agent_runtime=runtime,
+            thread_id="chat-setup-slow",
+            customer_id="telegram_setup_slow",
+            text="so what's up?",
+            bot_token="dummy",
+            chat_id=1,
+            turn_mode="workflow_setup",
+        )
+
+        assert suppressed is False
+        assert follow_up_suppressed is False
+        assert final == relay_module.WORKFLOW_SETUP_BUSY_REPLY
+        assert follow_up == relay_module.WORKFLOW_SETUP_BUSY_REPLY
+        assert len(runtime.ainvoke_calls) == 1
+        assert len(runtime.classifier_calls) == 1
+        assert runtime.classifier_calls[0]["status"]["state"] == "workflow_setup_running"
+        assert runtime.classifier_calls[0]["user_text"] == "so what's up?"
+
+        runtime.release.set()
+        await _wait_for_message(fake_client, "Workflow proposal: ready.")
+
+        assert len(runtime.ainvoke_calls) == 1
+        assert fake_client.message_calls[-1] == (
+            1,
+            "Workflow proposal: ready. Please confirm to activate it.",
+            "HTML",
+        )
+        assert delivered_replies == ["Workflow proposal: ready. Please confirm to activate it."]
+    finally:
+        await _cancel_workflow_setup_runs()
+
+
+@pytest.mark.asyncio
+async def test_slow_workflow_setup_turn_applies_substantive_follow_up_before_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _cancel_workflow_setup_runs()
+    fake_client = _FakeTelegramClient("dummy", draft_ok=False)
+    runtime = _QueuedWorkflowSetupRuntime()
+    delivered_replies: list[str] = []
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    monkeypatch.setattr(relay_module, "WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS", 0.01)
+
+    try:
+        final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+            agent_runtime=runtime,
+            thread_id="chat-setup-queued",
+            customer_id="telegram_setup_queued",
+            text="build workflow",
+            bot_token="dummy",
+            chat_id=1,
+            turn_mode="workflow_setup",
+            final_reply_callback=delivered_replies.append,
+        )
+        queued, queued_suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+            agent_runtime=runtime,
+            thread_id="chat-setup-queued",
+            customer_id="telegram_setup_queued",
+            text="Required fields: client, phone, service, day, time.",
+            bot_token="dummy",
+            chat_id=1,
+            turn_mode="workflow_setup",
+        )
+
+        assert suppressed is False
+        assert queued_suppressed is False
+        assert final == relay_module.WORKFLOW_SETUP_BUSY_REPLY
+        assert queued == relay_module.WORKFLOW_SETUP_QUEUED_REPLY
+        assert len(runtime.ainvoke_calls) == 1
+        assert len(runtime.classifier_calls) == 1
+        assert runtime.classifier_calls[0]["status"]["state"] == "workflow_setup_running"
+
+        runtime.release_first.set()
+        await _wait_for_message(fake_client, "Updated workflow proposal:")
+
+        assert len(runtime.ainvoke_calls) == 2
+        assert "Required fields: client" in str(runtime.ainvoke_calls[1]["text"])
+        assert not any("Old workflow proposal" in text for _, text, _ in fake_client.message_calls)
+        assert delivered_replies == [
+            "Updated workflow proposal: includes the new fields. Please confirm to activate it."
+        ]
+    finally:
+        await _cancel_workflow_setup_runs()
+
+
+@pytest.mark.asyncio
 async def test_progress_signals_stay_in_typing_only_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -251,8 +437,12 @@ async def test_progress_signals_stay_in_typing_only_path(
 
     assert suppressed is False
     assert final == "Here is the result."
-    assert not any("searching the web" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
-    assert not any("fetching a webpage" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
+    assert not any(
+        "searching the web" in text.lower() for _, _, text, _, _ in fake_client.draft_calls
+    )
+    assert not any(
+        "fetching a webpage" in text.lower() for _, _, text, _, _ in fake_client.draft_calls
+    )
     assert fake_client.message_calls == [(1, "Here is the result.", "HTML")]
 
 

@@ -212,8 +212,7 @@ class Settings(BaseSettings):
     wake_classifier_model: str | None = Field(
         default=None,
         description=(
-            "Optional cheaper model for wake/heartbeat notify decisions. "
-            "If unset, uses LLM_MODEL."
+            "Optional cheaper model for wake/heartbeat notify decisions. If unset, uses LLM_MODEL."
         ),
     )
     wake_execution_model: str | None = Field(
@@ -241,6 +240,13 @@ class Settings(BaseSettings):
         description=(
             "Model used by guardrail intent classification for approval decisions. "
             "Recommended default is google/gemini-3-flash-preview."
+        ),
+    )
+    workflow_setup_input_classifier_model: str = Field(
+        default="z-ai/glm-5.1",
+        description=(
+            "Model used to classify messages sent while workflow setup is already running "
+            "as status nudges versus real setup edits."
         ),
     )
     business_knowledge_oracle_model: str = Field(
@@ -374,6 +380,7 @@ class Settings(BaseSettings):
         """Preferred neutral provider naming for embedding model."""
         return self.openrouter_embedding_model
 
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
@@ -404,7 +411,9 @@ class _YamlRuntimeDefaultsSource(PydanticBaseSettingsSource):
 
         return candidates
 
-    def _build_delegate(self, settings_cls: type[BaseSettings]) -> PydanticBaseSettingsSource | None:
+    def _build_delegate(
+        self, settings_cls: type[BaseSettings]
+    ) -> PydanticBaseSettingsSource | None:
         for candidate in self._candidate_paths():
             if candidate.exists():
                 return YamlConfigSettingsSource(settings_cls, yaml_file=candidate)

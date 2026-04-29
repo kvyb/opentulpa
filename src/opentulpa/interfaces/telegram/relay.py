@@ -9,6 +9,7 @@ import time
 import zlib
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +28,24 @@ logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
 DRAFT_INITIAL_PUBLISH_DELAY_SECONDS = 0.35
 DRAFT_PUBLISH_MIN_INTERVAL_SECONDS = 0.9
+WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS = 180.0
+WORKFLOW_SETUP_BUSY_REPLY = (
+    "I'm still working on the workflow setup. I'll send the proposal here as soon as it's ready."
+)
+WORKFLOW_SETUP_QUEUED_REPLY = (
+    "I'm still working on the workflow setup. "
+    "I got your latest note and will apply it after the current validation finishes."
+)
+
+
+@dataclass
+class _WorkflowSetupRun:
+    task: asyncio.Task[Any]
+    pending_texts: list[str]
+    delivery_task: asyncio.Task[None] | None = None
+
+
+_WORKFLOW_SETUP_RUNS: dict[str, _WorkflowSetupRun] = {}
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -34,6 +53,17 @@ def _clean_thread_id(value: Any) -> str:
     if text.lower() in {"none", "null"}:
         return ""
     return text
+
+
+def _workflow_setup_run_key(*, customer_id: str, thread_id: str) -> str:
+    return f"{str(customer_id or '').strip()}:{_clean_thread_id(thread_id)}"
+
+
+def _workflow_setup_run_active(run: _WorkflowSetupRun) -> bool:
+    if not run.task.done():
+        return True
+    delivery_task = run.delivery_task
+    return delivery_task is not None and not delivery_task.done()
 
 
 def normalize_reply_text(text: str) -> str:
@@ -87,6 +117,178 @@ async def _emit_typing_until_done(
             await asyncio.wait_for(stop_event.wait(), timeout=4.0)
 
 
+async def _classify_workflow_setup_interruption(
+    *,
+    agent_runtime: Any,
+    text: str,
+    status: dict[str, Any],
+) -> dict[str, Any]:
+    classifier = getattr(agent_runtime, "classify_workflow_setup_interruption", None)
+    if not callable(classifier):
+        return {"ok": False, "kind": "setup_input", "error": "classifier_unavailable"}
+    try:
+        result = await asyncio.wait_for(
+            classifier(user_text=str(text or ""), status=status),
+            timeout=5.0,
+        )
+    except Exception as exc:
+        logger.warning(
+            "telegram.stream workflow_setup_interruption_classifier_failed error=%s",
+            f"{type(exc).__name__}: {exc}",
+        )
+        return {"ok": False, "kind": "setup_input", "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(result, dict):
+        return {"ok": False, "kind": "setup_input", "error": "invalid_classifier_output"}
+    kind = str(result.get("kind", "") or "").strip().lower()
+    if kind not in {"status_nudge", "setup_input"}:
+        kind = "setup_input"
+    return {
+        **result,
+        "kind": kind,
+        "status_reply": str(result.get("status_reply", "") or "").strip(),
+    }
+
+
+def _start_workflow_setup_task(
+    *,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    turn_mode: str,
+) -> asyncio.Task[Any]:
+    return asyncio.create_task(
+        agent_runtime.ainvoke_text(
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+            turn_mode=turn_mode,
+        )
+    )
+
+
+async def _resolve_workflow_setup_run(
+    *,
+    run: _WorkflowSetupRun,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    turn_mode: str,
+) -> str:
+    final_text = ""
+    while True:
+        result = await run.task
+        safe = str(result or "").strip()
+        if safe:
+            final_text = safe
+        if not run.pending_texts:
+            return final_text
+        pending_text = "\n\n".join(run.pending_texts).strip()
+        run.pending_texts.clear()
+        if not pending_text:
+            continue
+        run.task = _start_workflow_setup_task(
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=pending_text,
+            turn_mode=turn_mode,
+        )
+
+
+async def _deliver_workflow_setup_run_when_ready(
+    *,
+    run_key: str,
+    run: _WorkflowSetupRun,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    turn_mode: str,
+    bot_token: str,
+    chat_id: int,
+    final_reply_callback: Callable[[str], Any] | None,
+) -> None:
+    try:
+        while True:
+            final_text = await _resolve_workflow_setup_run(
+                run=run,
+                agent_runtime=agent_runtime,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                turn_mode=turn_mode,
+            )
+            if run.pending_texts:
+                continue
+            safe = str(final_text or "").strip()
+            if not safe or is_low_signal_reply(safe) or safe == STREAM_APPROVAL_HANDOFF_SIGNAL:
+                return
+            client = TelegramClient(bot_token)
+            try:
+                sent = await client.send_message(
+                    chat_id=chat_id,
+                    text=safe,
+                    parse_mode="HTML",
+                )
+                if sent and final_reply_callback is not None:
+                    with suppress(Exception):
+                        final_reply_callback(safe)
+                logger.info(
+                    "telegram.stream workflow_setup_background_delivered chat_id=%s thread_id=%s customer_id=%s sent=%s final_chars=%s",
+                    chat_id,
+                    thread_id,
+                    customer_id,
+                    sent,
+                    len(safe),
+                )
+            finally:
+                if hasattr(client, "aclose"):
+                    with suppress(Exception):
+                        await client.aclose()
+            if not run.pending_texts:
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "telegram.stream workflow_setup_background_failed chat_id=%s thread_id=%s customer_id=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+        )
+    finally:
+        if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
+            _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+
+
+def _ensure_workflow_setup_delivery_task(
+    *,
+    run_key: str,
+    run: _WorkflowSetupRun,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    turn_mode: str,
+    bot_token: str,
+    chat_id: int,
+    final_reply_callback: Callable[[str], Any] | None,
+) -> None:
+    if run.delivery_task is not None and not run.delivery_task.done():
+        return
+    run.delivery_task = asyncio.create_task(
+        _deliver_workflow_setup_run_when_ready(
+            run_key=run_key,
+            run=run,
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            turn_mode=turn_mode,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            final_reply_callback=final_reply_callback,
+        )
+    )
+
+
 async def stream_langgraph_reply_to_telegram(
     *,
     agent_runtime: Any,
@@ -97,6 +299,7 @@ async def stream_langgraph_reply_to_telegram(
     chat_id: int,
     turn_mode: str = "interactive",
     interactive_session: Any | None = None,
+    final_reply_callback: Callable[[str], Any] | None = None,
 ) -> tuple[str | None, bool]:
     last_streamed = ""
     final_reply = None
@@ -104,7 +307,9 @@ async def stream_langgraph_reply_to_telegram(
     live_delivery_text = ""
     live_delivery_at = 0.0
     client = TelegramClient(bot_token)
-    draft_id = zlib.crc32(f"{thread_id}:{customer_id}:{chat_id}:{new_short_id('dft')}".encode()) or 1
+    draft_id = (
+        zlib.crc32(f"{thread_id}:{customer_id}:{chat_id}:{new_short_id('dft')}".encode()) or 1
+    )
     draft_enabled = chat_id > 0
     waiting_for_segment = True
     typing_stop = asyncio.Event()
@@ -209,35 +414,121 @@ async def stream_langgraph_reply_to_telegram(
     try:
         if final_only:
             draft_enabled = False
-            try:
-                recovered = await asyncio.wait_for(
-                    agent_runtime.ainvoke_text(
+            run_key = _workflow_setup_run_key(customer_id=customer_id, thread_id=thread_id)
+            existing_run = _WORKFLOW_SETUP_RUNS.get(run_key)
+            if existing_run is not None and not _workflow_setup_run_active(existing_run):
+                _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+                existing_run = None
+            if existing_run is not None:
+                queued = False
+                status = {
+                    "state": "workflow_setup_running",
+                    "current_status": "The workflow setup/preflight/proposal run is still active.",
+                    "pending_setup_updates": len(existing_run.pending_texts),
+                    "reply_if_status_nudge": WORKFLOW_SETUP_BUSY_REPLY,
+                    "reply_if_setup_input": WORKFLOW_SETUP_QUEUED_REPLY,
+                }
+                decision = await _classify_workflow_setup_interruption(
+                    agent_runtime=agent_runtime,
+                    text=text,
+                    status=status,
+                )
+                if str(decision.get("kind", "") or "") == "status_nudge":
+                    final_reply = str(decision.get("status_reply", "") or "").strip()
+                    if not final_reply:
+                        final_reply = WORKFLOW_SETUP_BUSY_REPLY
+                else:
+                    safe_text = str(text or "").strip()
+                    if safe_text:
+                        existing_run.pending_texts.append(safe_text)
+                        queued = True
+                    final_reply = WORKFLOW_SETUP_QUEUED_REPLY
+                logger.info(
+                    "telegram.stream workflow_setup_existing_run chat_id=%s thread_id=%s customer_id=%s kind=%s queued=%s pending_count=%s",
+                    chat_id,
+                    thread_id,
+                    customer_id,
+                    str(decision.get("kind", "") or ""),
+                    queued,
+                    len(existing_run.pending_texts),
+                )
+            else:
+                run = _WorkflowSetupRun(
+                    task=_start_workflow_setup_task(
+                        agent_runtime=agent_runtime,
                         thread_id=thread_id,
                         customer_id=customer_id,
                         text=text,
                         turn_mode=turn_mode,
                     ),
-                    timeout=180.0,
+                    pending_texts=[],
                 )
-            except TimeoutError:
-                logger.error(
-                    "telegram.stream final_only_timeout chat_id=%s thread_id=%s customer_id=%s turn_mode=%s",
-                    chat_id,
-                    thread_id,
-                    customer_id,
-                    turn_mode,
-                )
-                final_reply = (
-                    "Still working, but the model response timed out. "
-                    "Please retry in a moment."
-                )
-            else:
-                safe = str(recovered or "").strip()
-                if safe == STREAM_APPROVAL_HANDOFF_SIGNAL:
-                    suppressed = True
-                    final_reply = None
-                elif safe and not is_low_signal_reply(safe):
-                    final_reply = safe
+                _WORKFLOW_SETUP_RUNS[run_key] = run
+                try:
+                    recovered = await asyncio.wait_for(
+                        asyncio.shield(run.task),
+                        timeout=WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "telegram.stream workflow_setup_backgrounded chat_id=%s thread_id=%s customer_id=%s turn_mode=%s",
+                        chat_id,
+                        thread_id,
+                        customer_id,
+                        turn_mode,
+                    )
+                    _ensure_workflow_setup_delivery_task(
+                        run_key=run_key,
+                        run=run,
+                        agent_runtime=agent_runtime,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        turn_mode=turn_mode,
+                        bot_token=bot_token,
+                        chat_id=chat_id,
+                        final_reply_callback=final_reply_callback,
+                    )
+                    final_reply = WORKFLOW_SETUP_BUSY_REPLY
+                except asyncio.CancelledError:
+                    _ensure_workflow_setup_delivery_task(
+                        run_key=run_key,
+                        run=run,
+                        agent_runtime=agent_runtime,
+                        thread_id=thread_id,
+                        customer_id=customer_id,
+                        turn_mode=turn_mode,
+                        bot_token=bot_token,
+                        chat_id=chat_id,
+                        final_reply_callback=final_reply_callback,
+                    )
+                    raise
+                except Exception:
+                    if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
+                        _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+                    raise
+                else:
+                    if run.pending_texts:
+                        _ensure_workflow_setup_delivery_task(
+                            run_key=run_key,
+                            run=run,
+                            agent_runtime=agent_runtime,
+                            thread_id=thread_id,
+                            customer_id=customer_id,
+                            turn_mode=turn_mode,
+                            bot_token=bot_token,
+                            chat_id=chat_id,
+                            final_reply_callback=final_reply_callback,
+                        )
+                        final_reply = WORKFLOW_SETUP_QUEUED_REPLY
+                    else:
+                        if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
+                            _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+                        safe = str(recovered or "").strip()
+                        if safe == STREAM_APPROVAL_HANDOFF_SIGNAL:
+                            suppressed = True
+                            final_reply = None
+                        elif safe and not is_low_signal_reply(safe):
+                            final_reply = safe
         else:
             stream = agent_runtime.astream_text(
                 thread_id=thread_id,
@@ -302,8 +593,7 @@ async def stream_langgraph_reply_to_telegram(
                         final_reply = recovered_text
                         break
                     timeout_text = (
-                        "Still working, but the model response timed out. "
-                        "Please retry in a moment."
+                        "Still working, but the model response timed out. Please retry in a moment."
                     )
                     logger.error(
                         "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
@@ -481,7 +771,9 @@ async def relay_event_via_main_agent(
                 parsed = datetime.fromisoformat(last_assistant_at.replace("Z", "+00:00"))
                 if parsed.tzinfo is None:
                     parsed = parsed.replace(tzinfo=UTC)
-                assistant_idle_hours = f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
+                assistant_idle_hours = (
+                    f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
+                )
 
         if (
             str(event_label).startswith("routine/")

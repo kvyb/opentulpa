@@ -71,6 +71,7 @@ def test_settings_default_agent_models_use_glm(monkeypatch, tmp_path: Path) -> N
 
     assert settings.llm_model == "z-ai/glm-5.1"
     assert settings.wake_execution_model == "z-ai/glm-5.1"
+    assert settings.workflow_setup_input_classifier_model == "z-ai/glm-5.1"
     assert settings.business_knowledge_oracle_model == "google/gemini-3.1-flash-lite-preview"
 
 
@@ -120,9 +121,7 @@ def test_dotenv_overrides_yaml_runtime_defaults(monkeypatch, tmp_path: Path) -> 
     assert settings.llm_model == "from-dotenv"
 
 
-def test_settings_discovers_yaml_by_walking_parent_directories(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_settings_discovers_yaml_by_walking_parent_directories(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text("llm_model: from-parent\n", encoding="utf-8")
     nested_dir = tmp_path / "nested" / "deeper"

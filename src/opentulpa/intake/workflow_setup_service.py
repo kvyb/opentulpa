@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 from contextlib import suppress
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -14,6 +16,8 @@ from opentulpa.intake.workflow_setup_store import (
     SetupSessionStatus,
     WorkflowSetupSessionStore,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_dict(value: Any) -> dict[str, Any]:
@@ -92,9 +96,7 @@ def _normalize_local_csv_draft_sink_config(draft: dict[str, Any]) -> dict[str, A
         return normalized
     sink_config = _safe_dict(normalized.get("sink_config"))
     file_path = str(
-        sink_config.get("file_path", "")
-        or sink_config.get("filename", "")
-        or ""
+        sink_config.get("file_path", "") or sink_config.get("filename", "") or ""
     ).strip()
     normalized["sink_config"] = {"file_path": file_path} if file_path else {}
     return normalized
@@ -121,6 +123,8 @@ def _compact_preflight_for_scratchpad(preflight: dict[str, Any]) -> dict[str, An
         "errors": _safe_list(preflight.get("errors")),
         "warnings": _safe_list(preflight.get("warnings")),
         "follow_up_questions": _safe_list(preflight.get("follow_up_questions")),
+        "draft_hash": str(preflight.get("draft_hash", "") or ""),
+        "cache_hit": bool(preflight.get("cache_hit", False)),
         "sink_type": str(sink_preflight.get("sink_type", "") or ""),
         "dry_run": {
             "mode": str(dry_run.get("mode", "") or ""),
@@ -144,6 +148,8 @@ class WorkflowSetupService:
         self._store = store
         self._intake_workflows = intake_workflows
         self._knowledge_service = knowledge_service
+        self._preflight_lock_guard = threading.Lock()
+        self._preflight_lock_keys: set[str] = set()
 
     @staticmethod
     def _draft_scaffold() -> dict[str, Any]:
@@ -195,6 +201,37 @@ class WorkflowSetupService:
     def _utc_now_iso() -> str:
         return datetime.now(UTC).isoformat()
 
+    @staticmethod
+    def _cached_ready_preflight(session: dict[str, Any], *, draft_hash: str) -> dict[str, Any]:
+        scratchpad = _safe_dict(session.get("scratchpad"))
+        last_preflight = _safe_dict(scratchpad.get("last_preflight"))
+        if (
+            str(last_preflight.get("draft_hash", "") or "").strip() != draft_hash
+            or not bool(last_preflight.get("ok", False))
+            or str(last_preflight.get("status", "") or "").strip() != "ready"
+        ):
+            return {}
+        cached = dict(last_preflight)
+        cached["cache_hit"] = True
+        cached["draft_hash"] = draft_hash
+        knowledge_preflight = _safe_dict(scratchpad.get("knowledge_last_preflight"))
+        if knowledge_preflight:
+            cached["business_knowledge_preflight"] = knowledge_preflight
+        return cached
+
+    def _claim_preflight_lock(self, *, session_id: str, draft_hash: str) -> bool:
+        lock_key = f"{session_id}:{draft_hash}"
+        with self._preflight_lock_guard:
+            if lock_key in self._preflight_lock_keys:
+                return False
+            self._preflight_lock_keys.add(lock_key)
+        return True
+
+    def _release_preflight_lock(self, *, session_id: str, draft_hash: str) -> None:
+        lock_key = f"{session_id}:{draft_hash}"
+        with self._preflight_lock_guard:
+            self._preflight_lock_keys.discard(lock_key)
+
     def get_thread_session(
         self,
         *,
@@ -228,10 +265,14 @@ class WorkflowSetupService:
         )
         safe_workflow_id = str(workflow_id or "").strip()
         if existing_thread_session is not None:
-            existing_target = str(existing_thread_session.get("target_workflow_id", "") or "").strip()
+            existing_target = str(
+                existing_thread_session.get("target_workflow_id", "") or ""
+            ).strip()
             if existing_thread_session.get("status") == "paused":
                 if safe_workflow_id and existing_target and safe_workflow_id != existing_target:
-                    raise ValueError("a paused workflow setup session already exists for this thread")
+                    raise ValueError(
+                        "a paused workflow setup session already exists for this thread"
+                    )
                 return self._store.update_session(
                     session_id=str(existing_thread_session["session_id"]),
                     status="active",
@@ -244,10 +285,13 @@ class WorkflowSetupService:
         if safe_mode == "edit":
             if not safe_workflow_id:
                 raise ValueError("workflow_id is required for edit mode")
-            workflow_snapshot = self._intake_workflows.get_workflow(
-                customer_id=customer_id,
-                workflow_id=safe_workflow_id,
-            ) or {}
+            workflow_snapshot = (
+                self._intake_workflows.get_workflow(
+                    customer_id=customer_id,
+                    workflow_id=safe_workflow_id,
+                )
+                or {}
+            )
             if not workflow_snapshot:
                 raise ValueError("workflow not found")
         draft = self._draft_scaffold()
@@ -255,17 +299,33 @@ class WorkflowSetupService:
             draft.update(
                 {
                     "name": str(workflow_snapshot.get("name", "") or ""),
-                    "channel": str(workflow_snapshot.get("channel", "instagram_dm") or "instagram_dm"),
+                    "channel": str(
+                        workflow_snapshot.get("channel", "instagram_dm") or "instagram_dm"
+                    ),
                     "provider": str(workflow_snapshot.get("provider", "composio") or "composio"),
                     "source_config": _safe_dict(workflow_snapshot.get("source_config")),
-                    "intent_description": str(workflow_snapshot.get("intent_description", "") or ""),
-                    "required_fields": [str(item or "").strip() for item in _safe_list(workflow_snapshot.get("required_fields")) if str(item or "").strip()],
+                    "intent_description": str(
+                        workflow_snapshot.get("intent_description", "") or ""
+                    ),
+                    "required_fields": [
+                        str(item or "").strip()
+                        for item in _safe_list(workflow_snapshot.get("required_fields"))
+                        if str(item or "").strip()
+                    ],
                     "field_guidance": _safe_dict(workflow_snapshot.get("field_guidance")),
-                    "assistant_instructions": str(workflow_snapshot.get("assistant_instructions", "") or ""),
-                    "knowledge_file_ids": [str(item or "").strip() for item in _safe_list(workflow_snapshot.get("knowledge_file_ids")) if str(item or "").strip()],
+                    "assistant_instructions": str(
+                        workflow_snapshot.get("assistant_instructions", "") or ""
+                    ),
+                    "knowledge_file_ids": [
+                        str(item or "").strip()
+                        for item in _safe_list(workflow_snapshot.get("knowledge_file_ids"))
+                        if str(item or "").strip()
+                    ],
                     "sink_type": str(workflow_snapshot.get("sink_type", "") or ""),
                     "sink_config": _safe_dict(workflow_snapshot.get("sink_config")),
-                    "schedule": str(workflow_snapshot.get("schedule", "*/5 * * * *") or "*/5 * * * *"),
+                    "schedule": str(
+                        workflow_snapshot.get("schedule", "*/5 * * * *") or "*/5 * * * *"
+                    ),
                     "notify_user": bool(workflow_snapshot.get("notify_user", True)),
                     "enabled": bool(workflow_snapshot.get("enabled", True)),
                 }
@@ -296,11 +356,15 @@ class WorkflowSetupService:
         )
         if session is None:
             raise ValueError("active workflow setup session not found")
-        updated_draft = _merge_draft(_safe_dict(session.get("draft_upsert")), _safe_dict(draft_patch))
+        updated_draft = _merge_draft(
+            _safe_dict(session.get("draft_upsert")), _safe_dict(draft_patch)
+        )
         updated_draft = _normalize_local_csv_draft_sink_config(
             _normalize_schedule_for_channel(updated_draft)
         )
-        updated_scratchpad = _deep_merge(_safe_dict(session.get("scratchpad")), _safe_dict(scratchpad_patch))
+        updated_scratchpad = _deep_merge(
+            _safe_dict(session.get("scratchpad")), _safe_dict(scratchpad_patch)
+        )
         return self._store.update_session(
             session_id=str(session["session_id"]),
             draft_upsert=updated_draft,
@@ -317,81 +381,134 @@ class WorkflowSetupService:
         if session is None:
             raise ValueError("active workflow setup session not found")
         draft = _safe_dict(session.get("draft_upsert"))
+        session_id = str(session.get("session_id", "") or "").strip()
+        draft_hash = self._draft_hash(draft)
+        cached_preflight = self._cached_ready_preflight(session, draft_hash=draft_hash)
+        if cached_preflight:
+            cached_session = dict(session)
+            cached_session["preflight"] = cached_preflight
+            logger.info(
+                "workflow_setup.preflight cache_hit customer_id=%s thread_id=%s session_id=%s draft_hash=%s",
+                customer_id,
+                thread_id,
+                session_id,
+                draft_hash,
+            )
+            return cached_session
+        if session_id and not self._claim_preflight_lock(
+            session_id=session_id, draft_hash=draft_hash
+        ):
+            running = {
+                "ok": False,
+                "status": "running",
+                "next_action": "wait_for_preflight",
+                "commit_blockers": [],
+                "errors": [],
+                "warnings": ["Workflow setup preflight is already running for the current draft."],
+                "follow_up_questions": [],
+                "draft_hash": draft_hash,
+                "cache_hit": False,
+            }
+            running_session = dict(session)
+            running_session["preflight"] = running
+            return running_session
         target_workflow_id = str(session.get("target_workflow_id", "") or "").strip() or None
-        preflight = self._intake_workflows.preflight_workflow_payload(
-            customer_id=customer_id,
-            workflow_id=target_workflow_id,
-            name=str(draft.get("name", "") or ""),
-            channel=str(draft.get("channel", "instagram_dm") or "instagram_dm"),
-            provider=str(draft.get("provider", "composio") or "composio"),
-            source_config=_safe_dict(draft.get("source_config")),
-            intent_description=str(draft.get("intent_description", "") or ""),
-            required_fields=_safe_list(draft.get("required_fields")),
-            field_guidance=_safe_dict(draft.get("field_guidance")),
-            assistant_instructions=str(draft.get("assistant_instructions", "") or ""),
-            knowledge_file_ids=_safe_list(draft.get("knowledge_file_ids")),
-            sink_type=str(draft.get("sink_type", "") or ""),
-            sink_config=_safe_dict(draft.get("sink_config")),
-            schedule=str(draft.get("schedule", "*/5 * * * *") or "*/5 * * * *"),
-            notify_user=bool(draft.get("notify_user", True)),
-            enabled=bool(draft.get("enabled", True)),
-        )
-        knowledge_preflight = self._preflight_knowledge_scope(
-            customer_id=customer_id,
-            session=session,
-            draft=draft,
-        )
-        if knowledge_preflight:
-            preflight["business_knowledge_preflight"] = knowledge_preflight
-            warnings = _safe_list(preflight.get("warnings"))
-            preflight["warnings"] = [
-                *warnings,
-                *[
-                    str(item).strip()
-                    for item in _safe_list(knowledge_preflight.get("warnings"))
-                    if str(item).strip()
-                ],
+        try:
+            preflight = self._intake_workflows.preflight_workflow_payload(
+                customer_id=customer_id,
+                workflow_id=target_workflow_id,
+                name=str(draft.get("name", "") or ""),
+                channel=str(draft.get("channel", "instagram_dm") or "instagram_dm"),
+                provider=str(draft.get("provider", "composio") or "composio"),
+                source_config=_safe_dict(draft.get("source_config")),
+                intent_description=str(draft.get("intent_description", "") or ""),
+                required_fields=_safe_list(draft.get("required_fields")),
+                field_guidance=_safe_dict(draft.get("field_guidance")),
+                assistant_instructions=str(draft.get("assistant_instructions", "") or ""),
+                knowledge_file_ids=_safe_list(draft.get("knowledge_file_ids")),
+                sink_type=str(draft.get("sink_type", "") or ""),
+                sink_config=_safe_dict(draft.get("sink_config")),
+                schedule=str(draft.get("schedule", "*/5 * * * *") or "*/5 * * * *"),
+                notify_user=bool(draft.get("notify_user", True)),
+                enabled=bool(draft.get("enabled", True)),
+            )
+            knowledge_preflight = self._preflight_knowledge_scope(
+                customer_id=customer_id,
+                session=session,
+                draft=draft,
+            )
+            if knowledge_preflight:
+                preflight["business_knowledge_preflight"] = knowledge_preflight
+                warnings = _safe_list(preflight.get("warnings"))
+                preflight["warnings"] = [
+                    *warnings,
+                    *[
+                        str(item).strip()
+                        for item in _safe_list(knowledge_preflight.get("warnings"))
+                        if str(item).strip()
+                    ],
+                ]
+                if not bool(knowledge_preflight.get("ok", False)):
+                    preflight["ok"] = False
+                    preflight["status"] = "needs_clarification"
+                    questions = _safe_list(preflight.get("follow_up_questions"))
+                    questions.append(
+                        "The uploaded business knowledge could not be grounded from source files. Please provide a text, spreadsheet, PDF, DOCX, CSV, or clearer source for the workflow."
+                    )
+                    preflight["follow_up_questions"] = questions
+            commit_blockers = [
+                str(item).strip()
+                for item in [
+                    *_safe_list(preflight.get("errors")),
+                    *_safe_list(preflight.get("follow_up_questions")),
+                ]
+                if str(item).strip()
             ]
-            if not bool(knowledge_preflight.get("ok", False)):
-                preflight["ok"] = False
-                preflight["status"] = "needs_clarification"
-                questions = _safe_list(preflight.get("follow_up_questions"))
-                questions.append(
-                    "The uploaded business knowledge could not be grounded from source files. Please provide a text, spreadsheet, PDF, DOCX, CSV, or clearer source for the workflow."
+            if (
+                bool(preflight.get("ok", False))
+                and str(preflight.get("status", "") or "") == "ready"
+            ):
+                preflight["commit_blockers"] = []
+                preflight["next_action"] = (
+                    "finalize_confirmation_if_owner_confirmed_else_mark_proposed"
                 )
-                preflight["follow_up_questions"] = questions
-        commit_blockers = [
-            str(item).strip()
-            for item in [
-                *_safe_list(preflight.get("errors")),
-                *_safe_list(preflight.get("follow_up_questions")),
-            ]
-            if str(item).strip()
-        ]
-        if bool(preflight.get("ok", False)) and str(preflight.get("status", "") or "") == "ready":
-            preflight["commit_blockers"] = []
-            preflight["next_action"] = "finalize_confirmation_if_owner_confirmed_else_mark_proposed"
-        else:
-            preflight["commit_blockers"] = commit_blockers
-            preflight["next_action"] = "ask_preflight_blocker"
-        scratchpad = _deep_merge(
-            _safe_dict(session.get("scratchpad")),
-            {
-                "last_preflight": _compact_preflight_for_scratchpad(preflight),
-                "knowledge_last_index": _safe_dict(knowledge_preflight.get("index")) if knowledge_preflight else {},
-                "knowledge_last_preflight": knowledge_preflight or {},
-            },
-        )
-        update_kwargs: dict[str, Any] = {"scratchpad": scratchpad}
-        if bool(preflight.get("ok", False)) and isinstance(preflight.get("normalized_draft"), dict):
-            update_kwargs["draft_upsert"] = _safe_dict(preflight.get("normalized_draft"))
-            update_kwargs["confirmed_draft_hash"] = ""
-        updated = self._store.update_session(
-            session_id=str(session["session_id"]),
-            **update_kwargs,
-        )
-        updated["preflight"] = preflight
-        return updated
+            else:
+                preflight["commit_blockers"] = commit_blockers
+                preflight["next_action"] = "ask_preflight_blocker"
+            normalized_draft = (
+                _safe_dict(preflight.get("normalized_draft"))
+                if isinstance(preflight.get("normalized_draft"), dict)
+                else draft
+            )
+            result_draft_hash = self._draft_hash(normalized_draft)
+            preflight["draft_hash"] = result_draft_hash
+            preflight["cache_hit"] = False
+            scratchpad = _deep_merge(
+                _safe_dict(session.get("scratchpad")),
+                {
+                    "last_preflight": _compact_preflight_for_scratchpad(preflight),
+                    "last_preflight_draft_hash": result_draft_hash,
+                    "knowledge_last_index": _safe_dict(knowledge_preflight.get("index"))
+                    if knowledge_preflight
+                    else {},
+                    "knowledge_last_preflight": knowledge_preflight or {},
+                },
+            )
+            update_kwargs: dict[str, Any] = {"scratchpad": scratchpad}
+            if bool(preflight.get("ok", False)) and isinstance(
+                preflight.get("normalized_draft"), dict
+            ):
+                update_kwargs["draft_upsert"] = _safe_dict(preflight.get("normalized_draft"))
+                update_kwargs["confirmed_draft_hash"] = ""
+            updated = self._store.update_session(
+                session_id=str(session["session_id"]),
+                **update_kwargs,
+            )
+            updated["preflight"] = preflight
+            return updated
+        finally:
+            if session_id:
+                self._release_preflight_lock(session_id=session_id, draft_hash=draft_hash)
 
     def finalize_confirmation(
         self,
@@ -428,10 +545,15 @@ class WorkflowSetupService:
 
         preflight_session = self.preflight_current(customer_id=customer_id, thread_id=thread_id)
         preflight = _safe_dict(preflight_session.get("preflight"))
-        if not bool(preflight.get("ok", False)) or str(preflight.get("status", "") or "") != "ready":
-            blockers = _safe_list(preflight.get("commit_blockers")) or _safe_list(
-                preflight.get("follow_up_questions")
-            ) or _safe_list(preflight.get("errors"))
+        if (
+            not bool(preflight.get("ok", False))
+            or str(preflight.get("status", "") or "") != "ready"
+        ):
+            blockers = (
+                _safe_list(preflight.get("commit_blockers"))
+                or _safe_list(preflight.get("follow_up_questions"))
+                or _safe_list(preflight.get("errors"))
+            )
             blocker = "; ".join(str(item).strip() for item in blockers if str(item).strip())
             if not blocker:
                 blocker = "workflow draft is not ready to commit"
@@ -478,7 +600,9 @@ class WorkflowSetupService:
                 str(draft.get("name", "") or "").strip(),
                 str(draft.get("intent_description", "") or "").strip(),
                 str(draft.get("assistant_instructions", "") or "").strip(),
-                " ".join(str(item or "").strip() for item in _safe_list(draft.get("required_fields"))),
+                " ".join(
+                    str(item or "").strip() for item in _safe_list(draft.get("required_fields"))
+                ),
             ]
             if item
         )
@@ -518,7 +642,9 @@ class WorkflowSetupService:
         if not proposed_hash:
             raise ValueError("workflow draft has not been proposed yet")
         if current_hash != proposed_hash:
-            raise ValueError("workflow draft changed after proposal; propose it again before confirming")
+            raise ValueError(
+                "workflow draft changed after proposal; propose it again before confirming"
+            )
         return self._store.update_session(
             session_id=str(session["session_id"]),
             confirmed_draft_hash=current_hash,
@@ -561,7 +687,10 @@ class WorkflowSetupService:
                     **workflow_payload,
                 )
             else:
-                target_id = safe_target_workflow_id or str(target_snapshot.get("workflow_id", "") or "").strip()
+                target_id = (
+                    safe_target_workflow_id
+                    or str(target_snapshot.get("workflow_id", "") or "").strip()
+                )
                 if not target_id:
                     raise ValueError("target_workflow_id is required for edit mode")
                 created = self._intake_workflows.upsert_workflow(
