@@ -297,6 +297,7 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     assert "do not require workflow.knowledge_answer or business_knowledge_query" in system_text
     assert "Never ask the customer to confirm a booking or change that you are saving now" in system_text
     assert "needs_business_knowledge=true" in system_text
+    assert "If workflow.knowledge_file_ids is empty, never set needs_business_knowledge=true" in system_text
     assert "business_knowledge_query to one concise natural language query" in system_text
 
 

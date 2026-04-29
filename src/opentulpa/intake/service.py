@@ -2355,6 +2355,82 @@ class IntakeWorkflowService:
             f"For this service, please contact the business{phone_part}."
         )
 
+    def _missing_field_for_follow_up(
+        self,
+        *,
+        workflow: dict[str, Any],
+        decision: dict[str, Any],
+        active_booking: dict[str, Any] | None,
+    ) -> str:
+        missing_fields = _unique_string_list(decision.get("missing_fields"))
+        if missing_fields:
+            return missing_fields[0]
+        known_fields: dict[str, Any] = {}
+        if isinstance(active_booking, dict):
+            known_fields.update(_safe_dict(active_booking.get("extracted_fields")))
+        known_fields.update(_safe_dict(decision.get("extracted_fields")))
+        known_fields.update(_safe_dict(decision.get("save_payload")))
+        for field in _unique_string_list(workflow.get("required_fields")):
+            if not str(known_fields.get(field, "") or "").strip():
+                return field
+        return ""
+
+    def _no_file_business_knowledge_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        decision: dict[str, Any],
+        active_booking: dict[str, Any] | None,
+    ) -> str:
+        latest_text = str(
+            conversation_summary.get("latest_inbound_message_text_preview", "") or ""
+        ).strip()
+        query = str(decision.get("business_knowledge_query", "") or "").strip()
+        instructions = str(workflow.get("assistant_instructions", "") or "").strip()
+        missing_field = self._missing_field_for_follow_up(
+            workflow=workflow,
+            decision=decision,
+            active_booking=active_booking,
+        )
+        label = missing_field.replace("_", " ").strip()
+        if _looks_like_cyrillic(latest_text, query, instructions):
+            prefix = "Точную информацию нужно уточнить у бизнеса."
+            if label:
+                return f"{prefix} Какое значение указать для поля «{label}»?"
+            return prefix
+        prefix = "I'll need to confirm that with the business."
+        if label:
+            return f"{prefix} What {label} should I use for the booking?"
+        return prefix
+
+    def _normalize_no_file_business_knowledge_decision(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        active_booking: dict[str, Any] | None,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = dict(decision)
+        reply_action = str(normalized.get("reply_action", "none") or "none").strip().lower()
+        reply_text = str(normalized.get("reply_text", "") or "").strip()
+        normalized["needs_business_knowledge"] = False
+        normalized["business_knowledge_query"] = ""
+        normalized["knowledge_source_refs"] = []
+        normalized["grounding_status"] = "no_source"
+        normalized["ready_to_save"] = False
+        normalized["save_payload"] = {}
+        if reply_action != "send_reply" or not reply_text:
+            normalized["reply_action"] = "send_reply"
+            normalized["reply_text"] = self._no_file_business_knowledge_reply(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                decision=decision,
+                active_booking=active_booking,
+            )
+        return normalized
+
     def _load_source_items(
         self,
         *,
@@ -2990,11 +3066,33 @@ class IntakeWorkflowService:
                 error=error,
             )
             return {}, error
+        workflow_knowledge_file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
         if (
             isinstance(decision, dict)
             and bool(decision.get("ok", False))
             and bool(decision.get("needs_business_knowledge", False))
-            and _unique_string_list(workflow.get("knowledge_file_ids"))
+            and not workflow_knowledge_file_ids
+        ):
+            prior_query = str(decision.get("business_knowledge_query", "") or "").strip()
+            decision = self._normalize_no_file_business_knowledge_decision(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                active_booking=active_booking,
+                decision=decision,
+            )
+            self._emit_observability(
+                event="intake.decision.normalized_no_knowledge_files",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                business_knowledge_query=prior_query,
+                reply_action=str(decision.get("reply_action", "") or "").strip().lower(),
+                missing_fields=_unique_string_list(decision.get("missing_fields")),
+            )
+        if (
+            isinstance(decision, dict)
+            and bool(decision.get("ok", False))
+            and bool(decision.get("needs_business_knowledge", False))
+            and workflow_knowledge_file_ids
         ):
             knowledge_query = str(decision.get("business_knowledge_query", "") or "").strip()
             if not knowledge_query:
