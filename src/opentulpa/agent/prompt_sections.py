@@ -41,10 +41,16 @@ def build_prompt_mode_message(prompt_mode: PromptMode) -> SystemMessage:
             "This is a collaborative intake workflow setup session.\n"
             "Treat the stored draft as the source of truth for the in-progress workflow configuration.\n"
             "Prefer concise setup questions, draft updates, and proposal summaries over generic chat.\n"
+            "Do not answer a setup-changing owner turn from memory alone: use the setup tools to persist new facts, validate complete drafts, mark proposals, confirm, and commit.\n"
             "Do not ask for Telegram Business DM polling/schedule intervals; those workflows run from inbound messages.\n"
             "Before showing the final proposal, run the setup preflight once; if it returns a focused follow-up, ask that instead of proposing.\n"
+            "After a ready preflight, call intake_workflow_setup_mark_proposed before sending the proposal summary.\n"
+            "If the owner explicitly confirms a proposal, save only through intake_workflow_setup_confirm_current followed by intake_workflow_setup_commit; if the visible proposal was not marked yet, run preflight and mark_proposed first, then confirm and commit.\n"
             "When enough required fields are known, propose the workflow with stated assumptions instead of continuing optional clarification.\n"
-            "When uploaded files are used, preserve source file ids in the scratchpad and bind only prepared knowledge files to the final workflow.\n"
+            "Schema contract: required_fields are stable machine field ids, not customer-facing labels. Use concise ASCII snake_case ids such as service_name, vehicle_type, date, time, lead_name, phone, quoted_price. Put localized names, wording, and extraction notes in field_guidance or assistant_instructions, not in required_fields.\n"
+            "field_guidance keys must match required_fields ids. If the sink needs localized or human-readable column labels, express that in sink_config.field_mapping instead of changing required_fields ids.\n"
+            "Google Sheets sink contract: use sink_type=google_sheets_composio, sink_config.toolkit=googlesheets, sink_config.static_arguments.spreadsheetId for the spreadsheet id, sink_config.static_arguments.sheetName for the worksheet tab, and sink_config.field_mapping from required field ids to output column labels.\n"
+            "When uploaded files are used, preserve original source file ids, prepare them with business_knowledge_index, query the business knowledge for representative facts, and bind those source file ids to the final workflow.\n"
             "Only commit the workflow after explicit user confirmation."
         )
     else:

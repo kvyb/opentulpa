@@ -65,18 +65,29 @@ def test_settings_default_agent_models_use_glm(monkeypatch, tmp_path: Path) -> N
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("WAKE_EXECUTION_MODEL", raising=False)
+    monkeypatch.delenv("BUSINESS_KNOWLEDGE_ORACLE_MODEL", raising=False)
 
     settings = Settings()
 
     assert settings.llm_model == "z-ai/glm-5.1"
     assert settings.wake_execution_model == "z-ai/glm-5.1"
+    assert settings.business_knowledge_oracle_model == "google/gemini-3.1-flash-lite-preview"
+
+
+def test_settings_accepts_business_knowledge_oracle_model_env(monkeypatch) -> None:
+    monkeypatch.setenv("BUSINESS_KNOWLEDGE_ORACLE_MODEL", "provider/oracle-model")
+
+    settings = Settings()
+
+    assert settings.business_knowledge_oracle_model == "provider/oracle-model"
 
 
 def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text(
         "llm_model: from-yaml\nagent_recursion_limit: 42\n"
-        "openai_compatible_base_url: https://yaml.example/v1\n",
+        "openai_compatible_base_url: https://yaml.example/v1\n"
+        "business_knowledge_oracle_model: oracle-from-yaml\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -86,6 +97,7 @@ def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) 
     assert settings.llm_model == "from-yaml"
     assert settings.agent_recursion_limit == 42
     assert settings.openai_compatible_base_url == "https://yaml.example/v1"
+    assert settings.business_knowledge_oracle_model == "oracle-from-yaml"
 
 
 def test_dotenv_overrides_yaml_runtime_defaults(monkeypatch, tmp_path: Path) -> None:

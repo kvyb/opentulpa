@@ -19,6 +19,7 @@ from opentulpa.api.routes import (
     register_file_routes,
     register_health_routes,
     register_intake_workflow_routes,
+    register_knowledge_routes,
     register_memory_routes,
     register_profile_routes,
     register_scheduler_routes,
@@ -40,11 +41,13 @@ from opentulpa.application import (
 from opentulpa.approvals.adapters.telegram import TelegramApprovalAdapter
 from opentulpa.approvals.broker import ApprovalBroker
 from opentulpa.approvals.store import PendingApprovalStore
+from opentulpa.business_knowledge import BusinessKnowledgeService
+from opentulpa.business_knowledge.service import OpenAICompatibleKnowledgeOracleClient
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
-from opentulpa.core.config import get_settings
+from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
 from opentulpa.intake import (
     IntakeWorkflowService,
     WorkflowSetupService,
@@ -109,6 +112,26 @@ def _is_trusted_server_client(host: str) -> bool:
     return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
 
 
+def _business_knowledge_oracle(
+    settings: Any,
+    *,
+    trace_path: Path | None = None,
+) -> OpenAICompatibleKnowledgeOracleClient | None:
+    api_key = str(
+        getattr(settings, "openai_compatible_api_key", None)
+        or get_openai_compatible_api_key_from_env()
+        or ""
+    ).strip()
+    if not api_key:
+        return None
+    return OpenAICompatibleKnowledgeOracleClient(
+        api_key=api_key,
+        base_url=str(getattr(settings, "openai_compatible_base_url", "") or ""),
+        model=str(getattr(settings, "business_knowledge_oracle_model", "") or ""),
+        trace_path=trace_path,
+    )
+
+
 def create_app(
     memory: MemoryService | None = None,
     scheduler: SchedulerService | None = None,
@@ -121,6 +144,7 @@ def create_app(
     skill_store_service: SkillStoreService | None = None,
     composio_service: ComposioService | None = None,
     intake_workflow_service: IntakeWorkflowService | None = None,
+    knowledge_service: BusinessKnowledgeService | None = None,
 ) -> FastAPI:
     """Create FastAPI app with internal API, webhook, and agent runtime."""
     memory_service = memory
@@ -137,6 +161,15 @@ def create_app(
     vault_service = file_vault_service or FileVaultService(
         root_dir=PROJECT_ROOT / ".opentulpa" / "file_vault",
         db_path=PROJECT_ROOT / ".opentulpa" / "file_vault.db",
+    )
+    knowledge = knowledge_service or BusinessKnowledgeService(
+        root_dir=PROJECT_ROOT / ".opentulpa" / "knowledge",
+        db_path=PROJECT_ROOT / ".opentulpa" / "knowledge" / "knowledge.db",
+        file_vault=vault_service,
+        oracle_client=_business_knowledge_oracle(
+            settings,
+            trace_path=getattr(runtime, "_llm_call_trace_path", None),
+        ),
     )
     link_alias_db = Path(settings.link_alias_db_path)
     if not link_alias_db.is_absolute():
@@ -193,6 +226,9 @@ def create_app(
     def get_file_vault() -> FileVaultService:
         return _require(vault_service, "FileVaultService")
 
+    def get_knowledge_service() -> BusinessKnowledgeService:
+        return _require(knowledge, "BusinessKnowledgeService")
+
     def get_skill_store() -> SkillStoreService:
         return _require(skill_service, "SkillStoreService")
 
@@ -230,6 +266,7 @@ def create_app(
         composio=composio,
         telegram_business=telegram_business,
         file_vault=vault_service,
+        knowledge_service=knowledge,
         get_agent_runtime=get_agent_runtime if runtime is not None else (lambda: None),
     )
 
@@ -311,7 +348,10 @@ def create_app(
     workflow_setup_service = WorkflowSetupService(
         store=workflow_setup_store,
         intake_workflows=intake_service,
+        knowledge_service=knowledge,
     )
+    if runtime is not None:
+        runtime._workflow_setup_service = workflow_setup_service  # type: ignore[attr-defined]
     workflow_setup_orchestrator = WorkflowSetupOrchestrator(
         setup_service=workflow_setup_service,
     )
@@ -444,6 +484,7 @@ def create_app(
     app.state.composio = composio
     app.state.intake_workflows = intake_service
     app.state.intake_workflow_setup = workflow_setup_service
+    app.state.knowledge_service = knowledge
     app.state.telegram_business = telegram_business
 
     @app.middleware("http")
@@ -493,6 +534,7 @@ def create_app(
         get_agent_runtime=get_agent_runtime,
         telegram_enabled=bool(settings.telegram_bot_token),
     )
+    register_knowledge_routes(app, get_knowledge_service=get_knowledge_service)
     register_profile_routes(
         app,
         get_profiles=get_profiles,

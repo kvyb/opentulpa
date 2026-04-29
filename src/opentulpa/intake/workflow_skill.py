@@ -204,7 +204,7 @@ def build_intake_workflow_skill(
     if knowledge_file_ids:
         instructions += (
             "\n## Knowledge Files\n"
-            "- Fetch and use the workflow-bound prepared knowledge files when answering customer questions.\n"
+            "- Use workflow-bound business knowledge answers before answering source-specific customer questions.\n"
             f"- Bound file ids: {', '.join(knowledge_file_ids)}\n"
         )
     else:

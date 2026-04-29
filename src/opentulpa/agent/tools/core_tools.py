@@ -156,25 +156,95 @@ def _compact_uploaded_file_inspection(payload: Any) -> Any:
         },
         "model_note": (
             "Inspection is compacted for the model. Use sheet_inventory and relevant_sheets "
-            "to choose selected_sections; full source bytes stay in the file vault."
+            "to understand the workbook before indexing; full source bytes stay in the file vault."
         ),
     }
 
 
-def _compact_prepared_knowledge_result(payload: Any) -> Any:
+def _compact_business_knowledge_query(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
     return {
+        "query": _trim_tool_text(payload.get("query", ""), limit=600),
+        "answer_extract": _trim_tool_text(payload.get("answer_extract", ""), limit=3000),
+    }
+
+
+def _compact_business_knowledge_index(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    sources: list[dict[str, Any]] = []
+    for source in list(payload.get("sources") or [])[:20]:
+        if not isinstance(source, dict):
+            continue
+        sources.append(
+            {
+                "file_id": str(source.get("file_id", "") or "").strip(),
+                "filename": str(source.get("filename", "") or "").strip(),
+                "status": str(source.get("status", "") or "").strip(),
+                "source_kind": str(source.get("source_kind", "") or "").strip(),
+                "section_count": source.get("section_count"),
+                "char_count": source.get("char_count"),
+                "warnings": source.get("warnings") or [],
+            }
+        )
+    return {
         "ok": bool(payload.get("ok", False)),
-        "knowledge_file_id": str(payload.get("knowledge_file_id", "") or "").strip(),
-        "knowledge_file": _compact_file_record_for_tool(payload.get("knowledge_file")),
-        "source_file_ids": payload.get("source_file_ids") or [],
-        "matched_sections": payload.get("matched_sections") or [],
-        "warnings": payload.get("warnings") or [],
-        "model_note": (
-            "The full Markdown knowledge pack was saved in the file vault. "
-            "Bind knowledge_file_id to the workflow; do not recreate the pack unless scope changes."
-        ),
+        "scope_type": str(payload.get("scope_type", "") or "").strip(),
+        "scope_id": str(payload.get("scope_id", "") or "").strip(),
+        "sources": sources,
+    }
+
+
+async def _resolve_business_knowledge_scope(
+    runtime: Any,
+    *,
+    scope_type: str,
+    scope_id: str,
+) -> tuple[str, str] | dict[str, str]:
+    requested_type = str(scope_type or "current_workflow").strip().lower() or "current_workflow"
+    requested_id = str(scope_id or "").strip()
+    valid_types = {"workflow_setup", "intake_workflow", "customer_business"}
+    if requested_type in valid_types:
+        if requested_type == "customer_business" and not requested_id:
+            return requested_type, require_customer_id(runtime)
+        if requested_id:
+            return requested_type, requested_id
+        return {"error": f"{requested_type} scope requires scope_id"}
+
+    customer_id = require_customer_id(runtime)
+    thread_id = require_thread_id(runtime)
+    with suppress(Exception):
+        setup_response = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/get",
+            json_body={
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "include_paused": True,
+            },
+            timeout=5.0,
+            retries=0,
+        )
+        if setup_response.status_code == 200:
+            payload = setup_response.json()
+            session = payload.get("session") if isinstance(payload, dict) else None
+            if isinstance(session, dict):
+                session_id = str(session.get("session_id", "") or "").strip()
+                if session_id and (not requested_id or requested_id == session_id):
+                    return "workflow_setup", session_id
+
+    if requested_id:
+        return "intake_workflow", requested_id
+
+    match = re.search(r"(iwf_[A-Za-z0-9]+)", thread_id)
+    if match:
+        return "intake_workflow", match.group(1)
+    return {
+        "error": (
+            "business knowledge scope could not be inferred; pass scope_type and scope_id "
+            "or start/open a workflow setup session"
+        )
     }
 
 
@@ -573,7 +643,11 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         file_id: str,
         question: str | None = None,
     ) -> Any:
-        """Analyze a previously uploaded file again, optionally with a focused question."""
+        """Analyze a previously uploaded file again, optionally with a focused question.
+
+        Do not use this as a fallback for workflow knowledge files that should be
+        indexed and queried with business_knowledge_index/business_knowledge_query.
+        """
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -600,8 +674,8 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         Use this first for arbitrary spreadsheets or large source files. For XLSX files,
         it opens the workbook, returns sheet names, dimensions, sample rows, table
         candidates, and optional matches for search_terms derived from the user's
-        workflow goal. Then pass chosen sheet/row selections to
-        uploaded_file_prepare_intake_knowledge.
+        workflow goal. For workflow knowledge, prefer business_knowledge_index and
+        business_knowledge_query so the source file stays out of chat context.
         """
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
@@ -620,47 +694,92 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         return _compact_uploaded_file_inspection(r.json())
 
     @tool
-    async def uploaded_file_prepare_intake_knowledge(
+    async def business_knowledge_index(
         file_ids: list[str],
-        include_hints: list[str] | str | None = None,
-        selected_sections: list[dict[str, Any]] | list[str] | None = None,
-        workflow_goal: str = "",
-        output_name: str = "intake_workflow_knowledge.md",
+        scope_type: str = "current_workflow",
+        scope_id: str = "",
     ) -> Any:
-        """Compile uploaded source files into a small Markdown knowledge pack for an intake workflow.
+        """Prepare uploaded source files as scoped business knowledge.
 
-        Use this during workflow setup when the user wants uploaded files, spreadsheets,
-        price lists, FAQs, or policies bound to the workflow. For arbitrary XLSX files,
-        call uploaded_file_inspect_structure first, choose exact sheets/row ranges, and
-        pass them as selected_sections. include_hints may be workflow-derived terms from
-        the user's stated goal, but do not assume fixed sheet names or source format.
-        Bind the returned knowledge_file_id to the workflow's knowledge_file_ids.
+        Use this during workflow setup when uploaded files should become durable
+        source knowledge for the workflow. If no setup session exists yet, call
+        intake_workflow_setup_begin first. This normalizes source files into an
+        LLM-readable knowledge pack. Bind original uploaded source file ids to
+        draft_patch.knowledge_file_ids; do not create a summarized Markdown pack.
         """
         customer_id = require_customer_id(runtime)
         safe_file_ids = [
             str(item or "").strip()
             for item in list(file_ids or [])
             if str(item or "").strip()
-        ][:8]
+        ][:20]
         if not safe_file_ids:
-            return {"error": "uploaded_file_prepare_intake_knowledge failed: file_ids is required"}
+            return {"error": "business_knowledge_index failed: file_ids is required"}
+        resolved = await _resolve_business_knowledge_scope(
+            runtime,
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        resolved_type, resolved_id = resolved
         r = await runtime._request_with_backoff(
             "POST",
-            "/internal/files/prepare_intake_knowledge",
+            "/internal/knowledge/index_sources",
             json_body={
                 "customer_id": customer_id,
+                "scope_type": resolved_type,
+                "scope_id": resolved_id,
                 "file_ids": safe_file_ids,
-                "include_hints": include_hints,
-                "selected_sections": selected_sections,
-                "workflow_goal": workflow_goal,
-                "output_name": output_name,
             },
             timeout=60.0,
             retries=1,
         )
         if r.status_code != 200:
-            return _tool_error_payload("uploaded_file_prepare_intake_knowledge", r)
-        return _compact_prepared_knowledge_result(r.json())
+            return _tool_error_payload("business_knowledge_index", r)
+        return _compact_business_knowledge_index(r.json())
+
+    @tool
+    async def business_knowledge_query(
+        query: str,
+        scope_type: str = "current_workflow",
+        scope_id: str = "",
+    ) -> Any:
+        """Ask scoped business knowledge for source-backed facts.
+
+        Use this for source-backed business details during workflow setup or intake.
+        The oracle reads the full prepared knowledge pack for the resolved scope and
+        returns only a compact plain-text answer. During intake, do not call it again
+        just to revalidate source-backed facts already present on the active booking.
+        """
+        customer_id = require_customer_id(runtime)
+        safe_query = str(query or "").strip()
+        if not safe_query:
+            return {"error": "business_knowledge_query failed: query is required"}
+        resolved = await _resolve_business_knowledge_scope(
+            runtime,
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        resolved_type, resolved_id = resolved
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/knowledge/query",
+            json_body={
+                "customer_id": customer_id,
+                "scope_type": resolved_type,
+                "scope_id": resolved_id,
+                "query": safe_query,
+                "max_extract_chars": 3000,
+            },
+            timeout=60.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("business_knowledge_query", r)
+        return _compact_business_knowledge_query(r.json())
 
     @tool
     async def directive_get() -> Any:
@@ -1178,7 +1297,8 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         "web_image_send": web_image_send,
         "uploaded_file_analyze": uploaded_file_analyze,
         "uploaded_file_inspect_structure": uploaded_file_inspect_structure,
-        "uploaded_file_prepare_intake_knowledge": uploaded_file_prepare_intake_knowledge,
+        "business_knowledge_index": business_knowledge_index,
+        "business_knowledge_query": business_knowledge_query,
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,

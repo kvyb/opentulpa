@@ -26,9 +26,15 @@ __pycache__/
 tulpa_stuff/**
 !tulpa_stuff/**/
 tulpa_stuff/artifacts/**
+tests/e2e/assets/*.xls
+tests/e2e/assets/*.xlsx
+tests/e2e/**/artifacts/**
+tests/e2e/**/*_artifacts/**
 docs/SCRATCHPAD.md
 graphify-out/
 .graphify_*
+.playwright-mcp/
+notion-opentulpa-board.png
 
 # IDE / OS
 .DS_Store

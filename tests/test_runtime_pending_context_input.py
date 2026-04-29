@@ -12,6 +12,64 @@ from opentulpa.agent.runtime_input import ThreadInputCoordinator
 from opentulpa.agent.utils import approx_tokens as _approx_tokens
 
 
+def _ready_setup_session() -> dict[str, Any]:
+    return {
+        "session_id": "iwsetup_test",
+        "customer_id": "telegram_test",
+        "thread_id": "chat-workflow-setup-context",
+        "status": "active",
+        "mode": "create",
+        "draft_upsert": {
+            "name": "AutoSpa",
+            "channel": "telegram_business_dm",
+            "provider": "composio",
+            "intent_description": "Book car wash leads",
+            "required_fields": ["service_name", "vehicle_type", "date", "time", "phone"],
+            "knowledge_file_ids": ["file_price"],
+            "sink_type": "google_sheets_composio",
+            "sink_config": {
+                "toolkit": "googlesheets",
+                "static_arguments": {
+                    "spreadsheetId": "sheet_123",
+                    "sheetName": "Bookings",
+                },
+                "field_mapping": {
+                    "service_name": "Service",
+                    "vehicle_type": "Vehicle",
+                },
+            },
+        },
+        "scratchpad": {
+            "last_preflight": {
+                "ok": True,
+                "status": "ready",
+                "errors": [],
+                "warnings": [],
+                "follow_up_questions": [],
+            },
+            "knowledge_last_preflight": {"ok": True, "status": "ready"},
+        },
+        "last_proposed_draft_hash": "",
+        "confirmed_draft_hash": "",
+        "created_or_updated_workflow_id": "",
+    }
+
+
+class _FakeWorkflowSetupService:
+    def __init__(self, session: dict[str, Any] | None) -> None:
+        self.session = session
+
+    def get_thread_session(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        include_paused: bool = True,
+    ) -> dict[str, Any] | None:
+        del customer_id, thread_id, include_paused
+        return self.session
+
+
 class _CapturingGraph:
     def __init__(self) -> None:
         self.last_state: dict[str, Any] | None = None
@@ -20,6 +78,20 @@ class _CapturingGraph:
         del config
         self.last_state = state
         return {"messages": [AIMessage(content="ok")]}
+
+
+class _AinvokeStaleMessageGraph:
+    async def ainvoke(self, state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del state, config
+        return {
+            "final_response_text": "",
+            "messages": [
+                HumanMessage(content="old user"),
+                AIMessage(content="old assistant reply"),
+                HumanMessage(content="current user"),
+                AIMessage(content=""),
+            ],
+        }
 
 
 class _FakeContextEvents:
@@ -53,6 +125,243 @@ class _FakeCheckpointer:
     def get_next_version(self, current: Any, channel: Any) -> int:
         del current, channel
         return 1
+
+
+def _install_minimal_graph_runtime_stubs(
+    runtime: OpenTulpaLangGraphRuntime,
+    *,
+    ainvoke_model: Any,
+    behavior_events: list[str] | None = None,
+) -> None:
+    async def _live_time(customer_id: str) -> dict[str, str]:
+        del customer_id
+        return {
+            "server_time_local_iso": "2026-04-29T12:00:00+08:00",
+            "server_time_utc_iso": "2026-04-29T04:00:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": "2026-04-29T12:00:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "profile",
+        }
+
+    async def _directive(customer_id: str) -> str | None:
+        del customer_id
+        return None
+
+    async def _memory_grounding(**kwargs: Any) -> str:
+        del kwargs
+        return ""
+
+    runtime._checkpointer = InMemorySaver()
+    runtime._model_with_tools = object()
+    runtime._thread_rollup_service = None
+    runtime._load_active_directive = _directive  # type: ignore[method-assign]
+    runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
+    runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
+    runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
+    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
+    runtime._tools = {}
+    runtime.ainvoke_model = ainvoke_model  # type: ignore[method-assign]
+    runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.log_behavior_event = (  # type: ignore[assignment]
+        (lambda **kwargs: behavior_events.append(str(kwargs.get("event", ""))))
+        if behavior_events is not None
+        else (lambda **kwargs: None)
+    )
+    runtime.model_with_tools_for_turn_mode = lambda turn_mode: object()  # type: ignore[assignment]
+    runtime._context_token_limit = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime.recursion_limit = 8
+    runtime._workflow_setup_service = None
+
+
+@pytest.mark.asyncio
+async def test_graph_finalize_does_not_reuse_prior_turn_assistant_reply() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    call_count = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return AIMessage(content="first reply")
+        return AIMessage(content="")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    graph = build_runtime_graph(runtime)
+    config = {"configurable": {"thread_id": "chat-finalize-current-turn"}, "recursion_limit": 8}
+
+    first = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="first user turn")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-finalize-current-turn",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_first",
+        },
+        config=config,
+    )
+    second = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="second user turn")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-finalize-current-turn",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_second",
+        },
+        config=config,
+    )
+
+    assert first["final_response_text"] == "first reply"
+    assert second["final_response_text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_text_does_not_reuse_prior_turn_assistant_reply() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _AinvokeStaleMessageGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _no_pending_approval(*, customer_id: str, thread_id: str) -> bool:
+        del customer_id, thread_id
+        return False
+
+    async def _noop_skills(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._has_pending_approval_lock = _no_pending_approval  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    reply = await runtime.ainvoke_text(
+        thread_id="chat-ainvoke-stale",
+        customer_id="telegram_stale",
+        text="current user",
+    )
+
+    assert reply == "I ran into an issue and could not produce a final response yet."
+
+
+@pytest.mark.asyncio
+async def test_workflow_setup_empty_no_tool_response_gets_repair_retry() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_prompts: list[list[Any]] = []
+    behavior_events: list[str] = []
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        captured_prompts.append(list(messages))
+        if len(captured_prompts) == 1:
+            return AIMessage(content="")
+        return AIMessage(content="Обновил драфт и готов продолжать настройку.")
+
+    _install_minimal_graph_runtime_stubs(
+        runtime,
+        ainvoke_model=_ainvoke_model,
+        behavior_events=behavior_events,
+    )
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Вот spreadsheetId=abc, sheetName=Bookings.")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-workflow-setup-repair",
+            "turn_mode": "workflow_setup",
+            "prompt_mode": "workflow_setup",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_repair",
+        },
+        config={"configurable": {"thread_id": "chat-workflow-setup-repair"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Обновил драфт и готов продолжать настройку."
+    assert len(captured_prompts) == 2
+    assert any(
+        "WORKFLOW_SETUP_NO_PROGRESS" in str(getattr(message, "content", ""))
+        for message in captured_prompts[1]
+    )
+    assert "graph.workflow_setup.no_progress_retry" in behavior_events
+
+
+@pytest.mark.asyncio
+async def test_workflow_setup_prompt_injects_authoritative_next_action() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_prompts: list[list[Any]] = []
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        captured_prompts.append(list(messages))
+        return AIMessage(content="Готово, показываю предложение.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._workflow_setup_service = _FakeWorkflowSetupService(_ready_setup_session())
+    graph = build_runtime_graph(runtime)
+
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Проверь и предложи workflow.")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-workflow-setup-context",
+            "turn_mode": "workflow_setup",
+            "prompt_mode": "workflow_setup",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_context",
+        },
+        config={"configurable": {"thread_id": "chat-workflow-setup-context"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Готово, показываю предложение."
+    prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
+    assert "WORKFLOW_SETUP_CONTROL_CARD" in prompt_text
+    assert "draft_status: preflight_ready" in prompt_text
+    assert "proposal_status: not_proposed" in prompt_text
+    assert "Call intake_workflow_setup_mark_proposed" in prompt_text
+    assert "After a ready preflight, do not re-query knowledge" in prompt_text
 
 
 @pytest.mark.asyncio

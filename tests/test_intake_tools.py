@@ -213,68 +213,134 @@ async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_uploaded_file_prepare_intake_knowledge_posts_expected_payload() -> None:
+async def test_business_knowledge_index_posts_expected_payload() -> None:
     runtime = DummyRuntime(
         [
             Response(
                 200,
                 {
                     "ok": True,
-                    "knowledge_file_id": "file_prepared",
-                    "knowledge_file": {
-                        "id": "file_prepared",
-                        "original_filename": "knowledge.md",
-                        "mime_type": "text/markdown",
-                        "size_bytes": 20000,
-                        "summary": "workflow knowledge | content_preview=" + ("markdown " * 2000),
-                    },
-                    "source_file_ids": ["file_raw"],
-                    "matched_sections": ["price.xlsx:Мойка:1-20"],
+                    "scope_type": "workflow_setup",
+                    "scope_id": "iwsetup_123",
+                    "sources": [
+                        {
+                            "file_id": "file_raw",
+                            "filename": "price.xlsx",
+                            "status": "indexed",
+                            "source_kind": "structured_table",
+                            "section_count": 12,
+                            "char_count": 1234,
+                            "warnings": [],
+                        }
+                    ],
                 },
             )
         ]
     )
     tools = register_runtime_tools(runtime)
 
-    result = await tools["uploaded_file_prepare_intake_knowledge"].ainvoke(
+    result = await tools["business_knowledge_index"].ainvoke(
         {
             "file_ids": ["file_raw"],
-            "include_hints": ["Мойка", "Шиномонтаж"],
-            "selected_sections": [
-                {
-                    "file_id": "file_raw",
-                    "sheet_name": "Мойка",
-                    "row_start": 1,
-                    "row_end": 20,
-                }
-            ],
-            "workflow_goal": "Handle car wash and tire fitting bookings.",
-            "output_name": "autospa_intake_knowledge.md",
+            "scope_type": "workflow_setup",
+            "scope_id": "iwsetup_123",
         }
     )
 
-    assert result["knowledge_file_id"] == "file_prepared"
-    assert result["knowledge_file"]["id"] == "file_prepared"
-    assert "content_preview" not in str(result)
-    assert len(str(result)) < 1500
+    assert result["sources"][0]["file_id"] == "file_raw"
+    assert result["sources"][0]["section_count"] == 12
     method, path, kwargs = runtime.calls[0]
     assert method == "POST"
-    assert path == "/internal/files/prepare_intake_knowledge"
+    assert path == "/internal/knowledge/index_sources"
     assert kwargs["json_body"] == {
         "customer_id": "telegram_123",
+        "scope_type": "workflow_setup",
+        "scope_id": "iwsetup_123",
         "file_ids": ["file_raw"],
-        "include_hints": ["Мойка", "Шиномонтаж"],
-        "selected_sections": [
-            {
-                "file_id": "file_raw",
-                "sheet_name": "Мойка",
-                "row_start": 1,
-                "row_end": 20,
-            }
-        ],
-        "workflow_goal": "Handle car wash and tire fitting bookings.",
-        "output_name": "autospa_intake_knowledge.md",
     }
+
+
+@pytest.mark.asyncio
+async def test_business_knowledge_query_posts_expected_payload() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "query": "2 phase wash price",
+                    "scope_type": "intake_workflow",
+                    "scope_id": "iwf_abc",
+                    "answer_extract": "2х-фазная мойка кузова = 1200",
+                    "source_count": 1,
+                    "section_count": 3,
+                    "warnings": [],
+                },
+            )
+        ]
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["business_knowledge_query"].ainvoke(
+        {
+            "query": "2 phase wash price",
+            "scope_type": "intake_workflow",
+            "scope_id": "iwf_abc",
+        }
+    )
+
+    assert result == {
+        "query": "2 phase wash price",
+        "answer_extract": "2х-фазная мойка кузова = 1200",
+    }
+    method, path, kwargs = runtime.calls[0]
+    assert method == "POST"
+    assert path == "/internal/knowledge/query"
+    assert kwargs["json_body"] == {
+        "customer_id": "telegram_123",
+        "scope_type": "intake_workflow",
+        "scope_id": "iwf_abc",
+        "query": "2 phase wash price",
+        "max_extract_chars": 3000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_business_knowledge_query_current_workflow_resolves_active_setup_scope() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(200, {"session": {"session_id": "iwsetup_123"}}),
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "query": "wash prices",
+                    "scope_type": "workflow_setup",
+                    "scope_id": "iwsetup_123",
+                    "answer_extract": "Мойка starts at 200",
+                },
+            ),
+        ],
+        thread_id="chat_123",
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["business_knowledge_query"].ainvoke(
+        {
+            "query": "wash prices",
+            "scope_type": "current_workflow",
+            "scope_id": "iwsetup_123",
+        }
+    )
+
+    assert result == {
+        "query": "wash prices",
+        "answer_extract": "Мойка starts at 200",
+    }
+    assert runtime.calls[0][1] == "/internal/intake/setup/get"
+    assert runtime.calls[1][1] == "/internal/knowledge/query"
+    assert runtime.calls[1][2]["json_body"]["scope_type"] == "workflow_setup"
+    assert runtime.calls[1][2]["json_body"]["scope_id"] == "iwsetup_123"
 
 
 @pytest.mark.asyncio

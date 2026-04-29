@@ -9,13 +9,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from opentulpa.agent.knowledge_prep import (
-    build_intake_knowledge_markdown,
-    inspect_uploaded_file_structure,
-    normalize_hints,
-    normalize_knowledge_filename,
-    normalize_selected_sections,
-)
+from opentulpa.agent.knowledge_prep import inspect_uploaded_file_structure
 from opentulpa.api.file_helpers import (
     download_image_from_web_url,
     sanitize_uploaded_file_record,
@@ -302,86 +296,4 @@ def register_file_routes(
             "ok": True,
             "file": sanitize_uploaded_file_record(record, include_excerpt=False),
             "inspection": inspected,
-        }
-
-    @app.post("/internal/files/prepare_intake_knowledge")
-    async def internal_files_prepare_intake_knowledge(request: Request) -> Any:
-        vault = get_file_vault()
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        raw_file_ids = body.get("file_ids")
-        file_ids = [
-            str(item or "").strip()
-            for item in (raw_file_ids if isinstance(raw_file_ids, list) else [])
-            if str(item or "").strip()
-        ]
-        if not customer_id or not file_ids:
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "customer_id and file_ids are required"},
-            )
-        file_ids = list(dict.fromkeys(file_ids))[:8]
-        sources: list[dict[str, Any]] = []
-        missing: list[str] = []
-        for file_id in file_ids:
-            record = vault.get_file(customer_id, file_id)
-            raw_bytes = vault.read_file_bytes(customer_id, file_id)
-            if not record or raw_bytes is None:
-                missing.append(file_id)
-                continue
-            sources.append({"record": record, "raw_bytes": raw_bytes})
-        if missing:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": f"file not found: {', '.join(missing)}"},
-            )
-        prepared = build_intake_knowledge_markdown(
-            sources=sources,
-            workflow_goal=body.get("workflow_goal"),
-            include_hints=body.get("include_hints"),
-            selected_sections=body.get("selected_sections"),
-        )
-        if prepared.get("requires_selection"):
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "detail": "xlsx source requires selected_sections or workflow-specific search hints",
-                    "needs_selection": True,
-                    "matched_sections": prepared.get("matched_sections") or [],
-                    "warnings": prepared.get("warnings") or [],
-                },
-            )
-        markdown = str(prepared.get("markdown", "") or "").strip()
-        if not markdown:
-            return JSONResponse(status_code=422, content={"detail": "no knowledge content prepared"})
-        output_name = normalize_knowledge_filename(body.get("output_name"))
-        hints = normalize_hints(body.get("include_hints"))
-        sections = normalize_selected_sections(body.get("selected_sections"))
-        caption_parts = ["compiled intake workflow knowledge"]
-        if hints:
-            caption_parts.append("scope=" + ", ".join(hints))
-        if sections:
-            caption_parts.append("sections=" + ", ".join(str(s.get("sheet_name", "")) for s in sections[:6]))
-        caption_parts.append("source_file_ids=" + ", ".join(file_ids))
-        created = vault.ingest_file(
-            customer_id=customer_id,
-            chat_id=None,
-            kind="workflow_knowledge",
-            telegram_file_id=None,
-            original_filename=output_name,
-            mime_type="text/markdown",
-            caption=" | ".join(caption_parts),
-            raw_bytes=markdown.encode("utf-8"),
-        )
-        return {
-            "ok": True,
-            "knowledge_file_id": str(created.get("id", "") or "").strip(),
-            "knowledge_file": sanitize_uploaded_file_record(
-                created,
-                include_excerpt=True,
-                max_excerpt_chars=16000,
-            ),
-            "source_file_ids": file_ids,
-            "matched_sections": prepared.get("matched_sections") or [],
-            "warnings": prepared.get("warnings") or [],
         }

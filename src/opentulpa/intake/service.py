@@ -261,6 +261,7 @@ class IntakeWorkflowService:
         composio: Any | None = None,
         telegram_business: Any | None = None,
         file_vault: FileVaultService | None = None,
+        knowledge_service: Any | None = None,
         get_agent_runtime: Any | None = None,
     ) -> None:
         self._db_path = db_path.resolve()
@@ -270,6 +271,7 @@ class IntakeWorkflowService:
         self._composio = composio
         self._telegram_business = telegram_business
         self._file_vault = file_vault
+        self._knowledge_service = knowledge_service
         self._get_agent_runtime = get_agent_runtime
         self._conversation_locks_guard = threading.Lock()
         self._conversation_locks: dict[str, asyncio.Lock] = {}
@@ -1718,6 +1720,7 @@ class IntakeWorkflowService:
                 ),
             )
             conn.commit()
+        self._index_workflow_knowledge(workflow)
         self._sync_routine(workflow)
         self._sync_skill(workflow)
         return self.get_workflow(
@@ -1853,14 +1856,147 @@ class IntakeWorkflowService:
             rows = conn.execute(query, params).fetchall()
         return [self._hydrate_booking_row(row) for row in rows]
 
-    def _knowledge_files_for_workflow(self, *, customer_id: str, workflow: dict[str, Any]) -> list[dict[str, Any]]:
-        file_vault = self._file_vault
-        if file_vault is None:
-            return []
-        return file_vault.get_many(
-            customer_id=str(customer_id or "").strip(),
-            file_ids=_unique_string_list(workflow.get("knowledge_file_ids")),
-        )
+    def _index_workflow_knowledge(self, workflow: dict[str, Any]) -> None:
+        knowledge = self._knowledge_service
+        if knowledge is None:
+            return
+        file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
+        if not file_ids:
+            return
+        with suppress(Exception):
+            knowledge.index_sources(
+                customer_id=str(workflow.get("customer_id", "") or "").strip(),
+                scope_type="intake_workflow",
+                scope_id=str(workflow.get("workflow_id", "") or "").strip(),
+                file_ids=file_ids,
+            )
+
+    def _business_knowledge_query_text(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+        active_booking: dict[str, Any] | None,
+    ) -> str:
+        latest_text = str(conversation_summary.get("latest_inbound_message_text_preview", "") or "").strip()
+        for item in reversed(recent_messages):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("sender_role", "") or "").strip().lower() not in {"customer", "lead", "user"}:
+                continue
+            text = str(item.get("text", "") or "").strip()
+            if text:
+                latest_text = text
+                break
+        active_fields: dict[str, Any] = {}
+        if isinstance(active_booking, dict):
+            active_fields = _safe_dict(active_booking.get("extracted_fields"))
+        parts = [
+            f"Latest customer message: {latest_text}",
+            f"Active booking extracted_fields JSON: {_json_dumps(active_fields)}",
+            (
+                "Workflow field contract JSON: "
+                + _json_dumps(
+                    {
+                        "required_fields": _safe_list(workflow.get("required_fields")),
+                        "field_guidance": _safe_dict(workflow.get("field_guidance")),
+                    }
+                )
+            ),
+            "Workflow scope: " + str(workflow.get("intent_description", "") or "").strip(),
+            "Workflow instructions: " + str(workflow.get("assistant_instructions", "") or "").strip(),
+            (
+                "Task: return only source-backed business facts relevant to the latest customer "
+                "message or active booking. Respect the configured workflow scope: if the source contains "
+                "facts for a category outside this workflow, do not answer those facts for intake; return "
+                "NO_SOURCE so the intake agent can redirect from workflow instructions. If the latest "
+                "message only cancels, reschedules, or corrects an existing booking and needs no new "
+                "business fact, return NO_SOURCE."
+            ),
+        ]
+        return " ".join(part for part in parts if part).strip()
+
+    def _business_knowledge_answer_for_workflow(
+        self,
+        *,
+        customer_id: str,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+        active_booking: dict[str, Any] | None = None,
+        query_override: str | None = None,
+        include_no_source: bool = False,
+    ) -> str:
+        knowledge = self._knowledge_service
+        if knowledge is None:
+            return ""
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
+        if not workflow_id or not file_ids:
+            return ""
+        query = str(query_override or "").strip()
+        if not query:
+            query = self._business_knowledge_query_text(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                active_booking=active_booking,
+            )
+        if not query:
+            query = str(workflow.get("intent_description", "") or "").strip() or "business knowledge"
+        workflow_context = {
+            "workflow_id": workflow_id,
+            "name": str(workflow.get("name", "") or "").strip(),
+            "intent_description": str(workflow.get("intent_description", "") or "").strip(),
+            "required_fields": _safe_list(workflow.get("required_fields")),
+            "field_guidance": _safe_dict(workflow.get("field_guidance")),
+            "assistant_instructions": str(workflow.get("assistant_instructions", "") or "").strip(),
+            "active_booking": _safe_dict(active_booking),
+        }
+        with suppress(Exception):
+            result = knowledge.query(
+                customer_id=customer_id,
+                scope_type="intake_workflow",
+                scope_id=workflow_id,
+                query=query,
+                workflow_context=workflow_context,
+            )
+            if int(getattr(result, "section_count", 0) or 0) == 0:
+                knowledge.index_sources(
+                    customer_id=customer_id,
+                    scope_type="intake_workflow",
+                    scope_id=workflow_id,
+                    file_ids=file_ids,
+                )
+                result = knowledge.query(
+                    customer_id=customer_id,
+                    scope_type="intake_workflow",
+                    scope_id=workflow_id,
+                    query=query,
+                    workflow_context=workflow_context,
+                )
+            answer = getattr(result, "answer", None)
+            if answer is None:
+                if include_no_source:
+                    return (
+                        f"Business knowledge query: {query[:600]}\n"
+                        "Business knowledge answer: NO_SOURCE"
+                    )[:3600]
+                return ""
+            answer_text = str(getattr(answer, "answer_extract", "") or "").strip()
+            if not answer_text:
+                if include_no_source:
+                    return (
+                        f"Business knowledge query: {query[:600]}\n"
+                        "Business knowledge answer: NO_SOURCE"
+                    )[:3600]
+                return ""
+            return (
+                f"Business knowledge query: {query[:600]}\n"
+                f"Business knowledge answer: {answer_text[:3000]}"
+            )[:3600]
+        return ""
 
     def _sync_routine(self, workflow: dict[str, Any]) -> None:
         if self._scheduler is None:
@@ -2788,10 +2924,7 @@ class IntakeWorkflowService:
             "field_guidance": workflow.get("field_guidance"),
             "assistant_instructions": workflow.get("assistant_instructions", ""),
             "knowledge_file_ids": _unique_string_list(workflow.get("knowledge_file_ids")),
-            "knowledge_files": self._knowledge_files_for_workflow(
-                customer_id=str(workflow["customer_id"]),
-                workflow=workflow,
-            ),
+            "knowledge_answer": "",
             "sink_type": workflow.get("sink_type"),
             "sink_config": workflow.get("sink_config"),
             "channel": workflow.get("channel"),
@@ -2806,13 +2939,14 @@ class IntakeWorkflowService:
                 (recent_completed_booking or {}).get("booking_id", "") or ""
             ).strip(),
             recent_message_count=len(recent_messages),
+            knowledge_answer_chars=len(str(workflow_context.get("knowledge_answer") or "")),
             execution_feedback_count=len(execution_feedback or []),
             execution_feedback=_safe_list(execution_feedback),
         )
         try:
             decision = await runtime.decide_intake_workflow(
                 customer_id=str(workflow["customer_id"]),
-                workflow=workflow_context,
+                workflow=dict(workflow_context),
                 conversation={
                     "summary": conversation_summary,
                     "recent_messages": recent_messages,
@@ -2830,6 +2964,70 @@ class IntakeWorkflowService:
                 error=error,
             )
             return {}, error
+        if (
+            isinstance(decision, dict)
+            and bool(decision.get("ok", False))
+            and bool(decision.get("needs_business_knowledge", False))
+            and _unique_string_list(workflow.get("knowledge_file_ids"))
+        ):
+            knowledge_query = str(decision.get("business_knowledge_query", "") or "").strip()
+            if not knowledge_query:
+                knowledge_query = self._business_knowledge_query_text(
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    recent_messages=recent_messages,
+                    active_booking=active_booking,
+                )
+            self._emit_observability(
+                event="intake.knowledge_query.start",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                query=knowledge_query,
+            )
+            knowledge_answer = self._business_knowledge_answer_for_workflow(
+                customer_id=str(workflow["customer_id"]),
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                active_booking=active_booking,
+                query_override=knowledge_query,
+                include_no_source=True,
+            )
+            workflow_context["knowledge_answer"] = knowledge_answer
+            self._emit_observability(
+                event="intake.knowledge_query.ok",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                query=knowledge_query,
+                knowledge_answer_chars=len(knowledge_answer),
+            )
+            self._emit_observability(
+                event="intake.decision.retry_with_knowledge",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                knowledge_answer_chars=len(knowledge_answer),
+            )
+            try:
+                decision = await runtime.decide_intake_workflow(
+                    customer_id=str(workflow["customer_id"]),
+                    workflow=dict(workflow_context),
+                    conversation={
+                        "summary": conversation_summary,
+                        "recent_messages": recent_messages,
+                    },
+                    active_booking=active_booking,
+                    recent_completed_booking=recent_completed_booking,
+                    execution_feedback=execution_feedback,
+                )
+            except Exception as exc:
+                error = str(exc)
+                self._emit_observability(
+                    event="intake.decision.error",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    error=error,
+                )
+                return {}, error
         if not isinstance(decision, dict) or not bool(decision.get("ok", False)):
             error = str(decision.get("error", "invalid intake workflow decision"))
             self._emit_observability(
@@ -2849,6 +3047,8 @@ class IntakeWorkflowService:
             booking_action=str(decision.get("booking_action", "") or "").strip().lower(),
             reply_action=str(decision.get("reply_action", "") or "").strip().lower(),
             ready_to_save=bool(decision.get("ready_to_save")),
+            needs_business_knowledge=bool(decision.get("needs_business_knowledge", False)),
+            business_knowledge_query=str(decision.get("business_knowledge_query", "") or "").strip(),
             missing_fields=_unique_string_list(decision.get("missing_fields")),
             extracted_fields=_safe_dict(decision.get("extracted_fields")),
             save_payload=_safe_dict(decision.get("save_payload")),
@@ -3035,12 +3235,14 @@ class IntakeWorkflowService:
         if ready_to_save:
             save_payload = dict(extracted_fields)
             save_payload.update(_safe_dict(decision.get("save_payload")))
+            save_status = str(save_payload.get("status", "") or "").strip().lower()
+            is_cancellation_save = reply_action == "mark_cancelled" or save_status == "cancelled"
             missing = [
                 field
                 for field in _unique_string_list(workflow.get("required_fields"))
                 if not str(save_payload.get(field, "") or "").strip()
             ]
-            if missing:
+            if missing and not is_cancellation_save:
                 error = (
                     "decision marked ready_to_save but required fields are missing: "
                     + ", ".join(missing)
@@ -3061,6 +3263,7 @@ class IntakeWorkflowService:
                     error=f"ready_to_save missing required fields: {', '.join(missing)}",
                     decision=decision,
                 )
+            skip_sink_write = is_cancellation_save and sink_status != "succeeded" and not sink_ref
             if stale_guard:
                 stale_result = self._requeue_if_conversation_stale(
                     workflow=workflow,
@@ -3070,86 +3273,140 @@ class IntakeWorkflowService:
                 )
                 if stale_result is not None:
                     return stale_result, None, None
-            self._emit_observability(
-                event="intake.sink_write.start",
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                booking_id=str(target_booking.get("booking_id", "") or "").strip(),
-                sink_type=str(workflow.get("sink_type", "") or "").strip(),
-                payload=save_payload,
-            )
-            sink_result, sink_error = self._write_to_sink(
-                workflow=workflow,
-                booking=target_booking,
-                payload=save_payload,
-                sink_arguments=sink_arguments,
-            )
-            if sink_error is not None:
-                target_booking["status"] = "active"
-                target_booking["sink_write_status"] = "failed"
-                target_booking["sink_record_ref"] = sink_ref
-                self._upsert_booking(target_booking)
+            if skip_sink_write:
                 self._emit_observability(
-                    event="intake.sink_write.error",
+                    event="intake.sink_write.skipped",
                     workflow=workflow,
                     conversation_summary=conversation_summary,
                     booking_id=str(target_booking.get("booking_id", "") or "").strip(),
                     sink_type=str(workflow.get("sink_type", "") or "").strip(),
-                    error=sink_error,
+                    reason="cancellation_not_previously_persisted",
+                    payload=save_payload,
                 )
-                self._emit_observability(
-                    event="intake.apply.error",
-                    workflow=workflow,
-                    conversation_summary=conversation_summary,
-                    phase="sink_execution",
-                    error=sink_error,
-                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
-                )
-                return {}, sink_error, self._build_recovery_feedback(
-                    phase="sink_execution",
-                    error=sink_error,
-                    decision=decision,
-                )
-            sink_status = "succeeded"
-            sink_ref = _safe_dict(sink_result)
-            now = _utc_now()
-            target_booking["status"] = "completed"
-            target_booking["completed_at"] = now.isoformat()
-            target_booking["edit_window_until"] = (now + _DEFAULT_EDIT_WINDOW).isoformat()
-            target_booking["sink_write_status"] = sink_status
-            target_booking["sink_record_ref"] = sink_ref
-            target_booking["extracted_fields"] = save_payload
-            target_booking["updated_at"] = now.isoformat()
-            self._upsert_booking(target_booking)
-            self._emit_observability(
-                event="intake.sink_write.ok",
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                booking_id=str(target_booking.get("booking_id", "") or "").strip(),
-                sink_type=str(workflow.get("sink_type", "") or "").strip(),
-                sink_result=sink_ref,
-            )
-            saved_summary = self._build_saved_summary(
-                workflow=workflow,
-                booking=target_booking,
-                conversation_summary=conversation_summary,
-            )
-            if self._should_enforce_completion_reply(workflow=workflow) and (
-                reply_action != "send_reply" or not reply_text
-            ):
-                reply_action = "send_reply"
-                reply_text = self._build_completion_confirmation_reply(
+                now = _utc_now()
+                target_booking["status"] = "cancelled"
+                target_booking["completed_at"] = now.isoformat()
+                target_booking["edit_window_until"] = (now + _DEFAULT_EDIT_WINDOW).isoformat()
+                target_booking["sink_write_status"] = "not_required"
+                target_booking["sink_record_ref"] = sink_ref
+                target_booking["extracted_fields"] = save_payload
+                target_booking["updated_at"] = now.isoformat()
+                self._upsert_booking(target_booking)
+                saved_summary = self._build_saved_summary(
                     workflow=workflow,
                     booking=target_booking,
                     conversation_summary=conversation_summary,
                 )
+                reply_action = "send_reply"
+                if not reply_text:
+                    reply_text = self._build_cancellation_confirmation_reply(
+                        workflow=workflow,
+                        booking=target_booking,
+                        conversation_summary=conversation_summary,
+                    )
+                    self._emit_observability(
+                        event="intake.reply.normalized_cancellation_confirmation",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        reply_text=reply_text,
+                    )
+            else:
                 self._emit_observability(
-                    event="intake.reply.normalized_completion_confirmation",
+                    event="intake.sink_write.start",
                     workflow=workflow,
                     conversation_summary=conversation_summary,
                     booking_id=str(target_booking.get("booking_id", "") or "").strip(),
-                    reply_text=reply_text,
+                    sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                    payload=save_payload,
                 )
+                sink_result, sink_error = self._write_to_sink(
+                    workflow=workflow,
+                    booking=target_booking,
+                    payload=save_payload,
+                    sink_arguments=sink_arguments,
+                )
+                if sink_error is not None:
+                    target_booking["status"] = "active"
+                    target_booking["sink_write_status"] = "failed"
+                    target_booking["sink_record_ref"] = sink_ref
+                    self._upsert_booking(target_booking)
+                    self._emit_observability(
+                        event="intake.sink_write.error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                        error=sink_error,
+                    )
+                    self._emit_observability(
+                        event="intake.apply.error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        phase="sink_execution",
+                        error=sink_error,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    )
+                    return {}, sink_error, self._build_recovery_feedback(
+                        phase="sink_execution",
+                        error=sink_error,
+                        decision=decision,
+                    )
+                sink_status = "succeeded"
+                sink_ref = _safe_dict(sink_result)
+                now = _utc_now()
+                target_booking["status"] = "cancelled" if reply_action == "mark_cancelled" else "completed"
+                target_booking["completed_at"] = now.isoformat()
+                target_booking["edit_window_until"] = (now + _DEFAULT_EDIT_WINDOW).isoformat()
+                target_booking["sink_write_status"] = sink_status
+                target_booking["sink_record_ref"] = sink_ref
+                target_booking["extracted_fields"] = save_payload
+                target_booking["updated_at"] = now.isoformat()
+                self._upsert_booking(target_booking)
+                self._emit_observability(
+                    event="intake.sink_write.ok",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                    sink_result=sink_ref,
+                )
+                saved_summary = self._build_saved_summary(
+                    workflow=workflow,
+                    booking=target_booking,
+                    conversation_summary=conversation_summary,
+                )
+                if reply_action == "mark_cancelled":
+                    reply_action = "send_reply"
+                    if not reply_text:
+                        reply_text = self._build_cancellation_confirmation_reply(
+                            workflow=workflow,
+                            booking=target_booking,
+                            conversation_summary=conversation_summary,
+                        )
+                        self._emit_observability(
+                            event="intake.reply.normalized_cancellation_confirmation",
+                            workflow=workflow,
+                            conversation_summary=conversation_summary,
+                            booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                            reply_text=reply_text,
+                        )
+                elif self._should_enforce_completion_reply(workflow=workflow) and (
+                    reply_action != "send_reply" or not reply_text
+                ):
+                    reply_action = "send_reply"
+                    reply_text = self._build_completion_confirmation_reply(
+                        workflow=workflow,
+                        booking=target_booking,
+                        conversation_summary=conversation_summary,
+                    )
+                    self._emit_observability(
+                        event="intake.reply.normalized_completion_confirmation",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        reply_text=reply_text,
+                    )
         else:
             if reply_action == "mark_cancelled":
                 target_booking["status"] = "cancelled"
@@ -3701,8 +3958,10 @@ class IntakeWorkflowService:
         if not contact:
             contact = str(conversation_summary.get("recipient_id", "") or "").strip() or "customer_contact"
         fields = _safe_dict(booking.get("extracted_fields"))
+        status = str(booking.get("status", "") or "").strip().lower()
+        action = "Booking cancelled" if status == "cancelled" else "Booking saved"
         parts = [
-            f"Booking saved for {workflow['name']}:",
+            f"{action} for {workflow['name']}:",
             f"contact={contact}",
             f"booking_id={booking['booking_id']}",
         ]
@@ -3712,6 +3971,47 @@ class IntakeWorkflowService:
                 parts.append(f"{key}={value}")
         parts.append(f"sink={workflow['sink_type']}")
         return " ".join(parts)[:1000]
+
+    def _build_cancellation_confirmation_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> str:
+        fields = _safe_dict(booking.get("extracted_fields"))
+        context_text = " ".join(
+            [
+                str(workflow.get("assistant_instructions", "") or ""),
+                str(workflow.get("intent_description", "") or ""),
+                str(conversation_summary.get("latest_inbound_message_text_preview", "") or ""),
+                " ".join(str(value or "") for value in fields.values()),
+            ]
+        )
+        russian = any("\u0400" <= char <= "\u04ff" for char in context_text)
+
+        def _first_value(*keys: str) -> str:
+            for key in keys:
+                value = str(fields.get(key, "") or "").strip()
+                if value:
+                    return value
+            return ""
+
+        service = _first_value("service_name", "service", "wash_type", "service_category")
+        date = _first_value("desired_date", "date", "day")
+        time_value = _first_value("desired_time", "time")
+        when = " ".join([date, time_value]).strip()
+        if russian:
+            if service and when:
+                return f"Готово, запись на {service} {when} отменена."[:1000]
+            if service:
+                return f"Готово, запись на {service} отменена."[:1000]
+            return "Готово, запись отменена."
+        if service and when:
+            return f"Done, your {service} booking for {when} is cancelled."[:1000]
+        if service:
+            return f"Done, your {service} booking is cancelled."[:1000]
+        return "Done, your booking is cancelled."
 
     def _should_enforce_completion_reply(self, *, workflow: dict[str, Any]) -> bool:
         channel = str(workflow.get("channel", "") or "").strip().lower()

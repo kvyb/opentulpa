@@ -293,6 +293,11 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     assert "If customer messages conflict, prefer the latest customer-provided value" in system_text
     assert "Ask at most one compact question at a time" in system_text
     assert "When ready_to_save=true, save_payload must contain the merged final field set" in system_text
+    assert "Booking-state fast path" in system_text
+    assert "do not require workflow.knowledge_answer or business_knowledge_query" in system_text
+    assert "Never ask the customer to confirm a booking or change that you are saving now" in system_text
+    assert "needs_business_knowledge=true" in system_text
+    assert "business_knowledge_query to one concise natural language query" in system_text
 
 
 @pytest.mark.asyncio
@@ -375,7 +380,7 @@ async def test_decide_intake_workflow_prefers_tool_runtime_first_for_composio_si
 
 
 @pytest.mark.asyncio
-async def test_decide_intake_workflow_prefers_tool_runtime_for_bound_knowledge_files() -> None:
+async def test_decide_intake_workflow_does_not_use_tool_runtime_for_bound_knowledge_files() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.model_name = "google/gemini-3-flash-preview"
     runtime._prompt_caching_enabled = True
@@ -394,23 +399,17 @@ async def test_decide_intake_workflow_prefers_tool_runtime_for_bound_knowledge_f
             "ready_to_save": False,
             "booking_action": "ignore",
             "save_payload": {},
-            "reason": "not used",
+            "needs_business_knowledge": True,
+            "business_knowledge_query": "2 phase wash price",
+            "reason": "Needs source-backed price.",
         }
     )
     runtime._model = model
     runtime._wake_execution_model = model
     runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
-    captured: dict[str, Any] = {}
 
     async def _fake_ainvoke_text(**kwargs: Any) -> str:
-        captured.update(kwargs)
-        return (
-            '{"matches_workflow": true, "confidence": 0.95, "conversation_summary": '
-            '"Customer asks about a source-backed wash service.", "extracted_fields": {"wash_type": "2 phase"}, '
-            '"missing_fields": ["time"], "reply_action": "send_reply", "reply_text": "What time works?", '
-            '"ready_to_save": false, "booking_action": "create_new_booking", "save_payload": {}, '
-            '"sink_arguments": {}, "reason": "Need time."}'
-        )
+        raise AssertionError("bound knowledge alone should not force tool runtime")
 
     runtime.ainvoke_text = _fake_ainvoke_text
 
@@ -437,9 +436,9 @@ async def test_decide_intake_workflow_prefers_tool_runtime_for_bound_knowledge_f
     )
 
     assert decision["ok"] is True
-    assert captured["thread_id"] == "wake_intake_iwf_knowledge_conv_1_msg_1"
-    assert captured["turn_mode"] == "routine_wake"
-    assert model.runner is None
+    assert decision["needs_business_knowledge"] is True
+    assert decision["business_knowledge_query"] == "2 phase wash price"
+    assert model.runner is not None
 
 
 @pytest.mark.asyncio
