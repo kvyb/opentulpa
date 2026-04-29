@@ -127,6 +127,7 @@ def _business_knowledge_oracle(
     return OpenAICompatibleKnowledgeOracleClient(
         api_key=api_key,
         base_url=str(getattr(settings, "openai_compatible_base_url", "") or ""),
+        model=str(getattr(settings, "business_knowledge_oracle_model", "") or ""),
         trace_path=trace_path,
     )
 

@@ -297,6 +297,7 @@ wake_execution_model: z-ai/glm-5.1
 memory_llm_model: google/gemini-3-flash-preview
 multimodal_llm: google/gemini-3-flash-preview
 guardrail_classifier_model: google/gemini-3-flash-preview
+business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
 ```
 
 This repo currently assumes:
@@ -304,6 +305,7 @@ This repo currently assumes:
 - `GLM 5.1` for main chat and wake execution
 - `medium` reasoning effort for agent-owned LLM calls by default
 - `Gemini Flash` for memory extraction, multimodal work, guardrail classification, and some test judging
+- `Gemini Flash Lite` for workflow business knowledge oracle queries over normalized uploaded files
 - `MULTIMODAL_LLM` should be set when your main model is not multimodal
 
 DeepSeek V4 Pro is still supported. When a DeepSeek model is used through OpenRouter, OpenTulpa routes it through the OpenRouter LangChain adapter so `reasoning_details` are preserved across tool-call loops, which DeepSeek thinking mode requires.

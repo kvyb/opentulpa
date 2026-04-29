@@ -243,6 +243,13 @@ class Settings(BaseSettings):
             "Recommended default is google/gemini-3-flash-preview."
         ),
     )
+    business_knowledge_oracle_model: str = Field(
+        default="google/gemini-3.1-flash-lite-preview",
+        description=(
+            "Model used by the workflow business knowledge oracle for source-grounded "
+            "answers over normalized uploaded files."
+        ),
+    )
     proactive_heartbeat_default_hours: int = Field(
         default=3,
         ge=1,
