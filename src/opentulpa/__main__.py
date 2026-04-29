@@ -391,6 +391,7 @@ def main() -> None:
             browser_use_model_override=settings.browser_use_model or settings.multimodal_llm,
             browser_use_max_concurrent_tasks=settings.browser_use_max_concurrent_tasks,
             browser_use_task_retention_seconds=settings.browser_use_task_retention_seconds,
+            capsolver_api_key=settings.capsolver_api_key,
             prompt_caching_enabled=settings.agent_prompt_caching_enabled,
             prompt_cache_ttl_1h=settings.agent_prompt_cache_ttl_1h,
             posthog_api_key=settings.posthog_api_key,

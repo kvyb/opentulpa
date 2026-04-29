@@ -25,6 +25,7 @@ def status_text(agent_up: bool) -> str:
         "TELEGRAM_BOT_TOKEN": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
         "BROWSER_USE_HEADLESS": bool(os.environ.get("BROWSER_USE_HEADLESS")),
         "BROWSER_USE_MODEL": bool(os.environ.get("BROWSER_USE_MODEL")),
+        "CAPSOLVER_API_KEY": bool(os.environ.get("CAPSOLVER_API_KEY")),
     }
     lines = [
         "OpenTulpa status:",
@@ -40,6 +41,7 @@ def status_text(agent_up: bool) -> str:
             f"- BROWSER_USE_MODEL: "
             f"{'set' if keys['BROWSER_USE_MODEL'] else 'default(MULTIMODAL_LLM)'}"
         ),
+        f"- CAPSOLVER_API_KEY: {'set' if keys['CAPSOLVER_API_KEY'] else 'disabled'}",
         "",
         "Commands: /start, /status, /fresh, /debug_logs",
     ]
