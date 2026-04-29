@@ -69,6 +69,7 @@ class BrowserUseLocalManager:
         headless: bool = True,
         max_concurrent_tasks: int = 2,
         task_retention_seconds: int = 1800,
+        capsolver_api_key: str | None = None,
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")
@@ -77,6 +78,7 @@ class BrowserUseLocalManager:
         self._reasoning_effort = str(reasoning_effort or "").strip() or None
         self._headless = bool(headless)
         self._task_retention_seconds = max(60, int(task_retention_seconds))
+        self._capsolver_api_key = str(capsolver_api_key or "").strip()
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
         self._tasks: dict[str, _BrowserUseTaskState] = {}
@@ -486,14 +488,24 @@ class BrowserUseLocalManager:
                     f"First navigate to this URL: {start_url}. "
                     f"Then complete this task: {task_text}"
                 )
+            if self._capsolver_api_key:
+                composed_task = (
+                    f"{composed_task}\n\n"
+                    "If a supported CAPTCHA blocks progress, use the "
+                    "solve_captcha_with_capsolver action before continuing."
+                )
 
-            agent = agent_cls(
-                task=composed_task,
-                llm=llm,
-                browser_session=browser_session,
-                register_new_step_callback=self._step_callback(task_id),
-                directly_open_url=True,
-            )
+            agent_kwargs: dict[str, Any] = {
+                "task": composed_task,
+                "llm": llm,
+                "browser_session": browser_session,
+                "register_new_step_callback": self._step_callback(task_id),
+                "directly_open_url": True,
+            }
+            captcha_controller = self._new_captcha_controller()
+            if captcha_controller is not None:
+                agent_kwargs["controller"] = captcha_controller
+            agent = agent_cls(**agent_kwargs)
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is not None:
@@ -715,6 +727,16 @@ class BrowserUseLocalManager:
         if allowed_domains:
             session_kwargs["allowed_domains"] = allowed_domains
         return browser_session_cls(**session_kwargs)
+
+    def _new_captcha_controller(self) -> Any | None:
+        if not self._capsolver_api_key:
+            return None
+        from opentulpa.integrations.browser_use_captcha import build_capsolver_controller
+        from opentulpa.integrations.capsolver import CapSolverClient
+
+        return build_capsolver_controller(
+            CapSolverClient(api_key=self._capsolver_api_key),
+        )
 
     @staticmethod
     def _import_browser_use_components() -> tuple[Any, Any, Any]:

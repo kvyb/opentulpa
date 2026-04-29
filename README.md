@@ -449,6 +449,7 @@ Useful `.env` knobs:
 - `START_MODE=auto|app|manager`
 - `INSTALL_BROWSER_USE=1|0`
 - `INSTALL_CLOUDFLARED=auto|1|0`
+- `CAPSOLVER_API_KEY=...` enables an optional Browser Use CAPTCHA action for supported reCAPTCHA v2 and Cloudflare Turnstile pages. When set, Browser Use tasks are told to call the solver if a supported CAPTCHA blocks progress. Leave it unset to keep CAPTCHA solving disabled.
 
 ---
 

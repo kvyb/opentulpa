@@ -302,6 +302,13 @@ class Settings(BaseSettings):
         le=86400,
         description="How long completed local Browser Use task records remain queryable in memory.",
     )
+    capsolver_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional CapSolver API key. When set, local Browser Use tasks get an explicit "
+            "CAPTCHA-solving action for supported reCAPTCHA v2 and Cloudflare Turnstile pages."
+        ),
+    )
     composio_api_key: str | None = Field(
         default=None,
         description="Composio API key used for Tool Router sessions and auth flows.",

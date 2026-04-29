@@ -82,6 +82,14 @@ def test_settings_accepts_business_knowledge_oracle_model_env(monkeypatch) -> No
     assert settings.business_knowledge_oracle_model == "provider/oracle-model"
 
 
+def test_settings_accepts_capsolver_api_key_env(monkeypatch) -> None:
+    monkeypatch.setenv("CAPSOLVER_API_KEY", "cap-key")
+
+    settings = Settings()
+
+    assert settings.capsolver_api_key == "cap-key"
+
+
 def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text(

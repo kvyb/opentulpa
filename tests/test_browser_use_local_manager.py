@@ -93,11 +93,13 @@ class _FakeAgent:
         llm: Any,
         browser_session: Any,
         register_new_step_callback: Any,
+        controller: Any | None = None,
         directly_open_url: bool = True,  # noqa: ARG002
     ) -> None:
         self.task = task
         self.llm = llm
         self.browser_session = browser_session
+        self.controller = controller
         self._callback = register_new_step_callback
         self._paused = False
         self._stopped = False
@@ -173,6 +175,8 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     assert payload["steps"]
     state = manager._tasks[task_id]
     assert state.agent.llm.kwargs["reasoning_effort"] == "medium"
+    assert state.agent.controller is None
+    assert "solve_captcha_with_capsolver" not in state.agent.task
 
 
 @pytest.mark.asyncio
@@ -432,3 +436,38 @@ async def test_local_manager_rejects_third_explicit_session_at_capacity(
     assert "session capacity reached" in str(blocked["error"])
     assert blocked["sessionLimit"] == 2
     assert len(manager._sessions) == 2
+
+
+@pytest.mark.asyncio
+async def test_local_manager_attaches_capsolver_controller_when_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import opentulpa.integrations.browser_use_captcha as captcha_module
+
+    controller = object()
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        capsolver_api_key="cap-key",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+    monkeypatch.setattr(captcha_module, "build_capsolver_controller", lambda client: controller)
+
+    created = await manager.start_task(task="blocked by captcha", max_steps=2, llm="", session_id="sess_cap")
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert manager._tasks[task_id].agent.controller is controller
+    assert "solve_captcha_with_capsolver" in manager._tasks[task_id].agent.task

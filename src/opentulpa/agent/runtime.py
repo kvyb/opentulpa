@@ -1209,6 +1209,7 @@ class OpenTulpaLangGraphRuntime:
         browser_use_model_override: str | None = None,
         browser_use_max_concurrent_tasks: int = 2,
         browser_use_task_retention_seconds: int = 1800,
+        capsolver_api_key: str | None = None,
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
         posthog_api_key: str | None = None,
@@ -1280,6 +1281,7 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_model_override = str(browser_use_model_override or "").strip()
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
+        self._capsolver_api_key = str(capsolver_api_key or "").strip()
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
         self._posthog_logger = create_posthog_logger(
@@ -1636,6 +1638,7 @@ class OpenTulpaLangGraphRuntime:
                 headless=self._browser_use_headless,
                 max_concurrent_tasks=self._browser_use_max_concurrent_tasks,
                 task_retention_seconds=self._browser_use_task_retention_seconds,
+                capsolver_api_key=self._capsolver_api_key,
             )
         return self._browser_use_local_manager
 
