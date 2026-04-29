@@ -165,9 +165,11 @@ def _install_minimal_graph_runtime_stubs(
     runtime.ainvoke_model = ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
-    runtime.verify_completion_claim = verify_completion_claim or (  # type: ignore[assignment]
-        (lambda **kwargs: {"usable": True, "mismatch": False, "applies": False, "confidence": 0.0})
-    )
+    async def _default_verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": False, "confidence": 0.0}
+
+    runtime.verify_completion_claim = verify_completion_claim or _default_verify_completion_claim  # type: ignore[assignment]
     runtime.log_behavior_event = (  # type: ignore[assignment]
         (lambda **kwargs: behavior_events.append(str(kwargs.get("event", ""))))
         if behavior_events is not None
