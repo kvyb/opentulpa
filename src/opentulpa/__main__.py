@@ -372,6 +372,7 @@ def main() -> None:
             wake_execution_model_name=settings.wake_execution_model,
             telegram_media_model_name=settings.multimodal_llm,
             guardrail_classifier_model_name=settings.guardrail_classifier_model,
+            workflow_setup_input_classifier_model_name=settings.workflow_setup_input_classifier_model,
             checkpoint_db_path=settings.agent_checkpoint_db_path,
             recursion_limit=settings.agent_recursion_limit,
             max_completion_tokens=settings.agent_max_completion_tokens,

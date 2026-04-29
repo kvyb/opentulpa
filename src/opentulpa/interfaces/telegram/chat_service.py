@@ -427,7 +427,9 @@ async def _maybe_configure_support_commands_for_chat(
     try:
         setter = getattr(client, "set_my_commands", None)
         if callable(setter):
-            await setter(commands=support_bot_commands(), scope={"type": "chat", "chat_id": int(chat_id)})
+            await setter(
+                commands=support_bot_commands(), scope={"type": "chat", "chat_id": int(chat_id)}
+            )
     finally:
         if hasattr(client, "aclose"):
             with suppress(Exception):
@@ -498,7 +500,9 @@ def _format_support_customers(items: list[dict[str, Any]]) -> str:
     if not items:
         return "No customer tenants are known yet."
     lines = ["Support customers:"]
-    lines.extend(_format_support_customer_line(index, item) for index, item in enumerate(items, start=1))
+    lines.extend(
+        _format_support_customer_line(index, item) for index, item in enumerate(items, start=1)
+    )
     lines.append("")
     lines.append("Bind with /support_bind <number> or /support_bind <customer_id>.")
     return "\n".join(lines)
@@ -854,7 +858,8 @@ async def _run_interactive_session(
         direct_replies = [
             str(item.direct_reply).strip()
             for item in ready_items
-            if isinstance(item, InteractiveSubmissionResult) and str(item.direct_reply or "").strip()
+            if isinstance(item, InteractiveSubmissionResult)
+            and str(item.direct_reply or "").strip()
         ]
         for reply_text in direct_replies:
             sent = await _send_direct_telegram_reply(
@@ -900,6 +905,16 @@ async def _run_interactive_session(
                 customer_id=session.customer_id,
                 thread_id=session.thread_id,
             )
+
+            def _workflow_setup_late_reply(reply_text: str) -> None:
+                _apply_workflow_setup_after_reply(
+                    workflow_setup_after_reply=workflow_setup_after_reply,
+                    customer_id=session.customer_id,
+                    thread_id=session.thread_id,
+                    reply_text=reply_text,
+                )
+                STATE_STORE.touch_assistant_message(session.chat_id)
+
             final, suppressed = await stream_langgraph_reply_to_telegram(
                 agent_runtime=agent_runtime,
                 thread_id=session.thread_id,
@@ -909,6 +924,9 @@ async def _run_interactive_session(
                 chat_id=session.chat_id,
                 turn_mode=turn_mode,
                 interactive_session=session,
+                final_reply_callback=(
+                    _workflow_setup_late_reply if turn_mode == "workflow_setup" else None
+                ),
             )
             if turn_mode == "workflow_setup" and final and not suppressed:
                 _apply_workflow_setup_after_reply(
@@ -1129,6 +1147,7 @@ async def handle_telegram_text(
         return thread_id, customer_id
 
     if support_allowed:
+
         def _upsert_support_session(state: dict[str, Any]) -> tuple[str, str]:
             binding = _support_binding_for_chat(state, ctx.chat_id)
             if not isinstance(binding, dict):
@@ -1249,6 +1268,16 @@ async def handle_telegram_text(
     )
     if bot_token:
         try:
+
+            def _workflow_setup_late_reply(reply_text: str) -> None:
+                _apply_workflow_setup_after_reply(
+                    workflow_setup_after_reply=workflow_setup_after_reply,
+                    customer_id=customer_id,
+                    thread_id=thread_id,
+                    reply_text=reply_text,
+                )
+                STATE_STORE.touch_assistant_message(ctx.chat_id)
+
             final, suppressed = await stream_langgraph_reply_to_telegram(
                 agent_runtime=agent_runtime,
                 thread_id=thread_id,
@@ -1257,6 +1286,9 @@ async def handle_telegram_text(
                 bot_token=bot_token,
                 chat_id=ctx.chat_id,
                 turn_mode=turn_mode,
+                final_reply_callback=(
+                    _workflow_setup_late_reply if turn_mode == "workflow_setup" else None
+                ),
             )
             if suppressed:
                 return None

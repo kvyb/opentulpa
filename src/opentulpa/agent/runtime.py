@@ -117,7 +117,10 @@ logger = logging.getLogger(__name__)
 
 _MEMORY_GROUNDING_KIND_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("preferences_and_directives", ("directive_fact", "preference_fact")),
-    ("durable_personal_facts", ("user_profile_fact", "life_fact", "relationship_fact", "contact_fact")),
+    (
+        "durable_personal_facts",
+        ("user_profile_fact", "life_fact", "relationship_fact", "contact_fact"),
+    ),
     ("aspirations_and_plans", ("aspirations_fact", "project_fact")),
     ("active_projects_or_workflows", ("workflow_fact", "skill_fact")),
     ("technical_or_code_facts", ("code_fact", "credential_fact")),
@@ -249,7 +252,9 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
     return merged
 
 
-def _disable_deepseek_v4_pro_thinking_extra(*, model_name: str, reasoning_effort: str | None) -> dict[str, Any]:
+def _disable_deepseek_v4_pro_thinking_extra(
+    *, model_name: str, reasoning_effort: str | None
+) -> dict[str, Any]:
     if reasoning_effort:
         return {}
     slug = str(model_name or "").strip().lower()
@@ -263,7 +268,9 @@ def _disable_deepseek_v4_pro_thinking_extra(*, model_name: str, reasoning_effort
     }
 
 
-def _cap_max_completion_tokens_for_model(model_kwargs: dict[str, Any], *, model_name: str) -> dict[str, Any]:
+def _cap_max_completion_tokens_for_model(
+    model_kwargs: dict[str, Any], *, model_name: str
+) -> dict[str, Any]:
     if str(model_name or "").strip().casefold() != "google/gemini-3.1-flash-lite-preview":
         return model_kwargs
     capped = dict(model_kwargs)
@@ -330,7 +337,9 @@ def _init_runtime_chat_model(
             adapter_kwargs["app_url"] = referer
         if title := app_headers.get("X-OpenRouter-Title"):
             adapter_kwargs["app_title"] = title
-        return ChatOpenRouter(**{key: value for key, value in adapter_kwargs.items() if value is not None})
+        return ChatOpenRouter(
+            **{key: value for key, value in adapter_kwargs.items() if value is not None}
+        )
 
     return init_chat_model(
         model_name,
@@ -601,6 +610,8 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
             if cost_details.get("completion") not in (None, ""):
                 fields["native_cost_completion_usd"] = float(cost_details.get("completion"))
     return fields
+
+
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
 STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
@@ -702,6 +713,16 @@ class _RoutineCreateIntentDecision(BaseModel):
     reason: str = ""
 
 
+class _WorkflowSetupInterruptionDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ok: bool = True
+    kind: str = "setup_input"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    status_reply: str = ""
+    reason: str = ""
+
+
 class _SkillSelectionItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -786,7 +807,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "- For a clear cancellation of an active or recent completed booking: use matches_workflow=true, "
         "booking_action=update_active or edit_recent_completed, reply_action=mark_cancelled, and a reply_text "
         "that confirms the cancellation. If the sink should be updated, ready_to_save=true and save_payload "
-        "should contain the merged booking fields plus status=\"cancelled\".\n\n"
+        'should contain the merged booking fields plus status="cancelled".\n\n'
         "Business knowledge request policy:\n"
         "- If workflow has knowledge_file_ids, workflow.knowledge_answer is empty, and the latest message needs a "
         "source-backed price, service, policy, menu, or capability fact that is not already present in saved "
@@ -804,7 +825,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "- If details are missing, set reply_action=send_reply with one concise, high-leverage follow-up question.\n"
         "- Ask at most one compact question at a time unless a single sentence can naturally request two tightly related missing fields.\n"
         "- reply_text should be plain outbound DM text, not explanations about JSON or system behavior.\n"
-        "- If no reply is needed, use reply_action=none and reply_text=\"\".\n"
+        '- If no reply is needed, use reply_action=none and reply_text="".\n'
         "- Use mark_cancelled only when the customer clearly cancels, abandons, or says they no longer want the booking.\n"
         "- Never ask for Telegram approval. This is background workflow execution.\n\n"
         "Booking action policy:\n"
@@ -823,7 +844,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "- When ready_to_save=true, reply_text must describe the completed action. Never ask the customer to confirm "
         "a booking or change that you are saving now. If confirmation is still needed, set ready_to_save=false.\n"
         "- When needs_business_knowledge=true and workflow.knowledge_file_ids is non-empty, set ready_to_save=false, "
-        "reply_action=none, reply_text=\"\", and business_knowledge_query to the exact missing source-backed fact.\n"
+        'reply_action=none, reply_text="", and business_knowledge_query to the exact missing source-backed fact.\n'
         "- sink_arguments may contain sink-tool arguments or overrides discovered via tools or context "
         "(for example sheetName for Google Sheets). These are merged into the final sink write.\n"
         "- When ready_to_save=false, save_payload should usually be empty.\n"
@@ -906,7 +927,9 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             if str(key or "").strip()
         ]
         compact_sink["static_arguments"] = _compact_jsonish_dict(static_arguments)
-    compact_knowledge_answer = _trim_text_chars(safe_workflow.get("knowledge_answer", ""), limit=3600)
+    compact_knowledge_answer = _trim_text_chars(
+        safe_workflow.get("knowledge_answer", ""), limit=3600
+    )
     return {
         "workflow_id": str(safe_workflow.get("workflow_id", "") or "").strip(),
         "name": _trim_text_chars(safe_workflow.get("name", ""), limit=80),
@@ -1098,7 +1121,7 @@ def _build_intake_workflow_agent_prompt(
         "- If ready_to_save=true, reply_text must be a final saved/updated/cancelled confirmation and must not ask "
         "for confirmation. If you still need confirmation from the customer, use ready_to_save=false.\n"
         "- If needs_business_knowledge=true and workflow.knowledge_file_ids is non-empty, set ready_to_save=false, "
-        "reply_action=none, reply_text=\"\", and business_knowledge_query to the exact missing source-backed fact.\n"
+        'reply_action=none, reply_text="", and business_knowledge_query to the exact missing source-backed fact.\n'
         "- If the customer asks a business/service/pricing/booking question that is close to the workflow but outside its configured scope, return matches_workflow=false, booking_action=ignore, reply_action=send_reply with a concise redirect based on workflow instructions.\n"
         "- If the latest customer message is only cancelling, rescheduling, or correcting an active/recent booking, "
         "reuse active_booking or recent_completed_booking and do not call business_knowledge_query unless a new "
@@ -1211,6 +1234,7 @@ class OpenTulpaLangGraphRuntime:
         wake_execution_model_name: str | None = None,
         telegram_media_model_name: str | None = None,
         guardrail_classifier_model_name: str | None = None,
+        workflow_setup_input_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
         recursion_limit: int = 30,
         max_completion_tokens: int = 4096,
@@ -1239,7 +1263,9 @@ class OpenTulpaLangGraphRuntime:
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
-        self.openrouter_base_url = str(openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
+        self.openrouter_base_url = (
+            str(openrouter_base_url or "").strip() or "https://openrouter.ai/api/v1"
+        )
         self.model_name = _normalize_model_name(model_name)
         self._reasoning_effort = str(reasoning_effort or "").strip() or None
         self._max_completion_tokens = max(128, min(int(max_completion_tokens), 32768))
@@ -1265,6 +1291,14 @@ class OpenTulpaLangGraphRuntime:
             else "minimax/minimax-m2.5"
         )
         self._guardrail_classifier_model_name = _normalize_model_name(guardrail_model)
+        workflow_setup_classifier_model = (
+            str(workflow_setup_input_classifier_model_name).strip()
+            if str(workflow_setup_input_classifier_model_name or "").strip()
+            else "z-ai/glm-5.1"
+        )
+        self._workflow_setup_input_classifier_model_name = _normalize_model_name(
+            workflow_setup_classifier_model
+        )
         self.checkpoint_db_path = checkpoint_db_path
         self.recursion_limit = recursion_limit
         self._context_events = context_events
@@ -1289,9 +1323,13 @@ class OpenTulpaLangGraphRuntime:
             int(context_compaction_source_tokens),
         )
         self._input_debounce_seconds = max(0.0, min(float(input_debounce_seconds), 3.0))
-        self._proactive_heartbeat_default_hours = max(1, min(int(proactive_heartbeat_default_hours), 24))
+        self._proactive_heartbeat_default_hours = max(
+            1, min(int(proactive_heartbeat_default_hours), 24)
+        )
         self._behavior_log_enabled = bool(behavior_log_enabled)
-        raw_behavior_path = str(behavior_log_path or "").strip() or ".opentulpa/logs/agent_behavior.jsonl"
+        raw_behavior_path = (
+            str(behavior_log_path or "").strip() or ".opentulpa/logs/agent_behavior.jsonl"
+        )
         self._behavior_log_path = Path(raw_behavior_path).resolve()
         self._behavior_log_lock = threading.Lock()
         self._llm_call_trace_path = self._behavior_log_path.parent / "llm_call_traces.jsonl"
@@ -1431,6 +1469,41 @@ class OpenTulpaLangGraphRuntime:
                 )
                 self._guardrail_classifier_model = self._model
 
+        classifier_model_kwargs = dict(model_init_kwargs)
+        classifier_model_kwargs["max_completion_tokens"] = min(
+            int(classifier_model_kwargs.get("max_completion_tokens", 160) or 160),
+            160,
+        )
+        if self._workflow_setup_input_classifier_model_name == self.model_name:
+            self._workflow_setup_input_classifier_model = self._model
+        elif self._workflow_setup_input_classifier_model_name == self._wake_classifier_model_name:
+            self._workflow_setup_input_classifier_model = self._wake_classifier_model
+        elif self._workflow_setup_input_classifier_model_name == self._wake_execution_model_name:
+            self._workflow_setup_input_classifier_model = self._wake_execution_model
+        elif self._workflow_setup_input_classifier_model_name == self._telegram_media_model_name:
+            self._workflow_setup_input_classifier_model = self._telegram_media_model
+        elif (
+            self._workflow_setup_input_classifier_model_name
+            == self._guardrail_classifier_model_name
+        ):
+            self._workflow_setup_input_classifier_model = self._guardrail_classifier_model
+        else:
+            try:
+                self._workflow_setup_input_classifier_model = _init_runtime_chat_model(
+                    self._workflow_setup_input_classifier_model_name,
+                    base_kwargs=classifier_model_kwargs,
+                    openrouter_base_url=self.openrouter_base_url,
+                    reasoning_effort=None,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize workflow setup input classifier model '%s'; "
+                    "falling back to main model '%s'.",
+                    self._workflow_setup_input_classifier_model_name,
+                    self.model_name,
+                )
+                self._workflow_setup_input_classifier_model = self._model
+
         self._checkpointer_cm: Any | None = None
         self._checkpointer: Any | None = None
         self._graph = None
@@ -1476,7 +1549,9 @@ class OpenTulpaLangGraphRuntime:
     def _model_request_attempts(self, *, model_name: str | None = None) -> list[dict[str, Any]]:
         return [{"name": "default", "invoke_extras": {}, "call_context": {}}]
 
-    def _resolve_model_name_for_runtime_call(self, model: Any, explicit_name: str | None = None) -> str:
+    def _resolve_model_name_for_runtime_call(
+        self, model: Any, explicit_name: str | None = None
+    ) -> str:
         if explicit_name:
             return str(explicit_name).strip()
         if model is getattr(self, "_wake_classifier_model", None):
@@ -1485,9 +1560,15 @@ class OpenTulpaLangGraphRuntime:
             return str(getattr(self, "_wake_execution_model_name", "") or "").strip()
         if model is getattr(self, "_guardrail_classifier_model", None):
             return str(getattr(self, "_guardrail_classifier_model_name", "") or "").strip()
+        if model is getattr(self, "_workflow_setup_input_classifier_model", None):
+            return str(
+                getattr(self, "_workflow_setup_input_classifier_model_name", "") or ""
+            ).strip()
         if model is getattr(self, "_wake_execution_model_with_tools", None):
             return str(getattr(self, "_wake_execution_model_name", "") or "").strip()
-        if model is getattr(self, "_model", None) or model is getattr(self, "_model_with_tools", None):
+        if model is getattr(self, "_model", None) or model is getattr(
+            self, "_model_with_tools", None
+        ):
             return str(getattr(self, "model_name", "") or "").strip()
         model_name = getattr(model, "model_name", None)
         if isinstance(model_name, str) and model_name.strip():
@@ -1496,7 +1577,10 @@ class OpenTulpaLangGraphRuntime:
 
     def model_with_tools_for_turn_mode(self, turn_mode: str) -> Any:
         normalized_turn_mode = str(turn_mode or "").strip().lower()
-        if normalized_turn_mode == "routine_wake" and self._wake_execution_model_with_tools is not None:
+        if (
+            normalized_turn_mode == "routine_wake"
+            and self._wake_execution_model_with_tools is not None
+        ):
             return self._wake_execution_model_with_tools
         return self._model_with_tools
 
@@ -1543,7 +1627,9 @@ class OpenTulpaLangGraphRuntime:
         stable_prefix_count: int = 0,
         call_context: dict[str, Any] | None = None,
     ) -> Any:
-        resolved_model_name = self._resolve_model_name_for_runtime_call(model, explicit_name=model_name)
+        resolved_model_name = self._resolve_model_name_for_runtime_call(
+            model, explicit_name=model_name
+        )
         prepared_messages = self.prepare_messages_for_prompt_cache(
             list(messages),
             model_name=resolved_model_name,
@@ -1559,7 +1645,9 @@ class OpenTulpaLangGraphRuntime:
             )
             attempt_context = dict(call_context or {})
             attempt_context.update(dict(attempt.get("call_context") or {}))
-            attempt_context["provider_attempt_name"] = str(attempt.get("name") or "").strip() or "default"
+            attempt_context["provider_attempt_name"] = (
+                str(attempt.get("name") or "").strip() or "default"
+            )
             attempt_context["provider_attempt_index"] = attempt_index + 1
             attempt_context["provider_attempt_count"] = len(attempts)
             callback_target = self._model_with_callbacks(model, call_context=attempt_context)
@@ -1586,7 +1674,8 @@ class OpenTulpaLangGraphRuntime:
                     event="llm.provider_fallback",
                     model_name=resolved_model_name,
                     failed_provider_attempt=attempt_context["provider_attempt_name"],
-                    next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip() or "default",
+                    next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip()
+                    or "default",
                     error=error_text,
                 )
             finally:
@@ -1641,7 +1730,13 @@ class OpenTulpaLangGraphRuntime:
         for name in names[:2]:
             label = _PROGRESS_TOOL_NAME_ALIASES.get(name)
             if label is None:
-                label = name.replace("tulpa_", "").replace("browser_use_", "").replace("_", " ").strip().capitalize()
+                label = (
+                    name.replace("tulpa_", "")
+                    .replace("browser_use_", "")
+                    .replace("_", " ")
+                    .strip()
+                    .capitalize()
+                )
             labels.append(label)
         if len(names) == 1:
             return f"{labels[0]}…"
@@ -1696,7 +1791,9 @@ class OpenTulpaLangGraphRuntime:
                 model_name=model_name or self.model_name,
             )
         except Exception:
-            logger.exception("tool result compression failed for %s", str(tool_name or "").strip() or "tool")
+            logger.exception(
+                "tool result compression failed for %s", str(tool_name or "").strip() or "tool"
+            )
             return raw_result_text
         normalized = str(compressed or "").strip()
         return normalized or raw_result_text
@@ -1774,9 +1871,7 @@ class OpenTulpaLangGraphRuntime:
             normalized["prompt_sections"] = [
                 str(part).strip() for part in prompt_sections if str(part).strip()
             ]
-        normalized["call_site"] = str(
-            normalized.get("call_site") or "runtime_model_invoke"
-        ).strip()
+        normalized["call_site"] = str(normalized.get("call_site") or "runtime_model_invoke").strip()
         return normalized
 
     def _write_llm_call_trace(self, payload: dict[str, Any]) -> None:
@@ -1823,11 +1918,7 @@ class OpenTulpaLangGraphRuntime:
         if not bool(getattr(self, "_behavior_log_enabled", True)):
             return
         normalized_context = self._normalize_llm_call_context(call_context)
-        usage_fields = (
-            self.extract_response_usage_fields(response)
-            if response is not None
-            else {}
-        )
+        usage_fields = self.extract_response_usage_fields(response) if response is not None else {}
         response_content = getattr(response, "content", response) if response is not None else ""
         safe_response_content = _json_safe(response_content)
         record: dict[str, Any] = {
@@ -1838,7 +1929,9 @@ class OpenTulpaLangGraphRuntime:
             "prompt_message_count": len(prepared_messages),
             "response_type": type(response).__name__ if response is not None else "",
             "response_message": _serialize_message(response) if response is not None else None,
-            "response_text": _content_to_text(safe_response_content).strip() if response is not None else "",
+            "response_text": _content_to_text(safe_response_content).strip()
+            if response is not None
+            else "",
             "response_content": safe_response_content,
             "response_tool_calls": _json_safe(getattr(response, "tool_calls", None)),
             "error": str(error or "").strip() or None,
@@ -1884,7 +1977,9 @@ class OpenTulpaLangGraphRuntime:
         call_context: dict[str, Any] | None = None,
     ) -> tuple[BaseModel | None, str | None]:
         last_error: str | None = None
-        resolved_model_name = self._resolve_model_name_for_runtime_call(model, explicit_name=model_name)
+        resolved_model_name = self._resolve_model_name_for_runtime_call(
+            model, explicit_name=model_name
+        )
         prepared_messages = self.prepare_messages_for_prompt_cache(
             list(messages),
             model_name=resolved_model_name,
@@ -1899,7 +1994,9 @@ class OpenTulpaLangGraphRuntime:
             )
             attempt_context = dict(call_context or {})
             attempt_context.update(dict(attempt.get("call_context") or {}))
-            attempt_context["provider_attempt_name"] = str(attempt.get("name") or "").strip() or "default"
+            attempt_context["provider_attempt_name"] = (
+                str(attempt.get("name") or "").strip() or "default"
+            )
             attempt_context["provider_attempt_index"] = attempt_index + 1
             attempt_context["provider_attempt_count"] = len(attempts)
             callback_target = self._model_with_callbacks(model, call_context=attempt_context)
@@ -1967,7 +2064,8 @@ class OpenTulpaLangGraphRuntime:
                     event="llm.provider_fallback",
                     model_name=resolved_model_name,
                     failed_provider_attempt=attempt_context["provider_attempt_name"],
-                    next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip() or "default",
+                    next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip()
+                    or "default",
                     error=error_text,
                 )
                 continue
@@ -1979,7 +2077,9 @@ class OpenTulpaLangGraphRuntime:
                 stable_prefix_count=stable_prefix_count,
                 call_context={
                     **dict(call_context or {}),
-                    "call_site": str((call_context or {}).get("call_site") or "structured_model_fallback"),
+                    "call_site": str(
+                        (call_context or {}).get("call_site") or "structured_model_fallback"
+                    ),
                 },
             )
             raw = _content_to_text(getattr(response, "content", response)).strip()
@@ -2204,7 +2304,9 @@ class OpenTulpaLangGraphRuntime:
             return self._link_alias_service.expand_link_ids_in_text(cid, raw)
         return raw
 
-    def resolve_link_aliases_in_args(self, *, customer_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    def resolve_link_aliases_in_args(
+        self, *, customer_id: str, args: dict[str, Any]
+    ) -> dict[str, Any]:
         if not isinstance(args, dict):
             return {}
 
@@ -2340,14 +2442,21 @@ class OpenTulpaLangGraphRuntime:
                 if any(tok in hay for tok in tokens):
                     return True
         if isinstance(thread_rollup_sections, dict):
-            hay = " ".join(str(thread_rollup_sections.get(k) or "").lower() for k in ("conversation_summary", "open_loops", "durable_facts"))
+            hay = " ".join(
+                str(thread_rollup_sections.get(k) or "").lower()
+                for k in ("conversation_summary", "open_loops", "durable_facts")
+            )
             if any(tok in hay for tok in tokens):
                 return True
         return False
 
     @staticmethod
     def _normalize_memory_search_results(raw: Any) -> list[dict[str, Any]]:
-        payload = raw.get("results") if isinstance(raw, dict) and isinstance(raw.get("results"), list) else raw
+        payload = (
+            raw.get("results")
+            if isinstance(raw, dict) and isinstance(raw.get("results"), list)
+            else raw
+        )
         if not isinstance(payload, list):
             payload = [payload] if payload not in (None, "") else []
         normalized: list[dict[str, Any]] = []
@@ -2360,7 +2469,10 @@ class OpenTulpaLangGraphRuntime:
                 continue
             metadata = item.get("metadata")
             metadata = dict(metadata) if isinstance(metadata, dict) else {}
-            kind = str(item.get("kind") or metadata.get("kind") or "").strip().lower() or "thread_context_rollup"
+            kind = (
+                str(item.get("kind") or metadata.get("kind") or "").strip().lower()
+                or "thread_context_rollup"
+            )
             dedupe_key = (kind, text.lower())
             if dedupe_key in seen:
                 continue
@@ -2371,8 +2483,12 @@ class OpenTulpaLangGraphRuntime:
                     "kind": kind,
                     "score": item.get("score"),
                     "metadata": metadata,
-                    "thread_id": str(item.get("thread_id") or metadata.get("thread_id") or "").strip(),
-                    "skill_name": str(item.get("skill_name") or metadata.get("skill_name") or "").strip(),
+                    "thread_id": str(
+                        item.get("thread_id") or metadata.get("thread_id") or ""
+                    ).strip(),
+                    "skill_name": str(
+                        item.get("skill_name") or metadata.get("skill_name") or ""
+                    ).strip(),
                 }
             )
         return normalized
@@ -2600,13 +2716,13 @@ class OpenTulpaLangGraphRuntime:
                     content=(
                         "You select reusable skills for the current user request.\n"
                         "Return strict JSON object with key 'selected', an array of objects:\n"
-                        "  {\"name\": string, \"score\": number, \"reason\": string}\n"
+                        '  {"name": string, "score": number, "reason": string}\n'
                         "Choose only skills that materially improve answer quality.\n"
                         "Never select persona, tone, or style-only skills for literal definitions, acronym expansions, translations, or short factual clarifications.\n"
                         "If the request is about reminders, schedules, recurring jobs, or cron, "
                         "prefer selecting routine-schedule-composer when available.\n"
                         "Prioritize skills that improve execution reliability and claim accuracy over style-only skills.\n"
-                        "If none apply, return {\"selected\": []}."
+                        'If none apply, return {"selected": []}.'
                     )
                 ),
                 HumanMessage(
@@ -2651,7 +2767,9 @@ class OpenTulpaLangGraphRuntime:
         query = str(user_text or "").strip()
         if not cid or not query:
             return {"skill_names": [], "context": ""}
-        available = candidates if isinstance(candidates, list) else await self._list_available_skills(cid)
+        available = (
+            candidates if isinstance(candidates, list) else await self._list_available_skills(cid)
+        )
         if not available:
             return {"skill_names": [], "context": ""}
         selected = await self._select_relevant_skills(
@@ -2776,9 +2894,7 @@ class OpenTulpaLangGraphRuntime:
 
         user_offset_text = await self._load_user_utc_offset(customer_id)
         source = "profile"
-        user_offset_minutes = (
-            _utc_offset_to_minutes(user_offset_text) if user_offset_text else None
-        )
+        user_offset_minutes = _utc_offset_to_minutes(user_offset_text) if user_offset_text else None
         if user_offset_minutes is None:
             user_offset_minutes = server_offset_minutes
             user_offset_text = server_offset_text
@@ -2930,7 +3046,9 @@ class OpenTulpaLangGraphRuntime:
     async def _compress_rollup(self, existing_rollup: str, additional_text: str) -> str:
         return await _compress_rollup(self, existing_rollup, additional_text)
 
-    async def _persist_rollup_memory(self, *, customer_id: str, thread_id: str, rollup: str) -> None:
+    async def _persist_rollup_memory(
+        self, *, customer_id: str, thread_id: str, rollup: str
+    ) -> None:
         await _persist_rollup_memory(
             self,
             customer_id=customer_id,
@@ -2975,8 +3093,12 @@ class OpenTulpaLangGraphRuntime:
                 "active_skill_names": forced_names,
                 "active_available_skills": available_skills,
                 "active_skill_discovery_context": "",
-                "active_invoked_skill_context": str(forced_skill_context.get("context", "")).strip(),
-                "active_invoked_skill_names": list(forced_skill_context.get("skill_names", []) or []),
+                "active_invoked_skill_context": str(
+                    forced_skill_context.get("context", "")
+                ).strip(),
+                "active_invoked_skill_names": list(
+                    forced_skill_context.get("skill_names", []) or []
+                ),
                 "active_skill_context": str(forced_skill_context.get("context", "")).strip(),
             }
         if forced_names:
@@ -2986,8 +3108,12 @@ class OpenTulpaLangGraphRuntime:
                 "active_skill_names": forced_names,
                 "active_available_skills": available_skills,
                 "active_skill_discovery_context": "",
-                "active_invoked_skill_context": str(forced_skill_context.get("context", "")).strip(),
-                "active_invoked_skill_names": list(forced_skill_context.get("skill_names", []) or []),
+                "active_invoked_skill_context": str(
+                    forced_skill_context.get("context", "")
+                ).strip(),
+                "active_invoked_skill_names": list(
+                    forced_skill_context.get("skill_names", []) or []
+                ),
                 "active_skill_context": str(forced_skill_context.get("context", "")).strip(),
             }
         if prompt_mode == "literal_chat":
@@ -3008,7 +3134,11 @@ class OpenTulpaLangGraphRuntime:
             prompt_mode=prompt_mode,
             max_skills=3,
         )
-        names = [str(item.get("name", "")).strip() for item in selected if str(item.get("name", "")).strip()]
+        names = [
+            str(item.get("name", "")).strip()
+            for item in selected
+            if str(item.get("name", "")).strip()
+        ]
         return {
             "prompt_mode": prompt_mode,
             "active_skill_query": query,
@@ -3036,7 +3166,9 @@ class OpenTulpaLangGraphRuntime:
         if self._wake_execution_model is self._model:
             self._wake_execution_model_with_tools = self._model_with_tools
         else:
-            self._wake_execution_model_with_tools = self._wake_execution_model.bind_tools(list(self._tools.values()))
+            self._wake_execution_model_with_tools = self._wake_execution_model.bind_tools(
+                list(self._tools.values())
+            )
         self._graph = self._build_graph()
         manager = self.get_browser_use_local_manager()
         with suppress(Exception):
@@ -3131,9 +3263,8 @@ class OpenTulpaLangGraphRuntime:
             customer_id=customer_id,
             include_pending_context=include_pending_context,
         )
-        prompt_mode = (
-            str(prompt_mode_override or "").strip().lower()
-            or _classify_prompt_mode(user_text, turn_mode=turn_mode)
+        prompt_mode = str(prompt_mode_override or "").strip().lower() or _classify_prompt_mode(
+            user_text, turn_mode=turn_mode
         )
         try:
             skill_state = await self._pre_resolve_skill_state(
@@ -3210,15 +3341,15 @@ class OpenTulpaLangGraphRuntime:
             properties=properties,
         )
 
-    def _model_with_callbacks(self, model: Any, *, call_context: dict[str, Any] | None = None) -> Any:
+    def _model_with_callbacks(
+        self, model: Any, *, call_context: dict[str, Any] | None = None
+    ) -> Any:
         if model is None:
             return model
         context = dict(call_context or {})
         callbacks = self._build_posthog_callbacks(
             customer_id=str(
-                context.get("customer_id")
-                or self.get_active_customer_id()
-                or ""
+                context.get("customer_id") or self.get_active_customer_id() or ""
             ).strip()
             or None,
             trace_id=str(context.get("trace_id") or "").strip() or None,
@@ -3226,7 +3357,9 @@ class OpenTulpaLangGraphRuntime:
             turn_mode=str(context.get("turn_mode") or "").strip() or None,
             prompt_mode=str(context.get("prompt_mode") or "").strip() or None,
             call_site=str(context.get("call_site") or "").strip() or "runtime_model_invoke",
-            model_name=self._resolve_model_name_for_runtime_call(model, explicit_name=context.get("model_name")),
+            model_name=self._resolve_model_name_for_runtime_call(
+                model, explicit_name=context.get("model_name")
+            ),
         )
         if not callbacks:
             return model
@@ -3277,7 +3410,9 @@ class OpenTulpaLangGraphRuntime:
         customer_scope_token = self.set_active_customer_id(customer_id)
         thread_scope_token = self.set_active_thread_id(thread_id)
         try:
-            if turn_state is not None or not (normalized_turn_mode == "interactive" and interactive_session is not None):
+            if turn_state is not None or not (
+                normalized_turn_mode == "interactive" and interactive_session is not None
+            ):
                 self.log_behavior_event(
                     event="turn_start",
                     trace_id=turn_trace_id,
@@ -3309,7 +3444,10 @@ class OpenTulpaLangGraphRuntime:
                 )
                 return ""
             result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
-            if bool(result.get("approval_handoff", False)) or str(result.get("turn_status", "")) == "approval_pending":
+            if (
+                bool(result.get("approval_handoff", False))
+                or str(result.get("turn_status", "")) == "approval_pending"
+            ):
                 self.log_behavior_event(
                     event="turn_approval_handoff",
                     trace_id=turn_trace_id,
@@ -3391,7 +3529,9 @@ class OpenTulpaLangGraphRuntime:
                             truncated_chars=len(cleaned.strip()),
                         )
                     if prepared.through_id is not None and self._context_events is not None:
-                        self._context_events.clear_events(customer_id, through_id=prepared.through_id)
+                        self._context_events.clear_events(
+                            customer_id, through_id=prepared.through_id
+                        )
                     self.log_behavior_event(
                         event="turn_complete",
                         trace_id=turn_trace_id,
@@ -3450,7 +3590,11 @@ class OpenTulpaLangGraphRuntime:
             turn_state, effective_text = await self._thread_inputs.begin_turn(
                 thread_id=thread_id, text=text
             )
-        if turn_state is None and normalized_turn_mode == "interactive" and interactive_session is not None:
+        if (
+            turn_state is None
+            and normalized_turn_mode == "interactive"
+            and interactive_session is not None
+        ):
             logger.info(
                 "runtime.astream_text interactive_session_bypass thread_id=%s customer_id=%s",
                 thread_id,
@@ -3586,7 +3730,9 @@ class OpenTulpaLangGraphRuntime:
                     )
                 if node_name != "agent":
                     stream_tool_chunks += 1
-                    if node_name == "tools" and self._tool_message_indicates_approval_handoff(message_chunk):
+                    if node_name == "tools" and self._tool_message_indicates_approval_handoff(
+                        message_chunk
+                    ):
                         approval_handoff_detected = True
                         self.log_behavior_event(
                             event="turn_stream_tool_approval_handoff_detected",
@@ -3621,7 +3767,10 @@ class OpenTulpaLangGraphRuntime:
                         yielded_any = True
                         yield STREAM_APPROVAL_HANDOFF_SIGNAL
                         break
-                    if self._stream_chunk_is_tool_phase(node_name, message_chunk) and not in_tool_phase:
+                    if (
+                        self._stream_chunk_is_tool_phase(node_name, message_chunk)
+                        and not in_tool_phase
+                    ):
                         in_tool_phase = True
                         suppress_live_text_until_completion = True
                         if buffered_visible and not yielded_any:
@@ -3710,7 +3859,9 @@ class OpenTulpaLangGraphRuntime:
                         yielded_any = True
                         stream_visible_yields += 1
                         if first_visible_yield_ms is None:
-                            first_visible_yield_ms = int((time.monotonic() - stream_started_at) * 1000)
+                            first_visible_yield_ms = int(
+                                (time.monotonic() - stream_started_at) * 1000
+                            )
                         if stream_visible_yields <= 3 or stream_visible_yields % 20 == 0:
                             self.log_behavior_event(
                                 event="turn_stream_chunk_yielded",
@@ -3845,9 +3996,10 @@ class OpenTulpaLangGraphRuntime:
                     prepared.graph_input,
                     config=config,
                 )
-                if bool(fallback_result.get("approval_handoff", False)) or str(
-                    fallback_result.get("turn_status", "")
-                ) == "approval_pending":
+                if (
+                    bool(fallback_result.get("approval_handoff", False))
+                    or str(fallback_result.get("turn_status", "")) == "approval_pending"
+                ):
                     yielded_any = True
                     self.log_behavior_event(
                         event="turn_approval_handoff",
@@ -4021,7 +4173,9 @@ class OpenTulpaLangGraphRuntime:
         async with self._interactive_sessions_lock:
             self._interactive_sessions[safe_thread_id] = session
 
-    async def clear_interactive_session(self, *, thread_id: str, session: Any | None = None) -> None:
+    async def clear_interactive_session(
+        self, *, thread_id: str, session: Any | None = None
+    ) -> None:
         safe_thread_id = str(thread_id or "").strip()
         if not safe_thread_id:
             return
@@ -4143,6 +4297,56 @@ class OpenTulpaLangGraphRuntime:
             return []
         return [str(item).strip() for item in drained if str(item).strip()]
 
+    async def classify_workflow_setup_interruption(
+        self,
+        *,
+        user_text: str,
+        status: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Classify a message sent while workflow setup is already running."""
+
+        decision, invoke_error = await self._invoke_structured_model(
+            model=self._workflow_setup_input_classifier_model,
+            schema=_WorkflowSetupInterruptionDecision,
+            messages=[
+                SystemMessage(
+                    content=(
+                        "Classify one user message sent while workflow setup is already running.\n"
+                        "Return strict JSON only with keys: ok, kind, confidence, status_reply, reason.\n"
+                        "kind must be exactly one of: status_nudge, setup_input.\n"
+                        "status_nudge means the user only asks for progress/status, expresses impatience, "
+                        "or sends a low-information acknowledgement with no new workflow facts.\n"
+                        "setup_input means the message contains any workflow requirement, edit, required "
+                        "field, business rule, sink/table/file clarification, confirmation, or other fact "
+                        "the setup agent should process.\n"
+                        "When kind=status_nudge, write a concise status_reply using only the provided "
+                        "status. Do not claim the workflow is complete.\n"
+                        "When unsure, use setup_input."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"status={json.dumps(status, ensure_ascii=False)[:2000]}\n"
+                        f"user_text={str(user_text or '').strip()[:2000]}"
+                    )
+                ),
+            ],
+            model_name=self._workflow_setup_input_classifier_model_name,
+            call_context={"classifier": "workflow_setup_interruption"},
+        )
+        if decision is None or not isinstance(decision, _WorkflowSetupInterruptionDecision):
+            return {"ok": False, "kind": "setup_input", "error": invoke_error or "invalid_output"}
+        kind = str(decision.kind or "").strip().lower()
+        if kind not in {"status_nudge", "setup_input"}:
+            kind = "setup_input"
+        return {
+            "ok": bool(decision.ok),
+            "kind": kind,
+            "confidence": max(0.0, min(float(decision.confidence), 1.0)),
+            "status_reply": str(decision.status_reply or "").strip()[:500],
+            "reason": str(decision.reason or "").strip()[:300],
+        }
+
     async def classify_wake_event(
         self,
         *,
@@ -4200,16 +4404,22 @@ class OpenTulpaLangGraphRuntime:
         decision: _IntakeWorkflowDecision | None = None
         workflow_id = str(workflow.get("workflow_id", "") or "").strip() or "workflow"
         conversation_summary = conversation.get("summary") if isinstance(conversation, dict) else {}
-        conversation_id = str(
-            (conversation_summary or {}).get("conversation_id", "")
-            if isinstance(conversation_summary, dict)
-            else ""
-        ).strip() or "conversation"
-        latest_inbound_id = str(
-            (conversation_summary or {}).get("latest_inbound_message_id", "")
-            if isinstance(conversation_summary, dict)
-            else ""
-        ).strip() or "latest"
+        conversation_id = (
+            str(
+                (conversation_summary or {}).get("conversation_id", "")
+                if isinstance(conversation_summary, dict)
+                else ""
+            ).strip()
+            or "conversation"
+        )
+        latest_inbound_id = (
+            str(
+                (conversation_summary or {}).get("latest_inbound_message_id", "")
+                if isinstance(conversation_summary, dict)
+                else ""
+            ).strip()
+            or "latest"
+        )
         structured_thread_id = f"intake_decision_{workflow_id}_{conversation_id}"
         structured_trace_id = f"intake_{workflow_id}_{conversation_id}_{latest_inbound_id}"
         tool_enabled_runtime = (
@@ -4218,14 +4428,18 @@ class OpenTulpaLangGraphRuntime:
             and callable(getattr(self, "ainvoke_text", None))
         )
         sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
-        sink_config = workflow.get("sink_config") if isinstance(workflow.get("sink_config"), dict) else {}
-        static_arguments = sink_config.get("static_arguments") if isinstance(sink_config, dict) else {}
-        sink_needs_tool_metadata = sink_type in {"google_sheets_composio", "generic_composio_write"} and not bool(
-            static_arguments
+        sink_config = (
+            workflow.get("sink_config") if isinstance(workflow.get("sink_config"), dict) else {}
         )
+        static_arguments = (
+            sink_config.get("static_arguments") if isinstance(sink_config, dict) else {}
+        )
+        sink_needs_tool_metadata = sink_type in {
+            "google_sheets_composio",
+            "generic_composio_write",
+        } and not bool(static_arguments)
         prefer_agent_runtime = tool_enabled_runtime and (
-            bool(execution_feedback)
-            or sink_needs_tool_metadata
+            bool(execution_feedback) or sink_needs_tool_metadata
         )
         model = getattr(self, "_wake_execution_model", None) or self._model
         if prefer_agent_runtime:
@@ -4306,7 +4520,9 @@ class OpenTulpaLangGraphRuntime:
             "confidence": float(decision.confidence),
             "conversation_summary": str(decision.conversation_summary).strip()[:500],
             "extracted_fields": dict(decision.extracted_fields),
-            "missing_fields": [str(item).strip() for item in decision.missing_fields if str(item).strip()],
+            "missing_fields": [
+                str(item).strip() for item in decision.missing_fields if str(item).strip()
+            ],
             "reply_action": str(decision.reply_action).strip().lower() or "none",
             "reply_text": str(decision.reply_text).strip(),
             "ready_to_save": bool(decision.ready_to_save),
@@ -4315,7 +4531,9 @@ class OpenTulpaLangGraphRuntime:
             "sink_arguments": dict(decision.sink_arguments),
             "needs_business_knowledge": bool(decision.needs_business_knowledge),
             "business_knowledge_query": str(decision.business_knowledge_query).strip()[:500],
-            "knowledge_source_refs": _normalize_knowledge_source_refs(decision.knowledge_source_refs),
+            "knowledge_source_refs": _normalize_knowledge_source_refs(
+                decision.knowledge_source_refs
+            ),
             "grounding_status": str(decision.grounding_status).strip().lower(),
             "reason": str(decision.reason).strip()[:500],
         }
@@ -4347,7 +4565,7 @@ class OpenTulpaLangGraphRuntime:
         safe_user = str(user_text or "").strip()
         safe_turn_window = str(turn_window or "").strip()
         safe_tools: list[str] = []
-        for raw in (recent_tool_outputs or []):
+        for raw in recent_tool_outputs or []:
             text = " ".join(str(raw or "").split()).strip()
             if text:
                 safe_tools.append(text)
@@ -4820,7 +5038,11 @@ class OpenTulpaLangGraphRuntime:
         cid = str(customer_id or "").strip()
         args = dict(action_args) if isinstance(action_args, dict) else {}
         args.pop("customer_id", None)
-        if inject_customer_id and str(action_name or "").strip() in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS and not cid:
+        if (
+            inject_customer_id
+            and str(action_name or "").strip() in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS
+            and not cid
+        ):
             raise RuntimeError(f"customer_id is required for tool: {action_name}")
         args = self.resolve_link_aliases_in_args(
             customer_id=cid,
