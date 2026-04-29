@@ -18,6 +18,7 @@ class BrowserCaptchaChallenge:
     website_url: str
     website_key: str
     marker: str
+    page_action: str | None = None
 
 
 _DETECT_CAPTCHA_SCRIPT = """() => {
@@ -33,6 +34,13 @@ _DETECT_CAPTCHA_SCRIPT = """() => {
     } catch (_) {}
     return '';
   };
+  const scriptTexts = Array.from(document.scripts)
+    .map((script) => String(script.textContent || ''))
+    .join('\\n');
+  const scriptSrcs = Array.from(document.scripts)
+    .map((script) => String(script.getAttribute('src') || ''))
+    .filter(Boolean);
+  const pageSource = scriptTexts + '\\n' + scriptSrcs.join('\\n');
 
   const recaptchaElement = document.querySelector(
     '.g-recaptcha[data-sitekey], [data-sitekey][class*="g-recaptcha"], [data-sitekey][data-callback]'
@@ -44,6 +52,28 @@ _DETECT_CAPTCHA_SCRIPT = """() => {
       websiteUrl: currentUrl,
       websiteKey: recaptchaKey,
       marker: 'g-recaptcha'
+    };
+  }
+
+  const renderScript = scriptSrcs.find((src) =>
+    src.includes('recaptcha') && parseParam(src, ['render'])
+  );
+  const renderKey = renderScript ? parseParam(renderScript, ['render']) : '';
+  const executeKeyMatch = pageSource.match(
+    /grecaptcha(?:\\.enterprise)?\\.execute\\s*\\(\\s*['"]([^'"]+)['"]/s
+  );
+  const actionMatch = pageSource.match(
+    /grecaptcha(?:\\.enterprise)?\\.execute\\s*\\([^)]*?action\\s*:\\s*['"]([^'"]+)['"]/s
+  );
+  const recaptchaV3Key = String((executeKeyMatch && executeKeyMatch[1]) || renderKey || '').trim();
+  const recaptchaV3Action = String((actionMatch && actionMatch[1]) || '').trim();
+  if (recaptchaV3Key && recaptchaV3Key !== 'explicit') {
+    return {
+      captchaType: 'recaptcha_v3',
+      websiteUrl: currentUrl,
+      websiteKey: recaptchaV3Key,
+      pageAction: recaptchaV3Action,
+      marker: 'recaptcha v3'
     };
   }
 
@@ -126,7 +156,7 @@ _INJECT_CAPTCHA_TOKEN_SCRIPT = """(captchaType, token) => {
 
   let fieldsUpdated = 0;
   let callbacksCalled = 0;
-  if (captchaType === 'recaptcha_v2') {
+  if (captchaType === 'recaptcha_v2' || captchaType === 'recaptcha_v3') {
     const response = ensureHiddenField('g-recaptcha-response', 'g-recaptcha-response');
     if (setElementValue(response, token)) fieldsUpdated += 1;
     const callbackName = document.querySelector('.g-recaptcha[data-callback], [data-callback]')
@@ -171,7 +201,7 @@ def build_capsolver_controller(capsolver: CapSolverClient) -> Controller:
     controller = Controller()
 
     @controller.action(
-        "Solve a visible reCAPTCHA v2 or Cloudflare Turnstile challenge using CapSolver. "
+        "Solve a reCAPTCHA v2, reCAPTCHA v3, or Cloudflare Turnstile challenge using CapSolver. "
         "Use only when a CAPTCHA is blocking the browser task.",
         domains=["*"],
     )
@@ -191,6 +221,12 @@ def build_capsolver_controller(capsolver: CapSolverClient) -> Controller:
                 result = await capsolver.solve_recaptcha_v2(
                     website_url=challenge.website_url,
                     website_key=challenge.website_key,
+                )
+            elif challenge.captcha_type == "recaptcha_v3":
+                result = await capsolver.solve_recaptcha_v3(
+                    website_url=challenge.website_url,
+                    website_key=challenge.website_key,
+                    page_action=challenge.page_action,
                 )
             elif challenge.captcha_type == "turnstile":
                 result = await capsolver.solve_turnstile(
@@ -230,7 +266,8 @@ async def detect_browser_captcha(page: Any) -> BrowserCaptchaChallenge | None:
     website_url = str(data.get("websiteUrl") or "").strip()
     website_key = str(data.get("websiteKey") or "").strip()
     marker = str(data.get("marker") or "").strip()
-    if captcha_type not in {"recaptcha_v2", "turnstile"}:
+    page_action = str(data.get("pageAction") or "").strip() or None
+    if captcha_type not in {"recaptcha_v2", "recaptcha_v3", "turnstile"}:
         return None
     if not website_url:
         raise ValueError("Detected CAPTCHA without a page URL")
@@ -241,6 +278,7 @@ async def detect_browser_captcha(page: Any) -> BrowserCaptchaChallenge | None:
         website_url=website_url,
         website_key=website_key,
         marker=marker,
+        page_action=page_action,
     )
 
 
@@ -252,7 +290,7 @@ async def inject_browser_captcha_token(
 ) -> dict[str, Any]:
     safe_type = str(captcha_type or "").strip()
     safe_token = str(token or "").strip()
-    if safe_type not in {"recaptcha_v2", "turnstile"}:
+    if safe_type not in {"recaptcha_v2", "recaptcha_v3", "turnstile"}:
         raise ValueError(f"Unsupported CAPTCHA type: {safe_type}")
     if not safe_token:
         raise ValueError("CAPTCHA solution token is empty")

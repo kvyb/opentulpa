@@ -69,6 +69,28 @@ class CapSolverClient:
         )
         return CapSolverSolveResult(task_id=task_id, token=token, captcha_type="recaptcha_v2")
 
+    async def solve_recaptcha_v3(
+        self,
+        *,
+        website_url: str,
+        website_key: str,
+        page_action: str | None = None,
+    ) -> CapSolverSolveResult:
+        task = {
+            "type": "ReCaptchaV3TaskProxyLess",
+            "websiteURL": self._require_text(website_url, "website_url"),
+            "websiteKey": self._require_text(website_key, "website_key"),
+        }
+        safe_action = str(page_action or "").strip()
+        if safe_action:
+            task["pageAction"] = safe_action
+        task_id = await self._create_task(task)
+        token = await self._poll_for_token(
+            task_id=task_id,
+            solution_keys=("gRecaptchaResponse", "token"),
+        )
+        return CapSolverSolveResult(task_id=task_id, token=token, captcha_type="recaptcha_v3")
+
     async def solve_turnstile(
         self,
         *,

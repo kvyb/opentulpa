@@ -492,7 +492,8 @@ class BrowserUseLocalManager:
                 composed_task = (
                     f"{composed_task}\n\n"
                     "If a supported CAPTCHA blocks progress, use the "
-                    "solve_captcha_with_capsolver action before continuing."
+                    "solve_captcha_with_capsolver action before continuing. "
+                    "Supported challenges are reCAPTCHA v2, reCAPTCHA v3, and Cloudflare Turnstile."
                 )
 
             agent_kwargs: dict[str, Any] = {

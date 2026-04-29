@@ -422,7 +422,7 @@ Installed by default. Skip it with:
 ```
 
 Browser Use CAPTCHA solving is optional and disabled by default. To enable the
-CapSolver-backed action for supported reCAPTCHA v2 and Cloudflare Turnstile
+CapSolver-backed action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile
 pages, set:
 
 ```bash
@@ -462,7 +462,7 @@ Useful `.env` knobs:
 - `START_MODE=auto|app|manager`
 - `INSTALL_BROWSER_USE=1|0`
 - `INSTALL_CLOUDFLARED=auto|1|0`
-- `CAPSOLVER_API_KEY=...` enables an optional Browser Use CAPTCHA action for supported reCAPTCHA v2 and Cloudflare Turnstile pages. When set, Browser Use tasks are told to call the solver if a supported CAPTCHA blocks progress. Leave it unset to keep CAPTCHA solving disabled.
+- `CAPSOLVER_API_KEY=...` enables an optional Browser Use CAPTCHA action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile pages. When set, Browser Use tasks are told to call the solver if a supported CAPTCHA blocks progress. Leave it unset to keep CAPTCHA solving disabled.
 
 ---
 

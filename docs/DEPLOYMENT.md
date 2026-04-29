@@ -124,7 +124,7 @@ CAPSOLVER_API_KEY=...
 ```
 
 When configured, OpenTulpa registers a `solve_captcha_with_capsolver` Browser
-Use action for supported reCAPTCHA v2 and Cloudflare Turnstile pages. Without
+Use action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile pages. Without
 the key, the solver is not registered and normal Browser Use behavior is
 unchanged.
 

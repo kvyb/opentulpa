@@ -50,6 +50,22 @@ class _FakeCapSolver:
             captcha_type="recaptcha_v2",
         )
 
+    async def solve_recaptcha_v3(
+        self,
+        *,
+        website_url: str,
+        website_key: str,
+        page_action: str | None = None,
+    ) -> CapSolverSolveResult:
+        assert website_url == "https://example.com/login"
+        assert website_key == "site-key"
+        assert page_action == "login"
+        return CapSolverSolveResult(
+            task_id="task-1",
+            token="solution-token",
+            captcha_type="recaptcha_v3",
+        )
+
     async def solve_turnstile(
         self,
         *,
@@ -118,6 +134,40 @@ async def test_capsolver_solve_recaptcha_success() -> None:
     assert result.captcha_type == "recaptcha_v2"
     assert calls[0][0] == "/createTask"
     assert calls[0][1]["task"]["type"] == "ReCaptchaV2TaskProxyLess"
+    assert calls[1] == ("/getTaskResult", {"clientKey": "cap-key", "taskId": "task-1"})
+
+
+@pytest.mark.asyncio
+async def test_capsolver_solve_recaptcha_v3_success() -> None:
+    client, calls, async_client = _mock_client(
+        [
+            {"errorId": 0, "taskId": "task-1"},
+            {
+                "errorId": 0,
+                "status": "ready",
+                "solution": {"gRecaptchaResponse": "token-1"},
+            },
+        ]
+    )
+    try:
+        result = await client.solve_recaptcha_v3(
+            website_url="https://example.com",
+            website_key="site-key",
+            page_action="login",
+        )
+    finally:
+        await async_client.aclose()
+
+    assert result.task_id == "task-1"
+    assert result.token == "token-1"
+    assert result.captcha_type == "recaptcha_v3"
+    assert calls[0][0] == "/createTask"
+    assert calls[0][1]["task"] == {
+        "type": "ReCaptchaV3TaskProxyLess",
+        "websiteURL": "https://example.com",
+        "websiteKey": "site-key",
+        "pageAction": "login",
+    }
     assert calls[1] == ("/getTaskResult", {"clientKey": "cap-key", "taskId": "task-1"})
 
 
@@ -239,6 +289,29 @@ async def test_browser_captcha_detection_parses_recaptcha_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_captcha_detection_parses_recaptcha_v3_json() -> None:
+    page = _FakePage(
+        [
+            {
+                "captchaType": "recaptcha_v3",
+                "websiteUrl": "https://example.com/login",
+                "websiteKey": "site-key",
+                "pageAction": "login",
+                "marker": "recaptcha v3",
+            }
+        ]
+    )
+
+    challenge = await detect_browser_captcha(page)
+
+    assert challenge is not None
+    assert challenge.captcha_type == "recaptcha_v3"
+    assert challenge.website_url == "https://example.com/login"
+    assert challenge.website_key == "site-key"
+    assert challenge.page_action == "login"
+
+
+@pytest.mark.asyncio
 async def test_browser_captcha_injection_passes_token_as_argument() -> None:
     page = _FakePage([{"ok": True, "fieldsUpdated": 1, "callbacksCalled": 0}])
 
@@ -280,3 +353,32 @@ async def test_capsolver_browser_use_action_returns_non_terminal_action_result()
     assert result.success is None
     assert result.is_done is False
     assert result.extracted_content == "CAPTCHA solved with CapSolver (recaptcha_v2)."
+
+
+@pytest.mark.asyncio
+async def test_capsolver_browser_use_action_handles_recaptcha_v3() -> None:
+    original_env = os.environ.copy()
+    page = _FakePage(
+        [
+            {
+                "captchaType": "recaptcha_v3",
+                "websiteUrl": "https://example.com/login",
+                "websiteKey": "site-key",
+                "pageAction": "login",
+                "marker": "recaptcha v3",
+            },
+            {"ok": True, "fieldsUpdated": 1, "callbacksCalled": 0},
+        ]
+    )
+    try:
+        controller = build_capsolver_controller(_FakeCapSolver())  # type: ignore[arg-type]
+        action = controller.registry.registry.actions["solve_captcha_with_capsolver"]
+
+        result = await action.function(browser_session=_FakeBrowserSession(page))
+    finally:
+        os.environ.clear()
+        os.environ.update(original_env)
+
+    assert result.success is None
+    assert result.is_done is False
+    assert result.extracted_content == "CAPTCHA solved with CapSolver (recaptcha_v3)."
