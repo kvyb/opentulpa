@@ -250,6 +250,27 @@ def _extract_phone_hint(value: Any) -> str:
     return match.group(0).strip(" .,-") if match else ""
 
 
+def _truthy_config_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().casefold()
+    return text in {"1", "true", "yes", "y", "on", "required", "strict"}
+
+
+def _workflow_requires_intent_match(workflow: dict[str, Any]) -> bool:
+    source_config = _safe_dict(workflow.get("source_config"))
+    matching = _safe_dict(source_config.get("matching"))
+    return any(
+        _truthy_config_flag(value)
+        for value in (
+            source_config.get("intent_match_required"),
+            source_config.get("strict_intent_matching"),
+            source_config.get("filter_by_intent"),
+            matching.get("intent_match_required"),
+        )
+    )
+
+
 class IntakeWorkflowService:
     """Stores intake workflows and runs them on scheduled wake events."""
 
@@ -2637,6 +2658,9 @@ class IntakeWorkflowService:
                         error=error,
                     )
                     continue
+                intent_match_required = _workflow_requires_intent_match(workflow)
+                decision_matches = bool(decision.get("matches_workflow"))
+                effective_matches = decision_matches or not intent_match_required
                 if self._uses_telegram_business_stale_guard(
                     workflow=workflow,
                     event_type=event_type,
@@ -2646,12 +2670,12 @@ class IntakeWorkflowService:
                         workflow=workflow,
                         conversation_id=conversation_id,
                         conversation_summary=cursor_summary,
-                        matched=bool(decision.get("matches_workflow")),
+                        matched=effective_matches,
                     )
                     if stale_result is not None:
                         result_items.append(stale_result)
                         continue
-                if not bool(decision.get("matches_workflow")):
+                if not effective_matches:
                     reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
                     reply_text = str(decision.get("reply_text", "") or "").strip()
                     if reply_action != "send_reply" or not reply_text:
@@ -2833,7 +2857,8 @@ class IntakeWorkflowService:
                     if error:
                         apply_error = error
                         break
-                    if not bool(decision.get("matches_workflow")):
+                    decision_matches = bool(decision.get("matches_workflow"))
+                    if intent_match_required and not decision_matches:
                         apply_error = "recovery decision no longer matches workflow"
                         break
                 if apply_error:
@@ -2920,6 +2945,7 @@ class IntakeWorkflowService:
             "workflow_id": workflow.get("workflow_id"),
             "name": workflow.get("name"),
             "intent_description": workflow.get("intent_description"),
+            "intent_match_required": _workflow_requires_intent_match(workflow),
             "required_fields": workflow.get("required_fields"),
             "field_guidance": workflow.get("field_guidance"),
             "assistant_instructions": workflow.get("assistant_instructions", ""),

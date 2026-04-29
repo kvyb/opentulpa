@@ -33,6 +33,12 @@ def _unique_string_list(values: Any) -> list[str]:
     return out
 
 
+def _truthy_config_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "on", "required", "strict"}
+
+
 def _clean_mapping(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -117,6 +123,7 @@ def build_intake_workflow_skill(
     knowledge_file_ids = _unique_string_list(safe_workflow.get("knowledge_file_ids"))
     field_guidance = _safe_dict(safe_workflow.get("field_guidance"))
     source_config = _safe_dict(safe_workflow.get("source_config"))
+    intent_match_required = _truthy_config_flag(source_config.get("intent_match_required"))
     sink_config = _safe_dict(safe_workflow.get("sink_config"))
     required_fields = [
         str(item or "").strip()
@@ -147,6 +154,17 @@ def build_intake_workflow_skill(
             "- If the user wants to change this Telegram Business workflow, first fetch the current workflow for context, then delete it, then create a replacement workflow.",
             "- When recreating it, the backend can reuse the single connected Telegram Business account automatically; only specify a different business_connection_id when the user explicitly wants another connected business account.",
         ]
+    if intent_match_required:
+        matching_rule = (
+            f"- Strictly match only conversations that fit this intent: {safe_workflow['intent_description']}\n"
+            "- If the request is not actually about this workflow, ignore it rather than forcing a match.\n\n"
+        )
+    else:
+        matching_rule = (
+            "- Do not use the workflow intent as a front-door filter; ordinary openers and ambiguous early-stage messages from this source are part of the workflow.\n"
+            "- Reply usefully to move the customer toward the workflow before deciding to ignore.\n\n"
+        )
+
     instructions = (
         "## Purpose\n"
         f"Support the durable intake workflow `{safe_workflow['name']}`.\n\n"
@@ -159,16 +177,14 @@ def build_intake_workflow_skill(
         + "\n"
         + f"- Sink target: {sink_summary}\n\n"
         "## Matching Rule\n"
-        f"- Match conversations that fit this intent: {safe_workflow['intent_description']}\n"
-        "- Favor precision over false positives; unrelated or purely social messages should not trigger workflow action.\n\n"
-        "## Required Fields\n"
+        + matching_rule
+        + "## Required Fields\n"
         f"- Collect these fields before save: {', '.join(required_fields)}\n\n"
         "## Execution Strategy\n"
         "- Understand whether the customer is starting a new request, continuing an active booking, or editing a recent completed booking.\n"
         "- Ask only the minimum high-leverage follow-up question needed to unblock the next step.\n"
         "- Use durable workflow instructions, field guidance, and bound knowledge files before improvising.\n"
         "- Save only when the required fields are sufficiently clear and internally consistent.\n"
-        "- If the request is not actually about this workflow, ignore it rather than forcing a match.\n\n"
         "## Behavioral Rules\n"
         f"- Ask concise follow-up questions in the {reply_channel_text} when fields are missing.\n"
         "- When all required fields are present, save through the configured sink.\n"

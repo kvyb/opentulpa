@@ -45,6 +45,17 @@ def test_build_intake_workflow_skill_uses_shared_template_for_instagram_and_tele
     assert "Telegram Business DMs" in str(telegram["skill_markdown"])
     assert "single durable intake policy" in str(telegram["skill_markdown"])
     assert "cannot be edited in place" in str(telegram["skill_markdown"])
+    assert "Do not use the workflow intent as a front-door filter" in str(telegram["skill_markdown"])
     assert "backend can reuse the single connected Telegram Business account automatically" in str(
         telegram["skill_markdown"]
     )
+
+    strict = build_intake_workflow_skill(
+        {
+            **base,
+            "channel": "telegram_business_dm",
+            "provider": "telegram_bot_api",
+            "source_config": {"business_connection_id": "bc_123", "intent_match_required": True},
+        }
+    )
+    assert "Strictly match only conversations that fit this intent" in str(strict["skill_markdown"])

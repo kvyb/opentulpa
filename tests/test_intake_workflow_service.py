@@ -1119,6 +1119,110 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
 
 
 @pytest.mark.asyncio
+async def test_telegram_business_default_workflow_does_not_intent_gate_model_reply(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": False,
+                "confidence": 0.3,
+                "conversation_summary": "Customer opened with a greeting.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Здравствуйте! Чем помочь с услугами или записью?",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Greeting is not an explicit booking intent yet.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Привет",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="АвтоSpa — консультация и запись",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Помогать с услугами, ценами и записью в автоцентр.",
+        required_fields=["name", "time"],
+        assistant_instructions="Reply in Russian and help customers choose a service.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert result["matched_conversations"] == 1
+    assert result["results"] == [
+        {
+            "conversation_id": "555",
+            "matched": True,
+            "status": "ignored",
+            "replied": True,
+        }
+    ]
+    assert runtime.calls[0]["workflow"]["intent_match_required"] is False
+    assert service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    ) == []
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["chat_id"] == "555"
+    assert sent["business_connection_id"] == "bc_123"
+    assert sent["reply_to_message_id"] == 10
+    assert "Чем помочь" in sent["text"]
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_out_of_scope_decision_can_reply_without_booking(
     tmp_path: Path,
 ) -> None:
@@ -1185,7 +1289,7 @@ async def test_telegram_business_out_of_scope_decision_can_reply_without_booking
         name="Telegram Wash Booking",
         channel="telegram_business_dm",
         provider="telegram_bot_api",
-        source_config={"business_connection_id": "bc_123"},
+        source_config={"business_connection_id": "bc_123", "intent_match_required": True},
         intent_description="Handle Telegram Business wash and tire fitting appointment requests.",
         required_fields=["name", "time"],
         assistant_instructions="Reply politely when the request is outside scope.",
@@ -1288,7 +1392,7 @@ async def test_telegram_business_out_of_scope_service_question_gets_fallback_rep
         name="Wash and tire booking",
         channel="telegram_business_dm",
         provider="telegram_bot_api",
-        source_config={"business_connection_id": "bc_123"},
+        source_config={"business_connection_id": "bc_123", "intent_match_required": True},
         intent_description="Handle Telegram Business wash and tire fitting appointment requests.",
         required_fields=["name", "time"],
         assistant_instructions="Reply politely when the request is outside scope. Phone: +1 555 123 4567.",

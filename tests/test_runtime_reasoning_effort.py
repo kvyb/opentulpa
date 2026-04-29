@@ -32,6 +32,33 @@ def test_runtime_passes_reasoning_effort_to_init_chat_model(monkeypatch) -> None
     assert calls[0]["reasoning_effort"] == "medium"
 
 
+def test_runtime_caps_gemini_flash_lite_preview_output_tokens(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
+        calls.append({"model": model, **kwargs})
+        return object()
+
+    monkeypatch.setattr(runtime_module, "init_chat_model", _fake_init_chat_model)
+
+    runtime_module.OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="test-key",
+        openrouter_base_url="https://example.com/v1",
+        model_name="google/gemini-3.1-flash-lite-preview",
+        wake_classifier_model_name="google/gemini-3.1-flash-lite-preview",
+        wake_execution_model_name="google/gemini-3.1-flash-lite-preview",
+        telegram_media_model_name="google/gemini-3.1-flash-lite-preview",
+        guardrail_classifier_model_name="google/gemini-3.1-flash-lite-preview",
+        max_completion_tokens=4096,
+        checkpoint_db_path=".opentulpa/test.sqlite",
+    )
+
+    assert calls
+    assert calls[0]["model"] == "google/gemini-3.1-flash-lite-preview"
+    assert calls[0]["max_completion_tokens"] == 1000
+
+
 def test_runtime_defaults_reasoning_effort_medium_for_all_agent_models(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
