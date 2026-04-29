@@ -20,6 +20,11 @@ from opentulpa.interfaces.telegram import relay as relay_module
 from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.tasks import sandbox as sandbox_module
+from tests.workbook_fixtures import (
+    SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+    SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
+    write_sample_vehicle_services_xlsx,
+)
 
 pytestmark = [pytest.mark.e2e, pytest.mark.telegram]
 
@@ -404,12 +409,14 @@ def test_live_llm_support_can_setup_autospa_workflow_for_bound_customer(
             text="/support_bind 1",
         ) == 200
 
-        asset = Path(__file__).resolve().parents[1] / "assets" / "autospa_price.xlsx"
+        asset = write_sample_vehicle_services_xlsx(
+            harness.status_report_path.parent / SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME
+        )
         registered = harness.telegram_client.register_file(
             file_id="tg_file_support_autospa_price",
             path=asset,
-            filename="autospa_price.xlsx",
-            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+            mime_type=SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
         )
         upload_text = (
             "Хочу создать workflow для Telegram Business входящих сообщений для клиента. "

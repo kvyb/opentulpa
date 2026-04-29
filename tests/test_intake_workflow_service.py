@@ -19,6 +19,11 @@ from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
+from tests.workbook_fixtures import (
+    SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+    SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
+    sample_vehicle_services_xlsx_bytes,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -511,10 +516,6 @@ def _mk_service(
         get_agent_runtime=lambda: runtime,
     )
     return service, scheduler, skills, telegram_business, file_vault
-
-
-def _autospa_price_list_path() -> Path:
-    return Path(__file__).resolve().parent / "e2e" / "assets" / "autospa_price.xlsx"
 
 
 def _telegram_business_inbound(
@@ -3316,15 +3317,12 @@ def test_google_sheets_sink_requires_explicit_sheet_name_when_target_has_multipl
 async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheets(
     tmp_path: Path,
 ) -> None:
-    price_list_path = _autospa_price_list_path()
-    if not price_list_path.exists():
-        pytest.skip(f"AutoSpa price list not found: {price_list_path}")
-    raw_bytes = price_list_path.read_bytes()
+    raw_bytes = sample_vehicle_services_xlsx_bytes()
 
     inspection = inspect_uploaded_file_structure(
         raw_bytes=raw_bytes,
-        filename=price_list_path.name,
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+        mime_type=SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
         search_terms=["Мойка", "Шиномонтаж"],
     )
     sheets = inspection["structure"]["sheets"]
@@ -3514,9 +3512,9 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
         chat_id=777,
         kind="document",
         telegram_file_id=None,
-        original_filename=price_list_path.name,
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        caption="AutoSpa price list source for workflow setup",
+        original_filename=SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+        mime_type=SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
+        caption="Sample service price list source for workflow setup",
         raw_bytes=raw_bytes,
     )
     workflow = service.upsert_workflow(

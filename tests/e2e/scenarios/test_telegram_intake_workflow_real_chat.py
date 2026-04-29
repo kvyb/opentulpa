@@ -15,6 +15,12 @@ from evaluation.judge import DEFAULT_JUDGE_MODEL, evaluate_e2e_scenario_with_llm
 from harness.lead_simulator import DEFAULT_LEAD_SIMULATOR_MODEL, LeadProfile
 from harness.runner import E2EHarness
 
+from tests.workbook_fixtures import (
+    SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+    SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
+    write_sample_vehicle_services_xlsx,
+)
+
 pytestmark = [pytest.mark.e2e, pytest.mark.live_llm, pytest.mark.telegram]
 
 
@@ -517,11 +523,14 @@ def _plan_autospa_owner_turn(
     return plan
 
 
-_AUTOSPA_PRICE_ASSET = Path(__file__).resolve().parents[1] / "assets" / "autospa_price.xlsx"
-
-
 def _live_google_sheets_target(harness: E2EHarness) -> Any | None:
     return getattr(harness.composio_service, "live_google_sheets_target", None)
+
+
+def _sample_price_workbook_path(harness: E2EHarness) -> Path:
+    return write_sample_vehicle_services_xlsx(
+        harness.status_report_path.parent / SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME
+    )
 
 
 def _owner_identity_for_autospa(harness: E2EHarness) -> tuple[int, int, str]:
@@ -856,7 +865,11 @@ def _post_owner_autospa_message(
             user_id=owner_user_id,
             caption=text,
             file_id=str(document["file_id"]),
-            file_name=str(document.get("file_name") or document.get("filename") or "autospa_price.xlsx"),
+            file_name=str(
+                document.get("file_name")
+                or document.get("filename")
+                or SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME
+            ),
             mime_type=str(document["mime_type"]),
             file_size=int(document["file_size"]),
             message_id=message_id,
@@ -1006,9 +1019,6 @@ def _send_autospa_lead_message(
 def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
     e2e_harness: E2EHarness,
 ) -> None:
-    if not _AUTOSPA_PRICE_ASSET.exists():
-        raise RuntimeError(f"AutoSpa E2E asset is missing: {_AUTOSPA_PRICE_ASSET}")
-
     owner_user_id, owner_chat_id, customer_id = _owner_identity_for_autospa(e2e_harness)
     live_google_sheets_target = _live_google_sheets_target(e2e_harness)
     business_connection_id = _seed_telegram_business_connection(
@@ -1027,12 +1037,13 @@ def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
         "live_google_sheets_target": live_google_sheets_target,
     }
 
+    workbook_path = _sample_price_workbook_path(e2e_harness)
     file_id = "tg_file_autospa_price"
     registered = e2e_harness.telegram_client.register_file(
         file_id=file_id,
-        path=_AUTOSPA_PRICE_ASSET,
-        filename="autospa_price.xlsx",
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        path=workbook_path,
+        filename=SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+        mime_type=SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
     )
     e2e_harness.recorder.add("owner_document_uploaded", **registered)
 
@@ -1438,9 +1449,6 @@ def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
 def test_live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated_leads(
     e2e_harness: E2EHarness,
 ) -> None:
-    if not _AUTOSPA_PRICE_ASSET.exists():
-        raise RuntimeError(f"AutoSpa E2E asset is missing: {_AUTOSPA_PRICE_ASSET}")
-
     owner_user_id = 19012
     owner_chat_id = 29012
     customer_id = f"telegram_{owner_user_id}"
@@ -1461,11 +1469,12 @@ def test_live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated
         "workflow": {},
     }
 
+    workbook_path = _sample_price_workbook_path(e2e_harness)
     registered = e2e_harness.telegram_client.register_file(
         file_id="tg_file_autospa_ai_owner_price",
-        path=_AUTOSPA_PRICE_ASSET,
-        filename="autospa_price.xlsx",
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        path=workbook_path,
+        filename=SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
+        mime_type=SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
     )
     e2e_harness.recorder.add("owner_document_uploaded", **registered)
 
