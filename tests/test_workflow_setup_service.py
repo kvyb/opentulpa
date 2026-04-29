@@ -137,7 +137,7 @@ def test_workflow_setup_begin_create_persists_session(tmp_path: Path) -> None:
     assert session["draft_upsert"]["channel"] == "instagram_dm"
     assert session["scratchpad"]["mode"] == "create"
     assert session["scratchpad"]["source_file_ids"] == []
-    assert session["scratchpad"]["prepared_knowledge_file_ids"] == []
+    assert session["scratchpad"]["knowledge_source_file_ids"] == []
 
 
 def test_workflow_setup_begin_edit_loads_existing_workflow(tmp_path: Path) -> None:
@@ -337,17 +337,17 @@ def test_workflow_setup_update_replaces_field_guidance_and_sink_field_mapping(tm
     }
 
 
-def test_workflow_setup_update_tracks_source_and_prepared_knowledge_files(tmp_path: Path) -> None:
+def test_workflow_setup_update_tracks_source_knowledge_files(tmp_path: Path) -> None:
     setup, _, _ = _mk_setup_service(tmp_path)
     setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
 
     session = setup.update_session(
         customer_id="telegram_123",
         thread_id="thread_123",
-        draft_patch={"knowledge_file_ids": ["file_prepared"]},
+        draft_patch={"knowledge_file_ids": ["file_source"]},
         scratchpad_patch={
             "source_file_ids": ["file_source"],
-            "prepared_knowledge_file_ids": ["file_prepared"],
+            "knowledge_source_file_ids": ["file_source"],
             "candidate_files": [
                 {
                     "file_id": "file_source",
@@ -358,9 +358,9 @@ def test_workflow_setup_update_tracks_source_and_prepared_knowledge_files(tmp_pa
         },
     )
 
-    assert session["draft_upsert"]["knowledge_file_ids"] == ["file_prepared"]
+    assert session["draft_upsert"]["knowledge_file_ids"] == ["file_source"]
     assert session["scratchpad"]["source_file_ids"] == ["file_source"]
-    assert session["scratchpad"]["prepared_knowledge_file_ids"] == ["file_prepared"]
+    assert session["scratchpad"]["knowledge_source_file_ids"] == ["file_source"]
     assert session["scratchpad"]["candidate_files"][0]["filename"] == "price-list.xlsx"
 
 

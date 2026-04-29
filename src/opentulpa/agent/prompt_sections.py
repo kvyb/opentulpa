@@ -44,7 +44,9 @@ def build_prompt_mode_message(prompt_mode: PromptMode) -> SystemMessage:
             "Do not ask for Telegram Business DM polling/schedule intervals; those workflows run from inbound messages.\n"
             "Before showing the final proposal, run the setup preflight once; if it returns a focused follow-up, ask that instead of proposing.\n"
             "When enough required fields are known, propose the workflow with stated assumptions instead of continuing optional clarification.\n"
-            "When uploaded files are used, preserve source file ids in the scratchpad and bind only prepared knowledge files to the final workflow.\n"
+            "Schema contract: required_fields are stable machine field ids, not customer-facing labels. Use concise ASCII snake_case ids such as service_name, vehicle_type, date, time, lead_name, phone, quoted_price. Put localized names, wording, and extraction notes in field_guidance or assistant_instructions, not in required_fields.\n"
+            "field_guidance keys must match required_fields ids. If the sink needs localized or human-readable column labels, express that in sink_config.field_mapping instead of changing required_fields ids.\n"
+            "When uploaded files are used, preserve original source file ids, prepare them with business_knowledge_index, query the business knowledge for representative facts, and bind those source file ids to the final workflow.\n"
             "Only commit the workflow after explicit user confirmation."
         )
     else:

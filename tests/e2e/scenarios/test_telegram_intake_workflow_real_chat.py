@@ -3,14 +3,16 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from evaluation.judge import DEFAULT_JUDGE_MODEL, evaluate_e2e_scenario_with_llm_judge
-from harness.lead_simulator import LeadProfile
+from harness.lead_simulator import DEFAULT_LEAD_SIMULATOR_MODEL, LeadProfile
 from harness.runner import E2EHarness
 
 pytestmark = [pytest.mark.e2e, pytest.mark.live_llm, pytest.mark.telegram]
@@ -279,6 +281,242 @@ def _addresses_pricing_question(text: str) -> bool:
     )
 
 
+def _extract_chat_completion_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first, dict) else {}
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                parts.append(text)
+            continue
+        if isinstance(item, dict):
+            text = str(item.get("text", "") or "").strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(raw[start : end + 1])
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _owner_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "done"}
+
+
+def _compact_owner_setup_state(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    owner_chat_id: int,
+    file_uploaded: bool,
+) -> dict[str, Any]:
+    thread_id = _telegram_owner_thread_id(chat_id=owner_chat_id)
+    session = (
+        _workflow_setup_session(harness, customer_id=customer_id, thread_id=thread_id)
+        if thread_id
+        else {}
+    )
+    draft = session.get("draft_upsert") if isinstance(session.get("draft_upsert"), dict) else {}
+    scratchpad = session.get("scratchpad") if isinstance(session.get("scratchpad"), dict) else {}
+    workflows = _list_workflows(harness, customer_id=customer_id)
+    return {
+        "file_uploaded": bool(file_uploaded),
+        "thread_id": thread_id,
+        "workflow_count": len(workflows),
+        "workflow_names": [str(item.get("name", "") or "") for item in workflows[-3:]],
+        "setup_session": {
+            "status": str(session.get("status", "") or ""),
+            "has_proposal": bool(str(session.get("last_proposed_draft_hash", "") or "").strip()),
+            "last_proposed_draft_hash": str(session.get("last_proposed_draft_hash", "") or ""),
+            "created_or_updated_workflow_id": str(
+                session.get("created_or_updated_workflow_id", "") or ""
+            ),
+            "draft_upsert": {
+                "name": str(draft.get("name", "") or ""),
+                "channel": str(draft.get("channel", "") or ""),
+                "provider": str(draft.get("provider", "") or ""),
+                "required_fields": draft.get("required_fields") or [],
+                "knowledge_file_ids": draft.get("knowledge_file_ids") or [],
+                "sink_type": str(draft.get("sink_type", "") or ""),
+                "sink_config": draft.get("sink_config") if isinstance(draft.get("sink_config"), dict) else {},
+            },
+            "scratchpad": {
+                "source_file_ids": scratchpad.get("source_file_ids") or [],
+                "knowledge_source_file_ids": scratchpad.get("knowledge_source_file_ids") or [],
+                "knowledge_last_index": scratchpad.get("knowledge_last_index") or {},
+                "knowledge_last_preflight": scratchpad.get("knowledge_last_preflight") or {},
+                "missing_fields": scratchpad.get("missing_fields") or [],
+                "open_questions": scratchpad.get("open_questions") or [],
+                "proposal_summary": str(scratchpad.get("proposal_summary", "") or "")[:1200],
+            },
+        },
+    }
+
+
+def _plan_autospa_owner_turn(
+    harness: E2EHarness,
+    *,
+    state: dict[str, Any],
+    customer_id: str,
+    owner_chat_id: int,
+    file_uploaded: bool,
+    turn_index: int,
+    csv_relative_path: str,
+) -> dict[str, Any]:
+    api_key = str(getattr(harness.runtime, "openrouter_api_key", "") or "").strip()
+    base_url = str(getattr(harness.runtime, "openrouter_base_url", "") or "").strip().rstrip("/")
+    if not api_key or not base_url:
+        raise RuntimeError("owner simulator requires the live LLM API key and base URL")
+    model = os.getenv("OPENTULPA_E2E_OWNER_SIM_MODEL", DEFAULT_LEAD_SIMULATOR_MODEL)
+    setup_state = _compact_owner_setup_state(
+        harness,
+        customer_id=customer_id,
+        owner_chat_id=owner_chat_id,
+        file_uploaded=file_uploaded,
+    )
+    payload = {
+        "hidden_owner_objective": {
+            "business": "AutoSpa detailing center in Murmansk",
+            "workflow_name": "E2E AI Owner AutoSpa Business Knowledge",
+            "channel": "Telegram Business DM",
+            "knowledge_source": "the attached AutoSpa XLSX price list",
+            "scope": "Use only the Мойка and Шиномонтаж sections for this workflow.",
+            "source_disambiguation": (
+                "For tire fitting prices, prefer the worksheet named Шиномонтаж. Ignore the Диски "
+                "worksheet unless the customer explicitly asks about wheels, disks, or powder coating."
+            ),
+            "business_knowledge_contract": (
+                "Tell OpenTulpa to prepare the original XLSX with business_knowledge_index, "
+                "query it with business_knowledge_query for representative Мойка and Шиномонтаж "
+                "facts, and bind the original source file ids to the final workflow."
+            ),
+            "required_fields": [
+                "service_category",
+                "service_name",
+                "vehicle_type",
+                "date",
+                "time",
+                "lead_name",
+                "phone",
+                "quoted_price",
+            ],
+            "field_guidance": {
+                "quoted_price": (
+                    "The assistant should fill this from the XLSX business knowledge when possible; "
+                    "do not ask the lead to provide the price."
+                )
+            },
+            "sink": {"type": "local_csv", "file_path": csv_relative_path},
+            "confirmation_rule": "Confirm once OpenTulpa proposes a workflow matching this objective.",
+        },
+        "turn_index": int(turn_index),
+        "current_setup_state": setup_state,
+        "owner_assistant_transcript": [
+            {
+                "role": str(item.get("role", "") or "")[:30],
+                "text": str(item.get("text", "") or "")[:1200],
+            }
+            for item in list(state.get("owner_transcript") or [])[-12:]
+            if isinstance(item, dict)
+        ],
+    }
+    harness.recorder.add("owner_simulator_prompt", model=model, payload=payload)
+    system_prompt = (
+        "You simulate the business owner using OpenTulpa through Telegram for a live e2e test.\n"
+        "Stay in character as the owner only; never speak as OpenTulpa.\n"
+        "Write concise Russian Telegram messages.\n"
+        "Your goal is to create and activate the exact workflow described in the hidden objective.\n"
+        "If the file is not uploaded yet, attach_file must be true and the message must explain how "
+        "OpenTulpa should use the attached XLSX.\n"
+        "If current_setup_state.setup_session.has_proposal is true and no workflow exists yet, confirm "
+        "saving and activating the proposed workflow.\n"
+        "If OpenTulpa asks a question, answer it with the hidden objective.\n"
+        "Set done=true only when current_setup_state.workflow_count is greater than 0.\n"
+        "Return strict JSON only with exactly these keys:\n"
+        '{"done": boolean, "message": string, "attach_file": boolean, "reason": string}'
+    )
+    response = httpx.post(
+        f"{base_url}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": "Plan the owner's next Telegram message.\n\n"
+                    + json.dumps(payload, ensure_ascii=False, default=str),
+                },
+            ],
+        },
+        timeout=45.0,
+    )
+    response.raise_for_status()
+    raw_text = _extract_chat_completion_text(response.json())
+    parsed = _parse_json_object(raw_text)
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"owner simulator returned invalid JSON: {raw_text[:1000]}")
+    plan = {
+        "done": _owner_bool(parsed.get("done")),
+        "message": str(parsed.get("message", "") or "").strip(),
+        "attach_file": _owner_bool(parsed.get("attach_file")),
+        "reason": str(parsed.get("reason", "") or "").strip()[:500],
+        "raw_text": raw_text,
+        "setup_state": setup_state,
+    }
+    if not file_uploaded and not plan["done"]:
+        plan["attach_file"] = True
+    if plan["done"] and int(setup_state.get("workflow_count") or 0) <= 0:
+        has_proposal = bool(
+            ((setup_state.get("setup_session") or {}).get("has_proposal"))
+            if isinstance(setup_state.get("setup_session"), dict)
+            else False
+        )
+        if has_proposal and plan["message"]:
+            plan["done"] = False
+        else:
+            raise RuntimeError(f"owner simulator stopped before workflow creation: {plan}")
+    if not plan["done"] and not plan["message"]:
+        raise RuntimeError(f"owner simulator produced an empty message: {plan}")
+    harness.recorder.add("owner_simulator_plan", model=model, payload=plan)
+    return plan
+
+
 _AUTOSPA_PRICE_ASSET = Path(__file__).resolve().parents[1] / "assets" / "autospa_price.xlsx"
 
 
@@ -305,6 +543,7 @@ def _write_json_artifact(path: Path, payload: Any) -> None:
 def _filtered_autospa_internal_calls(harness: E2EHarness) -> list[dict[str, Any]]:
     prefixes = (
         "/internal/files/",
+        "/internal/knowledge/",
         "/internal/intake/",
         "/internal/composio/",
         "/internal/telegram/business/",
@@ -316,21 +555,46 @@ def _filtered_autospa_internal_calls(harness: E2EHarness) -> list[dict[str, Any]
     ]
 
 
-def _workflow_knowledge_markdown(
+def _workflow_business_knowledge_snapshot(
     harness: E2EHarness,
     *,
     customer_id: str,
     workflow: dict[str, Any],
-) -> str:
-    file_vault = getattr(harness.client.app.state.intake_workflows, "_file_vault", None)
-    if file_vault is None:
-        return ""
-    chunks: list[str] = []
-    for file_id in workflow.get("knowledge_file_ids") or []:
-        raw = file_vault.read_file_bytes(customer_id, str(file_id or "").strip())
-        if raw:
-            chunks.append(raw.decode("utf-8", errors="replace"))
-    return "\n\n".join(chunk.strip() for chunk in chunks if chunk.strip())
+) -> dict[str, Any]:
+    knowledge = getattr(harness.client.app.state, "knowledge_service", None)
+    workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+    if knowledge is None or not workflow_id:
+        return {}
+    queries = [
+        "2х-фазная мойка кузова SUV цена",
+        "Шиномонтаж Комплект 19R кросовер низкий профиль цена",
+        "PPF пакет цена",
+    ]
+    results: list[dict[str, Any]] = []
+    for query in queries:
+        try:
+            result = knowledge.query(
+                customer_id=customer_id,
+                scope_type="intake_workflow",
+                scope_id=workflow_id,
+                query=query,
+            )
+        except Exception as exc:
+            results.append({"query": query, "error": str(exc)})
+            continue
+        answer = getattr(result, "answer", None)
+        results.append(
+            {
+                "query": query,
+                "warnings": list(getattr(result, "warnings", []) or []),
+                "answer_extract": str(getattr(answer, "answer_extract", "") or ""),
+            }
+        )
+    return {
+        "workflow_id": workflow_id,
+        "knowledge_file_ids": workflow.get("knowledge_file_ids") or [],
+        "queries": results,
+    }
 
 
 def _current_autospa_artifacts(
@@ -341,19 +605,20 @@ def _current_autospa_artifacts(
     customer_id: str,
 ) -> dict[str, str]:
     workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
-    prepared_markdown = _workflow_knowledge_markdown(
+    business_knowledge = _workflow_business_knowledge_snapshot(
         harness,
         customer_id=customer_id,
         workflow=workflow,
     )
-    if prepared_markdown:
-        content_hash = hashlib.sha256(prepared_markdown.encode("utf-8")).hexdigest()
-        if state.get("prepared_knowledge_hash") != content_hash:
-            state["prepared_knowledge_hash"] = content_hash
+    if business_knowledge:
+        content_hash = hashlib.sha256(
+            json.dumps(business_knowledge, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        if state.get("business_knowledge_hash") != content_hash:
+            state["business_knowledge_hash"] = content_hash
             harness.recorder.add(
-                "prepared_knowledge_snapshot",
+                "business_knowledge_snapshot",
                 knowledge_file_ids=workflow.get("knowledge_file_ids") or [],
-                markdown_chars=len(prepared_markdown),
                 sha256=content_hash,
             )
 
@@ -367,7 +632,7 @@ def _current_autospa_artifacts(
     paths = {
         "owner_transcript": artifact_dir / "owner_transcript.json",
         "lead_transcripts": artifact_dir / "lead_transcripts.json",
-        "prepared_knowledge": artifact_dir / "prepared_knowledge.md",
+        "business_knowledge": artifact_dir / "business_knowledge.json",
         "workflow_snapshot": artifact_dir / "workflow_snapshot.json",
         "sheet_writes": artifact_dir / "sheet_writes.json",
         "internal_calls_filtered": artifact_dir / "internal_calls_filtered.json",
@@ -375,7 +640,7 @@ def _current_autospa_artifacts(
     }
     _write_json_artifact(paths["owner_transcript"], state.get("owner_transcript") or [])
     _write_json_artifact(paths["lead_transcripts"], state.get("lead_transcripts") or [])
-    paths["prepared_knowledge"].write_text(prepared_markdown, encoding="utf-8")
+    _write_json_artifact(paths["business_knowledge"], business_knowledge)
     _write_json_artifact(paths["workflow_snapshot"], workflow)
     _write_json_artifact(
         paths["sheet_writes"],
@@ -802,8 +1067,10 @@ def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
             "что workflow покрывает только Мойку и Шиномонтаж. "
             "Для бронирования собери: категория услуги, название услуги, автомобиль или класс авто, "
             "дата, время, имя клиента, телефон, цена если найдена. "
-            "Прайс может быть большой, поэтому открой структуру файла, выбери только связанные "
-            "разделы для Мойка и Шиномонтаж, подготовь Markdown knowledge pack и прикрепи его к workflow. "
+            "Прайс может быть большой, поэтому не вставляй его в контекст и не готовь Markdown pack. "
+            "Проиндексируй исходный XLSX через business_knowledge_index, проверь разделы Мойка "
+            "и Шиномонтаж через business_knowledge_query, и привяжи оригинальные source file ids "
+            "к workflow knowledge_file_ids. "
             "Запись сохраняй в тестовую Google Sheets таблицу: "
             f"spreadsheetId={spreadsheet_id}, sheetName={sheet_name}. "
             "Используй sink_type google_sheets_composio, toolkit googlesheets, "
@@ -1150,6 +1417,301 @@ def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
     evaluation = report_payload.get("evaluation") if isinstance(report_payload, dict) else {}
     if not isinstance(evaluation, dict) or not bool(evaluation.get("ok", False)):
         raise RuntimeError(f"final status report judge failed: {evaluation}")
+
+
+def test_live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated_leads(
+    e2e_harness: E2EHarness,
+) -> None:
+    if not _AUTOSPA_PRICE_ASSET.exists():
+        raise RuntimeError(f"AutoSpa E2E asset is missing: {_AUTOSPA_PRICE_ASSET}")
+
+    owner_user_id = 19012
+    owner_chat_id = 29012
+    customer_id = f"telegram_{owner_user_id}"
+    business_connection_id = _seed_telegram_business_connection(
+        e2e_harness,
+        owner_user_id=owner_user_id,
+        owner_chat_id=owner_chat_id,
+        business_connection_id="bc_e2e_ai_owner_autospa",
+    )
+    csv_relative_path = "tulpa_stuff/e2e_ai_owner_autospa.csv"
+    artifact_dir = e2e_harness.status_report_path.parent / "autospa_ai_owner_knowledge_artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    state: dict[str, Any] = {
+        "owner_transcript": [],
+        "owner_simulator_plans": [],
+        "lead_transcripts": {},
+        "stage_judgements": [],
+        "workflow": {},
+    }
+
+    registered = e2e_harness.telegram_client.register_file(
+        file_id="tg_file_autospa_ai_owner_price",
+        path=_AUTOSPA_PRICE_ASSET,
+        filename="autospa_price.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    e2e_harness.recorder.add("owner_document_uploaded", **registered)
+
+    try:
+        fresh_replies = _post_owner_autospa_message(
+            e2e_harness,
+            state=state,
+            owner_chat_id=owner_chat_id,
+            owner_user_id=owner_user_id,
+            text="/fresh",
+            message_id=500,
+        )
+        assert fresh_replies
+        assert _list_workflows(e2e_harness, customer_id=customer_id) == []
+
+        file_uploaded = False
+        for turn_index in range(1, 8):
+            workflows = _list_workflows(e2e_harness, customer_id=customer_id)
+            if workflows:
+                break
+            plan = _plan_autospa_owner_turn(
+                e2e_harness,
+                state=state,
+                customer_id=customer_id,
+                owner_chat_id=owner_chat_id,
+                file_uploaded=file_uploaded,
+                turn_index=turn_index,
+                csv_relative_path=csv_relative_path,
+            )
+            state["owner_simulator_plans"].append(plan)
+            if plan["done"]:
+                break
+            attach_file = bool(plan["attach_file"]) and not file_uploaded
+            _post_owner_autospa_message(
+                e2e_harness,
+                state=state,
+                owner_chat_id=owner_chat_id,
+                owner_user_id=owner_user_id,
+                text=str(plan["message"]),
+                message_id=500 + turn_index,
+                document=registered if attach_file else None,
+            )
+            file_uploaded = file_uploaded or attach_file
+            if _wait_until(
+                lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) >= 1,
+                timeout_seconds=8.0,
+            ):
+                break
+
+        workflows = _list_workflows(e2e_harness, customer_id=customer_id)
+        assert len(workflows) == 1, workflows
+        workflow = workflows[0]
+        state["workflow"] = workflow
+        assert "autospa" in str(workflow.get("name", "")).lower()
+        assert workflow["channel"] == "telegram_business_dm"
+        assert workflow["provider"] == "telegram_bot_api"
+        assert workflow["source_config"] == {"business_connection_id": business_connection_id}
+        assert workflow["sink_type"] == "local_csv"
+        assert workflow["sink_config"] == {"file_path": csv_relative_path}
+        assert workflow.get("knowledge_file_ids"), workflow
+        required_fields = {str(item) for item in workflow.get("required_fields") or []}
+        assert {"service_name", "vehicle_type", "date", "time", "phone"}.issubset(
+            required_fields
+        )
+
+        business_knowledge = _workflow_business_knowledge_snapshot(
+            e2e_harness,
+            customer_id=customer_id,
+            workflow=workflow,
+        )
+        _write_json_artifact(artifact_dir / "business_knowledge_after_setup.json", business_knowledge)
+        knowledge_text = json.dumps(business_knowledge, ensure_ascii=False).lower()
+        assert "2х-фазная" in knowledge_text
+        assert "мойка" in knowledge_text
+        assert "шиномонтаж" in knowledge_text
+        assert "комплект 19" in knowledge_text or "19`r" in knowledge_text
+
+        wash_profile = LeadProfile(
+            objective=(
+                "Get the price for a 2х-фазная мойка кузова for a Toyota RAV4, then book it."
+            ),
+            initial_message=(
+                "Здравствуйте! Сколько стоит 2х-фазная мойка кузова для Toyota RAV4? "
+                "Если подходит, хочу записаться."
+            ),
+            known_facts={
+                "service_category": "Мойка",
+                "service_name": "2х-фазная мойка кузова",
+                "vehicle_type": "Toyota RAV4, SUV",
+                "date": "завтра",
+                "time": "10:00",
+                "lead_name": "Алексей",
+                "phone": "+79990001001",
+            },
+            persona="Russian Telegram customer, practical and brief.",
+            rules=[
+                "Speak Russian.",
+                "Do not reveal name, phone, date, or time until asked.",
+                "If the assistant gives a plausible AutoSpa price from the price list, accept it.",
+                "Stay focused on booking the 2х-фазная мойка кузова.",
+            ],
+            max_turns=7,
+        )
+        tire_profile = LeadProfile(
+            objective=(
+                "Get the price for tire fitting for a BMW X5: 19R, crossover, low profile, "
+                "then book it."
+            ),
+            initial_message=(
+                "Добрый день. Нужно узнать цену и записаться именно на шиномонтаж: BMW X5, "
+                "комплект 19`R, кросовер с низким профилем."
+            ),
+            known_facts={
+                "service_category": "Шиномонтаж",
+                "service_name": "Комплект 19`R",
+                "vehicle_type": "Внедорожник / кросовер + низкий профиль",
+                "date": "пятница",
+                "time": "15:00",
+                "lead_name": "Мария",
+                "phone": "+79990001002",
+            },
+            persona="Russian Telegram customer, concise and cooperative.",
+            rules=[
+                "Speak Russian.",
+                "Do not reveal name, phone, date, or time until asked.",
+                "If the assistant gives a plausible AutoSpa price from the price list, accept it.",
+                "Stay focused on booking шиномонтаж for 19R low-profile crossover tires.",
+            ],
+            max_turns=7,
+        )
+
+        wash_simulation = e2e_harness.simulate_telegram_business_lead(
+            customer_id=customer_id,
+            workflow_id=workflow["workflow_id"],
+            business_connection_id=business_connection_id,
+            lead_chat_id=39101,
+            lead_user_id=49101,
+            profile=wash_profile,
+            initial_message_id=900,
+            idle_timeout_seconds=100.0,
+        )
+        tire_simulation = e2e_harness.simulate_telegram_business_lead(
+            customer_id=customer_id,
+            workflow_id=workflow["workflow_id"],
+            business_connection_id=business_connection_id,
+            lead_chat_id=39102,
+            lead_user_id=49102,
+            profile=tire_profile,
+            initial_message_id=950,
+            idle_timeout_seconds=100.0,
+        )
+        state["lead_transcripts"] = {
+            "wash": wash_simulation.get("transcript") or [],
+            "tire": tire_simulation.get("transcript") or [],
+        }
+        assert wash_simulation["ok"] is True, wash_simulation
+        assert wash_simulation["reason"] == "booking_completed"
+        assert tire_simulation["ok"] is True, tire_simulation
+        assert tire_simulation["reason"] == "booking_completed"
+        for simulation in (wash_simulation, tire_simulation):
+            completed_booking = simulation.get("completed_booking") or {}
+            assert str(completed_booking.get("status", "")).lower() == "completed"
+            assert str(completed_booking.get("sink_write_status", "")).lower() == "succeeded"
+
+        csv_rows = _csv_rows_for_relative_path(
+            e2e_harness,
+            relative_path=csv_relative_path,
+        )
+        assert len(csv_rows) >= 2
+        by_conversation = {
+            str(row.get("conversation_id", "")).strip(): row
+            for row in csv_rows
+        }
+        wash_row = by_conversation.get("39101") or {}
+        tire_row = by_conversation.get("39102") or {}
+        assert str(wash_row.get("status", "")).strip().lower() == "completed"
+        assert str(wash_row.get("service_category", "")).strip().lower() == "мойка"
+        assert "2х-фазная" in str(wash_row.get("service_name", "")).lower()
+        assert str(wash_row.get("quoted_price", "")).strip()
+        assert str(wash_row.get("lead_name", "")).strip().lower() == "алексей"
+        assert str(wash_row.get("phone", "")).strip() == "+79990001001"
+        assert str(tire_row.get("status", "")).strip().lower() == "completed"
+        assert str(tire_row.get("service_category", "")).strip().lower() == "шиномонтаж"
+        tire_service_text = (
+            f"{tire_row.get('service_name', '')} {tire_row.get('vehicle_type', '')}".lower()
+        )
+        tire_quoted_price_digits = "".join(
+            ch for ch in str(tire_row.get("quoted_price", "")) if ch.isdigit()
+        )
+        assert "19" in tire_service_text
+        assert "4000" in tire_quoted_price_digits
+        assert str(tire_row.get("quoted_price", "")).strip()
+        assert str(tire_row.get("lead_name", "")).strip().lower() == "мария"
+        assert str(tire_row.get("phone", "")).strip() == "+79990001002"
+
+        lead_source_messages = {
+            "wash": _lead_source_messages(
+                e2e_harness,
+                customer_id=customer_id,
+                business_connection_id=business_connection_id,
+                lead_chat_id=39101,
+            ),
+            "tire": _lead_source_messages(
+                e2e_harness,
+                customer_id=customer_id,
+                business_connection_id=business_connection_id,
+                lead_chat_id=39102,
+            ),
+        }
+        assert any(
+            str(item.get("sender_role", "")).strip() == "assistant"
+            for messages in lead_source_messages.values()
+            for item in messages
+        )
+    except Exception as exc:
+        _write_autospa_failure_debug(
+            e2e_harness,
+            state=state,
+            artifact_dir=artifact_dir,
+            customer_id=customer_id,
+            error=exc,
+        )
+        raise
+
+    artifact_paths = _current_autospa_artifacts(
+        e2e_harness,
+        state=state,
+        artifact_dir=artifact_dir,
+        customer_id=customer_id,
+    )
+    report = e2e_harness.write_status_report(
+        scenario="live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated_leads",
+        ok=True,
+        details={
+            "customer_id": customer_id,
+            "business_connection_id": business_connection_id,
+            "owner_simulator_model": os.getenv(
+                "OPENTULPA_E2E_OWNER_SIM_MODEL",
+                DEFAULT_LEAD_SIMULATOR_MODEL,
+            ),
+            "lead_simulator_model": e2e_harness.lead_simulator.model,
+            "registered_file": registered,
+            "owner_simulator_plans": state.get("owner_simulator_plans") or [],
+            "workflow": {
+                "workflow_id": workflow["workflow_id"],
+                "name": workflow["name"],
+                "required_fields": workflow["required_fields"],
+                "knowledge_file_ids": workflow.get("knowledge_file_ids") or [],
+                "assistant_instructions": str(workflow.get("assistant_instructions", ""))[:2500],
+                "sink_config": workflow["sink_config"],
+            },
+            "artifact_paths": artifact_paths,
+            "lead_source_messages": lead_source_messages,
+            "wash_simulation": wash_simulation,
+            "tire_simulation": tire_simulation,
+            "csv_rows": csv_rows,
+        },
+    )
+    assert report.exists()
+    report_payload = json.loads(report.read_text(encoding="utf-8"))
+    verdict = _judge_verdict(report_payload)
+    assert verdict != "fail"
 
 
 def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activate_it(

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
+import opentulpa.interfaces.telegram.attachments as attachments_module
+from opentulpa.context.file_vault import FileVaultService
 from opentulpa.interfaces.telegram.attachments import (
+    XLSX_MIME_TYPE,
     build_uploaded_files_context,
     extract_attachments,
+    ingest_attachments,
 )
+from opentulpa.interfaces.telegram.models import TelegramAttachment
 
 
 def test_extract_attachments_includes_video_note() -> None:
@@ -66,4 +73,55 @@ def test_uploaded_files_context_sanitizes_stale_xlsx_no_text_summary() -> None:
 
     assert "No extractable text was available" not in context
     assert "Spreadsheet file stored" in context
-    assert "uploaded_file_inspect_structure" in context
+    assert "business_knowledge_index" in context
+
+
+@pytest.mark.asyncio
+async def test_document_ingest_skips_auto_llm_summary(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    class FakeTelegramClient:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        async def download_file(self, *, file_id: str):
+            return {
+                "raw_bytes": b"not-a-real-workbook",
+                "file_path": "prices.xlsx",
+                "mime_type": XLSX_MIME_TYPE,
+            }
+
+        async def aclose(self) -> None:
+            return None
+
+    class Runtime:
+        called = False
+
+        async def summarize_uploaded_blob(self, **kwargs):
+            self.called = True
+            raise AssertionError("document uploads should be indexed/queryable, not auto-summarized")
+
+    monkeypatch.setattr(attachments_module, "TelegramClient", FakeTelegramClient)
+    runtime = Runtime()
+    vault = FileVaultService(root_dir=tmp_path / "vault", db_path=tmp_path / "vault.sqlite")
+
+    records = await ingest_attachments(
+        attachments=[
+            TelegramAttachment(
+                kind="document",
+                file_id="tg-file-1",
+                filename="prices.xlsx",
+                mime_type=XLSX_MIME_TYPE,
+            )
+        ],
+        bot_token="token",
+        file_vault=vault,
+        memory=None,
+        agent_runtime=runtime,
+        customer_id="telegram_1",
+        chat_id=1,
+        caption=None,
+    )
+
+    assert len(records) == 1
+    assert records[0]["original_filename"] == "prices.xlsx"
+    assert "ai_summary=" not in records[0]["summary"]
+    assert runtime.called is False

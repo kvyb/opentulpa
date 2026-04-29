@@ -414,7 +414,7 @@ def test_live_llm_support_can_setup_autospa_workflow_for_bound_customer(
         upload_text = (
             "Хочу создать workflow для Telegram Business входящих сообщений для клиента. "
             "Вот прайс AutoSpa. Используй только категории Мойка и Шиномонтаж, "
-            "подготовь scoped Markdown knowledge pack и запиши бронирования в Google Sheets через fake Composio. "
+            "подготовь scoped business knowledge и запиши бронирования в Google Sheets через fake Composio. "
             "Сначала предложи workflow и жди подтверждения."
         )
         response = harness.client.post(

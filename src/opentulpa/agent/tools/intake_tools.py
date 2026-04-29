@@ -118,10 +118,16 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         - If the user has multiple connected Telegram Business accounts, specify
           source_config.business_connection_id explicitly.
         - Do not try to patch or overwrite an existing Telegram Business workflow by reusing its workflow_id.
-        - required_fields must be a list of plain field names like ["date", "time", "car_type"].
+        - required_fields must be stable machine-readable field ids, not display labels.
+          Use concise ASCII snake_case ids like ["date", "time", "vehicle_type", "service_name"].
+          If the user describes fields in another language, translate the meaning into stable ids and
+          keep the user's wording in field_guidance or assistant_instructions.
         - field_guidance may be either:
           - a dict keyed by field name, or
           - a short plain-text note; it will be stored as general guidance.
+        - field_guidance dict keys must match required_fields ids. Do not create parallel localized keys.
+        - If a sink needs human-readable or localized column names, put those labels in
+          sink_config.field_mapping; do not change required_fields ids.
         - source_config is optional.
         - If source_config.conversation_id is omitted, the workflow scans recent conversations
           for the configured source instead of pinning one specific thread.
@@ -134,8 +140,8 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
           the user's goals, reply style, qualification rules, booking policy, escalation boundaries,
           important constraints, and any other operating instructions learned during the conversation that
           should persist for future inbox turns.
-        - knowledge_file_ids is optional. Use it only when the user explicitly wants uploaded files bound to the workflow.
-        - For large spreadsheets or broad source docs, first call uploaded_file_inspect_structure, then call uploaded_file_prepare_intake_knowledge with selected sheets/row ranges, then bind the returned prepared Markdown file id here.
+        - knowledge_file_ids is optional. Use it only when the user explicitly wants uploaded source files bound to the workflow.
+        - For spreadsheets or broad source docs, call business_knowledge_index on the original uploaded file ids, query the business knowledge with business_knowledge_query for representative business facts, then bind those same source file ids here.
         - The workflow must still work when knowledge_file_ids is empty; in that case rely on the saved instructions
           and other workflow fields instead of pretending files exist.
         - sink_config must contain the concrete configuration needed by the chosen sink_type.
@@ -346,11 +352,13 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
 
         Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
         For local_csv workflows, use draft_patch.sink_config={"file_path": "..."}.
+        draft_patch.required_fields must be stable ASCII snake_case ids, not display labels.
+        Put localized wording, owner terminology, and extraction hints in draft_patch.field_guidance
+        or draft_patch.assistant_instructions. field_guidance keys must match required_fields ids.
         When replacing field-specific guidance or sink_config.field_mapping, send the full current object.
         If uploaded files are being used as workflow knowledge, patch scratchpad_patch.source_file_ids
-        with original uploaded file ids, inspect arbitrary spreadsheets first, prepare selected source sections
-        with uploaded_file_prepare_intake_knowledge, then patch scratchpad_patch.prepared_knowledge_file_ids
-        and draft_patch.knowledge_file_ids with the returned prepared file ids.
+        with original uploaded file ids, prepare them with business_knowledge_index, and set
+        draft_patch.knowledge_file_ids to those same source file ids.
         """
         if not isinstance(draft_patch, dict) and not isinstance(scratchpad_patch, dict):
             return {"error": "intake_workflow_setup_update failed: draft_patch or scratchpad_patch is required"}

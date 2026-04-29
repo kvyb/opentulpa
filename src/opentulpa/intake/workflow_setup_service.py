@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, cast
@@ -21,6 +22,19 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 def _safe_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _unique_setup_file_ids(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        folded = text.casefold()
+        if not text or folded in seen:
+            continue
+        seen.add(folded)
+        out.append(text)
+    return out
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -123,30 +137,32 @@ class WorkflowSetupService:
         *,
         store: WorkflowSetupSessionStore,
         intake_workflows: IntakeWorkflowService,
+        knowledge_service: Any | None = None,
     ) -> None:
         self._store = store
         self._intake_workflows = intake_workflows
+        self._knowledge_service = knowledge_service
 
     @staticmethod
     def _draft_scaffold() -> dict[str, Any]:
         return _normalize_local_csv_draft_sink_config(
             _normalize_schedule_for_channel(
-            {
-                "name": "",
-                "channel": "instagram_dm",
-                "provider": "composio",
-                "source_config": {},
-                "intent_description": "",
-                "required_fields": [],
-                "field_guidance": {},
-                "assistant_instructions": "",
-                "knowledge_file_ids": [],
-                "sink_type": "",
-                "sink_config": {},
-                "schedule": "*/5 * * * *",
-                "notify_user": True,
-                "enabled": True,
-            }
+                {
+                    "name": "",
+                    "channel": "instagram_dm",
+                    "provider": "composio",
+                    "source_config": {},
+                    "intent_description": "",
+                    "required_fields": [],
+                    "field_guidance": {},
+                    "assistant_instructions": "",
+                    "knowledge_file_ids": [],
+                    "sink_type": "",
+                    "sink_config": {},
+                    "schedule": "*/5 * * * *",
+                    "notify_user": True,
+                    "enabled": True,
+                }
             )
         )
 
@@ -160,7 +176,9 @@ class WorkflowSetupService:
             "user_constraints": [],
             "assumptions": [],
             "source_file_ids": [],
-            "prepared_knowledge_file_ids": [],
+            "knowledge_source_file_ids": [],
+            "knowledge_last_index": {},
+            "knowledge_last_preflight": {},
             "candidate_files": [],
             "proposal_summary": "",
             "last_user_confirmable_summary": "",
@@ -316,9 +334,37 @@ class WorkflowSetupService:
             notify_user=bool(draft.get("notify_user", True)),
             enabled=bool(draft.get("enabled", True)),
         )
+        knowledge_preflight = self._preflight_knowledge_scope(
+            customer_id=customer_id,
+            session=session,
+            draft=draft,
+        )
+        if knowledge_preflight:
+            preflight["business_knowledge_preflight"] = knowledge_preflight
+            warnings = _safe_list(preflight.get("warnings"))
+            preflight["warnings"] = [
+                *warnings,
+                *[
+                    str(item).strip()
+                    for item in _safe_list(knowledge_preflight.get("warnings"))
+                    if str(item).strip()
+                ],
+            ]
+            if not bool(knowledge_preflight.get("ok", False)):
+                preflight["ok"] = False
+                preflight["status"] = "needs_clarification"
+                questions = _safe_list(preflight.get("follow_up_questions"))
+                questions.append(
+                    "The uploaded business knowledge could not be grounded from source files. Please provide a text, spreadsheet, PDF, DOCX, CSV, or clearer source for the workflow."
+                )
+                preflight["follow_up_questions"] = questions
         scratchpad = _deep_merge(
             _safe_dict(session.get("scratchpad")),
-            {"last_preflight": _compact_preflight_for_scratchpad(preflight)},
+            {
+                "last_preflight": _compact_preflight_for_scratchpad(preflight),
+                "knowledge_last_index": _safe_dict(knowledge_preflight.get("index")) if knowledge_preflight else {},
+                "knowledge_last_preflight": knowledge_preflight or {},
+            },
         )
         update_kwargs: dict[str, Any] = {"scratchpad": scratchpad}
         if bool(preflight.get("ok", False)) and isinstance(preflight.get("normalized_draft"), dict):
@@ -330,6 +376,53 @@ class WorkflowSetupService:
         )
         updated["preflight"] = preflight
         return updated
+
+    def _preflight_knowledge_scope(
+        self,
+        *,
+        customer_id: str,
+        session: dict[str, Any],
+        draft: dict[str, Any],
+    ) -> dict[str, Any]:
+        knowledge = self._knowledge_service
+        if knowledge is None:
+            return {}
+        scratchpad = _safe_dict(session.get("scratchpad"))
+        file_ids = _unique_setup_file_ids(
+            [
+                *_safe_list(draft.get("knowledge_file_ids")),
+                *_safe_list(scratchpad.get("source_file_ids")),
+                *_safe_list(scratchpad.get("knowledge_source_file_ids")),
+            ]
+        )
+        if not file_ids:
+            return {}
+        session_id = str(session.get("session_id", "") or "").strip()
+        if not session_id:
+            return {}
+        index_result = knowledge.index_sources(
+            customer_id=customer_id,
+            scope_type="workflow_setup",
+            scope_id=session_id,
+            file_ids=file_ids,
+        )
+        goal = " ".join(
+            item
+            for item in [
+                str(draft.get("name", "") or "").strip(),
+                str(draft.get("intent_description", "") or "").strip(),
+                str(draft.get("assistant_instructions", "") or "").strip(),
+                " ".join(str(item or "").strip() for item in _safe_list(draft.get("required_fields"))),
+            ]
+            if item
+        )
+        preflight = knowledge.preflight_scope(
+            customer_id=customer_id,
+            scope_type="workflow_setup",
+            scope_id=session_id,
+            workflow_goal=goal,
+        )
+        return {"index": index_result, **preflight}
 
     def mark_proposed(self, *, customer_id: str, thread_id: str) -> dict[str, Any]:
         session = self._store.get_thread_session(
@@ -418,6 +511,11 @@ class WorkflowSetupService:
             )
 
         created_workflow_id = str(created.get("workflow_id", "") or "").strip()
+        self._promote_knowledge_scope(
+            customer_id=customer_id,
+            session=session,
+            workflow=created,
+        )
         completed = self._store.update_session(
             session_id=str(session["session_id"]),
             status="completed",
@@ -426,6 +524,40 @@ class WorkflowSetupService:
         )
         completed["workflow"] = created
         return completed
+
+    def _promote_knowledge_scope(
+        self,
+        *,
+        customer_id: str,
+        session: dict[str, Any],
+        workflow: dict[str, Any],
+    ) -> None:
+        knowledge = self._knowledge_service
+        if knowledge is None:
+            return
+        session_id = str(session.get("session_id", "") or "").strip()
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        if not session_id or not workflow_id:
+            return
+        result = knowledge.promote_scope(
+            customer_id=customer_id,
+            source_scope_type="workflow_setup",
+            source_scope_id=session_id,
+            target_scope_type="intake_workflow",
+            target_scope_id=workflow_id,
+        )
+        if int(result.get("source_count") or 0) > 0:
+            return
+        file_ids = _unique_setup_file_ids(_safe_list(workflow.get("knowledge_file_ids")))
+        if not file_ids:
+            return
+        with suppress(Exception):
+            knowledge.index_sources(
+                customer_id=customer_id,
+                scope_type="intake_workflow",
+                scope_id=workflow_id,
+                file_ids=file_ids,
+            )
 
     def pause(self, *, customer_id: str, thread_id: str) -> dict[str, Any]:
         session = self._store.get_thread_session(

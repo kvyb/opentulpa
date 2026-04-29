@@ -13,6 +13,19 @@ from opentulpa.interfaces.telegram.models import TelegramAttachment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_DOCUMENT_EXTENSIONS = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".md",
+    ".ods",
+    ".pdf",
+    ".rtf",
+    ".tsv",
+    ".txt",
+    ".xls",
+    ".xlsx",
+}
 
 
 def _safe_segment(value: str, *, fallback: str) -> str:
@@ -108,7 +121,7 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
     lines = [
         "Internal uploaded-file context. Do not quote this metadata verbatim to the user.",
         "Use file_id values with uploaded_file_* tools when deeper inspection is needed.",
-        "If a spreadsheet, price list, FAQ, or policy is intended for workflow setup, inspect structure first and prepare scoped workflow knowledge before activation.",
+        "If a spreadsheet, price list, FAQ, or policy is intended for workflow setup, prepare it with business_knowledge_index and query it with business_knowledge_query before activation.",
         "User-facing reply guidance: briefly acknowledge the file by name, summarize only human-meaningful available content, and ask one focused follow-up question.",
     ]
     for rec in records:
@@ -122,7 +135,7 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
         ):
             summary = (
                 "Spreadsheet file stored. Use uploaded_file_inspect_structure with this file_id "
-                "to inspect sheets, rows, and relevant sections before preparing workflow knowledge."
+                "or business_knowledge_index to prepare workflow knowledge without loading the workbook into chat context."
             )
         summary = re.sub(r"\s+", " ", summary)[:1200]
         lines.append(
@@ -136,6 +149,29 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
             )
         )
     return "\n".join(lines)
+
+
+def _skip_auto_summary_for_upload(*, kind: str | None, filename: str | None, mime_type: str | None) -> bool:
+    """Avoid hauling knowledge-source documents into the LLM at upload time."""
+    safe_kind = str(kind or "").strip().lower()
+    if safe_kind in {"photo", "video", "video_note", "audio", "voice"}:
+        return False
+    safe_mime = str(mime_type or "").strip().lower()
+    safe_name = str(filename or "").strip().lower()
+    if safe_kind == "document":
+        return True
+    if safe_mime.startswith("text/") or safe_mime in {
+        "application/pdf",
+        "application/msword",
+        "application/rtf",
+        "application/vnd.ms-excel",
+        XLSX_MIME_TYPE,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/csv",
+        "text/tab-separated-values",
+    }:
+        return True
+    return any(safe_name.endswith(ext) for ext in _DOCUMENT_EXTENSIONS)
 
 
 async def ingest_attachments(
@@ -194,7 +230,15 @@ async def ingest_attachments(
                     )
                     if transcript:
                         record = {**record, "voice_transcript": str(transcript).strip()[:4000]}
-            if agent_runtime is not None and hasattr(agent_runtime, "summarize_uploaded_blob"):
+            if (
+                agent_runtime is not None
+                and hasattr(agent_runtime, "summarize_uploaded_blob")
+                and not _skip_auto_summary_for_upload(
+                    kind=attachment.kind,
+                    filename=attachment.filename or file_path_name,
+                    mime_type=attachment.mime_type or str(downloaded.get("mime_type", "")).strip() or None,
+                )
+            ):
                 if attachment.kind == "voice":
                     ingested.append(record)
                     if memory is not None:

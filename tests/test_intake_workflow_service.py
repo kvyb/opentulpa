@@ -10,10 +10,8 @@ from typing import Any
 
 import pytest
 
-from opentulpa.agent.knowledge_prep import (
-    build_intake_knowledge_markdown,
-    inspect_uploaded_file_structure,
-)
+from opentulpa.agent.knowledge_prep import inspect_uploaded_file_structure
+from opentulpa.business_knowledge.service import BusinessKnowledgeService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.intake import service as intake_service_module
 from opentulpa.intake.service import IntakeWorkflowService
@@ -124,6 +122,25 @@ class _DelayedRuntime(_FakeRuntime):
     async def decide_intake_workflow(self, **kwargs: Any) -> dict[str, Any]:
         await asyncio.sleep(self.delay_seconds)
         return await super().decide_intake_workflow(**kwargs)
+
+
+class _FakeKnowledgeOracle:
+    def answer(self, **kwargs: Any) -> str:
+        source_pack = str(kwargs.get("source_pack", ""))
+        query = str(kwargs.get("query", ""))
+        relevant_query = query
+        if "Latest customer message:" in query:
+            relevant_query = query.split("Latest customer message:", 1)[1].split("Workflow field contract JSON:", 1)[0]
+        folded = relevant_query.casefold()
+        if "reference" in source_pack.casefold() or "reference" in folded:
+            return "Reference numbers are required for all appointments."
+        if "ppf" in folded:
+            return "NO_SOURCE"
+        if "19r" in folded or "19 r" in folded or "шиномонтаж" in folded:
+            return "Комплект 19`R: C=3000, D=3500, E=4 000. Source: Шиномонтаж row 10."
+        if "2х-фазная" in folded or "2х фазная" in folded or "мойка" in folded:
+            return "2х-фазная мойка кузова: SUV/S-Class price is 1200. Source: Мойка row 7."
+        return "NO_SOURCE"
 
 
 class _FakeComposio:
@@ -476,6 +493,12 @@ def _mk_service(
         root_dir=tmp_path / "file_vault",
         db_path=tmp_path / "file_vault.db",
     )
+    knowledge = BusinessKnowledgeService(
+        root_dir=tmp_path / "knowledge",
+        db_path=tmp_path / "knowledge.db",
+        file_vault=file_vault,
+        oracle_client=_FakeKnowledgeOracle(),
+    )
     service = IntakeWorkflowService(
         db_path=tmp_path / "intake.db",
         project_root=tmp_path,
@@ -484,6 +507,7 @@ def _mk_service(
         composio=composio,
         telegram_business=telegram_business,
         file_vault=file_vault,
+        knowledge_service=knowledge,
         get_agent_runtime=lambda: runtime,
     )
     return service, scheduler, skills, telegram_business, file_vault
@@ -1069,7 +1093,7 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert result["ok"] is True
     assert runtime.calls[0]["workflow"]["assistant_instructions"] == "Be concise and confirm only explicit booking times."
     assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == [str(knowledge["id"])]
-    assert runtime.calls[0]["workflow"]["knowledge_files"][0]["id"] == str(knowledge["id"])
+    assert "Reference numbers" in runtime.calls[0]["workflow"]["knowledge_answer"]
     sent = telegram_business.client.sent_messages[0]
     assert sent["chat_id"] == "555"
     assert sent["business_connection_id"] == "bc_123"
@@ -3434,32 +3458,6 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
         caption="AutoSpa price list source for workflow setup",
         raw_bytes=raw_bytes,
     )
-    prepared = build_intake_knowledge_markdown(
-        sources=[{"record": source_file, "raw_bytes": raw_bytes}],
-        workflow_goal="Handle only AutoSpa Мойка and Шиномонтаж inbound Telegram bookings.",
-        selected_sections=[
-            {"file_id": source_file["id"], "sheet_name": "Мойка"},
-            {"file_id": source_file["id"], "sheet_name": "Шиномонтаж"},
-        ],
-    )
-    assert prepared["requires_selection"] is False
-    markdown = str(prepared["markdown"])
-    assert "### Sheet: Мойка" in markdown
-    assert "### Sheet: Шиномонтаж" in markdown
-    assert "### Sheet: PPF" not in markdown
-    assert "2х-фазная мойка кузова" in markdown
-    assert "Комплект 19`R" in markdown
-    knowledge_file = file_vault.ingest_file(
-        customer_id=customer_id,
-        chat_id=None,
-        kind="workflow_knowledge",
-        telegram_file_id=None,
-        original_filename="autospa_wash_tire_knowledge.md",
-        mime_type="text/markdown",
-        caption="prepared workflow knowledge | sections=Мойка, Шиномонтаж",
-        raw_bytes=markdown.encode("utf-8"),
-    )
-
     workflow = service.upsert_workflow(
         customer_id=customer_id,
         name="AutoSpa Мойка + Шиномонтаж",
@@ -3482,12 +3480,12 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
         ],
         field_guidance={
             "service_category": "Must be exactly Мойка or Шиномонтаж.",
-            "quoted_price": "Use the prepared source knowledge; do not invent prices.",
+            "quoted_price": "Use the bound source knowledge; do not invent prices.",
         },
         assistant_instructions=(
             "Scope is only Мойка and Шиномонтаж. If another service is requested, ignore or clarify scope."
         ),
-        knowledge_file_ids=[str(knowledge_file["id"])],
+        knowledge_file_ids=[str(source_file["id"])],
         sink_type="google_sheets_composio",
         sink_config={
             "toolkit": "googlesheets",
@@ -3576,11 +3574,14 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
     assert out_of_scope["ok"] is True
 
     assert len(runtime.calls) == 4
-    for call in runtime.calls:
-        files = call["workflow"]["knowledge_files"]
-        assert len(files) == 1
-        assert files[0]["id"] == str(knowledge_file["id"])
-        assert "2х-фазная мойка кузова" in files[0]["text_excerpt"]
+    all_knowledge_text = ""
+    for call in runtime.calls[:3]:
+        answer = call["workflow"]["knowledge_answer"]
+        assert str(answer).strip()
+        all_knowledge_text += str(answer)
+    assert runtime.calls[3]["workflow"]["knowledge_answer"] == ""
+    assert "2х-фазная мойка кузова" in all_knowledge_text
+    assert "Комплект 19`R" in all_knowledge_text
 
     sink_calls = [
         call for call in composio.execute_calls if call["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"

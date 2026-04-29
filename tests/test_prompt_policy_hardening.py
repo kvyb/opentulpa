@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from opentulpa.agent.graph_builder import (
     _build_relevant_skill_discovery_context,
     _build_tool_validation_repair_message,
     _enforce_tool_message_protocol,
     _extract_invoked_skill_snapshot,
     _normalize_approval_id,
+    _routine_create_intent_validation_error,
     _sanitize_history_messages_for_model,
     _summarize_tool_validation_errors,
     _validate_model_tool_call,
@@ -24,6 +27,16 @@ from opentulpa.agent.turn_policy import (
     normalize_turn_mode,
 )
 from opentulpa.agent.utils import message_to_text
+
+
+class _RoutineIntentRuntime:
+    def __init__(self, decision: dict[str, object]) -> None:
+        self.decision = decision
+        self.calls: list[dict[str, object]] = []
+
+    async def classify_routine_create_intent(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return self.decision
 
 
 def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
@@ -96,8 +109,10 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "call send_owner_update as the first tool call" in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
     assert "call send_owner_update as the first tool call" in workflow_setup
-    assert "track source_file_ids and prepared_knowledge_file_ids" in workflow_setup
+    assert "track original source_file_ids" in workflow_setup
     assert "do not ask for polling, scanning, or schedule intervals" in workflow_setup
+    assert "required_fields are stable ASCII snake_case ids" in workflow_setup
+    assert "field_guidance keys must match required_fields ids" in workflow_setup
     assert "propose it with explicit assumptions" in workflow_setup
     assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     assert "scheduled routine execution" in routine_wake
@@ -123,7 +138,9 @@ def test_literal_chat_prompt_mode_discourages_random_follow_up_questions() -> No
     assert "collaborative intake workflow setup session" in workflow_setup
     assert "Do not ask for Telegram Business DM polling/schedule intervals" in workflow_setup
     assert "propose the workflow with stated assumptions" in workflow_setup
-    assert "bind only prepared knowledge files" in workflow_setup
+    assert "required_fields are stable machine field ids" in workflow_setup
+    assert "sink_config.field_mapping" in workflow_setup
+    assert "prepare them with business_knowledge_index" in workflow_setup
     assert "Only commit the workflow after explicit user confirmation." in workflow_setup
 
 
@@ -204,22 +221,81 @@ def test_validate_model_tool_call_accepts_valid_routine_create() -> None:
     assert err is None
 
 
-def test_validate_model_tool_call_rejects_ambiguous_routine_create_request() -> None:
+@pytest.mark.asyncio
+async def test_routine_intent_classifier_accepts_confirmation_after_routine_question() -> None:
+    runtime = _RoutineIntentRuntime(
+        {
+            "ok": True,
+            "allow_create": True,
+            "confidence": 0.94,
+            "reason": "User positively confirmed the assistant's routine creation question.",
+        }
+    )
+    args = {
+        "name": "daily-ai-oss-briefing",
+        "schedule": "0 10 * * *",
+        "instruction": "Read briefing_last_sent.md, find new AI and OSS news, send only fresh items.",
+        "implementation_command": "python3 daily_briefing.py",
+    }
     err = _validate_model_tool_call(
         call_name="routine_create",
-        args={
-            "name": "Post Draft",
-            "schedule": "0 9 * * *",
-            "instruction": "Post the saved draft and report status.",
-            "implementation_command": "python3 post_draft.py",
-        },
+        args=args,
+        latest_user_text="да, мне каждый раз нужны новые новости от тебя а не одно и то же. Создай плиз",
+        turn_mode="interactive",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is None
+    intent_err = await _routine_create_intent_validation_error(
+        runtime,
+        args=args,
+        latest_user_text="да, мне каждый раз нужны новые новости от тебя а не одно и то же. Создай плиз",
+        prior_assistant_text=(
+            "Подтверди: хочешь, чтобы я пересоздал daily-ai-oss-briefing "
+            "на 10:00 AM с антидубликатной логикой?"
+        ),
+        turn_mode="interactive",
+    )
+    assert intent_err is None
+    assert runtime.calls[0]["latest_user_text"] == (
+        "да, мне каждый раз нужны новые новости от тебя а не одно и то же. Создай плиз"
+    )
+
+
+@pytest.mark.asyncio
+async def test_routine_intent_classifier_rejects_ambiguous_routine_create_request() -> None:
+    runtime = _RoutineIntentRuntime(
+        {
+            "ok": True,
+            "allow_create": False,
+            "confidence": 0.89,
+            "reason": "User did not ask for a schedule or automation.",
+        }
+    )
+    args = {
+        "name": "Post Draft",
+        "schedule": "0 9 * * *",
+        "instruction": "Post the saved draft and report status.",
+        "implementation_command": "python3 post_draft.py",
+    }
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args=args,
         latest_user_text="Make that post today. Use the one we drafted.",
         turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
-    assert err is not None
-    assert "ACTION_CLARIFICATION_REQUIRED" in err
+    assert err is None
+    intent_err = await _routine_create_intent_validation_error(
+        runtime,
+        args=args,
+        latest_user_text="Make that post today. Use the one we drafted.",
+        prior_assistant_text="",
+        turn_mode="interactive",
+    )
+    assert intent_err is not None
+    assert "ACTION_CLARIFICATION_REQUIRED" in intent_err
 
 
 def test_summarize_tool_validation_errors_keeps_distinct_error_text() -> None:
@@ -263,22 +339,40 @@ def test_build_tool_validation_repair_message_requests_exact_argument_repair() -
     assert "Repair the tool call arguments and retry" in message
 
 
-def test_validate_model_tool_call_rejects_routine_create_when_user_wants_chat_only() -> None:
+@pytest.mark.asyncio
+async def test_routine_intent_classifier_rejects_chat_only_request() -> None:
+    runtime = _RoutineIntentRuntime(
+        {
+            "ok": True,
+            "allow_create": False,
+            "confidence": 0.96,
+            "reason": "User explicitly asked to keep planning in chat and not create a routine.",
+        }
+    )
+    args = {
+        "name": "Draft Post",
+        "schedule": "0 9 * * *",
+        "instruction": "Prepare the post and report back.",
+        "implementation_command": "python3 prepare_post.py",
+    }
     err = _validate_model_tool_call(
         call_name="routine_create",
-        args={
-            "name": "Draft Post",
-            "schedule": "0 9 * * *",
-            "instruction": "Prepare the post and report back.",
-            "implementation_command": "python3 prepare_post.py",
-        },
+        args=args,
         latest_user_text="Think it through with me here first. Do not create a routine yet.",
         turn_mode="interactive",
         required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
-    assert err is not None
-    assert "CHAT_MODE_LOCKED" in err
+    assert err is None
+    intent_err = await _routine_create_intent_validation_error(
+        runtime,
+        args=args,
+        latest_user_text="Think it through with me here first. Do not create a routine yet.",
+        prior_assistant_text="",
+        turn_mode="interactive",
+    )
+    assert intent_err is not None
+    assert "ACTION_CLARIFICATION_REQUIRED" in intent_err
 
 
 def test_validate_model_tool_call_accepts_explicit_one_time_reminder_request() -> None:

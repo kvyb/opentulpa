@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shlex
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -232,32 +231,6 @@ _WORKING_DIR_PREFIXES: dict[str, str] = {
     "opentulpa": "src/opentulpa",
 }
 
-_CHAT_ONLY_ROUTINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bstay in chat\b"),
-    re.compile(r"\b(?:just )?draft (?:it )?(?:with me )?here\b"),
-    re.compile(r"\bthink it through with me here\b"),
-    re.compile(r"\bwork through it with me here\b"),
-    re.compile(r"\bdo not create (?:a )?(?:routine|automation)\b"),
-    re.compile(r"\bdon't create (?:a )?(?:routine|automation)\b"),
-    re.compile(r"\bdo not automate (?:this|it)(?: yet)?\b"),
-    re.compile(r"\bdon't automate (?:this|it)(?: yet)?\b"),
-)
-_EXPLICIT_ROUTINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bremind me\b"),
-    re.compile(r"\bset (?:a )?reminder\b"),
-    re.compile(r"\bschedule\b"),
-    re.compile(r"\bautomation\b"),
-    re.compile(r"\bautomate\b"),
-    re.compile(r"\broutine\b"),
-    re.compile(r"\brecurr(?:ing|ence)?\b"),
-    re.compile(r"\brepeat(?:ing)?\b"),
-    re.compile(r"\b(?:daily|weekly|monthly|hourly|nightly)\b"),
-    re.compile(r"\bevery (?:morning|afternoon|evening|night|weekday|weekend)\b"),
-    re.compile(r"\bevery \d+\s*(?:minute|hour|day|week|month)s?\b"),
-    re.compile(r"\beach (?:day|week|month)\b"),
-    re.compile(r"\bonce (?:a|per) (?:day|week|month)\b"),
-)
-
 def _is_iso_datetime_schedule(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
@@ -304,27 +277,7 @@ def _has_duplicate_allowed_root_prefix(path: str) -> str | None:
     return None
 
 
-def _normalize_user_intent_text(text: str) -> str:
-    return " ".join(str(text or "").split()).strip().lower()
-
-
-def _user_requested_chat_only_for_routine(text: str) -> bool:
-    normalized = _normalize_user_intent_text(text)
-    if not normalized:
-        return False
-    return any(pattern.search(normalized) for pattern in _CHAT_ONLY_ROUTINE_PATTERNS)
-
-
-def _user_explicitly_requested_routine(text: str) -> bool:
-    normalized = _normalize_user_intent_text(text)
-    if not normalized:
-        return False
-    if _extract_relative_delay_minutes(text) is not None:
-        return True
-    return any(pattern.search(normalized) for pattern in _EXPLICIT_ROUTINE_PATTERNS)
-
-
-def _routine_create_clarification_error(latest_user_text: str, *, turn_mode: str) -> str | None:
+def _routine_create_turn_mode_error(*, turn_mode: str) -> str | None:
     normalized_turn_mode = _normalize_turn_mode(turn_mode)
     if normalized_turn_mode == "routine_wake":
         return None
@@ -333,18 +286,6 @@ def _routine_create_clarification_error(latest_user_text: str, *, turn_mode: str
             "TURN_MODE_MISMATCH: this is a background event-notification turn, not a fresh "
             "user scheduling request. Do not call routine_create here unless the event "
             "explicitly instructs schedule management."
-        )
-    if _user_requested_chat_only_for_routine(latest_user_text):
-        return (
-            "CHAT_MODE_LOCKED: the latest user message asks to keep this in chat "
-            "or avoid creating a routine. Do not call routine_create. "
-            "Reply in chat or ask one concise clarifying question instead."
-        )
-    if not _user_explicitly_requested_routine(latest_user_text):
-        return (
-            "ACTION_CLARIFICATION_REQUIRED: routine_create is only for explicit reminders, "
-            "schedules, or recurring jobs. The latest user message does not clearly request that. "
-            "Ask one concise clarifying question or continue in chat instead of creating a routine."
         )
     return None
 
@@ -410,12 +351,9 @@ def _validate_model_tool_call(
     if call_name == "routine_create":
         schedule = str(args.get("schedule", "")).strip()
         implementation_command = str(args.get("implementation_command", "")).strip()
-        clarification_error = _routine_create_clarification_error(
-            latest_user_text,
-            turn_mode=turn_mode,
-        )
-        if clarification_error:
-            return clarification_error
+        turn_mode_error = _routine_create_turn_mode_error(turn_mode=turn_mode)
+        if turn_mode_error:
+            return turn_mode_error
         if not (_is_cron_like_schedule(schedule) or _is_iso_datetime_schedule(schedule)):
             return (
                 "TOOL_VALIDATION_ERROR: routine_create schedule must be either cron "
@@ -446,6 +384,56 @@ def _validate_model_tool_call(
             )
 
     return None
+
+
+async def _routine_create_intent_validation_error(
+    runtime: Any,
+    *,
+    args: Any,
+    latest_user_text: str,
+    prior_assistant_text: str,
+    turn_mode: str,
+) -> str | None:
+    """Use the runtime classifier to decide whether routine_create is user-authorized."""
+    turn_mode_error = _routine_create_turn_mode_error(turn_mode=turn_mode)
+    if turn_mode_error:
+        return turn_mode_error
+    if _normalize_turn_mode(turn_mode) == "routine_wake":
+        return None
+
+    classifier = getattr(runtime, "classify_routine_create_intent", None)
+    if not callable(classifier):
+        logger.warning("routine_create intent classifier unavailable; allowing structural validation result")
+        return None
+    try:
+        decision = await classifier(
+            latest_user_text=latest_user_text,
+            prior_assistant_text=prior_assistant_text,
+            routine_args=args if isinstance(args, dict) else {},
+            turn_mode=_normalize_turn_mode(turn_mode),
+        )
+    except Exception as exc:
+        logger.warning("routine_create intent classifier failed; allowing structural validation result: %s", exc)
+        return None
+
+    if not isinstance(decision, dict):
+        return None
+    if not bool(decision.get("ok", True)):
+        logger.warning(
+            "routine_create intent classifier returned non-ok; allowing structural validation result: %s",
+            str(decision.get("error", "unknown"))[:200],
+        )
+        return None
+    if bool(decision.get("allow_create", False)):
+        return None
+
+    reason = str(decision.get("reason", "")).strip()[:300] or "classifier did not find user authorization"
+    return (
+        "ACTION_CLARIFICATION_REQUIRED: routine_create was not clearly authorized by the "
+        f"current conversation. Ask one concise clarifying question. Reason={reason}"
+    )
+
+
 def _build_relevant_skill_discovery_context(
     *,
     available_skills: Any,
@@ -570,7 +558,8 @@ def build_runtime_graph(runtime: Any):
         "web_image_send": ("url",),
         "uploaded_file_analyze": ("file_id",),
         "uploaded_file_inspect_structure": ("file_id",),
-        "uploaded_file_prepare_intake_knowledge": ("file_ids",),
+        "business_knowledge_index": ("file_ids",),
+        "business_knowledge_query": ("query",),
         "skill_get": ("name",),
         "skill_upsert": ("name", "description", "instructions"),
         "skill_delete": ("name",),
@@ -634,7 +623,8 @@ def build_runtime_graph(runtime: Any):
         "web_image_send",
         "uploaded_file_analyze",
         "uploaded_file_inspect_structure",
-        "uploaded_file_prepare_intake_knowledge",
+        "business_knowledge_index",
+        "business_knowledge_query",
         "skill_list",
         "skill_get",
         "skill_upsert",
@@ -1289,6 +1279,13 @@ def build_runtime_graph(runtime: Any):
 
         validation_errors: list[ToolMessage] = []
         latest_user = _latest_user_text(messages)
+        prior_assistant = ""
+        for msg in reversed(messages[:-1]):
+            if isinstance(msg, AIMessage):
+                candidate = _content_to_text(getattr(msg, "content", "")).strip()
+                if candidate:
+                    prior_assistant = candidate
+                    break
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
@@ -1305,6 +1302,17 @@ def build_runtime_graph(runtime: Any):
             if validation_error:
                 validation_errors.append(ToolMessage(content=validation_error, tool_call_id=call_id))
                 continue
+            if call_name == "routine_create":
+                intent_error = await _routine_create_intent_validation_error(
+                    runtime,
+                    args=args,
+                    latest_user_text=latest_user,
+                    prior_assistant_text=prior_assistant,
+                    turn_mode=turn_mode,
+                )
+                if intent_error:
+                    validation_errors.append(ToolMessage(content=intent_error, tool_call_id=call_id))
+                    continue
         if validation_errors:
             error_summary = _summarize_tool_validation_errors(validation_errors)
             repair_message = _build_tool_validation_repair_message(validation_errors)

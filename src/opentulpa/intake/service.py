@@ -261,6 +261,7 @@ class IntakeWorkflowService:
         composio: Any | None = None,
         telegram_business: Any | None = None,
         file_vault: FileVaultService | None = None,
+        knowledge_service: Any | None = None,
         get_agent_runtime: Any | None = None,
     ) -> None:
         self._db_path = db_path.resolve()
@@ -270,6 +271,7 @@ class IntakeWorkflowService:
         self._composio = composio
         self._telegram_business = telegram_business
         self._file_vault = file_vault
+        self._knowledge_service = knowledge_service
         self._get_agent_runtime = get_agent_runtime
         self._conversation_locks_guard = threading.Lock()
         self._conversation_locks: dict[str, asyncio.Lock] = {}
@@ -1718,6 +1720,7 @@ class IntakeWorkflowService:
                 ),
             )
             conn.commit()
+        self._index_workflow_knowledge(workflow)
         self._sync_routine(workflow)
         self._sync_skill(workflow)
         return self.get_workflow(
@@ -1853,14 +1856,129 @@ class IntakeWorkflowService:
             rows = conn.execute(query, params).fetchall()
         return [self._hydrate_booking_row(row) for row in rows]
 
-    def _knowledge_files_for_workflow(self, *, customer_id: str, workflow: dict[str, Any]) -> list[dict[str, Any]]:
-        file_vault = self._file_vault
-        if file_vault is None:
-            return []
-        return file_vault.get_many(
-            customer_id=str(customer_id or "").strip(),
-            file_ids=_unique_string_list(workflow.get("knowledge_file_ids")),
+    def _index_workflow_knowledge(self, workflow: dict[str, Any]) -> None:
+        knowledge = self._knowledge_service
+        if knowledge is None:
+            return
+        file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
+        if not file_ids:
+            return
+        with suppress(Exception):
+            knowledge.index_sources(
+                customer_id=str(workflow.get("customer_id", "") or "").strip(),
+                scope_type="intake_workflow",
+                scope_id=str(workflow.get("workflow_id", "") or "").strip(),
+                file_ids=file_ids,
+            )
+
+    def _business_knowledge_query_text(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+        active_booking: dict[str, Any] | None,
+    ) -> str:
+        latest_text = str(conversation_summary.get("latest_inbound_message_text_preview", "") or "").strip()
+        for item in reversed(recent_messages):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("sender_role", "") or "").strip().lower() not in {"customer", "lead", "user"}:
+                continue
+            text = str(item.get("text", "") or "").strip()
+            if text:
+                latest_text = text
+                break
+        active_fields: dict[str, Any] = {}
+        if isinstance(active_booking, dict):
+            active_fields = _safe_dict(active_booking.get("extracted_fields"))
+        parts = [
+            f"Latest customer message: {latest_text}",
+            f"Active booking extracted_fields JSON: {_json_dumps(active_fields)}",
+            (
+                "Workflow field contract JSON: "
+                + _json_dumps(
+                    {
+                        "required_fields": _safe_list(workflow.get("required_fields")),
+                        "field_guidance": _safe_dict(workflow.get("field_guidance")),
+                    }
+                )
+            ),
+            "Workflow scope: " + str(workflow.get("intent_description", "") or "").strip(),
+            "Workflow instructions: " + str(workflow.get("assistant_instructions", "") or "").strip(),
+            (
+                "Task: return only source-backed business facts relevant to the latest customer "
+                "message or active booking. If neither needs a source-backed fact, return NO_SOURCE."
+            ),
+        ]
+        return " ".join(part for part in parts if part).strip()
+
+    def _business_knowledge_answer_for_workflow(
+        self,
+        *,
+        customer_id: str,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+        active_booking: dict[str, Any] | None = None,
+    ) -> str:
+        knowledge = self._knowledge_service
+        if knowledge is None:
+            return ""
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
+        if not workflow_id or not file_ids:
+            return ""
+        query = self._business_knowledge_query_text(
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            recent_messages=recent_messages,
+            active_booking=active_booking,
         )
+        if not query:
+            query = str(workflow.get("intent_description", "") or "").strip() or "business knowledge"
+        workflow_context = {
+            "workflow_id": workflow_id,
+            "name": str(workflow.get("name", "") or "").strip(),
+            "intent_description": str(workflow.get("intent_description", "") or "").strip(),
+            "required_fields": _safe_list(workflow.get("required_fields")),
+            "field_guidance": _safe_dict(workflow.get("field_guidance")),
+            "assistant_instructions": str(workflow.get("assistant_instructions", "") or "").strip(),
+            "active_booking": _safe_dict(active_booking),
+        }
+        with suppress(Exception):
+            result = knowledge.query(
+                customer_id=customer_id,
+                scope_type="intake_workflow",
+                scope_id=workflow_id,
+                query=query,
+                workflow_context=workflow_context,
+            )
+            if int(getattr(result, "section_count", 0) or 0) == 0:
+                knowledge.index_sources(
+                    customer_id=customer_id,
+                    scope_type="intake_workflow",
+                    scope_id=workflow_id,
+                    file_ids=file_ids,
+                )
+                result = knowledge.query(
+                    customer_id=customer_id,
+                    scope_type="intake_workflow",
+                    scope_id=workflow_id,
+                    query=query,
+                    workflow_context=workflow_context,
+                )
+            answer = getattr(result, "answer", None)
+            if answer is None:
+                return ""
+            answer_text = str(getattr(answer, "answer_extract", "") or "").strip()
+            if not answer_text:
+                return ""
+            return (
+                f"Business knowledge query: {query[:600]}\n"
+                f"Business knowledge answer: {answer_text[:3000]}"
+            )[:3600]
+        return ""
 
     def _sync_routine(self, workflow: dict[str, Any]) -> None:
         if self._scheduler is None:
@@ -2788,9 +2906,12 @@ class IntakeWorkflowService:
             "field_guidance": workflow.get("field_guidance"),
             "assistant_instructions": workflow.get("assistant_instructions", ""),
             "knowledge_file_ids": _unique_string_list(workflow.get("knowledge_file_ids")),
-            "knowledge_files": self._knowledge_files_for_workflow(
+            "knowledge_answer": self._business_knowledge_answer_for_workflow(
                 customer_id=str(workflow["customer_id"]),
                 workflow=workflow,
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                active_booking=active_booking,
             ),
             "sink_type": workflow.get("sink_type"),
             "sink_config": workflow.get("sink_config"),
@@ -2806,6 +2927,7 @@ class IntakeWorkflowService:
                 (recent_completed_booking or {}).get("booking_id", "") or ""
             ).strip(),
             recent_message_count=len(recent_messages),
+            knowledge_answer_chars=len(str(workflow_context.get("knowledge_answer") or "")),
             execution_feedback_count=len(execution_feedback or []),
             execution_feedback=_safe_list(execution_feedback),
         )
