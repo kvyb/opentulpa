@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sqlite3
+
+from opentulpa.persistence.sqlite import connect_sqlite
 import threading
 import time
 from contextlib import suppress
@@ -38,8 +40,6 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
 
 _VALID_SCOPE_TYPES = {"workflow_setup", "intake_workflow", "customer_business"}
-_SQLITE_BUSY_TIMEOUT_MS = 10_000
-_SQLITE_CONNECT_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
 _DEFAULT_SOURCE_PACK_CHAR_LIMIT = 800_000
 _DEFAULT_ORACLE_MODEL = "google/gemini-3.1-flash-lite-preview"
 _DEFAULT_ORACLE_MAX_OUTPUT_TOKENS = 1000
@@ -279,15 +279,7 @@ class BusinessKnowledgeService:
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(
-            self.db_path,
-            check_same_thread=False,
-            timeout=_SQLITE_CONNECT_TIMEOUT_SECONDS,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+        return connect_sqlite(self.db_path, wal=True)
 
     def _init_db(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)

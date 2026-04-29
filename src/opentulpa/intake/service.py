@@ -8,6 +8,8 @@ import json
 import logging
 import re
 import sqlite3
+
+from opentulpa.persistence.sqlite import connect_sqlite
 import threading
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -886,9 +888,7 @@ class IntakeWorkflowService:
         }
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_sqlite(self._db_path, wal=True)
 
     def _init_db(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
