@@ -131,6 +131,7 @@ def _install_minimal_graph_runtime_stubs(
     runtime: OpenTulpaLangGraphRuntime,
     *,
     ainvoke_model: Any,
+    verify_completion_claim: Any | None = None,
     behavior_events: list[str] | None = None,
 ) -> None:
     async def _live_time(customer_id: str) -> dict[str, str]:
@@ -164,6 +165,11 @@ def _install_minimal_graph_runtime_stubs(
     runtime.ainvoke_model = ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    async def _default_verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {"usable": True, "mismatch": False, "applies": False, "confidence": 0.0}
+
+    runtime.verify_completion_claim = verify_completion_claim or _default_verify_completion_claim  # type: ignore[assignment]
     runtime.log_behavior_event = (  # type: ignore[assignment]
         (lambda **kwargs: behavior_events.append(str(kwargs.get("event", ""))))
         if behavior_events is not None
@@ -228,6 +234,92 @@ async def test_graph_finalize_does_not_reuse_prior_turn_assistant_reply() -> Non
 
     assert first["final_response_text"] == "first reply"
     assert second["final_response_text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_graph_claim_check_repairs_false_success_claim() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    call_count = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return AIMessage(content="Done — I already sent the update.")
+        return AIMessage(content="I have not sent it yet. I can do that now.")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        assistant_text = str(kwargs.get("assistant_text", ""))
+        if "already sent" in assistant_text:
+            return {"usable": True, "mismatch": True, "reason": "unsupported completion claim"}
+        return {"usable": True, "mismatch": False}
+
+    _install_minimal_graph_runtime_stubs(
+        runtime,
+        ainvoke_model=_ainvoke_model,
+        verify_completion_claim=_verify_completion_claim,
+    )
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Did you send the update?")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-claim-check-repair",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_claim_repair",
+        },
+        config={"configurable": {"thread_id": "chat-claim-check-repair"}, "recursion_limit": 8},
+    )
+    assert call_count == 2
+    assert result["final_response_text"] == "I have not sent it yet. I can do that now."
+
+
+@pytest.mark.asyncio
+async def test_graph_claim_check_repairs_empty_output() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    call_count = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return AIMessage(content="")
+        return AIMessage(content="Here is the answer.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="answer please")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-claim-check-empty",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_empty_repair",
+        },
+        config={"configurable": {"thread_id": "chat-claim-check-empty"}, "recursion_limit": 8},
+    )
+    assert call_count == 2
+    assert result["final_response_text"] == "Here is the answer."
 
 
 @pytest.mark.asyncio

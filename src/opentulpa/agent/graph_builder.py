@@ -740,7 +740,9 @@ def build_runtime_graph(runtime: Any):
         payload.update(fields)
         log_event(event=event, **payload)
 
-    async def agent_node(state: AgentState) -> Command[Literal["agent", "validate_tools", "finalize_turn"]]:
+    async def agent_node(
+        state: AgentState,
+    ) -> Command[Literal["agent", "validate_tools", "claim_check", "finalize_turn"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
@@ -1320,10 +1322,10 @@ def build_runtime_graph(runtime: Any):
             update["active_invoked_skill_context"] = invoked_skill_context
             update["active_invoked_skill_names"] = invoked_skill_names
             update["active_skill_context"] = invoked_skill_context
-        goto: Literal["validate_tools", "finalize_turn"] = (
+        goto: Literal["validate_tools", "claim_check"] = (
             "validate_tools"
             if isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
-            else "finalize_turn"
+            else "claim_check"
         )
         if (
             turn_mode == "workflow_setup"
@@ -2057,7 +2059,7 @@ def build_runtime_graph(runtime: Any):
         "agent",
         agent_node,
         retry_policy=RetryPolicy(max_attempts=3),
-        destinations=("agent", "validate_tools", "finalize_turn"),
+        destinations=("agent", "validate_tools", "claim_check", "finalize_turn"),
     )
     builder.add_node(
         "validate_tools",
@@ -2070,6 +2072,12 @@ def build_runtime_graph(runtime: Any):
         tools_node,
         retry_policy=RetryPolicy(max_attempts=3),
         destinations=("agent", END),
+    )
+    builder.add_node(
+        "claim_check",
+        claim_check_node,
+        retry_policy=RetryPolicy(max_attempts=2),
+        destinations=("agent", "finalize_turn"),
     )
     builder.add_node("finalize_turn", finalize_turn_node, retry_policy=RetryPolicy(max_attempts=1))
     builder.add_edge(START, "agent")
