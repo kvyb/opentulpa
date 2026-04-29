@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from opentulpa.integrations.browser_use_captcha import (
+    _DETECT_CAPTCHA_SCRIPT,
     build_capsolver_controller,
     detect_browser_captcha,
     inject_browser_captcha_token,
@@ -309,6 +310,42 @@ async def test_browser_captcha_detection_parses_recaptcha_v3_json() -> None:
     assert challenge.website_url == "https://example.com/login"
     assert challenge.website_key == "site-key"
     assert challenge.page_action == "login"
+
+
+@pytest.mark.asyncio
+async def test_browser_captcha_detection_script_keeps_turnstile_callback_widget() -> None:
+    pytest.importorskip("playwright.async_api")
+    from playwright.async_api import Error as PlaywrightError
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        try:
+            browser = await playwright.chromium.launch(headless=True)
+        except PlaywrightError as exc:
+            pytest.skip(f"Playwright Chromium is unavailable: {exc}")
+
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html>
+                  <body>
+                    <div
+                      class="cf-turnstile"
+                      data-sitekey="site-key"
+                      data-callback="onTurnstile"
+                    ></div>
+                  </body>
+                </html>
+                """
+            )
+
+            detected = await page.evaluate(_DETECT_CAPTCHA_SCRIPT)
+        finally:
+            await browser.close()
+
+    assert detected["captchaType"] == "turnstile"
+    assert detected["websiteKey"] == "site-key"
 
 
 @pytest.mark.asyncio

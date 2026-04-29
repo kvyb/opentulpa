@@ -43,7 +43,7 @@ _DETECT_CAPTCHA_SCRIPT = """() => {
   const pageSource = scriptTexts + '\\n' + scriptSrcs.join('\\n');
 
   const recaptchaElement = document.querySelector(
-    '.g-recaptcha[data-sitekey], [data-sitekey][class*="g-recaptcha"], [data-sitekey][data-callback]'
+    '.g-recaptcha[data-sitekey], [data-sitekey][class*="g-recaptcha"]'
   );
   const recaptchaKey = attr(recaptchaElement, 'data-sitekey');
   if (recaptchaKey) {
