@@ -1108,6 +1108,7 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     )
 
     assert result["ok"] is True
+    assert len(runtime.calls) == 2
     assert runtime.calls[0]["workflow"]["assistant_instructions"] == "Be concise and confirm only explicit booking times."
     assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == [str(knowledge["id"])]
     assert runtime.calls[0]["workflow"]["knowledge_answer"] == ""
@@ -1220,6 +1221,112 @@ async def test_telegram_business_default_workflow_does_not_intent_gate_model_rep
     assert sent["business_connection_id"] == "bc_123"
     assert sent["reply_to_message_id"] == 10
     assert "Чем помочь" in sent["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_no_file_workflow_does_not_silence_business_knowledge_decision(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer asks for an SUV wash price and wants to book.",
+                "extracted_fields": {"car_type": "SUV", "wash_type": "exterior", "date": "tomorrow"},
+                "missing_fields": ["time"],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "needs_business_knowledge": True,
+                "business_knowledge_query": "What is the price for an SUV car wash?",
+                "reason": "Need a source-backed price before replying.",
+            }
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "How much for an SUV exterior wash? Tomorrow maybe.",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Car Wash",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business car wash booking requests.",
+        required_fields=["car_type", "wash_type", "date", "time"],
+        assistant_instructions="If pricing is unavailable, say it needs confirmation and continue booking intake.",
+        knowledge_file_ids=[],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    assert len(runtime.calls) == 1
+    assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == []
+    assert runtime.calls[0]["workflow"]["knowledge_answer"] == ""
+    sent = telegram_business.client.sent_messages[0]
+    assert sent["chat_id"] == "555"
+    assert sent["business_connection_id"] == "bc_123"
+    assert sent["reply_to_message_id"] == 10
+    assert "confirm" in sent["text"].lower()
+    assert "time" in sent["text"].lower()
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "active"
+    assert bookings[0]["sink_write_status"] == "pending"
+    assert bookings[0]["extracted_fields"]["car_type"] == "SUV"
+    assert not (tmp_path / "tulpa_stuff" / "bookings.csv").exists()
 
 
 @pytest.mark.asyncio
