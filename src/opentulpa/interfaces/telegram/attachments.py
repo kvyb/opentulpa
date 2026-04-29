@@ -121,7 +121,7 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
     lines = [
         "Internal uploaded-file context. Do not quote this metadata verbatim to the user.",
         "Use file_id values with uploaded_file_* tools when deeper inspection is needed.",
-        "If a spreadsheet, price list, FAQ, or policy is intended for workflow setup, prepare it with business_knowledge_index and query it with business_knowledge_query before activation.",
+        "If a spreadsheet, price list, FAQ, or policy is intended for workflow setup, start/open the setup session first, then prepare it with business_knowledge_index and query it with business_knowledge_query before activation.",
         "User-facing reply guidance: briefly acknowledge the file by name, summarize only human-meaningful available content, and ask one focused follow-up question.",
     ]
     for rec in records:
@@ -135,7 +135,8 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
         ):
             summary = (
                 "Spreadsheet file stored. Use uploaded_file_inspect_structure with this file_id "
-                "or business_knowledge_index to prepare workflow knowledge without loading the workbook into chat context."
+                "or business_knowledge_index to prepare workflow knowledge without loading the workbook into chat context. "
+                "Do not use uploaded_file_analyze to create broad workflow source packs."
             )
         summary = re.sub(r"\s+", " ", summary)[:1200]
         lines.append(

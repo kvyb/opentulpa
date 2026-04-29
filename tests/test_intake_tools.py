@@ -306,6 +306,44 @@ async def test_business_knowledge_query_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_business_knowledge_query_current_workflow_resolves_active_setup_scope() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(200, {"session": {"session_id": "iwsetup_123"}}),
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "query": "wash prices",
+                    "scope_type": "workflow_setup",
+                    "scope_id": "iwsetup_123",
+                    "answer_extract": "Мойка starts at 200",
+                },
+            ),
+        ],
+        thread_id="chat_123",
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["business_knowledge_query"].ainvoke(
+        {
+            "query": "wash prices",
+            "scope_type": "current_workflow",
+            "scope_id": "iwsetup_123",
+        }
+    )
+
+    assert result == {
+        "query": "wash prices",
+        "answer_extract": "Мойка starts at 200",
+    }
+    assert runtime.calls[0][1] == "/internal/intake/setup/get"
+    assert runtime.calls[1][1] == "/internal/knowledge/query"
+    assert runtime.calls[1][2]["json_body"]["scope_type"] == "workflow_setup"
+    assert runtime.calls[1][2]["json_body"]["scope_id"] == "iwsetup_123"
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_status_posts_expected_payload() -> None:
     runtime = DummyRuntime([Response(200, {"ok": True, "connected": True, "connections": []})])
     tools = register_runtime_tools(runtime)

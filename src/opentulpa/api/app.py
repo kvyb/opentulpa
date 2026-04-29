@@ -349,6 +349,8 @@ def create_app(
         intake_workflows=intake_service,
         knowledge_service=knowledge,
     )
+    if runtime is not None:
+        runtime._workflow_setup_service = workflow_setup_service  # type: ignore[attr-defined]
     workflow_setup_orchestrator = WorkflowSetupOrchestrator(
         setup_service=workflow_setup_service,
     )

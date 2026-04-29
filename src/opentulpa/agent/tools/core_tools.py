@@ -211,8 +211,6 @@ async def _resolve_business_knowledge_scope(
         if requested_id:
             return requested_type, requested_id
         return {"error": f"{requested_type} scope requires scope_id"}
-    if requested_id:
-        return "intake_workflow", requested_id
 
     customer_id = require_customer_id(runtime)
     thread_id = require_thread_id(runtime)
@@ -233,8 +231,11 @@ async def _resolve_business_knowledge_scope(
             session = payload.get("session") if isinstance(payload, dict) else None
             if isinstance(session, dict):
                 session_id = str(session.get("session_id", "") or "").strip()
-                if session_id:
+                if session_id and (not requested_id or requested_id == session_id):
                     return "workflow_setup", session_id
+
+    if requested_id:
+        return "intake_workflow", requested_id
 
     match = re.search(r"(iwf_[A-Za-z0-9]+)", thread_id)
     if match:
@@ -642,7 +643,11 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         file_id: str,
         question: str | None = None,
     ) -> Any:
-        """Analyze a previously uploaded file again, optionally with a focused question."""
+        """Analyze a previously uploaded file again, optionally with a focused question.
+
+        Do not use this as a fallback for workflow knowledge files that should be
+        indexed and queried with business_knowledge_index/business_knowledge_query.
+        """
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -697,7 +702,8 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         """Prepare uploaded source files as scoped business knowledge.
 
         Use this during workflow setup when uploaded files should become durable
-        source knowledge for the workflow. This normalizes source files into an
+        source knowledge for the workflow. If no setup session exists yet, call
+        intake_workflow_setup_begin first. This normalizes source files into an
         LLM-readable knowledge pack. Bind original uploaded source file ids to
         draft_patch.knowledge_file_ids; do not create a summarized Markdown pack.
         """

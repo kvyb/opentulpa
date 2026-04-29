@@ -73,7 +73,7 @@ def select_table_evidence(
     query: str,
     target_terms: list[str],
     qualifier_terms: list[str],
-    limit: int = 8,
+    limit: int = 20,
 ) -> list[TableRowEvidence]:
     """Select compact table rows for an oracle using structured query intent."""
 
@@ -95,10 +95,11 @@ def select_table_evidence(
             context_text=context_text,
         )
         qualifier_score = _coverage_score(safe_qualifiers, context_text)
+        direct_label_score = max((_direct_label_score(term, row.item) for term in safe_targets), default=0.0)
         # Item/table match is required. Qualifiers only sort plausible rows.
         if target_score <= 0:
             continue
-        score = (target_score * 100.0) + (qualifier_score * 18.0)
+        score = (target_score * 100.0) + (qualifier_score * 18.0) + (direct_label_score * 30.0)
         scored.append(
             TableRowEvidence(
                 filename=row.filename,
@@ -445,6 +446,20 @@ def _phrase_match_score(needle: str, haystack: str) -> float:
     return max(token_score, sequence_score)
 
 
+def _direct_label_score(term: str, item: str) -> float:
+    term_norm = _normalized_text(term)
+    item_norm = _normalized_text(item)
+    if not term_norm or not item_norm:
+        return 0.0
+    if term_norm == item_norm:
+        return 1.0
+    if item_norm in term_norm or term_norm in item_norm:
+        shorter = min(len(term_norm), len(item_norm))
+        longer = max(len(term_norm), len(item_norm))
+        return shorter / longer if longer else 0.0
+    return _phrase_match_score(term_norm, item_norm) * 0.5
+
+
 def _target_coverage_score(*, target_terms: list[str], identity_text: str, context_text: str) -> float:
     if not target_terms:
         return 0.0
@@ -497,21 +512,38 @@ def _primary_label(value: str) -> str:
 
 
 def _row_cells_text(row: TableRowEvidence) -> str:
+    cells = [fact for fact in row.cells if fact.value_kind != "blank"]
     header_counts: dict[str, int] = defaultdict(int)
     header_totals: dict[str, int] = defaultdict(int)
-    for fact in row.cells:
-        if fact.value_kind == "blank":
-            continue
+    for fact in cells:
         header_totals[_normalized_text(fact.header)] += 1
+
+    group_by_column = _header_group_by_column(cells)
+    show_groups = bool(group_by_column) and any(total > 1 for total in header_totals.values())
+
     parts: list[str] = []
-    for fact in row.cells:
-        if fact.value_kind == "blank":
-            continue
+    for fact in cells:
         key = _normalized_text(fact.header)
         header_counts[key] += 1
         occurrence = f" [{header_counts[key]}]" if header_totals[key] > 1 else ""
-        parts.append(f"{fact.column} {fact.header}{occurrence} = {fact.value}")
+        group = f"header_group {group_by_column[fact.column]} " if show_groups else ""
+        parts.append(f"{fact.column} {group}{fact.header}{occurrence} = {fact.value}")
     return "; ".join(parts)
+
+
+def _header_group_by_column(cells: list[TableFact]) -> dict[str, int]:
+    groups: dict[str, int] = {}
+    last_header = ""
+    current_group = 0
+    for fact in sorted(cells, key=lambda item: _column_index(item.column)):
+        header = _normalized_text(fact.header)
+        if not header:
+            continue
+        if header != last_header:
+            current_group += 1
+            last_header = header
+        groups[fact.column] = current_group
+    return groups
 
 
 def _toon_value(value: Any) -> str:

@@ -109,6 +109,43 @@ def _dash_table_xlsx_bytes() -> bytes:
     return out.getvalue()
 
 
+def _duplicate_header_groups_xlsx_bytes() -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Wash"
+    ws.append(
+        [
+            "Service",
+            "Class 1",
+            "Class 1",
+            "Class 2",
+            "Class 2",
+            "Class 3",
+            "Class 3",
+        ]
+    )
+    ws.append(["2-phase wash", "1000", "1000", "1200", "1200", "1400", "1400"])
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def _bundle_and_direct_service_xlsx_bytes() -> bytes:
+    wb = Workbook()
+    packages = wb.active
+    packages.title = "Packages"
+    packages.append(["Package", "SUV"])
+    packages.append(["Premium bundle: Basic wash; Wax; Interior clean", "199"])
+
+    services = wb.create_sheet("Services")
+    services.append(["Service", "SUV"])
+    services.append(["Basic wash", "29"])
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
 def _sections_from_xlsx(raw_bytes: bytes, *, filename: str = "prices.xlsx"):
     sections, warnings, source_kind = extract_source_sections(
         record={
@@ -232,6 +269,42 @@ def test_table_normalizer_keeps_dash_only_cells_as_values_not_headers() -> None:
     )
 
     assert rows[0].item == "13R and smaller"
+
+
+def test_table_normalizer_labels_repeated_header_groups_left_to_right() -> None:
+    facts = table_facts_from_sections(_sections_from_xlsx(_duplicate_header_groups_xlsx_bytes()))
+
+    rows = select_table_evidence(
+        facts,
+        query="2-phase wash class 3 price",
+        target_terms=["2-phase wash"],
+        qualifier_terms=["class 3"],
+    )
+    toon = table_evidence_to_toon(
+        rows,
+        query="2-phase wash class 3 price",
+        target_terms=["2-phase wash"],
+        qualifier_terms=["class 3"],
+    )
+
+    assert rows[0].item == "2-phase wash"
+    assert "header_group 1 Class 1 [1] = 1000" in toon
+    assert "header_group 3 Class 3 [1] = 1400" in toon
+
+
+def test_table_normalizer_prefers_direct_service_rows_over_bundle_rows() -> None:
+    facts = table_facts_from_sections(_sections_from_xlsx(_bundle_and_direct_service_xlsx_bytes()))
+
+    rows = select_table_evidence(
+        facts,
+        query="SUV basic wash price",
+        target_terms=["Basic wash"],
+        qualifier_terms=["SUV"],
+    )
+
+    assert rows[0].table == "Services"
+    assert rows[0].item == "Basic wash"
+    assert any(row.table == "Packages" for row in rows[1:])
 
 
 def test_business_knowledge_uses_overview_evidence_for_broad_table_questions(tmp_path: Path) -> None:

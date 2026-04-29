@@ -352,6 +352,9 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
 
         Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
         For local_csv workflows, use draft_patch.sink_config={"file_path": "..."}.
+        For google_sheets_composio workflows, put spreadsheet targets in
+        draft_patch.sink_config.static_arguments, for example spreadsheetId and sheetName;
+        put output column labels in draft_patch.sink_config.field_mapping keyed by required field id.
         draft_patch.required_fields must be stable ASCII snake_case ids, not display labels.
         Put localized wording, owner terminology, and extraction hints in draft_patch.field_guidance
         or draft_patch.assistant_instructions. field_guidance keys must match required_fields ids.
@@ -402,7 +405,11 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_setup_mark_proposed() -> Any:
-        """Mark the current workflow setup draft as the proposal shown to the user."""
+        """Mark the current workflow setup draft as the proposal shown to the user.
+
+        Call this after ready preflight and before showing the proposal summary.
+        Without this marker, owner confirmation cannot be committed safely.
+        """
         customer_id = require_customer_id(runtime)
         thread_id = require_thread_id(runtime)
         r = await runtime._request_with_backoff(
@@ -417,7 +424,12 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_setup_confirm_current() -> Any:
-        """Confirm the current proposed workflow draft for the active setup session."""
+        """Confirm the current proposed workflow draft for the active setup session.
+
+        Use this only after the owner explicitly confirms the proposal. If this reports
+        that the workflow draft has not been proposed yet, call preflight and
+        intake_workflow_setup_mark_proposed before retrying.
+        """
         customer_id = require_customer_id(runtime)
         thread_id = require_thread_id(runtime)
         r = await runtime._request_with_backoff(
@@ -432,7 +444,11 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_setup_commit() -> Any:
-        """Persist the confirmed workflow setup draft and activate the workflow."""
+        """Persist the confirmed workflow setup draft and activate the workflow.
+
+        This must follow intake_workflow_setup_confirm_current in the same confirmation flow.
+        Do not tell the owner the workflow is saved until this tool succeeds.
+        """
         customer_id = require_customer_id(runtime)
         thread_id = require_thread_id(runtime)
         r = await runtime._request_with_backoff(

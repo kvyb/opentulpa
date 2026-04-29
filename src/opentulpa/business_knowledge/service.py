@@ -615,7 +615,7 @@ class BusinessKnowledgeService:
             query=query,
             target_terms=intent["target_terms"],
             qualifier_terms=intent["qualifier_terms"],
-            limit=12,
+            limit=20,
         )
         if not rows:
             return table_overview_to_toon(
@@ -923,11 +923,16 @@ def _oracle_system_prompt() -> str:
         "You are a workflow business knowledge oracle. Answer only from the SOURCE PACK. "
         "The SOURCE PACK is normalized evidence from user-uploaded files. It may be compact TOON table evidence. "
         "For TOON evidence, row_label is the original row text and cells contain column/header/value pairs. "
+        "When cells include header_group N, the group numbers are distinct column/header groups from left to right; "
+        "if the query names class, tier, category, option, or group N, use that matching header_group N. "
         "Duplicate header suffixes like [1] and [2] mean repeated adjacent source columns in spreadsheet order; "
         "when row_label clearly lists ordered variants, map earlier/later variants to earlier/later duplicate columns. "
         "If SOURCE PACK mode is overview, summarize available matching services/categories and ask a concise clarifying "
         "question when an exact price requires a service, variant, class, size, or other qualifier. "
         "For capability questions, answer yes only if a matching source row supports that capability; otherwise say you need to confirm. "
+        "If the query or workflow context says the latest customer request is outside the configured workflow scope, "
+        "do not answer source facts for that out-of-scope category; return exactly NO_SOURCE. "
+        "If the query is only about cancelling, rescheduling, or correcting an existing booking and no new source-backed business fact is needed, return exactly NO_SOURCE. "
         "Do not guess, infer unsupported facts, or use outside knowledge. "
         "If multiple rows support the same requested fact with different values, state the concise distinction instead of choosing silently. "
         "Return a plain string only: concise but informative facts the intake agent needs, with source refs when useful. "

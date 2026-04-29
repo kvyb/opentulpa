@@ -718,6 +718,8 @@ class _IntakeWorkflowDecision(BaseModel):
     booking_action: str = "ignore"
     save_payload: dict[str, Any] = Field(default_factory=dict)
     sink_arguments: dict[str, Any] = Field(default_factory=dict)
+    needs_business_knowledge: bool = False
+    business_knowledge_query: str = ""
     knowledge_source_refs: list[Any] = Field(default_factory=list)
     grounding_status: str = ""
     reason: str = ""
@@ -741,7 +743,8 @@ def _build_intake_workflow_system_prompt() -> str:
         "matches_workflow (bool), confidence (0..1), conversation_summary (string), "
         "extracted_fields (object), missing_fields (string array), reply_action (string), "
         "reply_text (string), ready_to_save (bool), booking_action (string), "
-        "save_payload (object), sink_arguments (object), knowledge_source_refs (string array), "
+        "save_payload (object), sink_arguments (object), needs_business_knowledge (bool), "
+        "business_knowledge_query (string), knowledge_source_refs (string array), "
         "grounding_status (string), reason (string).\n\n"
         "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "Allowed reply_action values: none, send_reply, mark_cancelled.\n\n"
@@ -762,6 +765,25 @@ def _build_intake_workflow_system_prompt() -> str:
         "- If customer messages conflict, prefer the latest customer-provided value unless the newer message is too vague to override the earlier one.\n"
         "- Do not ask for a field that is already reliably known unless the value is conflicting or unclear.\n"
         "- missing_fields must list only fields that are truly still needed before save.\n\n"
+        "Booking-state fast path:\n"
+        "- If the latest customer message clearly cancels, reschedules, corrects, or otherwise updates an active "
+        "booking or a recent completed booking, treat it as a booking-state operation. Reuse the saved booking "
+        "fields, do not require workflow.knowledge_answer or business_knowledge_query unless the latest message "
+        "asks for a new source-backed service or price fact, and return the JSON decision directly.\n"
+        "- For a clear cancellation of an active or recent completed booking: use matches_workflow=true, "
+        "booking_action=update_active or edit_recent_completed, reply_action=mark_cancelled, and a reply_text "
+        "that confirms the cancellation. If the sink should be updated, ready_to_save=true and save_payload "
+        "should contain the merged booking fields plus status=\"cancelled\".\n\n"
+        "Business knowledge request policy:\n"
+        "- If workflow has knowledge_file_ids, workflow.knowledge_answer is empty, and the latest message needs a "
+        "source-backed price, service, policy, menu, or capability fact that is not already present in saved "
+        "booking state, set needs_business_knowledge=true and business_knowledge_query to one concise natural "
+        "language query. Do not guess the fact and do not ask the customer before the knowledge lookup.\n"
+        "- When needs_business_knowledge=true, return the partial classification and extracted customer-provided "
+        "fields, but set ready_to_save=false, reply_action=none, and keep reply_text empty.\n"
+        "- If workflow.knowledge_answer is present, use it and set needs_business_knowledge=false. If it says "
+        "NO_SOURCE or does not support the requested fact, ask one clarifying question or redirect according to "
+        "workflow scope instead of requesting knowledge again.\n\n"
         "Reply policy:\n"
         "- If details are missing, set reply_action=send_reply with one concise, high-leverage follow-up question.\n"
         "- Ask at most one compact question at a time unless a single sentence can naturally request two tightly related missing fields.\n"
@@ -782,6 +804,10 @@ def _build_intake_workflow_system_prompt() -> str:
         "Save policy:\n"
         "- Set ready_to_save=true only when all required fields are available with enough clarity to create/update the booking.\n"
         "- When ready_to_save=true, save_payload must contain the merged final field set that should be persisted now.\n"
+        "- When ready_to_save=true, reply_text must describe the completed action. Never ask the customer to confirm "
+        "a booking or change that you are saving now. If confirmation is still needed, set ready_to_save=false.\n"
+        "- When needs_business_knowledge=true, set ready_to_save=false, reply_action=none, reply_text=\"\", and "
+        "business_knowledge_query to the exact missing source-backed fact.\n"
         "- sink_arguments may contain sink-tool arguments or overrides discovered via tools or context "
         "(for example sheetName for Google Sheets). These are merged into the final sink write.\n"
         "- When ready_to_save=false, save_payload should usually be empty.\n"
@@ -793,6 +819,8 @@ def _build_intake_workflow_system_prompt() -> str:
         "2. Customer says 'actually make it 4pm instead' after a recent completed booking -> matches_workflow=true, booking_action=edit_recent_completed, extracted_fields.time='4pm'.\n"
         "3. Customer says 'also book my other car tomorrow evening' after an earlier finished booking -> matches_workflow=true, booking_action=create_new_booking.\n"
         "4. Customer only reacts with 'thanks' or sends unrelated chat -> matches_workflow=false, booking_action=ignore, reply_action=none.\n"
+        "5. Customer says 'cancel it please' after an active or recent completed booking -> matches_workflow=true, booking_action=update_active or edit_recent_completed, reply_action=mark_cancelled, reply_text confirms cancellation.\n"
+        "6. Customer asks for a price from bound knowledge and workflow.knowledge_answer is empty -> needs_business_knowledge=true with a concise business_knowledge_query.\n"
         "No markdown. No extra keys."
     )
 
@@ -1014,7 +1042,7 @@ def _build_intake_workflow_agent_prompt(
         "- Inspect external state only when the workflow explicitly requires it before this decision.\n"
         "- Return strict JSON only as the final answer.\n\n"
         "Tool-use guidance:\n"
-        "- You may use normal tools, especially business_knowledge_query, uploaded_file_get, uploaded_file_analyze, uploaded_file_search, "
+        "- You may use normal tools, especially uploaded_file_get, uploaded_file_analyze, uploaded_file_search, "
         "composio_tool_search, composio_tool_schema, composio_tool_execute, and "
         "composio_instagram_reply_precheck when they materially help.\n"
         "- Do not read or search a sink just because it is Google Sheets or Composio. A write sink is not an "
@@ -1025,11 +1053,11 @@ def _build_intake_workflow_agent_prompt(
         "search for sink schema or read tools; leave sink_arguments empty unless a required write argument is missing.\n"
         "- If the sink write needs missing concrete target metadata such as a Google Sheets tab name, inspect the "
         "sink with Composio tools and return only those discovered values in sink_arguments.\n"
-        "- If the workflow has bound knowledge files, use workflow.knowledge_answer first. "
-        "Call business_knowledge_query only for a targeted missing or ambiguous source-backed fact. "
-        "When you call it, use the returned plain text directly. Do not inspect raw bound source files during intake unless the oracle returns empty text.\n"
-        "- If active_booking.extracted_fields already contains the needed source-backed business facts and the latest inbound message supplies only missing customer-provided fields, do not call business_knowledge_query. Return the merged decision.\n"
-        "- Avoid repeated business_knowledge_query calls. For one decision, use the prepared knowledge answer or one targeted oracle query, then return JSON using the best supported evidence or ask one clarifying question.\n"
+        "- Do not call business_knowledge_query during this intake decision turn. If workflow.knowledge_answer is "
+        "empty and a source-backed business fact is needed, return needs_business_knowledge=true with one concise "
+        "business_knowledge_query. The intake service will run the oracle and call you again with workflow.knowledge_answer.\n"
+        "- If workflow.knowledge_answer is present, use it and return a final decision. Do not request knowledge again.\n"
+        "- If active_booking.extracted_fields already contains the needed source-backed business facts and the latest inbound message supplies only missing customer-provided fields, return the merged decision without requesting business knowledge.\n"
         "- Prefer minimal read-only tool usage first.\n"
         "- Do not create, update, delete, or run workflows/routines from inside this turn.\n"
         "- Do not call intake_workflow_upsert, intake_workflow_delete, intake_workflow_run, routine_create, or routine_delete.\n"
@@ -1040,12 +1068,19 @@ def _build_intake_workflow_agent_prompt(
         "- Return strict JSON only with keys:\n"
         "  matches_workflow, confidence, conversation_summary, extracted_fields, missing_fields, "
         "reply_action, reply_text, ready_to_save, booking_action, save_payload, sink_arguments, "
-        "knowledge_source_refs, grounding_status, reason.\n"
+        "needs_business_knowledge, business_knowledge_query, knowledge_source_refs, grounding_status, reason.\n"
         "- booking_action must be one of: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "- reply_action must be one of: none, send_reply, mark_cancelled.\n"
         "- If availability is blocked or conflicting, do not set ready_to_save=true.\n"
         "- If details are missing, ask one concise follow-up question in reply_text.\n"
+        "- If ready_to_save=true, reply_text must be a final saved/updated/cancelled confirmation and must not ask "
+        "for confirmation. If you still need confirmation from the customer, use ready_to_save=false.\n"
+        "- If needs_business_knowledge=true, set ready_to_save=false, reply_action=none, reply_text=\"\", and "
+        "business_knowledge_query to the exact missing source-backed fact.\n"
         "- If the customer asks a business/service/pricing/booking question that is close to the workflow but outside its configured scope, return matches_workflow=false, booking_action=ignore, reply_action=send_reply with a concise redirect based on workflow instructions.\n"
+        "- If the latest customer message is only cancelling, rescheduling, or correcting an active/recent booking, "
+        "reuse active_booking or recent_completed_booking and do not call business_knowledge_query unless a new "
+        "source-backed business fact is requested.\n"
         "- If execution_feedback is present, you are replanning after a real tool or application error. "
         "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
         "- For source-backed business facts in reply_text or save_payload, leave knowledge_source_refs empty and set grounding_status=grounded only when workflow.knowledge_answer or business_knowledge_query directly supports the fact. If no business knowledge answer supports a fact, set grounding_status=no_source and ask to confirm instead.\n"
@@ -1213,6 +1248,7 @@ class OpenTulpaLangGraphRuntime:
         self._customer_profile_service = customer_profile_service
         self._thread_rollup_service = thread_rollup_service
         self._link_alias_service = link_alias_service
+        self._workflow_setup_service: Any | None = None
         self._context_token_limit = max(6000, min(24000, int(context_token_limit)))
         self._context_short_term_high_tokens = self._context_token_limit
         self._context_short_term_low_tokens = min(
@@ -3035,6 +3071,8 @@ class OpenTulpaLangGraphRuntime:
             "approval_handoff": False,
             "claim_check_retry_count": 0,
             "claim_check_needs_retry": False,
+            "workflow_setup_no_progress_retry_count": 0,
+            "workflow_setup_repair_instruction": "",
             "frozen_prompt_context": None,
             "frozen_history_projection": None,
             **skill_state,
@@ -3298,7 +3336,14 @@ class OpenTulpaLangGraphRuntime:
                 )
                 return cleaned.strip()
             messages = result.get("messages", [])
-            for message in reversed(messages):
+            latest_human_index = -1
+            for index, message in enumerate(messages):
+                if isinstance(message, HumanMessage):
+                    latest_human_index = index
+            current_turn_messages = (
+                messages[latest_human_index + 1 :] if latest_human_index >= 0 else messages
+            )
+            for message in reversed(current_turn_messages):
                 if isinstance(message, AIMessage) and (message.content or "").strip():
                     cleaned = str(message.content)
                     self.register_links_from_text(
@@ -4148,10 +4193,6 @@ class OpenTulpaLangGraphRuntime:
             and callable(getattr(self, "ainvoke_text", None))
         )
         sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
-        has_bound_knowledge = any(
-            str(item or "").strip()
-            for item in list(workflow.get("knowledge_file_ids") or [])
-        )
         sink_config = workflow.get("sink_config") if isinstance(workflow.get("sink_config"), dict) else {}
         static_arguments = sink_config.get("static_arguments") if isinstance(sink_config, dict) else {}
         sink_needs_tool_metadata = sink_type in {"google_sheets_composio", "generic_composio_write"} and not bool(
@@ -4159,7 +4200,6 @@ class OpenTulpaLangGraphRuntime:
         )
         prefer_agent_runtime = tool_enabled_runtime and (
             bool(execution_feedback)
-            or has_bound_knowledge
             or sink_needs_tool_metadata
         )
         model = getattr(self, "_wake_execution_model", None) or self._model
@@ -4248,6 +4288,8 @@ class OpenTulpaLangGraphRuntime:
             "booking_action": str(decision.booking_action).strip().lower() or "ignore",
             "save_payload": dict(decision.save_payload),
             "sink_arguments": dict(decision.sink_arguments),
+            "needs_business_knowledge": bool(decision.needs_business_knowledge),
+            "business_knowledge_query": str(decision.business_knowledge_query).strip()[:500],
             "knowledge_source_refs": _normalize_knowledge_source_refs(decision.knowledge_source_refs),
             "grounding_status": str(decision.grounding_status).strip().lower(),
             "reason": str(decision.reason).strip()[:500],

@@ -76,6 +76,9 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     safe_json as _safe_json,
 )
+from opentulpa.agent.workflow_setup_prompt_context import (
+    build_workflow_setup_control_context as _build_workflow_setup_control_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,35 @@ def _compute_empty_output_retry_limit(runtime: Any) -> int:
     Long retry loops here burn context without producing user-visible progress.
     """
     return min(2, _compute_claim_check_retry_limit(runtime))
+
+
+def _workflow_setup_no_progress_retry_limit(runtime: Any) -> int:
+    return min(2, _compute_claim_check_retry_limit(runtime))
+
+
+def _build_workflow_setup_prompt_context(
+    runtime: Any,
+    *,
+    customer_id: str,
+    thread_id: str,
+) -> str:
+    service = getattr(runtime, "_workflow_setup_service", None)
+    if service is None or not hasattr(service, "get_thread_session"):
+        return ""
+    try:
+        session = service.get_thread_session(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            include_paused=True,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to build workflow setup prompt context (customer_id=%s, thread_id=%s)",
+            customer_id,
+            thread_id,
+        )
+        return ""
+    return _build_workflow_setup_control_context(session)
 
 
 def _make_prompt_context_entry(*, section: str, content: str) -> dict[str, str] | None:
@@ -694,7 +726,7 @@ def build_runtime_graph(runtime: Any):
         payload.update(fields)
         log_event(event=event, **payload)
 
-    async def agent_node(state: AgentState) -> Command[Literal["validate_tools", "finalize_turn"]]:
+    async def agent_node(state: AgentState) -> Command[Literal["agent", "validate_tools", "finalize_turn"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
@@ -1148,11 +1180,28 @@ def build_runtime_graph(runtime: Any):
             *(message for _, message in selected_summary_entries),
         ]
         dynamic_late_messages: list[AnyMessage] = []
+        dynamic_late_sections: list[str] = []
+        if turn_mode == "workflow_setup":
+            workflow_setup_context = _build_workflow_setup_prompt_context(
+                runtime,
+                customer_id=customer_id,
+                thread_id=thread_id,
+            )
+            if workflow_setup_context:
+                dynamic_late_messages.append(SystemMessage(content=workflow_setup_context))
+                dynamic_late_sections.append("workflow_setup_control_card")
+        workflow_setup_repair_instruction = str(
+            state.get("workflow_setup_repair_instruction", "") or ""
+        ).strip()
+        if workflow_setup_repair_instruction:
+            dynamic_late_messages.append(SystemMessage(content=workflow_setup_repair_instruction))
+            dynamic_late_sections.append("workflow_setup_repair")
         prompt_section_names = [
             *prefix_sections,
             *late_control_sections,
             *(section for section, _ in selected_frozen_late_entries),
             *(section for section, _ in selected_summary_entries),
+            *dynamic_late_sections,
         ]
         optional_context_messages = (
             len(kept_stable_optional_entries)
@@ -1246,6 +1295,7 @@ def build_runtime_graph(runtime: Any):
         update: dict[str, Any] = {
             "messages": [*injected_messages, response],
             "turn_status": "running",
+            "workflow_setup_repair_instruction": "",
             **prompt_context_update,
         }
         if skill_query:
@@ -1261,6 +1311,43 @@ def build_runtime_graph(runtime: Any):
             if isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
             else "finalize_turn"
         )
+        if (
+            turn_mode == "workflow_setup"
+            and isinstance(response, AIMessage)
+            and not bool(getattr(response, "tool_calls", []))
+            and not response_text.strip()
+        ):
+            retry_count = int(state.get("workflow_setup_no_progress_retry_count", 0))
+            retry_limit = _workflow_setup_no_progress_retry_limit(runtime)
+            if retry_count < retry_limit:
+                _log(
+                    state,
+                    "graph.workflow_setup.no_progress_retry",
+                    retry_count=retry_count,
+                    retry_limit=retry_limit,
+                    turn_mode=turn_mode,
+                )
+                update["messages"] = [
+                    *injected_messages,
+                    response,
+                ]
+                update["workflow_setup_repair_instruction"] = (
+                    "WORKFLOW_SETUP_NO_PROGRESS: Your previous workflow setup response "
+                    "had no visible answer and no setup tool calls. Continue this same owner turn now.\n"
+                    "- If the latest owner message supplied workflow facts, sink details, files, fields, "
+                    "or behavior rules: call intake_workflow_setup_get if needed, then "
+                    "intake_workflow_setup_update to persist the new facts.\n"
+                    "- If the draft is complete after the update: call intake_workflow_setup_preflight; "
+                    "when ready, call intake_workflow_setup_mark_proposed before summarizing the proposal.\n"
+                    "- If the latest owner message explicitly confirms a shown proposal: call "
+                    "intake_workflow_setup_get, then intake_workflow_setup_confirm_current and "
+                    "intake_workflow_setup_commit. If no proposal hash exists but a proposal was shown "
+                    "in the conversation, call preflight and mark_proposed first, then confirm and commit.\n"
+                    "- Do not repeat an older proposal or ask for details already present in the latest "
+                    "owner message. If blocked, give the one concrete setup-tool error or follow-up."
+                )
+                update["workflow_setup_no_progress_retry_count"] = retry_count + 1
+                return Command(update=update, goto="agent")
         return Command(update=update, goto=goto)
 
     async def validate_tool_calls_node(state: AgentState) -> Command[Literal["tools", "agent"]]:
@@ -1931,7 +2018,12 @@ def build_runtime_graph(runtime: Any):
                 "final_response_text": "",
             }
         messages = state.get("messages", [])
-        for message in reversed(messages):
+        latest_human_index = -1
+        for index, message in enumerate(messages):
+            if isinstance(message, HumanMessage):
+                latest_human_index = index
+        current_turn_messages = messages[latest_human_index + 1 :] if latest_human_index >= 0 else messages
+        for message in reversed(current_turn_messages):
             if isinstance(message, AIMessage):
                 if bool(getattr(message, "tool_calls", [])):
                     continue
@@ -1951,7 +2043,7 @@ def build_runtime_graph(runtime: Any):
         "agent",
         agent_node,
         retry_policy=RetryPolicy(max_attempts=3),
-        destinations=("validate_tools", "finalize_turn"),
+        destinations=("agent", "validate_tools", "finalize_turn"),
     )
     builder.add_node(
         "validate_tools",

@@ -565,35 +565,51 @@ def _workflow_business_knowledge_snapshot(
     workflow_id = str(workflow.get("workflow_id", "") or "").strip()
     if knowledge is None or not workflow_id:
         return {}
-    queries = [
-        "2х-фазная мойка кузова SUV цена",
-        "Шиномонтаж Комплект 19R кросовер низкий профиль цена",
-        "PPF пакет цена",
-    ]
-    results: list[dict[str, Any]] = []
-    for query in queries:
-        try:
-            result = knowledge.query(
-                customer_id=customer_id,
-                scope_type="intake_workflow",
-                scope_id=workflow_id,
-                query=query,
-            )
-        except Exception as exc:
-            results.append({"query": query, "error": str(exc)})
-            continue
-        answer = getattr(result, "answer", None)
-        results.append(
-            {
-                "query": query,
-                "warnings": list(getattr(result, "warnings", []) or []),
-                "answer_extract": str(getattr(answer, "answer_extract", "") or ""),
-            }
+    sources: list[dict[str, Any]] = []
+    sections: list[dict[str, Any]] = []
+    try:
+        source_rows = knowledge._source_rows(  # noqa: SLF001 - e2e artifact snapshot
+            customer_id=customer_id,
+            scope_type="intake_workflow",
+            scope_id=workflow_id,
         )
+        for row in source_rows:
+            sources.append(
+                {
+                    "file_id": str(row["file_id"]),
+                    "filename": str(row["filename"]),
+                    "mime_type": str(row["mime_type"]),
+                    "status": str(row["status"]),
+                    "source_kind": str(row["source_kind"]),
+                    "section_count": int(row["section_count"] or 0),
+                    "char_count": int(row["char_count"] or 0),
+                }
+            )
+        prepared_sections = knowledge._load_sections(  # noqa: SLF001 - e2e artifact snapshot
+            customer_id=customer_id,
+            scope_type="intake_workflow",
+            scope_id=workflow_id,
+        )
+        for section in prepared_sections:
+            sections.append(
+                {
+                    "source_ref": section.source_ref,
+                    "source_kind": section.source_kind,
+                    "preview": str(section.content or "")[:2500],
+                }
+            )
+    except Exception as exc:
+        return {
+            "workflow_id": workflow_id,
+            "knowledge_file_ids": workflow.get("knowledge_file_ids") or [],
+            "error": str(exc),
+        }
     return {
         "workflow_id": workflow_id,
         "knowledge_file_ids": workflow.get("knowledge_file_ids") or [],
-        "queries": results,
+        "sources": sources,
+        "section_count": len(sections),
+        "section_previews": sections,
     }
 
 

@@ -1011,6 +1011,22 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
                 "conversation_summary": "Customer wants an appointment.",
                 "extracted_fields": {"name": "Alice", "time": "3pm"},
                 "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "needs_business_knowledge": True,
+                "business_knowledge_query": "appointment reference number policy",
+                "reason": "Need source-backed policy before replying.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants an appointment.",
+                "extracted_fields": {"name": "Alice", "time": "3pm"},
+                "missing_fields": [],
                 "reply_action": "send_reply",
                 "reply_text": "Booked for 3pm. Please bring your reference number.",
                 "ready_to_save": True,
@@ -1093,7 +1109,8 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert result["ok"] is True
     assert runtime.calls[0]["workflow"]["assistant_instructions"] == "Be concise and confirm only explicit booking times."
     assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == [str(knowledge["id"])]
-    assert "Reference numbers" in runtime.calls[0]["workflow"]["knowledge_answer"]
+    assert runtime.calls[0]["workflow"]["knowledge_answer"] == ""
+    assert "Reference numbers" in runtime.calls[1]["workflow"]["knowledge_answer"]
     sent = telegram_business.client.sent_messages[0]
     assert sent["chat_id"] == "555"
     assert sent["business_connection_id"] == "bc_123"
@@ -3325,6 +3342,26 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
                     "service_category": "Мойка",
                     "service_name": "2х-фазная мойка кузова",
                     "vehicle_type": "S-Class / SUV",
+                },
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "needs_business_knowledge": True,
+                "business_knowledge_query": "2х-фазная мойка кузова SUV цена",
+                "reason": "Need source-backed wash price.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.96,
+                "conversation_summary": "Lead asks for a source-backed wash price.",
+                "extracted_fields": {
+                    "service_category": "Мойка",
+                    "service_name": "2х-фазная мойка кузова",
+                    "vehicle_type": "S-Class / SUV",
                     "quoted_price": "1200",
                 },
                 "missing_fields": ["time", "lead_name", "phone"],
@@ -3369,6 +3406,30 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
                     "phone": "+79990000001",
                 },
                 "reason": "All wash booking fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Lead wants tire fitting.",
+                "extracted_fields": {
+                    "service_category": "Шиномонтаж",
+                    "service_name": "Комплект 19`R",
+                    "vehicle_type": "кросовер + низкий профиль",
+                    "date": "Friday",
+                    "time": "15:00",
+                    "lead_name": "Мария",
+                    "phone": "+79990000002",
+                },
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "needs_business_knowledge": True,
+                "business_knowledge_query": "Шиномонтаж Комплект 19R кросовер низкий профиль цена",
+                "reason": "Need source-backed tire fitting price.",
             },
             {
                 "ok": True,
@@ -3573,13 +3634,17 @@ async def test_autospa_xlsx_telegram_inbound_books_wash_and_tire_to_google_sheet
     out_of_scope = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
     assert out_of_scope["ok"] is True
 
-    assert len(runtime.calls) == 4
-    all_knowledge_text = ""
-    for call in runtime.calls[:3]:
-        answer = call["workflow"]["knowledge_answer"]
-        assert str(answer).strip()
-        all_knowledge_text += str(answer)
+    assert len(runtime.calls) == 6
+    assert runtime.calls[0]["workflow"]["knowledge_answer"] == ""
+    assert runtime.calls[2]["workflow"]["knowledge_answer"] == ""
     assert runtime.calls[3]["workflow"]["knowledge_answer"] == ""
+    assert runtime.calls[5]["workflow"]["knowledge_answer"] == ""
+    all_knowledge_text = (
+        str(runtime.calls[1]["workflow"]["knowledge_answer"])
+        + str(runtime.calls[4]["workflow"]["knowledge_answer"])
+    )
+    assert str(runtime.calls[1]["workflow"]["knowledge_answer"]).strip()
+    assert str(runtime.calls[4]["workflow"]["knowledge_answer"]).strip()
     assert "2х-фазная мойка кузова" in all_knowledge_text
     assert "Комплект 19`R" in all_knowledge_text
 
@@ -3971,6 +4036,311 @@ async def test_telegram_business_completed_booking_without_model_reply_sends_con
     assert "2х-фазная мойка кузова" in sent[0]["text"]
     assert "10:00" in sent[0]["text"]
     assert "1200" in sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_cancel_ready_save_preserves_cancellation_reply(
+    tmp_path: Path,
+) -> None:
+    initial_fields = {
+        "service_category": "Мойка",
+        "service_name": "2х-фазная мойка кузова",
+        "vehicle": "Toyota RAV4",
+        "desired_date": "завтра",
+        "desired_time": "10:00",
+        "client_name": "Алексей",
+        "phone": "+79990000001",
+        "quoted_price": "1200",
+    }
+    cancel_payload = {**initial_fields, "desired_time": "11:00", "status": "cancelled"}
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Клиент дал все данные для записи.",
+                "extracted_fields": initial_fields,
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": initial_fields,
+                "reason": "All fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.99,
+                "conversation_summary": "Клиент отменяет существующую запись.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "mark_cancelled",
+                "reply_text": "Алексей, вашу запись на 2х-фазную мойку кузова завтра в 11:00 отменена.",
+                "ready_to_save": True,
+                "booking_action": "edit_recent_completed",
+                "save_payload": cancel_payload,
+                "reason": "Clear cancellation inside the edit window.",
+            },
+        ]
+    )
+    composio = _FakeComposio({}, {})
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    customer_id = "telegram_123"
+    business_connection_id = "bc_autospa"
+    telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    workflow = service.upsert_workflow(
+        customer_id=customer_id,
+        name="AutoSpa Мойка",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": business_connection_id},
+        intent_description="Записывать клиентов на мойку.",
+        required_fields=[
+            "service_category",
+            "service_name",
+            "vehicle",
+            "desired_date",
+            "desired_time",
+            "client_name",
+            "phone",
+        ],
+        assistant_instructions="Отвечай клиенту на русском языке.",
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "service_category": "Category",
+                "service_name": "Service",
+                "vehicle": "Vehicle",
+                "desired_date": "Date",
+                "desired_time": "Time",
+                "client_name": "Lead Name",
+                "phone": "Phone",
+                "quoted_price": "Quoted Price",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_autospa_test",
+                "sheetName": "Bookings",
+            },
+        },
+    )
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=1,
+            text="Алексей, Toyota RAV4, завтра в 10:00, телефон +79990000001.",
+            date=1_775_552_400,
+        ),
+    )
+    first_result = await service.run_workflow(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+    )
+    assert first_result["ok"] is True
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=2,
+            text="Тогда отмените запись, пожалуйста.",
+            date=1_775_552_460,
+        ),
+    )
+    second_result = await service.run_workflow(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert second_result["ok"] is True
+    assert len(composio.execute_calls) == 2
+    sent = telegram_business.client.sent_messages
+    assert len(sent) == 2
+    assert "отменена" in sent[1]["text"].lower()
+    assert "запись сохранена" not in sent[1]["text"].lower()
+    bookings = service.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        conversation_id="5101",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_cancel_partial_booking_without_required_fields(
+    tmp_path: Path,
+) -> None:
+    partial_fields = {
+        "category": "Мойка",
+        "conversation_id": "5101",
+        "date": "30.04.2026",
+        "lead_name": "Алексей",
+        "phone": "+79990000001",
+        "time": "11:00",
+        "vehicle": "SUV",
+    }
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Клиент выбрал время, но еще не выбрал конкретную услугу.",
+                "extracted_fields": partial_fields,
+                "missing_fields": ["service_name", "quoted_price"],
+                "reply_action": "send_reply",
+                "reply_text": "Какой вариант мойки вас интересует?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Booking is partial.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.99,
+                "conversation_summary": "Клиент отменяет частично заполненную запись.",
+                "extracted_fields": {"status": "cancelled"},
+                "missing_fields": [],
+                "reply_action": "mark_cancelled",
+                "reply_text": "Алексей, вашу запись на мойку 30.04.2026 в 11:00 отменена.",
+                "ready_to_save": True,
+                "booking_action": "update_active",
+                "save_payload": {"status": "cancelled"},
+                "reason": "Clear cancellation of a partial active booking.",
+            },
+        ]
+    )
+    composio = _FakeComposio({}, {})
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    customer_id = "telegram_123"
+    business_connection_id = "bc_autospa"
+    telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    workflow = service.upsert_workflow(
+        customer_id=customer_id,
+        name="AutoSpa Мойка",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": business_connection_id},
+        intent_description="Записывать клиентов на мойку.",
+        required_fields=[
+            "category",
+            "service_name",
+            "vehicle",
+            "date",
+            "time",
+            "lead_name",
+            "phone",
+            "quoted_price",
+            "conversation_id",
+        ],
+        assistant_instructions="Отвечай клиенту на русском языке.",
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "category": "Category",
+                "service_name": "Service",
+                "vehicle": "Vehicle",
+                "date": "Date",
+                "time": "Time",
+                "lead_name": "Lead Name",
+                "phone": "Phone",
+                "quoted_price": "Quoted Price",
+                "conversation_id": "Conversation ID",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_autospa_test",
+                "sheetName": "Bookings",
+            },
+        },
+    )
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=1,
+            text="Алексей, SUV, завтра в 11:00, телефон +79990000001.",
+            date=1_775_552_400,
+        ),
+    )
+    first_result = await service.run_workflow(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+    )
+    assert first_result["ok"] is True
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=2,
+            text="Тогда отмените запись, пожалуйста.",
+            date=1_775_552_460,
+        ),
+    )
+    second_result = await service.run_workflow(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert second_result["ok"] is True
+    assert composio.execute_calls == []
+    sent = telegram_business.client.sent_messages
+    assert len(sent) == 2
+    assert "отменена" in sent[1]["text"].lower()
+    bookings = service.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        conversation_id="5101",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "cancelled"
+    assert bookings[0]["sink_write_status"] == "not_required"
 
 
 @pytest.mark.asyncio
