@@ -116,6 +116,18 @@ Skip browser installation with:
 ./start.sh --no-browser-use
 ```
 
+Optional CAPTCHA solving for Browser Use is disabled unless you configure
+CapSolver:
+
+```bash
+CAPSOLVER_API_KEY=...
+```
+
+When configured, OpenTulpa registers a `solve_captcha_with_capsolver` Browser
+Use action for supported reCAPTCHA v2 and Cloudflare Turnstile pages. Without
+the key, the solver is not registered and normal Browser Use behavior is
+unchanged.
+
 ## Useful startup commands
 
 | Command | Meaning |

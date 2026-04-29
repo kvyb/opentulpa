@@ -421,6 +421,19 @@ Installed by default. Skip it with:
 ./start.sh --no-browser-use
 ```
 
+Browser Use CAPTCHA solving is optional and disabled by default. To enable the
+CapSolver-backed action for supported reCAPTCHA v2 and Cloudflare Turnstile
+pages, set:
+
+```bash
+CAPSOLVER_API_KEY=...
+```
+
+When this key is present, OpenTulpa registers `solve_captcha_with_capsolver`
+for Browser Use tasks and tells the browser agent to call it if a supported
+CAPTCHA blocks progress. If the key is absent, Browser Use runs without the
+solver action or CAPTCHA-specific prompt hint.
+
 ### Composio
 
 If you want access to supported third-party apps:
