@@ -137,6 +137,33 @@ async def test_intake_workflow_setup_preflight_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_setup_finalize_confirmation_posts_expected_payload() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(
+                200,
+                {"session": {"status": "completed", "created_or_updated_workflow_id": "iwf_abc"}},
+            )
+        ]
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_setup_finalize_confirmation"].ainvoke(
+        {"draft_patch": {"assistant_instructions": "Use '-' when optional pricing is unknown."}}
+    )
+
+    assert result["status"] == "completed"
+    assert runtime.calls[0][0] == "POST"
+    assert runtime.calls[0][1] == "/internal/intake/setup/finalize_confirmation"
+    assert runtime.calls[0][2]["json_body"] == {
+        "customer_id": "telegram_123",
+        "thread_id": "thread_123",
+        "draft_patch": {"assistant_instructions": "Use '-' when optional pricing is unknown."},
+        "scratchpad_patch": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
     runtime = DummyRuntime(
         [

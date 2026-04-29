@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -60,6 +61,15 @@ class _FakeIntakeWorkflows:
         return []
 
 
+def _wait_for_webhook_tasks(app: FastAPI, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not getattr(app.state, "telegram_webhook_tasks", set()):
+            return
+        time.sleep(0.01)
+    raise AssertionError("telegram webhook background task did not finish")
+
+
 def test_webhook_flushes_approval_challenges_before_optional_follow_up_message() -> None:
     app = FastAPI()
     call_order: list[str] = []
@@ -100,6 +110,7 @@ def test_webhook_flushes_approval_challenges_before_optional_follow_up_message()
         },
         headers={"x-telegram-bot-api-secret-token": "secret-token"},
     )
+    _wait_for_webhook_tasks(app)
     assert response.status_code == 200
     assert call_order == [
         "flush_deferred_challenges",

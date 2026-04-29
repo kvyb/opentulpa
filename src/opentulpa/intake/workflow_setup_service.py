@@ -116,6 +116,8 @@ def _compact_preflight_for_scratchpad(preflight: dict[str, Any]) -> dict[str, An
     return {
         "ok": bool(preflight.get("ok", False)),
         "status": str(preflight.get("status", "") or ""),
+        "next_action": str(preflight.get("next_action", "") or ""),
+        "commit_blockers": _safe_list(preflight.get("commit_blockers")),
         "errors": _safe_list(preflight.get("errors")),
         "warnings": _safe_list(preflight.get("warnings")),
         "follow_up_questions": _safe_list(preflight.get("follow_up_questions")),
@@ -358,6 +360,20 @@ class WorkflowSetupService:
                     "The uploaded business knowledge could not be grounded from source files. Please provide a text, spreadsheet, PDF, DOCX, CSV, or clearer source for the workflow."
                 )
                 preflight["follow_up_questions"] = questions
+        commit_blockers = [
+            str(item).strip()
+            for item in [
+                *_safe_list(preflight.get("errors")),
+                *_safe_list(preflight.get("follow_up_questions")),
+            ]
+            if str(item).strip()
+        ]
+        if bool(preflight.get("ok", False)) and str(preflight.get("status", "") or "") == "ready":
+            preflight["commit_blockers"] = []
+            preflight["next_action"] = "finalize_confirmation_if_owner_confirmed_else_mark_proposed"
+        else:
+            preflight["commit_blockers"] = commit_blockers
+            preflight["next_action"] = "ask_preflight_blocker"
         scratchpad = _deep_merge(
             _safe_dict(session.get("scratchpad")),
             {
@@ -376,6 +392,56 @@ class WorkflowSetupService:
         )
         updated["preflight"] = preflight
         return updated
+
+    def finalize_confirmation(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        draft_patch: dict[str, Any] | None = None,
+        scratchpad_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply final edits, validate, mark, confirm, and commit in one explicit owner-confirmation path."""
+
+        if isinstance(draft_patch, dict) or isinstance(scratchpad_patch, dict):
+            self.update_session(
+                customer_id=customer_id,
+                thread_id=thread_id,
+                draft_patch=draft_patch,
+                scratchpad_patch=scratchpad_patch,
+            )
+        session = self._store.get_thread_session(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            statuses=("active",),
+        )
+        if session is None:
+            completed = self._store.get_thread_session(
+                customer_id=customer_id,
+                thread_id=thread_id,
+                statuses=("completed",),
+            )
+            if completed and str(completed.get("created_or_updated_workflow_id", "") or "").strip():
+                completed["already_completed"] = True
+                return completed
+            raise ValueError("active workflow setup session not found")
+
+        preflight_session = self.preflight_current(customer_id=customer_id, thread_id=thread_id)
+        preflight = _safe_dict(preflight_session.get("preflight"))
+        if not bool(preflight.get("ok", False)) or str(preflight.get("status", "") or "") != "ready":
+            blockers = _safe_list(preflight.get("commit_blockers")) or _safe_list(
+                preflight.get("follow_up_questions")
+            ) or _safe_list(preflight.get("errors"))
+            blocker = "; ".join(str(item).strip() for item in blockers if str(item).strip())
+            if not blocker:
+                blocker = "workflow draft is not ready to commit"
+            raise ValueError(blocker)
+
+        self.mark_proposed(customer_id=customer_id, thread_id=thread_id)
+        self.confirm_current(customer_id=customer_id, thread_id=thread_id)
+        committed = self.commit(customer_id=customer_id, thread_id=thread_id)
+        committed["preflight"] = preflight
+        return committed
 
     def _preflight_knowledge_scope(
         self,

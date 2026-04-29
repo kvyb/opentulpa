@@ -193,6 +193,21 @@ def register_intake_workflow_routes(
             return JSONResponse(status_code=400, content={"detail": str(exc)})
         return {"ok": True, "session": session}
 
+    @app.post("/internal/intake/setup/finalize_confirmation")
+    async def internal_intake_setup_finalize_confirmation(request: Request) -> Any:
+        service = get_workflow_setup_service()
+        body = await request.json()
+        try:
+            session = service.finalize_confirmation(
+                customer_id=str(body.get("customer_id", "")).strip(),
+                thread_id=str(body.get("thread_id", "")).strip(),
+                draft_patch=body.get("draft_patch") if isinstance(body.get("draft_patch"), dict) else None,
+                scratchpad_patch=body.get("scratchpad_patch") if isinstance(body.get("scratchpad_patch"), dict) else None,
+            )
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+        return {"ok": True, "session": session, "preflight": session.get("preflight", {})}
+
     @app.post("/internal/intake/setup/pause")
     async def internal_intake_setup_pause(request: Request) -> Any:
         service = get_workflow_setup_service()
