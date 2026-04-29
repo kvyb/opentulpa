@@ -320,7 +320,7 @@ def test_build_tool_validation_repair_message_blocks_false_schedule_claims() -> 
             )
         ]
     )
-    assert "schedule was not created" in message
+    assert "scheduled action was not created" in message
     assert "Do not say it was scheduled" in message
     assert "clarifying question" in message
 
@@ -334,9 +334,47 @@ def test_build_tool_validation_repair_message_requests_exact_argument_repair() -
             )
         ]
     )
-    assert "schedule was not created yet" in message
+    assert "scheduled action was not created yet" in message
     assert "Do not claim success" in message
     assert "Repair the tool call arguments and retry" in message
+
+
+def test_build_tool_validation_repair_message_is_generic_for_intake_setup_errors() -> None:
+    err = _validate_model_tool_call(
+        call_name="intake_workflow_setup_update",
+        args=None,
+        latest_user_text="update the workflow setup",
+        turn_mode="interactive",
+        required_args={"intake_workflow_setup_update": ()},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+
+    message = _build_tool_validation_repair_message([ToolMessage(content=err, tool_call_id="a")])
+
+    assert "requested tool action was not completed yet" in message
+    assert "Do not claim success" in message
+    assert "Repair the tool call arguments and retry" in message
+    assert "schedule" not in message.lower()
+
+
+def test_build_tool_validation_repair_message_is_generic_for_tooling_errors() -> None:
+    err = _validate_model_tool_call(
+        call_name="tulpa_run_terminal",
+        args={},
+        latest_user_text="run the checks",
+        turn_mode="interactive",
+        required_args={"tulpa_run_terminal": ("command",)},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+
+    message = _build_tool_validation_repair_message([ToolMessage(content=err, tool_call_id="a")])
+
+    assert "requested tool action was not completed yet" in message
+    assert "Do not claim success" in message
+    assert "tulpa_run_terminal" in message
+    assert "schedule" not in message.lower()
 
 
 @pytest.mark.asyncio

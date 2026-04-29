@@ -554,17 +554,31 @@ def _build_tool_validation_repair_message(messages: list[ToolMessage]) -> str:
             "VALIDATION_REPAIR_REQUIRED: Your previous tool call was blocked. Do not claim success. "
             "Repair the tool call or clearly state that the action was not completed yet."
         )
-    if any(
+    is_routine_create_error = "routine_create" in summary or "ROUTINE_" in summary
+    needs_clarification = any(
         marker in summary
         for marker in ("ACTION_CLARIFICATION_REQUIRED", "CHAT_MODE_LOCKED", "TURN_MODE_MISMATCH")
-    ):
+    )
+    if is_routine_create_error and needs_clarification:
         return (
-            "VALIDATION_REPAIR_REQUIRED: The schedule was not created. Do not say it was scheduled. "
+            "VALIDATION_REPAIR_REQUIRED: The scheduled action was not created. Do not say it was scheduled. "
             "Ask one concise clarifying question or continue in chat if automation is not explicit. "
             f"Reason={summary}"
         )
+    if needs_clarification:
+        return (
+            "VALIDATION_REPAIR_REQUIRED: Your previous tool call was blocked. Do not claim success. "
+            "Ask one concise clarifying question or continue in chat if the requested action is not explicit. "
+            f"Reason={summary}"
+        )
+    if is_routine_create_error:
+        return (
+            "VALIDATION_REPAIR_REQUIRED: The scheduled action was not created yet. Do not claim success. "
+            "Repair the tool call arguments and retry only if you can satisfy the validation error exactly. "
+            f"Reason={summary}"
+        )
     return (
-        "VALIDATION_REPAIR_REQUIRED: The schedule was not created yet. Do not claim success. "
+        "VALIDATION_REPAIR_REQUIRED: The requested tool action was not completed yet. Do not claim success. "
         "Repair the tool call arguments and retry only if you can satisfy the validation error exactly. "
         f"Reason={summary}"
     )
