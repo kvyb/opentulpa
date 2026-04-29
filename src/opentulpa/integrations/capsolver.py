@@ -133,14 +133,21 @@ class CapSolverClient:
 
     async def _post_json(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base_url}{endpoint}"
-        if self._http_client is not None:
-            response = await self._http_client.post(url, json=payload)
-        else:
-            timeout = httpx.Timeout(self._request_timeout_seconds)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        try:
+            if self._http_client is not None:
+                response = await self._http_client.post(url, json=payload)
+            else:
+                timeout = httpx.Timeout(self._request_timeout_seconds)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise CapSolverError(f"CapSolver request failed: {exc}") from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise CapSolverError("CapSolver returned invalid JSON") from exc
         if not isinstance(data, dict):
             raise CapSolverError("CapSolver returned a non-object JSON response")
         return data

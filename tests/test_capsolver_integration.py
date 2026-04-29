@@ -137,6 +137,34 @@ async def test_capsolver_create_task_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capsolver_transport_error_becomes_capsolver_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network unavailable", request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = CapSolverClient(api_key="cap-key", http_client=async_client)
+    try:
+        with pytest.raises(CapSolverError, match="CapSolver request failed"):
+            await client.get_balance()
+    finally:
+        await async_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_capsolver_invalid_json_becomes_capsolver_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+        return httpx.Response(200, content=b"not-json")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = CapSolverClient(api_key="cap-key", http_client=async_client)
+    try:
+        with pytest.raises(CapSolverError, match="invalid JSON"):
+            await client.get_balance()
+    finally:
+        await async_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_capsolver_poll_failure() -> None:
     client, _, async_client = _mock_client(
         [
