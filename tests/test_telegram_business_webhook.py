@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,6 +80,15 @@ class _FakeIntakeWorkflows:
         return {"ok": False, "summary": "send failed"}
 
 
+def _wait_for_webhook_tasks(app: FastAPI, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not getattr(app.state, "telegram_webhook_tasks", set()):
+            return
+        time.sleep(0.01)
+    raise AssertionError("telegram webhook background task did not finish")
+
+
 def test_business_message_webhook_triggers_matching_workflow_and_notifies_owner(tmp_path: Path) -> None:
     app = FastAPI()
     telegram_client = _RecordingTelegramClient()
@@ -129,6 +139,7 @@ def test_business_message_webhook_triggers_matching_workflow_and_notifies_owner(
             },
             headers={"x-telegram-bot-api-secret-token": "secret-token"},
         )
+        _wait_for_webhook_tasks(app)
 
     assert response.status_code == 200
     assert intake.run_calls == [

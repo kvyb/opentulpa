@@ -34,7 +34,7 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "When the owner provides new workflow facts, sink details, source files, field requirements, or behavior rules, call intake_workflow_setup_update to persist them in the draft; do not merely acknowledge them in prose.\n"
                 "When the owner provides Google Sheets details, store them under sink_type=google_sheets_composio and sink_config.static_arguments, including spreadsheetId and sheetName when provided.\n"
                 "After updating a draft that now appears complete, call intake_workflow_setup_preflight. If ready, call intake_workflow_setup_mark_proposed before showing the proposal.\n"
-                "When the owner explicitly confirms a shown proposal, call intake_workflow_setup_confirm_current and intake_workflow_setup_commit before saying it is saved. If a proposal was shown in the conversation but last_proposed_draft_hash is missing, call preflight, mark_proposed, confirm_current, and commit in order.\n"
+                "When the owner explicitly confirms a shown proposal, call intake_workflow_setup_finalize_confirmation before saying it is saved. If the same message adds small final behavior rules, pass them in that finalize tool call instead of doing a separate update/preflight loop.\n"
                 "If any setup tool returns an error or focused follow-up, report that specific blocker instead of repeating an older proposal.\n"
                 "Ask one high-value setup question at a time.\n"
                 "If uploaded files are part of the workflow, track original source_file_ids and prepare them with business_knowledge_index.\n"

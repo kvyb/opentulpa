@@ -45,7 +45,7 @@ def build_prompt_mode_message(prompt_mode: PromptMode) -> SystemMessage:
             "Do not ask for Telegram Business DM polling/schedule intervals; those workflows run from inbound messages.\n"
             "Before showing the final proposal, run the setup preflight once; if it returns a focused follow-up, ask that instead of proposing.\n"
             "After a ready preflight, call intake_workflow_setup_mark_proposed before sending the proposal summary.\n"
-            "If the owner explicitly confirms a proposal, save only through intake_workflow_setup_confirm_current followed by intake_workflow_setup_commit; if the visible proposal was not marked yet, run preflight and mark_proposed first, then confirm and commit.\n"
+            "If the owner explicitly confirms a proposal, call intake_workflow_setup_finalize_confirmation; pass any small final behavior-rule edits in that same tool call when needed instead of doing a separate update/preflight loop.\n"
             "When enough required fields are known, propose the workflow with stated assumptions instead of continuing optional clarification.\n"
             "Schema contract: required_fields are stable machine field ids, not customer-facing labels. Use concise ASCII snake_case ids such as service_name, vehicle_type, date, time, lead_name, phone, quoted_price. Put localized names, wording, and extraction notes in field_guidance or assistant_instructions, not in required_fields.\n"
             "field_guidance keys must match required_fields ids. If the sink needs localized or human-readable column labels, express that in sink_config.field_mapping instead of changing required_fields ids.\n"

@@ -217,6 +217,43 @@ def test_workflow_setup_commit_create_persists_active_workflow(tmp_path: Path) -
     assert workflows[0]["name"] == "Car Wash Intake"
 
 
+def test_workflow_setup_finalize_confirmation_applies_final_patch_and_commits(
+    tmp_path: Path,
+) -> None:
+    setup, intake_service, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time", "car_type", "wash_type"],
+            "assistant_instructions": "Be direct.",
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        },
+    )
+    setup.mark_proposed(customer_id="telegram_123", thread_id="thread_123")
+
+    session = setup.finalize_confirmation(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "assistant_instructions": (
+                "Be direct. If a price is missing, ask the owner; use '-' after one hour."
+            )
+        },
+    )
+
+    assert session["status"] == "completed"
+    assert session["created_or_updated_workflow_id"]
+    assert session["preflight"]["status"] == "ready"
+    workflows = intake_service.list_workflows(customer_id="telegram_123", include_disabled=True)
+    assert len(workflows) == 1
+    assert workflows[0]["assistant_instructions"].endswith("use '-' after one hour.")
+
+
 def test_workflow_setup_commit_edit_recreates_telegram_workflow(tmp_path: Path) -> None:
     setup, intake_service, telegram_business = _mk_setup_service(tmp_path)
     telegram_business.upsert_connection(

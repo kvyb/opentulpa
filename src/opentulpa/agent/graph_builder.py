@@ -626,6 +626,7 @@ def build_runtime_graph(runtime: Any):
         "intake_workflow_setup_mark_proposed": (),
         "intake_workflow_setup_confirm_current": (),
         "intake_workflow_setup_commit": (),
+        "intake_workflow_setup_finalize_confirmation": (),
         "intake_workflow_setup_pause": (),
         "intake_workflow_setup_cancel": (),
         "intake_workflow_run": ("workflow_id",),
@@ -686,6 +687,7 @@ def build_runtime_graph(runtime: Any):
         "intake_workflow_setup_mark_proposed",
         "intake_workflow_setup_confirm_current",
         "intake_workflow_setup_commit",
+        "intake_workflow_setup_finalize_confirmation",
         "intake_workflow_setup_pause",
         "intake_workflow_setup_cancel",
         "intake_workflow_run",
@@ -1356,9 +1358,9 @@ def build_runtime_graph(runtime: Any):
                     "- If the draft is complete after the update: call intake_workflow_setup_preflight; "
                     "when ready, call intake_workflow_setup_mark_proposed before summarizing the proposal.\n"
                     "- If the latest owner message explicitly confirms a shown proposal: call "
-                    "intake_workflow_setup_get, then intake_workflow_setup_confirm_current and "
-                    "intake_workflow_setup_commit. If no proposal hash exists but a proposal was shown "
-                    "in the conversation, call preflight and mark_proposed first, then confirm and commit.\n"
+                    "intake_workflow_setup_finalize_confirmation. Pass any small final behavior-rule "
+                    "edits in that same tool call when needed instead of doing a separate "
+                    "update/preflight loop.\n"
                     "- Do not repeat an older proposal or ask for details already present in the latest "
                     "owner message. If blocked, give the one concrete setup-tool error or follow-up."
                 )

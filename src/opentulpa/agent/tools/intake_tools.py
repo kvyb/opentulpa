@@ -462,6 +462,36 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("session", {})
 
     @tool
+    async def intake_workflow_setup_finalize_confirmation(
+        draft_patch: dict[str, Any] | None = None,
+        scratchpad_patch: dict[str, Any] | None = None,
+    ) -> Any:
+        """Finalize an explicitly confirmed workflow setup in one backend operation.
+
+        Use this when the owner confirms a shown workflow proposal. If the same owner
+        message also adds small final behavior rules, pass them as draft_patch or
+        scratchpad_patch; this tool will persist them, preflight, mark the current
+        draft as proposed, confirm it, and commit it. Do not call the separate
+        preflight/mark_proposed/confirm_current/commit tools after this succeeds.
+        """
+        customer_id = require_customer_id(runtime)
+        thread_id = require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/finalize_confirmation",
+            json_body={
+                "customer_id": customer_id,
+                "thread_id": thread_id,
+                "draft_patch": draft_patch if isinstance(draft_patch, dict) else None,
+                "scratchpad_patch": scratchpad_patch if isinstance(scratchpad_patch, dict) else None,
+            },
+            timeout=45.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_finalize_confirmation failed: {r.text}"}
+        return r.json().get("session", {})
+
+    @tool
     async def intake_workflow_setup_pause() -> Any:
         """Pause the active workflow setup session for the current thread."""
         customer_id = require_customer_id(runtime)
@@ -525,6 +555,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         "intake_workflow_setup_mark_proposed": intake_workflow_setup_mark_proposed,
         "intake_workflow_setup_confirm_current": intake_workflow_setup_confirm_current,
         "intake_workflow_setup_commit": intake_workflow_setup_commit,
+        "intake_workflow_setup_finalize_confirmation": intake_workflow_setup_finalize_confirmation,
         "intake_workflow_setup_pause": intake_workflow_setup_pause,
         "intake_workflow_setup_cancel": intake_workflow_setup_cancel,
         "intake_workflow_run": intake_workflow_run,

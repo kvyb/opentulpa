@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from opentulpa.interfaces.telegram.client import (
@@ -21,6 +21,26 @@ from opentulpa.interfaces.telegram.client import (
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 
 logger = logging.getLogger(__name__)
+
+
+def _track_background_task(app: FastAPI, task: asyncio.Task[Any]) -> None:
+    tasks = getattr(app.state, "telegram_webhook_tasks", None)
+    if not isinstance(tasks, set):
+        tasks = set()
+        app.state.telegram_webhook_tasks = tasks
+    tasks.add(task)
+
+    def _on_done(done_task: asyncio.Task[Any]) -> None:
+        tasks.discard(done_task)
+        with suppress(asyncio.CancelledError):
+            exc = done_task.exception()
+            if exc is not None:
+                logger.error(
+                    "telegram webhook background handler failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+    task.add_done_callback(_on_done)
 
 
 def _parse_approval_callback_data(data: str) -> tuple[str, str] | None:
@@ -196,7 +216,7 @@ def register_telegram_webhook_routes(
     """Register Telegram webhook with callback-driven approval support."""
 
     @app.post("/webhook/telegram")
-    async def telegram_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+    async def telegram_webhook(request: Request) -> Response:
         if not settings.telegram_bot_token:
             return JSONResponse(status_code=501, content={"detail": "Telegram not configured"})
         expected_secret = str(settings.telegram_webhook_secret or "").strip()
@@ -210,8 +230,8 @@ def register_telegram_webhook_routes(
             return JSONResponse(status_code=403, content={"detail": "invalid telegram secret"})
         body = await request.json()
 
-        # Immediate 200 OK, logic runs in background.
-        background_tasks.add_task(_telegram_background_handler, body=body)
+        # Return 200 before long-running agent work so Telegram does not retry the same update.
+        _track_background_task(app, asyncio.create_task(_telegram_background_handler(body=body)))
         return Response(status_code=200)
 
     async def _telegram_background_handler(body: dict[str, Any]) -> None:

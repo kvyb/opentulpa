@@ -103,6 +103,7 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
     follow_up_questions = _nonempty_list(last_preflight.get("follow_up_questions"))
     errors = _nonempty_list(last_preflight.get("errors"))
     warnings = _nonempty_list(last_preflight.get("warnings"))
+    preflight_next_action = str(last_preflight.get("next_action", "") or "").strip()
 
     name = str(draft.get("name", "") or "").strip()
     channel = str(draft.get("channel", "") or "").strip()
@@ -164,14 +165,14 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
     elif proposal == "proposed_current":
         suggested = (
             "If the latest owner message explicitly confirms the proposal, call "
-            "intake_workflow_setup_confirm_current followed by intake_workflow_setup_commit, then stop. "
+            "intake_workflow_setup_finalize_confirmation, then report the created workflow id and stop. "
             "If the owner requests changes, call intake_workflow_setup_update, then preflight again."
         )
     elif preflight_ok and preflight_status == "ready":
         suggested = (
             "Call intake_workflow_setup_mark_proposed. Then send a concise proposal summary and ask for confirmation, then stop. "
             "If the latest owner message is already an explicit confirmation of a proposal visible in this conversation, "
-            "call intake_workflow_setup_mark_proposed, intake_workflow_setup_confirm_current, and intake_workflow_setup_commit in order."
+            "call intake_workflow_setup_finalize_confirmation instead."
         )
     elif preflight_status != "not_run" and follow_up_questions:
         suggested = (
@@ -209,6 +210,7 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
         f"- knowledge_file_count: {len(knowledge_file_ids or source_file_ids)}",
         f"- last_preflight_status: {preflight_status}",
         f"- last_preflight_ok: {_yes_no(preflight_ok)}",
+        f"- last_preflight_next_action: {preflight_next_action or 'none'}",
         f"- proposal_status: {proposal}",
         f"- confirmation_status: {confirmation}",
         f"- missing_core_inputs: {', '.join(missing_core) if missing_core else 'none'}",

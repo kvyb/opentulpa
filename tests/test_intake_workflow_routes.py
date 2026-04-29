@@ -218,3 +218,49 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
         session = committed.json()["session"]
         assert session["status"] == "completed"
         assert session["workflow"]["name"] == "Car Wash Intake"
+
+
+def test_intake_workflow_setup_finalize_confirmation_route_commits(tmp_path: Path) -> None:
+    with _mk_client(tmp_path) as client:
+        begin = client.post(
+            "/internal/intake/setup/begin",
+            json={
+                "customer_id": "telegram_123",
+                "thread_id": "thread_123",
+                "mode": "create",
+            },
+        )
+        assert begin.status_code == 200
+
+        updated = client.post(
+            "/internal/intake/setup/update",
+            json={
+                "customer_id": "telegram_123",
+                "thread_id": "thread_123",
+                "draft_patch": {
+                    "name": "Car Wash Intake",
+                    "intent_description": "Handle booking requests that arrive in Instagram DMs.",
+                    "required_fields": ["day", "time", "car_type", "wash_type"],
+                    "sink_type": "local_csv",
+                    "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+                },
+            },
+        )
+        assert updated.status_code == 200
+
+        finalized = client.post(
+            "/internal/intake/setup/finalize_confirmation",
+            json={
+                "customer_id": "telegram_123",
+                "thread_id": "thread_123",
+                "draft_patch": {"assistant_instructions": "Use '-' when optional pricing is unknown."},
+            },
+        )
+
+        assert finalized.status_code == 200
+        session = finalized.json()["session"]
+        assert session["status"] == "completed"
+        assert session["workflow"]["name"] == "Car Wash Intake"
+        assert session["workflow"]["assistant_instructions"] == (
+            "Use '-' when optional pricing is unknown."
+        )
