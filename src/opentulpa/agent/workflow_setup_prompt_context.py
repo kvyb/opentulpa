@@ -40,8 +40,6 @@ def _sink_status(*, sink_type: str, sink_config: dict[str, Any]) -> tuple[str, l
         static_arguments = _safe_dict(sink_config.get("static_arguments"))
         if not str(static_arguments.get("spreadsheetId", "") or "").strip():
             missing.append("sink_config.static_arguments.spreadsheetId")
-        if not str(static_arguments.get("sheetName", "") or "").strip():
-            missing.append("sink_config.static_arguments.sheetName")
         toolkit = str(sink_config.get("toolkit", "") or "").strip()
         if toolkit != "googlesheets":
             missing.append("sink_config.toolkit=googlesheets")
