@@ -1984,14 +1984,73 @@ class OpenTulpaLangGraphRuntime:
             payload: Any | None = None
             error_text: str | None = None
             trace_recorded = False
+            invoke_started = time.monotonic()
+            self.log_behavior_event(
+                event="llm.invoke.start",
+                model_name=resolved_model_name,
+                call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                trace_id=str(attempt_context.get("trace_id") or ""),
+                thread_id=str(attempt_context.get("thread_id") or ""),
+                customer_id=str(attempt_context.get("customer_id") or ""),
+                turn_mode=str(attempt_context.get("turn_mode") or ""),
+                prompt_mode=str(attempt_context.get("prompt_mode") or ""),
+                provider_attempt_name=str(attempt_context.get("provider_attempt_name") or "default"),
+                provider_attempt_index=int(attempt_context.get("provider_attempt_index") or 1),
+                provider_attempt_count=int(attempt_context.get("provider_attempt_count") or 1),
+                prompt_message_count=len(prepared_messages),
+                stable_prefix_count=int(stable_prefix_count),
+                structured_output_supported=bool(callable(structured)),
+            )
             if callable(structured):
+                phase = "structured_output"
                 try:
+                    structured_started = time.monotonic()
                     runner = structured(schema)
+                    self.log_behavior_event(
+                        event="llm.invoke.runner_ready",
+                        model_name=resolved_model_name,
+                        call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                        trace_id=str(attempt_context.get("trace_id") or ""),
+                        thread_id=str(attempt_context.get("thread_id") or ""),
+                        customer_id=str(attempt_context.get("customer_id") or ""),
+                        provider_attempt_name=str(
+                            attempt_context.get("provider_attempt_name") or "default"
+                        ),
+                        elapsed_ms=int((time.monotonic() - structured_started) * 1000),
+                    )
+                    phase = "provider_await"
+                    provider_started = time.monotonic()
+                    self.log_behavior_event(
+                        event="llm.invoke.await_provider",
+                        model_name=resolved_model_name,
+                        call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                        trace_id=str(attempt_context.get("trace_id") or ""),
+                        thread_id=str(attempt_context.get("thread_id") or ""),
+                        customer_id=str(attempt_context.get("customer_id") or ""),
+                        provider_attempt_name=str(
+                            attempt_context.get("provider_attempt_name") or "default"
+                        ),
+                    )
                     if _supports_ainvoke_kwargs(runner, invoke_extras):
                         payload = await runner.ainvoke(prepared_messages, **invoke_extras)
                     else:
                         payload = await runner.ainvoke(prepared_messages)
+                    provider_elapsed_ms = int((time.monotonic() - provider_started) * 1000)
                     if isinstance(payload, schema):
+                        self.log_behavior_event(
+                            event="llm.invoke.finish",
+                            model_name=resolved_model_name,
+                            call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                            trace_id=str(attempt_context.get("trace_id") or ""),
+                            thread_id=str(attempt_context.get("thread_id") or ""),
+                            customer_id=str(attempt_context.get("customer_id") or ""),
+                            provider_attempt_name=str(
+                                attempt_context.get("provider_attempt_name") or "default"
+                            ),
+                            provider_elapsed_ms=provider_elapsed_ms,
+                            elapsed_ms=int((time.monotonic() - invoke_started) * 1000),
+                            result_type=type(payload).__name__,
+                        )
                         self._record_llm_call_trace(
                             model_name=resolved_model_name,
                             prepared_messages=prepared_messages,
@@ -2004,6 +2063,20 @@ class OpenTulpaLangGraphRuntime:
                         return payload, None
                     if isinstance(payload, dict):
                         parsed = schema.model_validate(payload)
+                        self.log_behavior_event(
+                            event="llm.invoke.finish",
+                            model_name=resolved_model_name,
+                            call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                            trace_id=str(attempt_context.get("trace_id") or ""),
+                            thread_id=str(attempt_context.get("thread_id") or ""),
+                            customer_id=str(attempt_context.get("customer_id") or ""),
+                            provider_attempt_name=str(
+                                attempt_context.get("provider_attempt_name") or "default"
+                            ),
+                            provider_elapsed_ms=provider_elapsed_ms,
+                            elapsed_ms=int((time.monotonic() - invoke_started) * 1000),
+                            result_type=type(payload).__name__,
+                        )
                         self._record_llm_call_trace(
                             model_name=resolved_model_name,
                             prepared_messages=prepared_messages,
@@ -2020,6 +2093,20 @@ class OpenTulpaLangGraphRuntime:
                     )
                 except Exception as exc:
                     error_text = f"{type(exc).__name__}: {exc}"
+                    self.log_behavior_event(
+                        event="llm.invoke.error",
+                        model_name=resolved_model_name,
+                        call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                        trace_id=str(attempt_context.get("trace_id") or ""),
+                        thread_id=str(attempt_context.get("thread_id") or ""),
+                        customer_id=str(attempt_context.get("customer_id") or ""),
+                        provider_attempt_name=str(
+                            attempt_context.get("provider_attempt_name") or "default"
+                        ),
+                        phase=phase,
+                        elapsed_ms=int((time.monotonic() - invoke_started) * 1000),
+                        error=error_text,
+                    )
                 finally:
                     if not trace_recorded and (payload is not None or error_text):
                         self._record_llm_call_trace(
