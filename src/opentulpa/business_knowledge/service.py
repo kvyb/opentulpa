@@ -47,6 +47,7 @@ _DEFAULT_ORACLE_MAX_OUTPUT_TOKENS = 1000
 _NO_SOURCE_MARKERS = {"no_source", "no source", "not found", "unsupported"}
 _DEFAULT_OPENROUTER_APP_REFERER = "https://github.com/kvyb/opentulpa"
 _DEFAULT_OPENROUTER_APP_TITLE = "OpenTulpa"
+_KNOWLEDGE_PREFLIGHT_CACHE_VERSION = 1
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +83,10 @@ def _json_loads_dict(value: Any) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _hash_json(value: Any) -> str:
+    return content_hash(_json_dumps(value).encode("utf-8", errors="replace"))
 
 
 def _safe_dict(value: Any) -> dict[str, Any]:
@@ -377,6 +382,24 @@ class BusinessKnowledgeService:
                     ON knowledge_sections(customer_id, scope_type, scope_id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_sections_file
                     ON knowledge_sections(customer_id, scope_type, scope_id, file_id);
+
+                CREATE TABLE IF NOT EXISTS knowledge_preflight_cache (
+                    customer_id TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,
+                    cache_version INTEGER NOT NULL,
+                    source_signature TEXT NOT NULL,
+                    workflow_goal_hash TEXT NOT NULL,
+                    oracle_model TEXT NOT NULL,
+                    file_ids_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (customer_id, cache_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_preflight_cache_lookup
+                    ON knowledge_preflight_cache(
+                        customer_id, source_signature, workflow_goal_hash, oracle_model
+                    );
                 """
             )
 
@@ -803,21 +826,47 @@ class BusinessKnowledgeService:
         workflow_goal: str,
     ) -> dict[str, Any]:
         started = time.monotonic()
+        cid = _safe_id(customer_id, field="customer_id")
+        safe_scope_type = _safe_scope_type(scope_type)
+        safe_scope_id = _safe_id(scope_id, field="scope_id")
         goal = str(workflow_goal or "").strip() or "business services pricing policies required fields"
+        source_rows = self._source_rows(
+            customer_id=cid,
+            scope_type=safe_scope_type,
+            scope_id=safe_scope_id,
+        )
+        cache_meta = self._preflight_cache_meta(
+            customer_id=cid,
+            source_rows=source_rows,
+            workflow_goal=goal,
+        )
+        cached = self._get_preflight_cache(customer_id=cid, cache_key=cache_meta["cache_key"])
+        if cached:
+            diagnostics = _safe_dict(cached.get("diagnostics"))
+            timing_ms = dict(_safe_int_dict(diagnostics.get("timing_ms")))
+            timing_ms["preflight_total"] = _elapsed_ms(started)
+            diagnostics["timing_ms"] = timing_ms
+            diagnostics["cache"] = {**cache_meta, "hit": True}
+            cached["diagnostics"] = diagnostics
+            cached["cache_hit"] = True
+            logger.info(
+                "business_knowledge.preflight cache_hit customer_id=%s scope_type=%s scope_id=%s cache_key=%s preflight_total_ms=%s",
+                cid,
+                safe_scope_type,
+                safe_scope_id,
+                cache_meta["cache_key"],
+                timing_ms.get("preflight_total"),
+            )
+            return cached
         result = self.query(
-            customer_id=customer_id,
-            scope_type=scope_type,
-            scope_id=scope_id,
+            customer_id=cid,
+            scope_type=safe_scope_type,
+            scope_id=safe_scope_id,
             query=(
                 "Can these source files support this intake workflow? "
                 "Mention only source-backed useful facts and missing gaps. "
                 f"Workflow goal: {goal}"
             ),
-        )
-        source_rows = self._source_rows(
-            customer_id=customer_id,
-            scope_type=_safe_scope_type(scope_type),
-            scope_id=str(scope_id or "").strip(),
         )
         derived_only = bool(source_rows) and all(
             str(row["source_kind"]) == "derived_from_media" for row in source_rows
@@ -828,23 +877,25 @@ class BusinessKnowledgeService:
         timing_ms = dict(_safe_int_dict(diagnostics.get("timing_ms")))
         timing_ms["preflight_total"] = _elapsed_ms(started)
         diagnostics["timing_ms"] = timing_ms
+        diagnostics["cache"] = {**cache_meta, "hit": False}
         logger.info(
             "business_knowledge.preflight timing customer_id=%s scope_type=%s scope_id=%s status=%s preflight_total_ms=%s query_total_ms=%s source_pack_ms=%s",
-            customer_id,
-            scope_type,
-            scope_id,
+            cid,
+            safe_scope_type,
+            safe_scope_id,
             "ready" if ready else "needs_better_source",
             timing_ms.get("preflight_total"),
             timing_ms.get("total"),
             timing_ms.get("source_pack_total"),
         )
-        return {
+        payload = {
             "ok": ready,
             "status": "ready" if ready else "needs_better_source",
             "source_count": result.source_count,
             "section_count": result.section_count,
             "answer_extract": result.answer.answer_extract,
             "diagnostics": diagnostics,
+            "cache_hit": False,
             "warnings": [
                 *result.warnings,
                 *(
@@ -856,6 +907,12 @@ class BusinessKnowledgeService:
                 ),
             ],
         }
+        self._store_preflight_cache(
+            customer_id=cid,
+            cache_meta=cache_meta,
+            result=payload,
+        )
+        return payload
 
     def promote_scope(
         self,
@@ -1075,6 +1132,100 @@ class BusinessKnowledgeService:
                 (customer_id, scope_type, scope_id),
             ).fetchone()
         return int((row or {})["count"] or 0) if row is not None else 0
+
+    def _preflight_cache_meta(
+        self,
+        *,
+        customer_id: str,
+        source_rows: list[sqlite3.Row],
+        workflow_goal: str,
+    ) -> dict[str, Any]:
+        source_versions = [
+            {
+                "file_id": str(row["file_id"]),
+                "source_hash": str(row["source_hash"]),
+                "status": str(row["status"]),
+                "source_kind": str(row["source_kind"]),
+                "section_count": int(row["section_count"] or 0),
+                "char_count": int(row["char_count"] or 0),
+                "indexed_at": str(row["indexed_at"]),
+            }
+            for row in sorted(source_rows, key=lambda item: str(item["file_id"]))
+        ]
+        source_signature = _hash_json(source_versions)
+        workflow_goal_hash = _hash_json(str(workflow_goal or "").strip())
+        cache_key = _hash_json(
+            {
+                "cache_version": _KNOWLEDGE_PREFLIGHT_CACHE_VERSION,
+                "customer_id": customer_id,
+                "source_signature": source_signature,
+                "workflow_goal_hash": workflow_goal_hash,
+                "oracle_model": self.oracle_model,
+                "max_output_tokens": self.max_output_tokens,
+            }
+        )
+        return {
+            "cache_key": cache_key,
+            "cache_version": _KNOWLEDGE_PREFLIGHT_CACHE_VERSION,
+            "source_signature": source_signature,
+            "workflow_goal_hash": workflow_goal_hash,
+            "oracle_model": self.oracle_model,
+            "file_count": len(source_versions),
+            "file_ids": [item["file_id"] for item in source_versions],
+        }
+
+    def _get_preflight_cache(self, *, customer_id: str, cache_key: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT result_json
+                FROM knowledge_preflight_cache
+                WHERE customer_id=? AND cache_key=? AND cache_version=?
+                """,
+                (customer_id, cache_key, _KNOWLEDGE_PREFLIGHT_CACHE_VERSION),
+            ).fetchone()
+        if row is None:
+            return {}
+        return _json_loads_dict(row["result_json"])
+
+    def _store_preflight_cache(
+        self,
+        *,
+        customer_id: str,
+        cache_meta: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        now = _utc_now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO knowledge_preflight_cache (
+                    customer_id, cache_key, cache_version, source_signature,
+                    workflow_goal_hash, oracle_model, file_ids_json, result_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(customer_id, cache_key) DO UPDATE SET
+                    source_signature=excluded.source_signature,
+                    workflow_goal_hash=excluded.workflow_goal_hash,
+                    oracle_model=excluded.oracle_model,
+                    file_ids_json=excluded.file_ids_json,
+                    result_json=excluded.result_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    customer_id,
+                    str(cache_meta.get("cache_key", "") or ""),
+                    int(cache_meta.get("cache_version") or _KNOWLEDGE_PREFLIGHT_CACHE_VERSION),
+                    str(cache_meta.get("source_signature", "") or ""),
+                    str(cache_meta.get("workflow_goal_hash", "") or ""),
+                    str(cache_meta.get("oracle_model", "") or ""),
+                    _json_dumps(_safe_text_list(cache_meta.get("file_ids"))),
+                    _json_dumps(result),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
 
     def _source_rows(self, *, customer_id: str, scope_type: str, scope_id: str) -> list[sqlite3.Row]:
         if not scope_id:

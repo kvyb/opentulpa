@@ -545,6 +545,122 @@ def test_business_knowledge_requeries_oracle_after_reindex(tmp_path: Path) -> No
     assert len(oracle.calls) == 3
 
 
+def test_business_knowledge_preflight_reuses_durable_cache_for_same_source_goal(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    record = vault.ingest_file(
+        customer_id="telegram_123",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="policy.txt",
+        mime_type="text/plain",
+        caption=None,
+        raw_bytes=b"Reference numbers are required for all appointments.",
+    )
+    oracle = _FakeOracle("The source supports appointment intake.")
+    knowledge = _knowledge(tmp_path, vault, oracle=oracle)
+    knowledge.index_sources(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache",
+        file_ids=[str(record["id"])],
+    )
+
+    first = knowledge.preflight_scope(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache",
+        workflow_goal="appointment intake",
+    )
+    second = knowledge.preflight_scope(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache",
+        workflow_goal="appointment intake",
+    )
+
+    assert first["ok"] is True
+    assert first["cache_hit"] is False
+    assert second["ok"] is True
+    assert second["cache_hit"] is True
+    assert second["diagnostics"]["cache"]["hit"] is True
+    assert len(oracle.calls) == 1
+
+    resumed_oracle = _FakeOracle("should not be called")
+    resumed = BusinessKnowledgeService(
+        root_dir=tmp_path / "knowledge",
+        db_path=tmp_path / "knowledge.db",
+        file_vault=vault,
+        oracle_client=resumed_oracle,
+    )
+    cached_after_restart = resumed.preflight_scope(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache",
+        workflow_goal="appointment intake",
+    )
+
+    assert cached_after_restart["cache_hit"] is True
+    assert resumed_oracle.calls == []
+
+
+def test_business_knowledge_preflight_cache_invalidates_on_goal_or_source_change(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    record = vault.ingest_file(
+        customer_id="telegram_123",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="policy.txt",
+        mime_type="text/plain",
+        caption=None,
+        raw_bytes=b"Reference numbers are required for all appointments.",
+    )
+    oracle = _FakeOracle("The source supports appointment intake.")
+    knowledge = _knowledge(tmp_path, vault, oracle=oracle)
+    knowledge.index_sources(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache_invalidate",
+        file_ids=[str(record["id"])],
+    )
+
+    first = knowledge.preflight_scope(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache_invalidate",
+        workflow_goal="appointment intake",
+    )
+    changed_goal = knowledge.preflight_scope(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache_invalidate",
+        workflow_goal="appointment intake with vehicle class",
+    )
+    vault.set_ai_summary("telegram_123", str(record["id"]), "summary changed")
+    knowledge.index_sources(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache_invalidate",
+        file_ids=[str(record["id"])],
+    )
+    changed_source = knowledge.preflight_scope(
+        customer_id="telegram_123",
+        scope_type="workflow_setup",
+        scope_id="iwsetup_preflight_cache_invalidate",
+        workflow_goal="appointment intake",
+    )
+
+    assert first["cache_hit"] is False
+    assert changed_goal["cache_hit"] is False
+    assert changed_source["cache_hit"] is False
+    assert len(oracle.calls) == 3
+
+
 def test_business_knowledge_fails_when_source_pack_is_too_large(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     record = vault.ingest_file(
