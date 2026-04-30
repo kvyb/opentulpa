@@ -1892,6 +1892,7 @@ class OpenTulpaLangGraphRuntime:
     def _normalize_llm_call_context(call_context: dict[str, Any] | None) -> dict[str, Any]:
         normalized = dict(call_context) if isinstance(call_context, dict) else {}
         normalized.pop("_langfuse_callback_attached", None)
+        normalized.pop("_langfuse_graph_callback_covers_call", None)
         prompt_sections = normalized.get("prompt_sections")
         if isinstance(prompt_sections, str):
             normalized["prompt_sections"] = [
@@ -1972,7 +1973,11 @@ class OpenTulpaLangGraphRuntime:
         tracer = getattr(self, "_langfuse_tracer", None)
         record_generation = getattr(tracer, "record_generation", None)
         callback_already_records = bool(
-            isinstance(call_context, dict) and call_context.get("_langfuse_callback_attached")
+            isinstance(call_context, dict)
+            and (
+                call_context.get("_langfuse_callback_attached")
+                or call_context.get("_langfuse_graph_callback_covers_call")
+            )
         )
         if callable(record_generation) and not callback_already_records:
             with suppress(Exception):
@@ -3263,6 +3268,7 @@ class OpenTulpaLangGraphRuntime:
             "final_response_text": "",
             "pending_context_summary": pending_context_summary,
             "agent_trace_id": trace_id,
+            "langfuse_graph_callback_attached": False,
             "tool_error_count": 0,
             "approval_handoff": False,
             "claim_check_retry_count": 0,
@@ -3351,6 +3357,9 @@ class OpenTulpaLangGraphRuntime:
                 "prompt_mode": str(prompt_mode or "").strip(),
             }
             config["tags"] = list(config["metadata"]["langfuse_tags"])
+            graph_langfuse_callback_attached = True
+        else:
+            graph_langfuse_callback_attached = False
         graph_input = self._build_graph_input(
             user_text=user_text,
             customer_id=customer_id,
@@ -3361,6 +3370,7 @@ class OpenTulpaLangGraphRuntime:
             trace_id=trace_id,
             skill_state=skill_state,
         )
+        graph_input["langfuse_graph_callback_attached"] = graph_langfuse_callback_attached
         return _PreparedTurnContext(
             through_id=through_id,
             config=config,
@@ -3404,6 +3414,8 @@ class OpenTulpaLangGraphRuntime:
         if model is None:
             return model
         context = dict(call_context or {})
+        if bool(context.get("_langfuse_graph_callback_covers_call")):
+            return model
         callbacks = self._build_langfuse_callbacks(
             customer_id=str(
                 context.get("customer_id") or self.get_active_customer_id() or ""

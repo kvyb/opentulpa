@@ -914,6 +914,7 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
     assert grounding_index < last_human_index
     assert isinstance(captured["call_context"], dict)
     assert captured["call_context"]["call_site"] == "graph_agent"
+    assert captured["call_context"]["_langfuse_graph_callback_covers_call"] is False
     assert "memory_grounding" in captured["call_context"]["prompt_sections"]
 
 
