@@ -356,6 +356,18 @@ Useful operational surfaces:
 
 Support operators are trusted operators. They can bind to a customer tenant, debug or set up workflows with owner-level access, and keep their own support conversation history separate from the owner's chat. Customer-facing proactive events still go to the owner by default.
 
+### Langfuse Observability
+
+Langfuse is optional and enabled when both keys are present:
+
+```bash
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_TRACING_ENVIRONMENT=opentulpa-alpha
+```
+
+`LANGFUSE_BASE_URL` defaults to `https://us.cloud.langfuse.com`. When enabled, OpenTulpa sends turn traces, LLM generations, tool spans, side-effect summaries, token/cost metadata, and deployment/environment tags to Langfuse. Local JSONL logs still stay on disk.
+
 ---
 
 ## Safety Model
