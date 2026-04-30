@@ -91,6 +91,41 @@ def test_settings_accepts_capsolver_api_key_env(monkeypatch) -> None:
     assert settings.capsolver_api_key == "cap-key"
 
 
+def test_settings_accepts_langfuse_base_url_or_host_alias(monkeypatch) -> None:
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://us.cloud.langfuse.com")
+    monkeypatch.setenv("LANGFUSE_DEPLOYMENT_TAG", "carwash-test")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENVIRONMENT", "carwash-test")
+
+    settings = Settings()
+
+    assert settings.langfuse_public_key == "pk"
+    assert settings.langfuse_secret_key == "sk"
+    assert settings.langfuse_base_url == "https://us.cloud.langfuse.com"
+    assert settings.langfuse_deployment_tag == "carwash-test"
+    assert settings.langfuse_environment == "carwash-test"
+
+
+def test_settings_accepts_langfuse_environment_alias(monkeypatch) -> None:
+    monkeypatch.delenv("LANGFUSE_TRACING_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("LANGFUSE_ENVIRONMENT", "staging")
+
+    settings = Settings()
+
+    assert settings.langfuse_environment == "staging"
+
+
+def test_settings_defaults_langfuse_base_url_to_us_cloud(monkeypatch) -> None:
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+
+    settings = Settings()
+
+    assert settings.langfuse_base_url == "https://us.cloud.langfuse.com"
+
+
 def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text(

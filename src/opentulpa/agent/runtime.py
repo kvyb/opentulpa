@@ -21,7 +21,7 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -110,7 +110,6 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.ids import new_short_id
-from opentulpa.logging import create_posthog_logger
 from opentulpa.memory.service import MEMORY_KIND_PRIORITY
 
 logger = logging.getLogger(__name__)
@@ -1258,8 +1257,7 @@ class OpenTulpaLangGraphRuntime:
         capsolver_api_key: str | None = None,
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
-        posthog_api_key: str | None = None,
-        posthog_host: str | None = None,
+        langfuse_tracer: Any | None = None,
     ) -> None:
         self.app_url = app_url.rstrip("/")
         self.openrouter_api_key = openrouter_api_key
@@ -1344,10 +1342,7 @@ class OpenTulpaLangGraphRuntime:
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
-        self._posthog_logger = create_posthog_logger(
-            api_key=posthog_api_key,
-            host=posthog_host,
-        )
+        self._langfuse_tracer = langfuse_tracer
         self._context_engineer = ContextEngineer()
         self._browser_use_local_manager: Any | None = None
         self._headroom_service: Any | None = None
@@ -1810,8 +1805,6 @@ class OpenTulpaLangGraphRuntime:
         return normalized or raw_result_text
 
     def log_behavior_event(self, *, event: str, **fields: Any) -> None:
-        if not bool(getattr(self, "_behavior_log_enabled", False)):
-            return
         event_name = str(event or "").strip()
         if not event_name:
             return
@@ -1825,50 +1818,34 @@ class OpenTulpaLangGraphRuntime:
                 continue
             payload[safe_key] = value
         serialized = json.dumps(payload, ensure_ascii=False, default=str)
-        lock = getattr(self, "_behavior_log_lock", None)
-        path = getattr(self, "_behavior_log_path", None)
-        if not isinstance(path, Path):
-            return
-        with suppress(Exception):
-            path.parent.mkdir(parents=True, exist_ok=True)
-        if lock is None:
-            with suppress(Exception), path.open("a", encoding="utf-8") as f:
-                f.write(serialized + "\n")
-            return
-        with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
-            f.write(serialized + "\n")
-
-    def capture_posthog_event(
-        self,
-        *,
-        event: str,
-        customer_id: str | None = None,
-        properties: dict[str, Any] | None = None,
-    ) -> None:
-        posthog_logger = getattr(self, "_posthog_logger", None)
-        capture = getattr(posthog_logger, "capture_event", None)
-        if not callable(capture):
-            return
-        capture(
-            distinct_id=str(customer_id or "").strip() or None,
-            event=str(event or "").strip(),
-            properties=_json_safe(properties or {}),
-        )
+        if bool(getattr(self, "_behavior_log_enabled", False)):
+            lock = getattr(self, "_behavior_log_lock", None)
+            path = getattr(self, "_behavior_log_path", None)
+            if isinstance(path, Path):
+                with suppress(Exception):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                if lock is None:
+                    with suppress(Exception), path.open("a", encoding="utf-8") as f:
+                        f.write(serialized + "\n")
+                else:
+                    with suppress(Exception), lock, path.open("a", encoding="utf-8") as f:
+                        f.write(serialized + "\n")
+        tracer = getattr(self, "_langfuse_tracer", None)
+        record_event = getattr(tracer, "record_behavior_event", None)
+        if callable(record_event):
+            with suppress(Exception):
+                record_event(payload)
 
     def record_observability_event(
         self,
         *,
         event: str,
         customer_id: str | None = None,
-        posthog_event: str | None = None,
         **fields: Any,
     ) -> None:
+        if customer_id:
+            fields.setdefault("customer_id", customer_id)
         self.log_behavior_event(event=event, **fields)
-        self.capture_posthog_event(
-            event=str(posthog_event or event or "").strip(),
-            customer_id=customer_id,
-            properties={"behavior_event": str(event or "").strip(), **fields},
-        )
 
     @staticmethod
     def _normalize_llm_call_context(call_context: dict[str, Any] | None) -> dict[str, Any]:
@@ -1926,8 +1903,6 @@ class OpenTulpaLangGraphRuntime:
         error: str | None,
         call_context: dict[str, Any] | None = None,
     ) -> None:
-        if not bool(getattr(self, "_behavior_log_enabled", True)):
-            return
         normalized_context = self._normalize_llm_call_context(call_context)
         usage_fields = self.extract_response_usage_fields(response) if response is not None else {}
         response_content = getattr(response, "content", response) if response is not None else ""
@@ -1950,7 +1925,13 @@ class OpenTulpaLangGraphRuntime:
         }
         for key, value in normalized_context.items():
             record[str(key)] = _json_safe(value)
-        self._write_llm_call_trace(record)
+        if bool(getattr(self, "_behavior_log_enabled", True)):
+            self._write_llm_call_trace(record)
+        tracer = getattr(self, "_langfuse_tracer", None)
+        record_generation = getattr(tracer, "record_generation", None)
+        if callable(record_generation):
+            with suppress(Exception):
+                record_generation(record)
 
     def _truncate_user_visible_reply(self, text: str) -> tuple[str, bool]:
         raw = str(text or "").strip()
@@ -3195,10 +3176,10 @@ class OpenTulpaLangGraphRuntime:
             with suppress(Exception):
                 await manager.shutdown()
         self._browser_use_local_manager = None
-        posthog_logger = getattr(self, "_posthog_logger", None)
-        if posthog_logger is not None and hasattr(posthog_logger, "shutdown"):
+        langfuse_tracer = getattr(self, "_langfuse_tracer", None)
+        if langfuse_tracer is not None and hasattr(langfuse_tracer, "shutdown"):
             with suppress(Exception):
-                posthog_logger.shutdown()
+                langfuse_tracer.shutdown()
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
         self._checkpointer_cm = None
@@ -3302,7 +3283,7 @@ class OpenTulpaLangGraphRuntime:
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
         }
-        callbacks = self._build_posthog_callbacks(
+        callbacks = self._build_langfuse_callbacks(
             customer_id=customer_id,
             trace_id=trace_id,
             thread_id=thread_id,
@@ -3327,7 +3308,7 @@ class OpenTulpaLangGraphRuntime:
             graph_input=graph_input,
         )
 
-    def _build_posthog_callbacks(
+    def _build_langfuse_callbacks(
         self,
         *,
         customer_id: str | None,
@@ -3338,20 +3319,24 @@ class OpenTulpaLangGraphRuntime:
         call_site: str | None = None,
         model_name: str | None = None,
     ) -> list[Any]:
-        posthog_logger = getattr(self, "_posthog_logger", None)
-        if posthog_logger is None:
+        langfuse_tracer = getattr(self, "_langfuse_tracer", None)
+        build_callbacks = getattr(langfuse_tracer, "build_callbacks", None)
+        if not callable(build_callbacks):
             return []
-        properties: dict[str, Any] = {
+        metadata: dict[str, Any] = {
             "thread_id": str(thread_id or "").strip(),
             "turn_mode": str(turn_mode or "").strip(),
             "prompt_mode": str(prompt_mode or "").strip(),
             "call_site": str(call_site or "").strip(),
             "model_name": str(model_name or "").strip(),
+            "opentulpa_trace_id": str(trace_id or "").strip(),
         }
-        return posthog_logger.build_callbacks(
-            distinct_id=str(customer_id or "").strip() or None,
+        return build_callbacks(
+            user_id=str(customer_id or "").strip() or None,
             trace_id=str(trace_id or "").strip() or None,
-            properties=properties,
+            session_id=str(thread_id or "").strip() or None,
+            metadata=metadata,
+            tags=[item for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip()) if item],
         )
 
     def _model_with_callbacks(
@@ -3360,7 +3345,7 @@ class OpenTulpaLangGraphRuntime:
         if model is None:
             return model
         context = dict(call_context or {})
-        callbacks = self._build_posthog_callbacks(
+        callbacks = self._build_langfuse_callbacks(
             customer_id=str(
                 context.get("customer_id") or self.get_active_customer_id() or ""
             ).strip()
@@ -3382,8 +3367,42 @@ class OpenTulpaLangGraphRuntime:
         try:
             return with_config({"callbacks": callbacks})
         except Exception:
-            logger.exception("Failed to attach PostHog callbacks to model invocation.")
+            logger.exception("Failed to attach Langfuse callbacks to model invocation.")
             return model
+
+    def _observability_trace_context(
+        self,
+        *,
+        name: str,
+        trace_id: str | None,
+        customer_id: str | None,
+        thread_id: str | None,
+        input: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> Any:
+        tracer = getattr(self, "_langfuse_tracer", None)
+        trace_context = getattr(tracer, "trace_context", None)
+        if not callable(trace_context):
+            return nullcontext()
+        return trace_context(
+            name=name,
+            trace_id=trace_id,
+            user_id=customer_id,
+            session_id=thread_id,
+            input=input,
+            metadata=metadata,
+            tags=tags,
+        )
+
+    @staticmethod
+    def _observability_ids_from_text(text: str) -> dict[str, str]:
+        payload: dict[str, str] = {}
+        for field in ("workflow_id", "routine_id", "conversation_id"):
+            match = re.search(rf"\b{field}\s*[:=]\s*([^\s,;]+)", str(text or ""), re.IGNORECASE)
+            if match:
+                payload[field] = match.group(1).strip()
+        return payload
 
     async def ainvoke_text(
         self,
@@ -3422,6 +3441,22 @@ class OpenTulpaLangGraphRuntime:
             return ""
         customer_scope_token = self.set_active_customer_id(customer_id)
         thread_scope_token = self.set_active_thread_id(thread_id)
+        trace_context = self._observability_trace_context(
+            name=f"opentulpa.turn.{normalized_turn_mode}",
+            trace_id=turn_trace_id,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            input={"text": str(effective_text or ""), "mode": "ainvoke"},
+            metadata={
+                **self._observability_ids_from_text(str(effective_text or "")),
+                "turn_mode": normalized_turn_mode,
+                "mode": "ainvoke",
+                "prompt_mode_override": str(prompt_mode_override or "").strip() or None,
+                "forced_skill_names": forced_skill_names or [],
+            },
+            tags=[normalized_turn_mode, "ainvoke"],
+        )
+        trace_context.__enter__()
         try:
             if turn_state is not None or not (
                 normalized_turn_mode == "interactive" and interactive_session is not None
@@ -3576,6 +3611,8 @@ class OpenTulpaLangGraphRuntime:
             )
             raise
         finally:
+            with suppress(Exception):
+                trace_context.__exit__(None, None, None)
             self.reset_active_thread_id(thread_scope_token)
             self.reset_active_customer_id(customer_scope_token)
             self._thread_inputs.end_turn(turn_state)
@@ -3630,6 +3667,22 @@ class OpenTulpaLangGraphRuntime:
             raise MergedInputSuppressedError("input merged into previous in-flight turn")
         customer_scope_token = self.set_active_customer_id(customer_id)
         thread_scope_token = self.set_active_thread_id(thread_id)
+        trace_context = self._observability_trace_context(
+            name=f"opentulpa.turn.{normalized_turn_mode}",
+            trace_id=turn_trace_id,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            input={"text": str(effective_text or ""), "mode": "astream"},
+            metadata={
+                **self._observability_ids_from_text(str(effective_text or "")),
+                "turn_mode": normalized_turn_mode,
+                "mode": "astream",
+                "prompt_mode_override": str(prompt_mode_override or "").strip() or None,
+                "forced_skill_names": forced_skill_names or [],
+            },
+            tags=[normalized_turn_mode, "astream"],
+        )
+        trace_context.__enter__()
         try:
             logger.info(
                 "runtime.astream_text start thread_id=%s customer_id=%s text_chars=%s",
@@ -4160,6 +4213,8 @@ class OpenTulpaLangGraphRuntime:
             )
             raise
         finally:
+            with suppress(Exception):
+                trace_context.__exit__(None, None, None)
             self.reset_active_thread_id(thread_scope_token)
             self.reset_active_customer_id(customer_scope_token)
             self._thread_inputs.end_turn(turn_state)
@@ -4489,35 +4544,50 @@ class OpenTulpaLangGraphRuntime:
                     error=invoke_error,
                 )
         if decision is None:
-            decision, invoke_error = await self._invoke_structured_model(
-                model=model,
-                schema=_IntakeWorkflowDecision,
-                messages=[
-                    SystemMessage(content=_build_intake_workflow_system_prompt()),
-                    HumanMessage(
-                        content=_build_intake_workflow_human_prompt(
-                            customer_id=customer_id,
-                            workflow=workflow,
-                            conversation=conversation,
-                            active_booking=active_booking,
-                            recent_completed_booking=recent_completed_booking,
-                            execution_feedback=execution_feedback,
-                        )
-                    ),
-                ],
-                stable_prefix_count=1,
-                call_context={
-                    "call_site": "intake_workflow_decision",
-                    "trace_id": structured_trace_id,
-                    "thread_id": structured_thread_id,
-                    "customer_id": customer_id,
+            with self._observability_trace_context(
+                name="opentulpa.intake.decision",
+                trace_id=structured_trace_id,
+                customer_id=customer_id,
+                thread_id=structured_thread_id,
+                input={"workflow_id": workflow_id, "conversation_id": conversation_id},
+                metadata={
                     "turn_mode": "routine_wake",
                     "prompt_mode": "structured_intake",
                     "workflow_id": workflow_id,
                     "conversation_id": conversation_id,
                     "latest_inbound_message_id": latest_inbound_id,
                 },
-            )
+                tags=["intake", "routine_wake"],
+            ):
+                decision, invoke_error = await self._invoke_structured_model(
+                    model=model,
+                    schema=_IntakeWorkflowDecision,
+                    messages=[
+                        SystemMessage(content=_build_intake_workflow_system_prompt()),
+                        HumanMessage(
+                            content=_build_intake_workflow_human_prompt(
+                                customer_id=customer_id,
+                                workflow=workflow,
+                                conversation=conversation,
+                                active_booking=active_booking,
+                                recent_completed_booking=recent_completed_booking,
+                                execution_feedback=execution_feedback,
+                            )
+                        ),
+                    ],
+                    stable_prefix_count=1,
+                    call_context={
+                        "call_site": "intake_workflow_decision",
+                        "trace_id": structured_trace_id,
+                        "thread_id": structured_thread_id,
+                        "customer_id": customer_id,
+                        "turn_mode": "routine_wake",
+                        "prompt_mode": "structured_intake",
+                        "workflow_id": workflow_id,
+                        "conversation_id": conversation_id,
+                        "latest_inbound_message_id": latest_inbound_id,
+                    },
+                )
         if decision is None or not isinstance(decision, _IntakeWorkflowDecision):
             return {
                 "ok": False,

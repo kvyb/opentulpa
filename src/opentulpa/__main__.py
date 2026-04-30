@@ -17,19 +17,11 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.thread_rollups import ThreadRollupService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
-from opentulpa.core.debug_logs import (
-    configure_process_output_event_callback,
-    install_process_output_log_capture,
-)
+from opentulpa.core.debug_logs import install_process_output_log_capture
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.interfaces.telegram.chat_service import support_bot_commands
 from opentulpa.interfaces.telegram.security import parse_csv_set
-from opentulpa.logging.posthog import (
-    create_posthog_logger,
-    create_process_output_posthog_callback,
-    install_posthog_logging_handler,
-    uninstall_posthog_logging_handler,
-)
+from opentulpa.logging import create_langfuse_tracer
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -291,28 +283,15 @@ def main() -> None:
     _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
     install_process_output_log_capture(project_root=project_root)
     settings = get_settings()
-    public_base_url = _resolve_public_base_url()
     agent_runtime: OpenTulpaLangGraphRuntime | None = None
-    process_posthog_logger = create_posthog_logger(
-        api_key=settings.posthog_api_key,
-        host=settings.posthog_host,
+    langfuse_tracer = create_langfuse_tracer(
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key,
+        base_url=settings.langfuse_base_url,
+        deployment_tag=settings.langfuse_deployment_tag,
+        environment=settings.langfuse_environment,
+        content_level=settings.langfuse_content_level,
     )
-    posthog_logging_handler = None
-    if process_posthog_logger is not None:
-        posthog_logging_handler = install_posthog_logging_handler(
-            posthog_logger=process_posthog_logger,
-            public_base_url=public_base_url,
-            customer_id_provider=lambda: _runtime_active_customer_id(agent_runtime),
-            thread_id_provider=lambda: _runtime_active_thread_id(agent_runtime),
-        )
-        configure_process_output_event_callback(
-            create_process_output_posthog_callback(
-                posthog_logger=process_posthog_logger,
-                public_base_url=public_base_url,
-                customer_id_provider=lambda: _runtime_active_customer_id(agent_runtime),
-                thread_id_provider=lambda: _runtime_active_thread_id(agent_runtime),
-            )
-        )
     openai_compatible_api_key = (
         settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env()
     )
@@ -395,8 +374,7 @@ def main() -> None:
             capsolver_api_key=settings.capsolver_api_key,
             prompt_caching_enabled=settings.agent_prompt_caching_enabled,
             prompt_cache_ttl_1h=settings.agent_prompt_cache_ttl_1h,
-            posthog_api_key=settings.posthog_api_key,
-            posthog_host=settings.posthog_host,
+            langfuse_tracer=langfuse_tracer,
         )
     else:
         print(
@@ -423,10 +401,8 @@ def main() -> None:
     try:
         uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", ws="none")
     finally:
-        configure_process_output_event_callback(None)
-        uninstall_posthog_logging_handler(posthog_logging_handler)
-        if process_posthog_logger is not None:
-            process_posthog_logger.shutdown()
+        if langfuse_tracer is not None:
+            langfuse_tracer.shutdown()
 
 
 if __name__ == "__main__":

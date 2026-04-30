@@ -66,14 +66,12 @@ class _DebounceRuntime:
         *,
         event: str,
         customer_id: str | None = None,
-        posthog_event: str | None = None,
         **fields: Any,
     ) -> None:
         self.behavior_events.append(
             {
                 "event": event,
                 "customer_id": customer_id,
-                "posthog_event": posthog_event,
                 **fields,
             }
         )
@@ -124,14 +122,12 @@ class _ThreeMessageRuntime:
         *,
         event: str,
         customer_id: str | None = None,
-        posthog_event: str | None = None,
         **fields: Any,
     ) -> None:
         self.behavior_events.append(
             {
                 "event": event,
                 "customer_id": customer_id,
-                "posthog_event": posthog_event,
                 **fields,
             }
         )
@@ -178,14 +174,12 @@ class _ParallelRuntime:
         *,
         event: str,
         customer_id: str | None = None,
-        posthog_event: str | None = None,
         **fields: Any,
     ) -> None:
         self.behavior_events.append(
             {
                 "event": event,
                 "customer_id": customer_id,
-                "posthog_event": posthog_event,
                 **fields,
             }
         )

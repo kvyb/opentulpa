@@ -77,7 +77,6 @@ class _FakeRuntime:
         self.decisions = list(decisions)
         self.calls: list[dict[str, Any]] = []
         self.behavior_events: list[dict[str, Any]] = []
-        self.posthog_events: list[dict[str, Any]] = []
 
     async def decide_intake_workflow(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
@@ -88,35 +87,16 @@ class _FakeRuntime:
     def log_behavior_event(self, *, event: str, **fields: Any) -> None:
         self.behavior_events.append({"event": event, **fields})
 
-    def capture_posthog_event(
-        self,
-        *,
-        event: str,
-        customer_id: str | None = None,
-        properties: dict[str, Any] | None = None,
-    ) -> None:
-        self.posthog_events.append(
-            {
-                "event": event,
-                "customer_id": customer_id,
-                "properties": dict(properties or {}),
-            }
-        )
-
     def record_observability_event(
         self,
         *,
         event: str,
         customer_id: str | None = None,
-        posthog_event: str | None = None,
         **fields: Any,
     ) -> None:
+        if customer_id:
+            fields.setdefault("customer_id", customer_id)
         self.log_behavior_event(event=event, **fields)
-        self.capture_posthog_event(
-            event=str(posthog_event or event or "").strip(),
-            customer_id=customer_id,
-            properties={"behavior_event": event, **fields},
-        )
 
 
 class _DelayedRuntime(_FakeRuntime):
@@ -2731,8 +2711,8 @@ async def test_intake_workflow_emits_observability_for_successful_save_and_reply
     assert decision_ok["workflow_id"] == workflow["workflow_id"]
     assert decision_ok["conversation_id"] == "conv_1"
     assert decision_ok["save_payload"]["wash_type"] == "full wash"
-    assert len(runtime.posthog_events) == len(runtime.behavior_events)
-    assert runtime.posthog_events[0]["event"] == "intake.conversation.start"
+    assert runtime.behavior_events[0]["event"] == "intake.conversation.start"
+    assert runtime.behavior_events[0]["customer_id"] == workflow["customer_id"]
 
 
 @pytest.mark.asyncio

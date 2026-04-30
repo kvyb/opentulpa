@@ -8,8 +8,6 @@ import json
 import logging
 import re
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 import threading
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -20,6 +18,7 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
 from opentulpa.intake.workflow_skill import build_intake_workflow_skill, workflow_skill_name
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
+from opentulpa.persistence.sqlite import connect_sqlite
 from opentulpa.scheduler.models import Routine
 
 _ALLOWED_CHANNELS = {"instagram_dm", "telegram_business_dm"}
@@ -404,7 +403,6 @@ class IntakeWorkflowService:
             record(
                 event=event,
                 customer_id=customer_id,
-                posthog_event=event,
                 **fields,
             )
             return
