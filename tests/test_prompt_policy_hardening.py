@@ -117,6 +117,7 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
+    assert "Return the user-visible routine notification" in routine_wake
     assert "previously approved action" in approval_recovery
     assert "continuation of the approved execution" in approval_recovery
     assert "background event/status notification" in event_notification
@@ -495,6 +496,20 @@ def test_validate_model_tool_call_allows_routine_create_during_routine_wake() ->
         forbidden_tool_args={"routine_create": {"customer_id", "message"}},
     )
     assert err is None
+
+
+def test_validate_model_tool_call_rejects_owner_update_during_routine_wake() -> None:
+    err = _validate_model_tool_call(
+        call_name="send_owner_update",
+        args={"message": "Still working."},
+        latest_user_text="System update: a scheduled routine fired.",
+        turn_mode="routine_wake",
+        required_args={"send_owner_update": ("message",)},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+    assert "send_owner_update is only for live owner/support turns" in err
+    assert "routine_wake" in err
 
 
 def test_validate_model_tool_call_rejects_routine_create_during_event_notification() -> None:

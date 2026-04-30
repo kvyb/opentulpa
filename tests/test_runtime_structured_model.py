@@ -55,6 +55,19 @@ class _BrokenStructuredThenFallbackModel(_FallbackModel):
         raise RuntimeError("structured_unavailable")
 
 
+def test_tools_for_routine_wake_excludes_interactive_owner_update_tool() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    send_owner_update = object()
+    tulpa_read_file = object()
+    runtime._tools = {
+        "send_owner_update": send_owner_update,
+        "tulpa_read_file": tulpa_read_file,
+    }
+
+    assert runtime.tools_for_turn_mode("interactive") == [send_owner_update, tulpa_read_file]
+    assert runtime.tools_for_turn_mode("routine_wake") == [tulpa_read_file]
+
+
 class _ProviderAwareStructuredRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
