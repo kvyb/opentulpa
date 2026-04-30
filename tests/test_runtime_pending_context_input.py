@@ -545,6 +545,55 @@ async def test_workflow_setup_prompt_injects_authoritative_next_action() -> None
 
 
 @pytest.mark.asyncio
+async def test_interactive_turn_promotes_to_workflow_setup_when_session_becomes_active() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_prompts: list[list[Any]] = []
+    behavior_events: list[str] = []
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        captured_prompts.append(list(messages))
+        return AIMessage(content="Готово, показываю предложение.")
+
+    _install_minimal_graph_runtime_stubs(
+        runtime,
+        ainvoke_model=_ainvoke_model,
+        behavior_events=behavior_events,
+    )
+    runtime._workflow_setup_service = _FakeWorkflowSetupService(_ready_setup_session())
+    graph = build_runtime_graph(runtime)
+
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Создай workflow для мойки.")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-workflow-setup-context",
+            "turn_mode": "interactive",
+            "prompt_mode": "execution",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_promote",
+        },
+        config={"configurable": {"thread_id": "chat-workflow-setup-context"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Готово, показываю предложение."
+    assert result["turn_mode"] == "workflow_setup"
+    assert result["prompt_mode"] == "workflow_setup"
+    assert "graph.workflow_setup.promoted_turn_mode" in behavior_events
+    prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
+    assert "WORKFLOW_SETUP_CONTROL_CARD" in prompt_text
+    assert "Call intake_workflow_setup_mark_proposed" in prompt_text
+
+
+@pytest.mark.asyncio
 async def test_pending_context_is_not_merged_into_user_message() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     graph = _CapturingGraph()
