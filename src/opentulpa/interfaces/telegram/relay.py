@@ -682,28 +682,15 @@ async def stream_langgraph_reply_to_telegram(
         suppressed = True
         final_reply = None
     if not suppressed and final_reply:
-        final_delivered_by_draft = False
-        if draft_enabled and final_reply != live_delivery_text:
-            await _send_draft_reply(final_reply, force=True)
-        if draft_enabled:
-            final_delivered_by_draft = delivered_any and final_reply == live_delivery_text
-        if final_delivered_by_draft:
-            logger.info(
-                "telegram.stream final_send_skipped_draft_delivered chat_id=%s thread_id=%s customer_id=%s",
-                chat_id,
-                thread_id,
-                customer_id,
-            )
+        sent = await client.send_message(
+            chat_id=chat_id,
+            text=final_reply,
+            parse_mode="HTML",
+        )
+        if sent:
+            delivered_any = True
         else:
-            sent = await client.send_message(
-                chat_id=chat_id,
-                text=final_reply,
-                parse_mode="HTML",
-            )
-            if sent:
-                delivered_any = True
-            elif not delivered_any:
-                final_reply = None
+            final_reply = None
     logger.info(
         "telegram.stream complete chat_id=%s thread_id=%s customer_id=%s suppressed=%s final_chars=%s",
         chat_id,
