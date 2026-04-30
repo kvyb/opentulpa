@@ -292,6 +292,14 @@ def main() -> None:
         environment=settings.langfuse_environment,
         content_level=settings.langfuse_content_level,
     )
+    if langfuse_tracer is not None:
+        print(
+            "Langfuse observability enabled: "
+            f"environment={langfuse_tracer.environment or 'unset'} "
+            f"deployment_tag={langfuse_tracer.deployment_tag or 'unset'} "
+            f"base_url={langfuse_tracer.base_url}",
+            file=sys.stderr,
+        )
     openai_compatible_api_key = (
         settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env()
     )
