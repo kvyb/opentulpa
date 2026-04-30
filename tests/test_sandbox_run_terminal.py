@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -103,3 +105,62 @@ def test_run_terminal_logs_timeout_before_raising(monkeypatch) -> None:
         )
 
     assert ("terminal_command_timeout", {"working_dir": "tulpa_stuff", "command_bin": "agent-context", "timeout_seconds": 20}) in events
+
+
+def test_run_terminal_does_not_bootstrap_pip_for_existing_agent_venv(monkeypatch) -> None:
+    agent_venv = sandbox.PROJECT_ROOT / ".opentulpa" / f"test_agent_venv_{uuid.uuid4().hex}"
+    (agent_venv / "bin").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sandbox, "AGENT_VENV_DIR", agent_venv)
+    captured: list[list[str]] = []
+
+    def _fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", _fake_run)
+
+    try:
+        result = sandbox.run_terminal(
+            command="python3 task.py",
+            working_dir="tulpa_stuff",
+            timeout_seconds=20,
+        )
+    finally:
+        shutil.rmtree(agent_venv, ignore_errors=True)
+
+    assert result["ok"] is True
+    assert captured == [["python3", "task.py"]]
+
+
+def test_run_terminal_creates_agent_venv_with_system_site_packages(monkeypatch) -> None:
+    agent_venv = sandbox.PROJECT_ROOT / ".opentulpa" / f"test_agent_venv_{uuid.uuid4().hex}"
+    monkeypatch.setattr(sandbox, "AGENT_VENV_DIR", agent_venv)
+    captured: list[list[str]] = []
+
+    def _fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        cmd = list(args)
+        captured.append(cmd)
+        if cmd[:4] == [sandbox.sys.executable, "-m", "venv", "--system-site-packages"]:
+            agent_venv.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", _fake_run)
+
+    try:
+        result = sandbox.run_terminal(
+            command="python3 task.py",
+            working_dir="tulpa_stuff",
+            timeout_seconds=20,
+        )
+    finally:
+        shutil.rmtree(agent_venv, ignore_errors=True)
+
+    assert result["ok"] is True
+    assert captured[0] == [
+        sandbox.sys.executable,
+        "-m",
+        "venv",
+        "--system-site-packages",
+        str(agent_venv),
+    ]
+    assert captured[1] == ["python3", "task.py"]

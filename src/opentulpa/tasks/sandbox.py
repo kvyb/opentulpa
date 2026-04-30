@@ -77,9 +77,6 @@ DEFAULT_TERMINAL_COMMAND_ALLOWLIST = {
     "sqlite3",
 }
 TERMINAL_COMMAND_ALLOWLIST_ENV = "OPENTULPA_TERMINAL_COMMAND_ALLOWLIST"
-AGENT_VENV_BASELINE_PACKAGES: tuple[str, ...] = ("fastapi",)
-
-
 def get_terminal_command_allowlist() -> set[str]:
     raw = str(os.environ.get(TERMINAL_COMMAND_ALLOWLIST_ENV, "")).strip()
     if not raw:
@@ -348,7 +345,6 @@ def run_terminal(
 ) -> dict[str, Any]:
     def _ensure_agent_venv() -> Path:
         if AGENT_VENV_DIR.exists():
-            _ensure_agent_venv_baseline(AGENT_VENV_DIR)
             return AGENT_VENV_DIR
         AGENT_VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
         _debug_log(
@@ -359,14 +355,13 @@ def run_terminal(
         )
         try:
             subprocess.run(
-                [sys.executable, "-m", "venv", str(AGENT_VENV_DIR)],
+                [sys.executable, "-m", "venv", "--system-site-packages", str(AGENT_VENV_DIR)],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=True,
             )
-            _ensure_agent_venv_baseline(AGENT_VENV_DIR)
         except Exception as exc:
             _debug_log(
                 hypothesis_id="sandbox",
@@ -376,7 +371,7 @@ def run_terminal(
             )
             raise RuntimeError(
                 f"Agent venv setup failed at {AGENT_VENV_DIR}. "
-                "Create it manually with: python3 -m venv .opentulpa/agent_venv"
+                "Create it manually with: python3 -m venv --system-site-packages .opentulpa/agent_venv"
             ) from exc
         _debug_log(
             hypothesis_id="sandbox",
@@ -385,72 +380,6 @@ def run_terminal(
             data={"venv_path": str(AGENT_VENV_DIR)},
         )
         return AGENT_VENV_DIR
-
-    def _ensure_agent_venv_baseline(agent_venv_dir: Path) -> None:
-        venv_python = agent_venv_dir / "bin" / "python"
-        if not venv_python.exists():
-            raise RuntimeError(f"Agent venv is missing python executable at {venv_python}")
-        check_cmd = [
-            str(venv_python),
-            "-c",
-            "import fastapi",
-        ]
-        try:
-            subprocess.run(
-                check_cmd,
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=True,
-            )
-            return
-        except subprocess.CalledProcessError:
-            pass
-        _debug_log(
-            hypothesis_id="sandbox",
-            location="tasks/sandbox.py:run_terminal",
-            message="agent_venv_baseline_install_start",
-            data={
-                "venv_path": str(agent_venv_dir),
-                "packages": list(AGENT_VENV_BASELINE_PACKAGES),
-            },
-        )
-        try:
-            subprocess.run(
-                [
-                    str(venv_python),
-                    "-m",
-                    "pip",
-                    "install",
-                    *AGENT_VENV_BASELINE_PACKAGES,
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=True,
-            )
-        except Exception as exc:
-            _debug_log(
-                hypothesis_id="sandbox",
-                location="tasks/sandbox.py:run_terminal",
-                message="agent_venv_baseline_install_failed",
-                data={"venv_path": str(agent_venv_dir), "error": str(exc)},
-            )
-            raise RuntimeError(
-                "Agent venv baseline install failed. "
-                f"Missing packages: {', '.join(AGENT_VENV_BASELINE_PACKAGES)}"
-            ) from exc
-        _debug_log(
-            hypothesis_id="sandbox",
-            location="tasks/sandbox.py:run_terminal",
-            message="agent_venv_baseline_install_ok",
-            data={
-                "venv_path": str(agent_venv_dir),
-                "packages": list(AGENT_VENV_BASELINE_PACKAGES),
-            },
-        )
 
     cmd = str(command).strip()
     if not cmd:
