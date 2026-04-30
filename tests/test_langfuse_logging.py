@@ -20,9 +20,13 @@ class _FakeObservation:
         self.kwargs = kwargs
         self.id = "a" * 16
         self.updates: list[dict[str, Any]] = []
+        self.ended = False
 
     def update(self, **kwargs: Any) -> None:
         self.updates.append(kwargs)
+
+    def end(self) -> None:
+        self.ended = True
 
 
 class _FakeObservationContext:
@@ -54,6 +58,11 @@ class _FakeLangfuseClient:
 
     def start_as_current_observation(self, **kwargs: Any) -> _FakeObservationContext:
         return _FakeObservationContext(self, kwargs)
+
+    def start_observation(self, **kwargs: Any) -> _FakeObservation:
+        observation = _FakeObservation(kwargs)
+        self.observations.append(observation)
+        return observation
 
     def get_current_trace_id(self) -> str | None:
         return self.current_trace_id
@@ -230,6 +239,7 @@ def test_langfuse_trace_context_uses_deterministic_trace_id_and_deployment_tag()
     assert observation.kwargs["metadata"]["deployment_tag"] == "carwash-test"
     assert observation.kwargs["metadata"]["environment"] == "carwash-test"
     assert observation.kwargs["metadata"]["turn_mode"] == "interactive"
+    assert observation.ended is True
     assert "env:carwash-test" in tracer.tags(["interactive"])
 
 
@@ -472,6 +482,7 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
 
     assert prepared is not None
     assert prepared.config["callbacks"] == ["langfuse-callback"]
+    assert prepared.graph_input["langfuse_graph_callback_attached"] is True
     assert runtime._langfuse_tracer.calls[0]["user_id"] == "telegram_test"
     assert runtime._langfuse_tracer.calls[0]["trace_id"] == "turn_test"
     assert runtime._langfuse_tracer.calls[0]["session_id"] == "chat_test"
@@ -507,3 +518,38 @@ async def test_ainvoke_model_attaches_langfuse_callbacks_with_with_config(tmp_pa
     assert runtime._langfuse_tracer.calls[0]["trace_id"] == "turn_test"
     assert runtime._langfuse_tracer.calls[0]["metadata"]["call_site"] == "graph_agent"
     assert runtime._langfuse_tracer.generations == []
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_skips_langfuse_cloud_when_graph_callback_covers_call(
+    tmp_path: Path,
+) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._langfuse_tracer = _FakeCallbackTracer()
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+    model = _ConfigurableModel()
+
+    await runtime.ainvoke_model(
+        model,
+        [HumanMessage(content="hi")],
+        model_name="google/gemini-3-flash-preview",
+        call_context={
+            "call_site": "graph_agent",
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "trace_id": "turn_test",
+            "turn_mode": "interactive",
+            "prompt_mode": "literal_chat",
+            "_langfuse_graph_callback_covers_call": True,
+        },
+    )
+
+    assert model.configs == []
+    assert runtime._langfuse_tracer.calls == []
+    assert runtime._langfuse_tracer.generations == []
+    assert runtime._llm_call_trace_path.exists()

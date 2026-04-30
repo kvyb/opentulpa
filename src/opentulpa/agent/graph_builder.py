@@ -1363,6 +1363,9 @@ def build_runtime_graph(runtime: Any):
                 "customer_id": customer_id,
                 "turn_mode": turn_mode,
                 "prompt_mode": prompt_mode,
+                "_langfuse_graph_callback_covers_call": bool(
+                    state.get("langfuse_graph_callback_attached")
+                ),
                 "prompt_sections": prompt_section_names,
                 "stable_prefix_count": stable_prefix_count,
                 "prompt_overhead_tokens": prompt_overhead_tokens,
@@ -1625,7 +1628,7 @@ def build_runtime_graph(runtime: Any):
                     scope_token = set_customer_scope(customer_id)
                 tool_span = None
                 span_factory = getattr(getattr(runtime, "_langfuse_tracer", None), "tool_span", None)
-                if callable(span_factory):
+                if callable(span_factory) and not bool(state.get("langfuse_graph_callback_attached")):
                     tool_span = span_factory(
                         trace_id=str(state.get("agent_trace_id", "")).strip() or None,
                         tool_name=call_name,

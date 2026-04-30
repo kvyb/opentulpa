@@ -513,14 +513,6 @@ class LangfuseTracer:
         start_observation = getattr(client, "start_observation", None)
         if trace_context and callable(start_observation):
             observation = start_observation(**kwargs)
-            use_span_context: Any = None
-            otel_span = getattr(observation, "_otel_span", None)
-            if otel_span is not None:
-                with suppress(Exception):
-                    from opentelemetry import trace as otel_trace
-
-                    use_span_context = otel_trace.use_span(otel_span, end_on_exit=False)
-                    use_span_context.__enter__()
             observation_id = _clean_text(
                 getattr(observation, "id", None) or getattr(observation, "observation_id", None)
             )
@@ -533,9 +525,6 @@ class LangfuseTracer:
                 if token is not None:
                     with suppress(Exception):
                         _ACTIVE_OBSERVATION_ID.reset(token)
-                if use_span_context is not None:
-                    with suppress(Exception):
-                        use_span_context.__exit__(None, None, None)
                 end = getattr(observation, "end", None)
                 if callable(end):
                     with suppress(Exception):
