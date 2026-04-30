@@ -27,6 +27,12 @@ class _ToolFirstRuntime:
         yield "I checked the inbox. 3 priority emails found."
 
 
+class _DelayedSingleReplyRuntime:
+    async def astream_text(self, **kwargs):
+        await asyncio.sleep(0.4)
+        yield "I checked your inbox. 3 priority emails found."
+
+
 class _ResultThenWaitRuntime:
     async def astream_text(self, **kwargs):
         yield "Here is the finished result."
@@ -233,14 +239,14 @@ async def _wait_for_message(fake_client: _FakeTelegramClient, needle: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_stream_uses_drafts_for_live_partials_without_separate_final_send(
+async def test_stream_replaces_live_draft_with_final_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = _FakeTelegramClient("dummy")
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
 
     final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
-        agent_runtime=_SegmentedRuntime(),
+        agent_runtime=_DelayedSingleReplyRuntime(),
         thread_id="chat-1",
         customer_id="telegram_1",
         text="check inbox",
@@ -250,9 +256,11 @@ async def test_stream_uses_drafts_for_live_partials_without_separate_final_send(
 
     assert suppressed is False
     assert "priority emails" in str(final or "").lower()
-    assert fake_client.draft_calls
+    assert [text for _, _, text, _, _ in fake_client.draft_calls] == [
+        "I checked your inbox. 3 priority emails found."
+    ]
     assert len({draft_id for _, draft_id, _, _, _ in fake_client.draft_calls}) == 1
-    assert fake_client.message_calls == []
+    assert fake_client.message_calls == [(1, "I checked your inbox. 3 priority emails found.", "HTML")]
     assert fake_client.chat_actions
     assert not fake_client.deleted_messages
 
@@ -276,7 +284,7 @@ async def test_wait_signal_does_not_emit_visible_progress_message(
     assert suppressed is False
     assert "priority emails" in str(final or "").lower()
     assert not any("working on it" in text.lower() for _, _, text, _, _ in fake_client.draft_calls)
-    assert fake_client.message_calls == []
+    assert fake_client.message_calls == [(1, "I checked the inbox. 3 priority emails found.", "HTML")]
 
 
 @pytest.mark.asyncio
@@ -439,7 +447,7 @@ async def test_progress_signals_stay_in_typing_only_path(
     assert not any(
         "fetching a webpage" in text.lower() for _, _, text, _, _ in fake_client.draft_calls
     )
-    assert fake_client.message_calls == []
+    assert fake_client.message_calls == [(1, "Here is the result.", "HTML")]
 
 
 @pytest.mark.asyncio
@@ -460,8 +468,8 @@ async def test_stream_coalesces_rapid_partial_updates_until_final_flush(
 
     assert suppressed is False
     assert final == "Hello world"
-    assert [text for _, _, text, _, _ in fake_client.draft_calls] == ["Hello world"]
-    assert fake_client.message_calls == []
+    assert fake_client.draft_calls == []
+    assert fake_client.message_calls == [(1, "Hello world", "HTML")]
 
 
 @pytest.mark.asyncio
@@ -486,7 +494,7 @@ async def test_stream_paces_draft_updates_by_time_not_by_token(
         "Chunk one. Chunk two.",
         "Chunk one. Chunk two. Chunk three.",
     ]
-    assert fake_client.message_calls == []
+    assert fake_client.message_calls == [(1, "Chunk one. Chunk two. Chunk three.", "HTML")]
 
 
 @pytest.mark.asyncio
@@ -507,7 +515,7 @@ async def test_draft_failure_falls_back_to_typing_and_final_send(
 
     assert suppressed is False
     assert final == "Here is the finished result."
-    assert len(fake_client.draft_calls) == 1
+    assert fake_client.draft_calls == []
     assert fake_client.message_calls == [(1, "Here is the finished result.", "HTML")]
     assert fake_client.chat_actions
 
@@ -532,7 +540,14 @@ async def test_successful_draft_stream_stops_typing_loop_after_first_publish(
     assert "completed follow-up chunk" in str(final or "")
     assert fake_client.draft_calls
     assert 1 <= len(fake_client.chat_actions) <= 2
-    assert fake_client.message_calls == []
+    assert fake_client.message_calls == [
+        (
+            1,
+            "This first visible draft is long enough to publish immediately. "
+            "And here is the completed follow-up chunk.",
+            "HTML",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -554,6 +569,14 @@ async def test_failed_draft_stream_also_stops_typing_loop(
     assert suppressed is False
     assert "completed follow-up chunk" in str(final or "")
     assert fake_client.draft_calls
+    assert fake_client.message_calls == [
+        (
+            1,
+            "This first visible draft is long enough to publish immediately. "
+            "And here is the completed follow-up chunk.",
+            "HTML",
+        )
+    ]
     assert 1 <= len(fake_client.chat_actions) <= 2
 
 
