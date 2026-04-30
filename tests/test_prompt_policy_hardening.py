@@ -53,11 +53,11 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "call skill_get(name)" in text
     assert "ask one concise clarifying question" in text
     assert "stay in chat mode" in text
-    assert "Do not write placeholder progress text as assistant prose next to a tool call" in text
-    assert "Telegram may not deliver assistant prose attached to a tool-call step" in text
-    assert "call send_owner_update as the first tool call" in text
+    assert "Assistant prose attached to a tool-call step may be surfaced as a live chat update" in text
+    assert "do not attach private reasoning or large drafts to tool calls" in text
+    assert "call send_owner_update once early" in text
     assert "live owner/support turns" in text
-    assert "use send_owner_update for intentional interim progress messages" in text
+    assert "use concise attached tool-call prose or send_owner_update" in text
     assert "For long-running live owner/support work" in text
     assert "Do not use send_owner_update for inbound lead/intake processing" in text
     assert "concrete result or a plain blocker/failure report" in text
@@ -106,8 +106,10 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     event_notification = str(build_turn_mode_system_message("event_notification").content)
 
     assert "live user-guided turn" in interactive
+    assert "attach one concise visible progress sentence" in interactive
     assert "call send_owner_update as the first tool call" in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
+    assert "attach one concise visible progress sentence" in workflow_setup
     assert "call send_owner_update as the first tool call" in workflow_setup
     assert "track original source_file_ids" in workflow_setup
     assert "do not ask for polling, scanning, or schedule intervals" in workflow_setup

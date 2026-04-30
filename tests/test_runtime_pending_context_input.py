@@ -183,6 +183,129 @@ def _install_minimal_graph_runtime_stubs(
 
 
 @pytest.mark.asyncio
+async def test_graph_surfaces_tool_call_preamble_as_live_update() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    sequence: list[str] = []
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            sequence.append("tool")
+            return {"status": "ok"}
+
+    async def _emit_update(*, text: str, dedupe_key: str = "") -> dict[str, bool]:
+        assert dedupe_key.startswith("tool_call_preamble:")
+        sequence.append(f"emit:{text}")
+        return {"sent": True, "duplicate": False}
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="Черновик заполнен. Запускаю предпроверку:",
+                tool_calls=[{"id": "call_preflight", "name": "fake_tool", "args": {}}],
+            )
+        return AIMessage(content="Готово.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"fake_tool": _FakeTool()}
+    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="работаешь?")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_tool_preamble",
+            "turn_mode": "workflow_setup",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_tool_preamble",
+        },
+        config={"configurable": {"thread_id": "chat_tool_preamble"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Готово."
+    assert sequence == ["emit:Черновик заполнен. Запускаю предпроверку:", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_graph_does_not_duplicate_send_owner_update_preamble() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    emitted: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    class _SendOwnerUpdateTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            tool_calls.append(args)
+            return {"sent": True, "duplicate": False}
+
+    async def _emit_update(*, text: str, dedupe_key: str = "") -> dict[str, bool]:
+        del dedupe_key
+        emitted.append(text)
+        return {"sent": True, "duplicate": False}
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="Да, работаю!",
+                tool_calls=[
+                    {
+                        "id": "call_update",
+                        "name": "send_owner_update",
+                        "args": {"message": "Да, работаю!"},
+                    }
+                ],
+            )
+        return AIMessage(content="Готово.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"send_owner_update": _SendOwnerUpdateTool()}
+    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="работаешь?")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_owner_update",
+            "turn_mode": "workflow_setup",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_owner_update",
+        },
+        config={"configurable": {"thread_id": "chat_owner_update"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Готово."
+    assert emitted == []
+    assert tool_calls == [{"message": "Да, работаю!"}]
+
+
+@pytest.mark.asyncio
 async def test_graph_finalize_does_not_reuse_prior_turn_assistant_reply() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     call_count = 0
