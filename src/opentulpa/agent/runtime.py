@@ -516,6 +516,23 @@ def _maybe_int(value: Any) -> int | None:
         return None
 
 
+def _maybe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _first_float(mapping: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _maybe_float(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _usage_object_to_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -597,17 +614,41 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
         fields["native_tokens_cache_write"] = cache_write_tokens
     if reasoning_tokens is not None:
         fields["native_tokens_reasoning"] = reasoning_tokens
-    with suppress(Exception):
-        if cost not in (None, ""):
-            fields["native_cost_usd"] = float(cost)
+    total_cost = _maybe_float(cost)
     if cost_details:
         fields["native_cost_details"] = cost_details
-        with suppress(Exception):
-            if cost_details.get("prompt") not in (None, ""):
-                fields["native_cost_prompt_usd"] = float(cost_details.get("prompt"))
-        with suppress(Exception):
-            if cost_details.get("completion") not in (None, ""):
-                fields["native_cost_completion_usd"] = float(cost_details.get("completion"))
+        total_cost = total_cost or _first_float(
+            cost_details,
+            "total",
+            "cost",
+            "total_cost",
+            "upstream_inference_cost",
+        )
+        prompt_cost = _first_float(
+            cost_details,
+            "prompt",
+            "input",
+            "prompt_cost",
+            "input_cost",
+            "upstream_inference_prompt_cost",
+        )
+        completion_cost = _first_float(
+            cost_details,
+            "completion",
+            "completions",
+            "output",
+            "completion_cost",
+            "completions_cost",
+            "output_cost",
+            "upstream_inference_completion_cost",
+            "upstream_inference_completions_cost",
+        )
+        if prompt_cost is not None:
+            fields["native_cost_prompt_usd"] = prompt_cost
+        if completion_cost is not None:
+            fields["native_cost_completion_usd"] = completion_cost
+    if total_cost is not None:
+        fields["native_cost_usd"] = total_cost
     return fields
 
 
@@ -1850,6 +1891,7 @@ class OpenTulpaLangGraphRuntime:
     @staticmethod
     def _normalize_llm_call_context(call_context: dict[str, Any] | None) -> dict[str, Any]:
         normalized = dict(call_context) if isinstance(call_context, dict) else {}
+        normalized.pop("_langfuse_callback_attached", None)
         prompt_sections = normalized.get("prompt_sections")
         if isinstance(prompt_sections, str):
             normalized["prompt_sections"] = [
@@ -1929,7 +1971,10 @@ class OpenTulpaLangGraphRuntime:
             self._write_llm_call_trace(record)
         tracer = getattr(self, "_langfuse_tracer", None)
         record_generation = getattr(tracer, "record_generation", None)
-        if callable(record_generation):
+        callback_already_records = bool(
+            isinstance(call_context, dict) and call_context.get("_langfuse_callback_attached")
+        )
+        if callable(record_generation) and not callback_already_records:
             with suppress(Exception):
                 record_generation(record)
 
@@ -3292,6 +3337,20 @@ class OpenTulpaLangGraphRuntime:
         )
         if callbacks:
             config["callbacks"] = callbacks
+            config["metadata"] = {
+                "langfuse_user_id": str(customer_id or "").strip(),
+                "langfuse_session_id": str(thread_id or "").strip(),
+                "langfuse_tags": [
+                    item
+                    for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip())
+                    if item
+                ],
+                "opentulpa_trace_id": str(trace_id or "").strip(),
+                "thread_id": str(thread_id or "").strip(),
+                "turn_mode": str(turn_mode or "").strip(),
+                "prompt_mode": str(prompt_mode or "").strip(),
+            }
+            config["tags"] = list(config["metadata"]["langfuse_tags"])
         graph_input = self._build_graph_input(
             user_text=user_text,
             customer_id=customer_id,
@@ -3365,7 +3424,36 @@ class OpenTulpaLangGraphRuntime:
         if not callable(with_config):
             return model
         try:
-            return with_config({"callbacks": callbacks})
+            metadata = {
+                "langfuse_user_id": str(
+                    context.get("customer_id") or self.get_active_customer_id() or ""
+                ).strip(),
+                "langfuse_session_id": str(context.get("thread_id") or "").strip(),
+                "langfuse_tags": [
+                    item
+                    for item in (
+                        str(context.get("turn_mode") or "").strip(),
+                        str(context.get("prompt_mode") or "").strip(),
+                    )
+                    if item
+                ],
+                "opentulpa_trace_id": str(context.get("trace_id") or "").strip(),
+                "thread_id": str(context.get("thread_id") or "").strip(),
+                "turn_mode": str(context.get("turn_mode") or "").strip(),
+                "prompt_mode": str(context.get("prompt_mode") or "").strip(),
+                "call_site": str(context.get("call_site") or "").strip()
+                or "runtime_model_invoke",
+            }
+            configured_model = with_config(
+                {
+                    "callbacks": callbacks,
+                    "metadata": metadata,
+                    "tags": list(metadata["langfuse_tags"]),
+                }
+            )
+            if isinstance(call_context, dict):
+                call_context["_langfuse_callback_attached"] = True
+            return configured_model
         except Exception:
             logger.exception("Failed to attach Langfuse callbacks to model invocation.")
             return model

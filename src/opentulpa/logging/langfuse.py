@@ -26,6 +26,10 @@ _ACTIVE_TOOL_SPAN: contextvars.ContextVar[_LangfuseToolSpan | None] = contextvar
     "opentulpa_langfuse_active_tool_span",
     default=None,
 )
+_ACTIVE_OBSERVATION_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "opentulpa_langfuse_active_observation_id",
+    default=None,
+)
 
 
 class _NoopContext:
@@ -143,6 +147,14 @@ def _float_value(value: Any) -> float | None:
         return None
 
 
+def _first_float(mapping: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _float_value(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _usage_details(record: dict[str, Any]) -> dict[str, int]:
     details: dict[str, int] = {}
     mapping = {
@@ -199,9 +211,32 @@ def _cost_details(record: dict[str, Any]) -> dict[str, float]:
             details[langfuse_key] = value
     native_cost_details = record.get("native_cost_details")
     if isinstance(native_cost_details, dict):
-        prompt = _float_value(native_cost_details.get("prompt"))
-        completion = _float_value(native_cost_details.get("completion"))
-        total = _float_value(native_cost_details.get("total"))
+        prompt = _first_float(
+            native_cost_details,
+            "prompt",
+            "input",
+            "prompt_cost",
+            "input_cost",
+            "upstream_inference_prompt_cost",
+        )
+        completion = _first_float(
+            native_cost_details,
+            "completion",
+            "completions",
+            "output",
+            "completion_cost",
+            "completions_cost",
+            "output_cost",
+            "upstream_inference_completion_cost",
+            "upstream_inference_completions_cost",
+        )
+        total = _first_float(
+            native_cost_details,
+            "total",
+            "cost",
+            "total_cost",
+            "upstream_inference_cost",
+        )
         if prompt is not None:
             details.setdefault("input", prompt)
         if completion is not None:
@@ -215,9 +250,32 @@ def _cost_details(record: dict[str, Any]) -> dict[str, float]:
             details.setdefault("total", cost)
         usage_cost_details = usage.get("cost_details")
         if isinstance(usage_cost_details, dict):
-            prompt = _float_value(usage_cost_details.get("prompt"))
-            completion = _float_value(usage_cost_details.get("completion"))
-            total = _float_value(usage_cost_details.get("total"))
+            prompt = _first_float(
+                usage_cost_details,
+                "prompt",
+                "input",
+                "prompt_cost",
+                "input_cost",
+                "upstream_inference_prompt_cost",
+            )
+            completion = _first_float(
+                usage_cost_details,
+                "completion",
+                "completions",
+                "output",
+                "completion_cost",
+                "completions_cost",
+                "output_cost",
+                "upstream_inference_completion_cost",
+                "upstream_inference_completions_cost",
+            )
+            total = _first_float(
+                usage_cost_details,
+                "total",
+                "cost",
+                "total_cost",
+                "upstream_inference_cost",
+            )
             if prompt is not None:
                 details.setdefault("input", prompt)
             if completion is not None:
@@ -449,6 +507,56 @@ class LangfuseTracer:
                 resolved.append(text)
         return resolved
 
+    @contextmanager
+    def _observation_context(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        trace_context = kwargs.get("trace_context")
+        start_observation = getattr(client, "start_observation", None)
+        if trace_context and callable(start_observation):
+            observation = start_observation(**kwargs)
+            use_span_context: Any = None
+            otel_span = getattr(observation, "_otel_span", None)
+            if otel_span is not None:
+                with suppress(Exception):
+                    from opentelemetry import trace as otel_trace
+
+                    use_span_context = otel_trace.use_span(otel_span, end_on_exit=False)
+                    use_span_context.__enter__()
+            observation_id = _clean_text(
+                getattr(observation, "id", None) or getattr(observation, "observation_id", None)
+            )
+            token: contextvars.Token[Any] | None = None
+            if observation_id:
+                token = _ACTIVE_OBSERVATION_ID.set(observation_id)
+            try:
+                yield observation
+            finally:
+                if token is not None:
+                    with suppress(Exception):
+                        _ACTIVE_OBSERVATION_ID.reset(token)
+                if use_span_context is not None:
+                    with suppress(Exception):
+                        use_span_context.__exit__(None, None, None)
+                end = getattr(observation, "end", None)
+                if callable(end):
+                    with suppress(Exception):
+                        end()
+            return
+
+        observation_context = client.start_as_current_observation(**kwargs)
+        observation = observation_context.__enter__()
+        observation_id = _clean_text(
+            getattr(observation, "id", None) or getattr(observation, "observation_id", None)
+        )
+        token = _ACTIVE_OBSERVATION_ID.set(observation_id) if observation_id else None
+        try:
+            yield observation
+        finally:
+            if token is not None:
+                with suppress(Exception):
+                    _ACTIVE_OBSERVATION_ID.reset(token)
+            with suppress(Exception):
+                observation_context.__exit__(None, None, None)
+
     def _propagate_attributes(
         self,
         *,
@@ -498,7 +606,7 @@ class LangfuseTracer:
         if trace_context:
             kwargs["trace_context"] = trace_context
         try:
-            observation_context = client.start_as_current_observation(**kwargs)
+            observation_context = self._observation_context(client, kwargs)
             observation = observation_context.__enter__()
         except Exception:
             logger.exception("Failed to create Langfuse trace context.")
@@ -529,7 +637,7 @@ class LangfuseTracer:
         metadata: dict[str, Any] | None = None,
         tags: list[str] | None = None,
     ) -> list[Any]:
-        _ = trace_id, session_id, metadata, tags
+        _ = user_id, session_id, metadata, tags
         if not self.enabled:
             return []
         self._install_env()
@@ -544,7 +652,15 @@ class LangfuseTracer:
                 logger.exception("Failed to import Langfuse LangChain callback handler.")
                 return []
         try:
-            return [callback_cls()]
+            active_observation_id = _clean_text(_ACTIVE_OBSERVATION_ID.get())
+            if not active_observation_id:
+                logger.debug("Skipping Langfuse callback handler without active root observation.")
+                return []
+            trace_context = self.trace_context_payload(trace_id)
+            if trace_context:
+                trace_context = {**trace_context, "parent_span_id": active_observation_id}
+            kwargs = {"trace_context": trace_context} if trace_context else {}
+            return [callback_cls(**kwargs)]
         except Exception:
             logger.exception("Failed to build Langfuse callback handler.")
             return []
@@ -583,10 +699,16 @@ class LangfuseTracer:
         if callable(current_trace):
             with suppress(Exception):
                 current_trace_id = current_trace()
+        if not trace_context and not current_trace_id:
+            logger.debug(
+                "Skipping Langfuse generation without trace context for call_site=%s.",
+                call_site,
+            )
+            return
         if trace_context and not current_trace_id:
             kwargs["trace_context"] = trace_context
         try:
-            with client.start_as_current_observation(**kwargs):
+            with self._observation_context(client, kwargs):
                 return
         except Exception:
             logger.exception("Failed to record Langfuse generation.")
@@ -624,7 +746,7 @@ class LangfuseTracer:
         if trace_context and not current_trace_id:
             kwargs["trace_context"] = trace_context
         try:
-            with client.start_as_current_observation(**kwargs):
+            with self._observation_context(client, kwargs):
                 return
         except Exception:
             logger.exception("Failed to record Langfuse span '%s'.", name)

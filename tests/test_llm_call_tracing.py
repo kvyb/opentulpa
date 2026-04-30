@@ -35,6 +35,27 @@ class _TraceModel:
         return _TraceResponse()
 
 
+class _OpenRouterCostResponse(_TraceResponse):
+    def __init__(self) -> None:
+        super().__init__()
+        self.usage = {
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125,
+            "cost_details": {
+                "upstream_inference_prompt_cost": 0.004,
+                "upstream_inference_completions_cost": 0.006,
+                "upstream_inference_cost": 0.01,
+            },
+        }
+
+
+class _OpenRouterCostModel(_TraceModel):
+    async def ainvoke(self, messages: object, **kwargs: object) -> _OpenRouterCostResponse:
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return _OpenRouterCostResponse()
+
+
 @pytest.mark.asyncio
 async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     runtime = OpenTulpaLangGraphRuntime(
@@ -93,6 +114,29 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     assert len(record["prompt_messages"]) == 2
     assert record["prompt_messages"][0]["role"] == "system"
     assert record["prompt_messages"][1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_extracts_openrouter_upstream_cost_details(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+
+    await runtime.ainvoke_model(
+        _OpenRouterCostModel(),
+        [HumanMessage(content="cost please")],
+        model_name="google/gemini-3-flash-preview",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_trace_test"},
+    )
+
+    record = json.loads(runtime._llm_call_trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["native_cost_usd"] == 0.01
+    assert record["native_cost_prompt_usd"] == 0.004
+    assert record["native_cost_completion_usd"] == 0.006
 
 
 @pytest.mark.asyncio
