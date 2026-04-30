@@ -14,7 +14,6 @@ agent_checkpoint_db_path: .opentulpa/langgraph_checkpoints.sqlite
 mem0_qdrant_path: .opentulpa/qdrant
 mem0_qdrant_on_disk: true
 link_alias_db_path: .opentulpa/link_aliases.db
-approvals_db_path: .opentulpa/pending_approvals.db
 agent_behavior_log_path: .opentulpa/logs/agent_behavior.jsonl
 
 # Agent/runtime limits
@@ -25,7 +24,6 @@ agent_context_token_limit: 12000
 agent_context_recent_tokens: 3500
 agent_context_rollup_tokens: 2200
 agent_context_compaction_source_tokens: 100000
-approvals_ttl_minutes: 10
 
 # LLM/provider configuration
 llm_model: z-ai/glm-5.1
@@ -34,7 +32,6 @@ llm_reasoning_effort: medium
 wake_classifier_model: null
 wake_execution_model: z-ai/glm-5.1
 multimodal_llm: google/gemini-3-flash-preview
-guardrail_classifier_model: google/gemini-3-flash-preview
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
 openai_compatible_embedding_model: openai/text-embedding-3-small
 agent_prompt_caching_enabled: true

@@ -33,7 +33,6 @@ OPENROUTER_API_KEY=...
 The generic scenario harness accepts either name. Some standalone smokes under
 `tests/e2e/live/` have extra opt-in gates:
 
-- `test_guardrail_live_llm.py`: `OPENROUTER_API_KEY` plus `OPENTULPA_RUN_LIVE_OPENROUTER_E2E=1`
 - `test_browser_use_google.py`: `OPENROUTER_API_KEY`, Playwright Chromium, plus `OPENTULPA_ENABLE_LIVE_BROWSER_USE_E2E=1`
 - `test_intake_workflow_composio.py`: `COMPOSIO_API_KEY` plus `OPENTULPA_ENABLE_LIVE_COMPOSIO_INTAKE_E2E=1`; write coverage also requires `OPENTULPA_ENABLE_LIVE_COMPOSIO_INTAKE_WRITE_E2E=1` and the live sink mapping env values in that test file
 
@@ -101,7 +100,7 @@ These are intentionally close to real usage:
 - uploaded files go through the file vault and prepared workflow knowledge path
 - lead messages go through the `business_message` webhook path
 
-`tests/e2e/scenarios/test_telegram_support_act_as.py` covers support operator act-as behavior: customer listing, binding, support thread isolation, owner invisibility, approval routing, and optional live-LLM setup under a bound customer.
+`tests/e2e/scenarios/test_telegram_support_act_as.py` covers support operator act-as behavior: customer listing, binding, support thread isolation, owner invisibility, and optional live-LLM setup under a bound customer.
 
 ## Recommended test order while iterating on intake
 
@@ -180,7 +179,6 @@ By default, the e2e harness uses the same repo settings as normal runtime:
 
 - `settings.llm_model`
 - `settings.wake_classifier_model`
-- `settings.guardrail_classifier_model`
 - `google/gemini-3-flash-preview` for the optional lead simulator lane
 
 You can still override them explicitly for e2e-only runs:
@@ -188,7 +186,6 @@ You can still override them explicitly for e2e-only runs:
 ```bash
 OPENTULPA_E2E_MODEL=...
 OPENTULPA_E2E_WAKE_MODEL=...
-OPENTULPA_E2E_GUARDRAIL_MODEL=...
 OPENTULPA_E2E_LEAD_SIM_MODEL=google/gemini-3-flash-preview
 uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py --run-e2e --run-live-llm -s
 ```

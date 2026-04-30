@@ -175,8 +175,7 @@ def test_live_llm_uses_browser_use_run_for_google_search(tmp_path: Path) -> None
         "blocked",
     )
     anti_bot_evidence = any(
-        str(event.get("event", "")).strip() == "graph.claim_check.mismatch_retry"
-        and any(marker in str(event.get("reason", "")).lower() for marker in anti_bot_markers)
+        any(marker in json.dumps(event, ensure_ascii=False).lower() for marker in anti_bot_markers)
         for event in events
     )
     if anti_bot_evidence:

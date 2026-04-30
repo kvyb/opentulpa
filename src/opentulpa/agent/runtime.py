@@ -685,7 +685,7 @@ _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "browser_use_run": "Using the browser",
 }
 
-APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS: set[str] = {
+CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
     "memory_search",
     "memory_add",
     "uploaded_file_search",
@@ -844,7 +844,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "- reply_text should be plain outbound DM text, not explanations about JSON or system behavior.\n"
         '- If no reply is needed, use reply_action=none and reply_text="".\n'
         "- Use mark_cancelled only when the customer clearly cancels, abandons, or says they no longer want the booking.\n"
-        "- Never ask for approval or confirmation. This is background workflow execution.\n\n"
+        "- Never ask for extra confirmation. This is background workflow execution.\n\n"
         "Booking action policy:\n"
         "- If there is an active booking and the customer is continuing the same request, use update_active.\n"
         "- If there is a recent completed booking inside the edit window and the customer is correcting or changing that booking, use edit_recent_completed.\n"
@@ -4631,7 +4631,7 @@ class OpenTulpaLangGraphRuntime:
         args.pop("customer_id", None)
         if (
             inject_customer_id
-            and str(action_name or "").strip() in APPROVAL_EXECUTION_CUSTOMER_ID_TOOLS
+            and str(action_name or "").strip() in CUSTOMER_ID_REQUIRED_TOOLS
             and not cid
         ):
             raise RuntimeError(f"customer_id is required for tool: {action_name}")

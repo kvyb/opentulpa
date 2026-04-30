@@ -10,7 +10,6 @@ One especially strong use case is structured lead intake: you describe the intak
 
 - OpenTulpa can remember files, prior decisions, and past outputs
 - OpenTulpa stores generated scripts and artifacts in `tulpa_stuff`
-- External write actions can still be gated behind approval
 - If Composio is configured, OpenTulpa can connect to supported third-party services
 
 ## Good prompt pattern
@@ -46,7 +45,7 @@ OpenTulpa is useful before you create any workflow. You can ask it to research, 
 
 ### Build an internal bot
 
-> "Create a small Slack bot workflow that listens for a keyword, drafts a response from our FAQ, and requires approval before posting externally."
+> "Create a small Slack bot workflow that listens for a keyword, drafts a response from our FAQ, and keeps the final outbound post as a draft for review in chat."
 
 ### Turn a repeat task into a skill
 
@@ -120,7 +119,7 @@ This is useful when the owner forwards messages to OpenTulpa for assistance. It 
 
 ### Sheet-backed booking flow
 
-> "Use this uploaded booking policy and write confirmed appointments into my Google Sheet only after I approve the final write."
+> "Use this uploaded booking policy and write confirmed appointments into my Google Sheet only after the booking is fully confirmed."
 
 ### Instagram DM intake
 
@@ -182,5 +181,5 @@ Better versions make the task specific:
 - what source to watch
 - what output to produce
 - what should be saved
-- what should require approval
+- what should stay draft-only or require an explicit go-signal
 - whether the work repeats

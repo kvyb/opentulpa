@@ -19,7 +19,7 @@ def test_full_runtime_policy_retains_hardened_rules() -> None:
     assert "[SECTION A] Core Behavior" in text
     assert "[SECTION B] Scheduling And Routines" in text
     assert "[SECTION C] Tool Selection" in text
-    assert "[SECTION D] Claim Discipline And Approvals" in text
+    assert "[SECTION D] Claim Discipline And Execution" in text
     assert PROMPT_DYNAMIC_BOUNDARY not in text
 
 

@@ -103,11 +103,11 @@ class _FakeContextEvents:
         return [
             {
                 "id": 42,
-                "source": "approval",
+                "source": "task",
                 "event_type": "executed",
                 "payload": {
-                    "approval_id": "apr_abc",
-                    "status": "approved",
+                    "task_id": "task_abc",
+                    "status": "executed",
                     "raw_prompt": "I want you to scan my telegram Work folder",
                 },
             }
@@ -131,7 +131,6 @@ def _install_minimal_graph_runtime_stubs(
     runtime: OpenTulpaLangGraphRuntime,
     *,
     ainvoke_model: Any,
-    verify_completion_claim: Any | None = None,
     behavior_events: list[str] | None = None,
 ) -> None:
     async def _live_time(customer_id: str) -> dict[str, str]:
@@ -165,11 +164,6 @@ def _install_minimal_graph_runtime_stubs(
     runtime.ainvoke_model = ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
-    async def _default_verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": False, "confidence": 0.0}
-
-    runtime.verify_completion_claim = verify_completion_claim or _default_verify_completion_claim  # type: ignore[assignment]
     runtime.log_behavior_event = (  # type: ignore[assignment]
         (lambda **kwargs: behavior_events.append(str(kwargs.get("event", ""))))
         if behavior_events is not None
@@ -360,103 +354,7 @@ async def test_graph_finalize_does_not_reuse_prior_turn_assistant_reply() -> Non
 
 
 @pytest.mark.asyncio
-async def test_graph_claim_check_repairs_false_success_claim() -> None:
-    runtime = object.__new__(OpenTulpaLangGraphRuntime)
-    call_count = 0
-
-    async def _ainvoke_model(
-        model: Any,
-        messages: list[Any],
-        *,
-        stable_prefix_count: int = 0,
-        **kwargs: Any,
-    ) -> AIMessage:
-        del model, messages, stable_prefix_count, kwargs
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return AIMessage(content="Done — I already sent the update.")
-        return AIMessage(content="I have not sent it yet. I can do that now.")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        assistant_text = str(kwargs.get("assistant_text", ""))
-        if "already sent" in assistant_text:
-            return {"usable": True, "mismatch": True, "reason": "unsupported completion claim"}
-        return {"usable": True, "mismatch": False}
-
-    _install_minimal_graph_runtime_stubs(
-        runtime,
-        ainvoke_model=_ainvoke_model,
-        verify_completion_claim=_verify_completion_claim,
-    )
-    graph = build_runtime_graph(runtime)
-    result = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Did you send the update?")],
-            "customer_id": "telegram_test",
-            "thread_id": "chat-claim-check-repair",
-            "turn_mode": "interactive",
-            "turn_status": "running",
-            "final_response_text": "",
-            "pending_context_summary": "",
-            "agent_trace_id": "turn_claim_repair",
-        },
-        config={"configurable": {"thread_id": "chat-claim-check-repair"}, "recursion_limit": 8},
-    )
-    assert call_count == 2
-    assert result["final_response_text"] == "I have not sent it yet. I can do that now."
-
-
-@pytest.mark.asyncio
-async def test_graph_routine_wake_skips_claim_check() -> None:
-    runtime = object.__new__(OpenTulpaLangGraphRuntime)
-    behavior_events: list[str] = []
-    call_count = 0
-
-    async def _ainvoke_model(
-        model: Any,
-        messages: list[Any],
-        *,
-        stable_prefix_count: int = 0,
-        **kwargs: Any,
-    ) -> AIMessage:
-        del model, messages, stable_prefix_count, kwargs
-        nonlocal call_count
-        call_count += 1
-        return AIMessage(content="Routine complete. 3 stories sent.")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        raise AssertionError("routine_wake should not invoke claim-check")
-
-    _install_minimal_graph_runtime_stubs(
-        runtime,
-        ainvoke_model=_ainvoke_model,
-        verify_completion_claim=_verify_completion_claim,
-        behavior_events=behavior_events,
-    )
-    graph = build_runtime_graph(runtime)
-    result = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="System update: a scheduled routine fired.")],
-            "customer_id": "telegram_test",
-            "thread_id": "routine_rtn_test_wake_123",
-            "turn_mode": "routine_wake",
-            "turn_status": "running",
-            "final_response_text": "",
-            "pending_context_summary": "",
-            "agent_trace_id": "turn_routine_skip_claim",
-        },
-        config={"configurable": {"thread_id": "routine_rtn_test_wake_123"}, "recursion_limit": 8},
-    )
-
-    assert call_count == 1
-    assert result["final_response_text"] == "Routine complete. 3 stories sent."
-    assert "graph.claim_check.start" not in behavior_events
-
-
-@pytest.mark.asyncio
-async def test_graph_claim_check_repairs_empty_output() -> None:
+async def test_graph_keeps_empty_output_without_retry() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     call_count = 0
 
@@ -480,17 +378,17 @@ async def test_graph_claim_check_repairs_empty_output() -> None:
         {
             "messages": [HumanMessage(content="answer please")],
             "customer_id": "telegram_test",
-            "thread_id": "chat-claim-check-empty",
+            "thread_id": "chat-empty-retry",
             "turn_mode": "interactive",
             "turn_status": "running",
             "final_response_text": "",
             "pending_context_summary": "",
             "agent_trace_id": "turn_empty_repair",
         },
-        config={"configurable": {"thread_id": "chat-claim-check-empty"}, "recursion_limit": 8},
+        config={"configurable": {"thread_id": "chat-empty-retry"}, "recursion_limit": 8},
     )
-    assert call_count == 2
-    assert result["final_response_text"] == "Here is the answer."
+    assert call_count == 1
+    assert result["final_response_text"] == ""
 
 
 def test_pending_context_surfaces_routine_execution_summary() -> None:
@@ -536,17 +434,12 @@ async def test_ainvoke_text_does_not_reuse_prior_turn_assistant_reply() -> None:
         del thread_id, customer_id
         return None
 
-    async def _no_pending_approval(*, customer_id: str, thread_id: str) -> bool:
-        del customer_id, thread_id
-        return False
-
     async def _noop_skills(**kwargs: Any) -> dict[str, Any]:
         del kwargs
         return {}
 
     runtime.start = _noop_start  # type: ignore[method-assign]
     runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._has_pending_approval_lock = _no_pending_approval  # type: ignore[method-assign]
     runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
 
     reply = await runtime.ainvoke_text(
@@ -674,11 +567,6 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
     async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
         del thread_id, customer_id
         return None
-
-    async def _no_pending_lock(*, customer_id: str, thread_id: str) -> bool:
-        del customer_id, thread_id
-        return False
-
     async def _capture_skill_state(*, customer_id: str, user_text: str) -> dict[str, Any]:
         del customer_id
         captured_skill_user_text["value"] = user_text
@@ -686,7 +574,6 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
 
     runtime.start = _noop_start  # type: ignore[method-assign]
     runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._has_pending_approval_lock = _no_pending_lock  # type: ignore[method-assign]
     runtime._pre_resolve_skill_state = _capture_skill_state  # type: ignore[method-assign]
 
     user_text = "can you try again?"
@@ -705,7 +592,7 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
     assert isinstance(model_messages[0], HumanMessage)
     assert model_messages[0].content == user_text
     pending_text = str(graph.last_state.get("pending_context_summary", ""))
-    assert "approval_id=apr_abc" in pending_text
+    assert "task_id=task_abc" in pending_text
     assert "scan my telegram" not in pending_text
     assert "raw_prompt" not in pending_text
     assert events.cleared == ("telegram_test", 42)
@@ -758,11 +645,6 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     async def _directive(customer_id: str) -> str | None:
         del customer_id
         return None
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     runtime._model_with_tools = model
     runtime._checkpointer = InMemorySaver()
     runtime._list_available_skills = _unexpected_list  # type: ignore[method-assign]
@@ -773,7 +655,6 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
     runtime._tools = {}
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
@@ -849,11 +730,6 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
         captured["stable_prefix_count"] = stable_prefix_count
         captured["call_context"] = kwargs.get("call_context")
         return AIMessage(content="ok")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     runtime._checkpointer = InMemorySaver()
     runtime._model_with_tools = object()
     runtime._thread_rollup_service = None
@@ -863,7 +739,6 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
     runtime._tools = {}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
@@ -967,11 +842,6 @@ async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
                 tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {}}],
             )
         return AIMessage(content="Done.")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     runtime._checkpointer = InMemorySaver()
     runtime._model_with_tools = object()
     runtime._thread_rollup_service = None
@@ -982,7 +852,6 @@ async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
     runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
@@ -1072,11 +941,6 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
                 tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {}}],
             )
         return AIMessage(content="Done.")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     prior_messages: list[Any] = []
     for idx in range(14):
         prior_messages.append(HumanMessage(content=f"Earlier user note {idx}: keep this thread moving."))
@@ -1092,7 +956,6 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
     runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
@@ -1167,11 +1030,6 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
         del model, stable_prefix_count, kwargs
         captured_messages.extend(messages)
         return AIMessage(content="Done.")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     prior_messages: list[Any] = []
     for idx in range(14):
         prior_messages.append(HumanMessage(content=f"Earlier user note {idx}: old raw chat."))
@@ -1189,7 +1047,6 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
     runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
@@ -1269,11 +1126,6 @@ async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
                 tool_calls=[{"id": "call_2", "name": "fake_tool", "args": {"step": 2}}],
             )
         return AIMessage(content="Done.")
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     runtime.model_name = "deepseek/deepseek-v4-pro"
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime._checkpointer = InMemorySaver()
@@ -1286,7 +1138,6 @@ async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
     runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]

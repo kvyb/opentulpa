@@ -10,14 +10,14 @@ def test_parse_telegram_callback_query_extracts_fields() -> None:
                 "id": "cbq_1",
                 "from": {"id": 123},
                 "message": {"message_id": 77, "chat": {"id": 456}},
-                "data": "approval:apr_abc123:approve",
+                "data": "menu:status",
             }
         }
     )
     assert callback_id == "cbq_1"
     assert user_id == 123
     assert chat_id == 456
-    assert data == "approval:apr_abc123:approve"
+    assert data == "menu:status"
     assert message_id == 77
 
 

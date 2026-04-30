@@ -5,7 +5,7 @@ This document explains how OpenTulpa is put together today.
 If you only need the mental model, it is this:
 
 ```text
-an inbound event arrives -> the runtime reloads durable context -> the agent plans and uses tools -> risky actions are gated -> results are persisted for the next turn
+an inbound event arrives -> the runtime reloads durable context -> the agent plans and uses tools -> results are persisted for the next turn
 ```
 
 OpenTulpa is designed around one core assumption: a useful agent should behave like a long-running worker, not a stateless chat session.
@@ -23,12 +23,10 @@ OpenTulpa is designed around one core assumption: a useful agent should behave l
 
 - `src/opentulpa/api`: FastAPI app composition and route registration
 - `src/opentulpa/api/routes`: internal API routes, Telegram webhook routes, and Composio callback/status routes
-- `src/opentulpa/application`: orchestration use cases such as `TurnOrchestrator`, `WakeOrchestrator`, and `ApprovalExecutionOrchestrator`
+- `src/opentulpa/application`: orchestration use cases such as `TurnOrchestrator` and `WakeOrchestrator`
 - `src/opentulpa/domain`: typed domain contracts
 - `src/opentulpa/agent`: LangGraph runtime, graph nodes, compaction, and tool registry
 - `src/opentulpa/interfaces/telegram`: Telegram transport, parsing, streaming relay, and Telegram Business inbox persistence
-- `src/opentulpa/approvals`: approval broker, adapters, store, and approval models
-- `src/opentulpa/policy`: approval intent and policy evaluation
 - `src/opentulpa/context`: profiles, event backlog, file vault, thread rollups, and link aliases
 - `src/opentulpa/skills`: durable skill storage and retrieval
 - `src/opentulpa/scheduler`: routine scheduling
@@ -41,7 +39,7 @@ The system is split so that transports and storage are replaceable, while the ag
 - Interfaces move data in and out
 - The application layer shapes requests and responses
 - The runtime decides what to do
-- Policy and approvals decide whether it is allowed
+- Tool validation and execution determine what can run this turn
 - Context, skills, and artifacts make future turns better
 
 ## Primary request flows
@@ -51,10 +49,10 @@ The system is split so that transports and storage are replaceable, while the ag
 1. Telegram calls `POST /webhook/telegram`
 2. `interfaces/telegram/chat_service.py` parses text, files, and voice, then resolves `customer_id` and `thread_id`
 3. Owner/support chats resolve the active turn mode; active workflow setup threads use workflow setup prompting
-4. LangGraph runs nodes such as `agent`, `validate_tools`, `guardrail_precheck`, `tools`, and `claim_check`
+4. LangGraph runs nodes such as `agent`, `validate_tools`, `tools`, and `finalize_turn`
 5. The assistant reply is streamed back to Telegram
-6. If a tool requires approval, the runtime emits the approval interrupt immediately and stops normal reply streaming for that action
-7. Telegram webhook handling makes sure the approval challenge is surfaced before any optional follow-up assistant message
+6. Tool-call preambles and interactive progress updates can be surfaced before the final reply when the runtime emits them
+7. Telegram webhook handling returns quickly while the tracked turn continues in the background when needed
 
 ### External DM intake flow
 
@@ -111,15 +109,6 @@ This keeps tenant/customer state, owner chat history, and support-operator chat 
 3. If absent, OpenTulpa keeps the status route available but reports `enabled: false`
 4. When configured, auth and tool flows run through `/internal/composio/*` routes on behalf of the active user
 
-### Approval decision and execution flow
-
-1. Guardrail precheck calls `POST /internal/approvals/evaluate`
-2. `ApprovalBroker` and `policy/evaluator.py` decide `allow`, `require_approval`, or `deny`
-3. `require_approval` creates a durable pending record
-4. User approves or denies through Telegram callback or `/approve` token path
-5. Approved actions execute once through `POST /internal/approvals/execute`
-6. `ApprovalExecutionOrchestrator` summarizes the outcome back to the user
-
 ### Background wake flow
 
 1. Scheduler or task events enqueue wake payloads
@@ -130,9 +119,8 @@ This keeps tenant/customer state, owner chat history, and support-operator chat 
 ## Agent graph behavior
 
 - Tool-call validation runs before execution
-- Guardrail precheck evaluates requested actions and only allows approved tool call IDs through
-- Claim-check verifies immediate execution claims against tool evidence before the turn ends
-- Claim-check has retry and backoff handling for empty assistant output, unusable checker output, and claim or evidence mismatch
+- Workflow setup has a no-progress repair path that injects the current draft state when the model stalls
+- Blank or unusable streamed output falls back to a visible user-facing message
 - Streaming has a fallback path that guarantees a visible user-facing message when no chunks are produced
 
 ## Context policy
@@ -154,14 +142,6 @@ Compaction is hysteresis-based: the runtime compacts at the high watermark, then
 - Gemini models use per-message cache breakpoints on the stable prefix
 - OpenAI-compatible models that cache automatically do not receive explicit cache markers
 
-## Approval model
-
-- Internal and read-oriented actions are deterministically allowed by policy
-- External-impact actions are gated through the approval broker
-- Pending approvals are durable in SQLite at `.opentulpa/pending_approvals.db`
-- Approval prompts are surfaced immediately when handoff is detected
-- State machine: `pending -> approved|denied|expired`, then `approved -> executed`
-
 ## Internal API boundary
 
 - `/webhook/*` is the public webhook ingress surface for Telegram plus the Composio OAuth callback path
@@ -176,7 +156,6 @@ Compaction is hysteresis-based: the runtime compacts at the high watermark, then
 ## Runtime data stores
 
 - LangGraph checkpoints: `.opentulpa/langgraph_checkpoints.sqlite`
-- Approvals: `.opentulpa/pending_approvals.db`
 - Context events: `.opentulpa/context_events.db`
 - Customer profiles: `.opentulpa/customer_profiles.db`
 - Thread rollups: `.opentulpa/thread_rollups.db`
@@ -192,7 +171,7 @@ Compaction is hysteresis-based: the runtime compacts at the high watermark, then
 
 - Structured agent behavior log is enabled by default through `AGENT_BEHAVIOR_LOG_ENABLED=true`
 - Default path: `.opentulpa/logs/agent_behavior.jsonl`
-- Logs include turn lifecycle, graph node outcomes, guardrail decisions, claim-check retries, and tool execution outcomes
+- Logs include turn lifecycle, graph node outcomes, workflow setup retries, and tool execution outcomes
 - Optional Langfuse observability can be enabled with `LANGFUSE_PUBLIC_KEY`
   and `LANGFUSE_SECRET_KEY`; `LANGFUSE_BASE_URL` defaults to
   `https://us.cloud.langfuse.com`
@@ -205,14 +184,11 @@ Compaction is hysteresis-based: the runtime compacts at the high watermark, then
 - Add tools in `src/opentulpa/agent/tools_registry.py`
 - Add internal APIs in `src/opentulpa/api/routes/*`
 - Add interface adapters under `src/opentulpa/interfaces/*`
-- Add approval adapters under `src/opentulpa/approvals/adapters/*`
 - Add skills via `src/opentulpa/skills/*`
 
 For external integrations, also read `docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md`.
 
 ## Failure behavior
 
-- Guardrail classifier uncertainty defaults to approval-required
-- If approval delivery fails, the action remains non-executed
 - Tool-call failures return explicit tool error messages back into the graph
 - Wake delivery failures are persisted to the context backlog for later recovery

@@ -266,7 +266,6 @@ def _create_fake_telegram_app(
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-bot-token")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "test-secret")
-    monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / "approvals.sqlite"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / "links.sqlite"))
     monkeypatch.setattr(intake_service_module, "_TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(intake_service_module, "_TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS", 0.01)
@@ -294,7 +293,6 @@ def test_telegram_business_intake_suppresses_stale_reply_from_webhook_worker(
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-bot-token")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "test-secret")
-    monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / "approvals.sqlite"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / "links.sqlite"))
     monkeypatch.setattr(intake_service_module, "_TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(intake_service_module, "_TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS", 0.01)

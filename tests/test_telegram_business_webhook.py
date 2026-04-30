@@ -43,12 +43,6 @@ class _FakeTelegramChat:
         return None
 
 
-class _FakeApprovals:
-    async def flush_deferred_challenges(self, **kwargs):  # type: ignore[no-untyped-def]
-        _ = kwargs
-        return 0
-
-
 class _FakeIntakeWorkflows:
     def __init__(self) -> None:
         self.run_calls: list[dict[str, str]] = []

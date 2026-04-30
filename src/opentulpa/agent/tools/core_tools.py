@@ -483,8 +483,8 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
 
         Use only during live owner/support turns when you will continue working
         with tools. This is for long-running interactive or workflow setup work,
-        not final answers, inbound lead replies, routine wakes, approval recovery,
-        or background event notifications.
+        not final answers, inbound lead replies, routine wakes, or background
+        event notifications.
         """
         require_customer_id(runtime)
         require_thread_id(runtime)

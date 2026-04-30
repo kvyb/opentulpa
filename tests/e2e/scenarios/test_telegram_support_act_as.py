@@ -45,17 +45,6 @@ class _SupportRuntime:
         self.ainvoke_calls.append({"classify_wake_event": kwargs})
         return {"notify_user": True}
 
-    async def classify_guardrail_intent(self, **kwargs: Any) -> dict[str, Any]:
-        self.ainvoke_calls.append({"classify_guardrail_intent": kwargs})
-        return {
-            "ok": True,
-            "gate": "require_approval",
-            "impact_type": "write",
-            "recipient_scope": "external",
-            "confidence": 0.95,
-            "reason": "support-e2e",
-        }
-
 
 def _telegram_message(*, chat_id: int, user_id: int, username: str, text: str) -> dict[str, Any]:
     return {
@@ -138,7 +127,6 @@ def support_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, An
     monkeypatch.setenv("TELEGRAM_SUPPORT_USER_IDS", "900")
     monkeypatch.setenv("TELEGRAM_SUPPORT_USERNAMES", "")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
-    monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / "approvals.sqlite"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / "links.sqlite"))
     monkeypatch.setattr(sandbox_module, "PROJECT_ROOT", project_root)
     monkeypatch.setattr(app_module, "PROJECT_ROOT", project_root)
@@ -295,7 +283,7 @@ def test_support_binding_preserves_customer_invisibility_and_thread_boundaries(
         assert len([m for m in fake_tg.sent_messages if int(m["chat_id"]) == chat_id]) == count
 
 
-def test_support_workflow_edit_is_invisible_but_proactive_and_approval_route_correctly(
+def test_support_workflow_edit_is_invisible_but_proactive_routes_correctly(
     support_app: dict[str, Any],
 ) -> None:
     _seed_customer_signals(support_app)
@@ -311,21 +299,6 @@ def test_support_workflow_edit_is_invisible_but_proactive_and_approval_route_cor
     )
     assert any(item["name"] == "Support Created Workflow" for item in workflows)
     assert len([m for m in fake_tg.sent_messages if int(m["chat_id"]) == 1101]) == owner_count
-
-    support_thread = support_app["state_store"].load()["support_bindings"]["9900"]["thread_id"]
-    approval_response = client.post(
-        "/internal/approvals/evaluate",
-        json={
-            "customer_id": "telegram_101",
-            "thread_id": support_thread,
-            "action_name": "tulpa_run_terminal",
-            "action_args": {"command": "echo support"},
-        },
-    )
-    assert approval_response.status_code == 200
-    approval_messages = [m for m in fake_tg.sent_messages if "Approval needed" in str(m.get("text", ""))]
-    assert approval_messages
-    assert int(approval_messages[-1]["chat_id"]) == 9900
 
     wake_response = client.post(
         "/internal/wake",

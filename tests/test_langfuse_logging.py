@@ -324,7 +324,7 @@ def test_record_generation_skips_without_trace_context() -> None:
     assert client.observations == []
 
 
-def test_tool_span_captures_status_error_approval_and_side_effects() -> None:
+def test_tool_span_captures_status_and_side_effects() -> None:
     client = _FakeLangfuseClient()
     tracer = LangfuseTracer(
         public_key="pk",
@@ -346,13 +346,13 @@ def test_tool_span_captures_status_error_approval_and_side_effects() -> None:
                 "authorization": "Bearer secret",
             }
         )
-        span.set_result({"status": "approval_pending", "token": "secret"}, status="approval_pending")
+        span.set_result({"status": "queued", "token": "secret"}, status="queued")
 
     observation = client.observations[0]
     assert observation.kwargs["as_type"] == "tool"
     assert observation.kwargs["input"]["authorization"] == "[redacted]"
     update = observation.updates[0]
-    assert update["metadata"]["status"] == "approval_pending"
+    assert update["metadata"]["status"] == "queued"
     assert update["metadata"]["side_effect_count"] == 1
     assert update["metadata"]["side_effects"][0]["payload"]["authorization"] == "[redacted]"
     assert update["output"]["token"] == "[redacted]"
@@ -453,14 +453,7 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
 
     async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
         del thread_id, customer_id
-
-    async def _no_pending_lock(*, customer_id: str, thread_id: str) -> bool:
-        del customer_id, thread_id
-        return False
-
     runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._has_pending_approval_lock = _no_pending_lock  # type: ignore[method-assign]
-
     prepared = await runtime._prepare_turn_context(
         thread_id="chat_test",
         customer_id="telegram_test",

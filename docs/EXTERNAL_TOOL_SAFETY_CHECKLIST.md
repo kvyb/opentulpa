@@ -6,57 +6,45 @@ Use this checklist whenever you add or modify a tool/integration that can read/w
 
 - Define `recipient_scope` behavior: `self`, `external`, or `unknown`.
 - Define `impact_type`: `read`, `write`, `purchase`, or `costly`.
-- Treat unknown scope as approval-required.
+- Treat unknown scope as higher-risk and make the model spell out what it is touching.
 
-## 2. Wire approval policy before execution
+## 2. Define the execution contract before execution
 
-- Ensure the tool is evaluated in guardrail precheck (before actual execution).
-- Require approval for:
-  - `external` + (`write` or `purchase` or `costly`)
-  - `unknown` + side-effectful/costly action
-- Do not require approval for same-session self-targeted replies/files.
+- Keep read operations separate from write operations where practical.
+- Make side effects explicit in tool inputs and results.
+- Return enough evidence for the assistant to know whether the requested action actually happened.
+- Prefer idempotent writes or explicit duplicate detection when the target system allows it.
 
-## 3. Define safe execution contract
-
-- Make approval single-use with TTL.
-- Ensure only origin user can approve/deny.
-- Keep approved action args immutable between approval and execution.
-- Fail closed if approval lookup or decision validation fails.
+## 3. Keep support act-as execution tenant-correct
 
 For support act-as flows:
 
-- Evaluate the action against the bound customer tenant, not the support operator's own tenant.
-- Route approval prompts created from a support turn back to the support chat.
+- Execute the action against the bound customer tenant, not the support operator's own tenant.
 - Do not leak support setup/debug chat into the owner thread.
 - Do not notify the owner about support setup/debug chatter unless the action intentionally produces a customer-facing or owner-facing event.
 - Record support user id, username, support chat id, bound customer id, support thread id, action/tool name, timestamp, and outcome in internal audit state.
 
 ## 4. Minimize data exposure
 
-- Do not include secrets in approval summaries or callback payloads.
-- Include only concise action summary, destination hint, risk/cost hint, and expiry.
 - Store secrets in env/local secure config, never in prompts or logs.
+- Keep tool args/results redacted when they can contain tokens, cookies, headers, or uploaded media.
+- Summarize side effects instead of dumping raw external payloads into chat or traces.
 
 ## 5. Add interface handling
 
-- Add same-interface approval UX first (buttons/cards if supported).
-- Add text-token fallback for interfaces without interactive widgets.
-- Ensure unauthorized decision actors are rejected.
+- Add same-interface status updates first when a tool can take more than a few seconds.
+- Ensure the user sees when work is still running versus when the result is final.
 
 ## 6. Add tests before merge
 
 - Self-target action auto-allowed.
-- External write action requires approval.
-- Unknown recipient scope requires approval.
-- Approve by origin user succeeds; non-origin user fails.
-- Expired approval cannot execute.
-- Replay of used approval token fails.
-- Guardrail model error falls back to approval-required.
-- Support-originated approval routes to the support chat, not the owner chat.
+- External write action returns concrete success/failure evidence.
+- Unknown recipient scope does not produce a misleading success claim.
+- Repeated execution does not duplicate side effects unexpectedly.
 - Support act-as actions use the bound customer id and keep support history separate from owner history.
 
 ## 7. Document the integration
 
 - Update README capability/safety notes.
-- Document tool classification and approval behavior.
+- Document tool classification and the execution contract.
 - Include operational caveats (rate limits, retries, partial failures).
