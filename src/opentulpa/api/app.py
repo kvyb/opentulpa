@@ -116,6 +116,7 @@ def _business_knowledge_oracle(
     settings: Any,
     *,
     trace_path: Path | None = None,
+    langfuse_tracer: Any | None = None,
 ) -> OpenAICompatibleKnowledgeOracleClient | None:
     api_key = str(
         getattr(settings, "openai_compatible_api_key", None)
@@ -129,6 +130,7 @@ def _business_knowledge_oracle(
         base_url=str(getattr(settings, "openai_compatible_base_url", "") or ""),
         model=str(getattr(settings, "business_knowledge_oracle_model", "") or ""),
         trace_path=trace_path,
+        langfuse_tracer=langfuse_tracer,
     )
 
 
@@ -162,6 +164,7 @@ def create_app(
         root_dir=PROJECT_ROOT / ".opentulpa" / "file_vault",
         db_path=PROJECT_ROOT / ".opentulpa" / "file_vault.db",
     )
+    langfuse_tracer = getattr(runtime, "_langfuse_tracer", None)
     knowledge = knowledge_service or BusinessKnowledgeService(
         root_dir=PROJECT_ROOT / ".opentulpa" / "knowledge",
         db_path=PROJECT_ROOT / ".opentulpa" / "knowledge" / "knowledge.db",
@@ -169,7 +172,9 @@ def create_app(
         oracle_client=_business_knowledge_oracle(
             settings,
             trace_path=getattr(runtime, "_llm_call_trace_path", None),
+            langfuse_tracer=langfuse_tracer,
         ),
+        langfuse_tracer=langfuse_tracer,
     )
     link_alias_db = Path(settings.link_alias_db_path)
     if not link_alias_db.is_absolute():

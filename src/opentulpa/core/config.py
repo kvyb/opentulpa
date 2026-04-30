@@ -326,20 +326,34 @@ class Settings(BaseSettings):
             "If unset, OpenTulpa derives it automatically from the public base URL."
         ),
     )
-    posthog_api_key: str | None = Field(
+    langfuse_public_key: str | None = Field(
         default=None,
+        description="Optional Langfuse public key. Langfuse stays disabled unless public key, secret key, and base URL are set.",
+    )
+    langfuse_secret_key: str | None = Field(
+        default=None,
+        description="Optional Langfuse secret key. Langfuse stays disabled unless public key, secret key, and base URL are set.",
+    )
+    langfuse_base_url: str = Field(
+        default="https://us.cloud.langfuse.com",
+        validation_alias=AliasChoices("LANGFUSE_BASE_URL", "LANGFUSE_HOST"),
+        description="Langfuse base URL. Defaults to https://us.cloud.langfuse.com.",
+    )
+    langfuse_deployment_tag: str | None = Field(
+        default=None,
+        description="Optional deployment tag added to Langfuse trace metadata and tags.",
+    )
+    langfuse_environment: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LANGFUSE_TRACING_ENVIRONMENT", "LANGFUSE_ENVIRONMENT"),
         description=(
-            "Optional PostHog project API key for LangGraph/LLM analytics and process log mirroring. "
-            "PostHog instrumentation stays disabled unless both POSTHOG_API_KEY and POSTHOG_HOST are set."
+            "Optional Langfuse tracing environment override. If unset, OpenTulpa derives it "
+            "from the deployment tag or Railway service/environment metadata."
         ),
     )
-    posthog_host: str | None = Field(
-        default=None,
-        description=(
-            "Optional PostHog host URL for LangGraph/LLM analytics and process log mirroring "
-            "(for example https://us.i.posthog.com). "
-            "PostHog instrumentation stays disabled unless both POSTHOG_API_KEY and POSTHOG_HOST are set."
-        ),
+    langfuse_content_level: str = Field(
+        default="full_debug",
+        description="Langfuse capture mode for OpenTulpa payloads. Defaults to full_debug with redaction.",
     )
     agent_prompt_caching_enabled: bool = Field(
         default=True,

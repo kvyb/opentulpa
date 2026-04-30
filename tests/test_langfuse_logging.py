@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from opentulpa.agent.lc_messages import HumanMessage
+from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.logging.langfuse import (
+    LangfuseTracer,
+    create_langfuse_tracer,
+    redact_for_langfuse,
+)
+
+
+class _FakeObservation:
+    def __init__(self, kwargs: dict[str, Any]) -> None:
+        self.kwargs = kwargs
+        self.updates: list[dict[str, Any]] = []
+
+    def update(self, **kwargs: Any) -> None:
+        self.updates.append(kwargs)
+
+
+class _FakeObservationContext:
+    def __init__(self, client: _FakeLangfuseClient, kwargs: dict[str, Any]) -> None:
+        self.client = client
+        self.observation = _FakeObservation(kwargs)
+
+    def __enter__(self) -> _FakeObservation:
+        self.client.observations.append(self.observation)
+        self.client.current_trace_id = (
+            self.observation.kwargs.get("trace_context", {}) or {}
+        ).get("trace_id")
+        return self.observation
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.client.current_trace_id = None
+        return False
+
+
+class _FakeLangfuseClient:
+    def __init__(self) -> None:
+        self.observations: list[_FakeObservation] = []
+        self.flushed = False
+        self.shutdown_called = False
+        self.current_trace_id: str | None = None
+
+    def create_trace_id(self, *, seed: str) -> str:
+        return ("f" * 32) if seed else ""
+
+    def start_as_current_observation(self, **kwargs: Any) -> _FakeObservationContext:
+        return _FakeObservationContext(self, kwargs)
+
+    def get_current_trace_id(self) -> str | None:
+        return self.current_trace_id
+
+    def flush(self) -> None:
+        self.flushed = True
+
+    def shutdown(self) -> None:
+        self.shutdown_called = True
+
+
+class _FakeCallbackHandler:
+    instances = 0
+
+    def __init__(self) -> None:
+        type(self).instances += 1
+
+
+def test_create_langfuse_tracer_requires_full_config() -> None:
+    assert (
+        create_langfuse_tracer(
+            public_key=None,
+            secret_key="sk",
+            base_url="https://cloud.langfuse.com",
+        )
+        is None
+    )
+    assert (
+        create_langfuse_tracer(public_key="pk", secret_key="sk", base_url=None)
+        is None
+    )
+
+
+def test_create_langfuse_tracer_enabled_with_keys_and_base_url() -> None:
+    tracer = create_langfuse_tracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        deployment_tag="test-deploy",
+    )
+
+    assert tracer is not None
+    assert tracer.enabled is True
+    assert tracer.deployment_tag == "test-deploy"
+    assert tracer.environment == "test-deploy"
+
+
+def test_langfuse_environment_defaults_to_railway_service_name(monkeypatch) -> None:
+    monkeypatch.setenv("RAILWAY_SERVICE_NAME", "OpenTulpa Alpha")
+
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=_FakeLangfuseClient(),
+    )
+
+    assert tracer.deployment_tag == "OpenTulpa Alpha"
+    assert tracer.environment == "opentulpa-alpha"
+
+
+def test_langfuse_environment_override_is_normalized_and_installed(monkeypatch) -> None:
+    monkeypatch.delenv("LANGFUSE_TRACING_ENVIRONMENT", raising=False)
+    _FakeCallbackHandler.instances = 0
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        deployment_tag="ignored",
+        environment="LANGFUSE Prod!",
+        callback_handler_cls=_FakeCallbackHandler,
+    )
+
+    callbacks = tracer.build_callbacks(
+        user_id="cust_1",
+        trace_id="turn_1",
+        session_id="thread_1",
+        metadata=None,
+        tags=None,
+    )
+
+    assert callbacks
+    assert tracer.environment == "env-langfuse-prod"
+    assert os.environ["LANGFUSE_TRACING_ENVIRONMENT"] == "env-langfuse-prod"
+
+
+def test_langfuse_trace_context_uses_deterministic_trace_id_and_deployment_tag() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        deployment_tag="carwash-test",
+        client=client,
+    )
+
+    with tracer.trace_context(
+        name="opentulpa.turn.interactive",
+        trace_id="turn_123",
+        user_id="cust_1",
+        session_id="thread_1",
+        metadata={"turn_mode": "interactive"},
+        tags=["interactive"],
+    ):
+        pass
+
+    observation = client.observations[0]
+    assert observation.kwargs["trace_context"]["trace_id"] == "f" * 32
+    assert observation.kwargs["metadata"]["deployment_tag"] == "carwash-test"
+    assert observation.kwargs["metadata"]["environment"] == "carwash-test"
+    assert observation.kwargs["metadata"]["turn_mode"] == "interactive"
+    assert "env:carwash-test" in tracer.tags(["interactive"])
+
+
+def test_record_generation_captures_usage_and_cost() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=client,
+    )
+
+    tracer.record_generation(
+        {
+            "model_name": "z-ai/glm-5.1",
+            "call_site": "graph_agent",
+            "trace_id": "turn_1",
+            "prompt_messages": [{"role": "user", "text": "hi"}],
+            "response_text": "hello",
+            "response_content": "hello",
+            "response_tool_calls": [],
+            "native_tokens_prompt": 10,
+            "native_tokens_completion": 5,
+            "native_tokens_total": 15,
+            "native_tokens_cached": 3,
+            "native_tokens_reasoning": 2,
+            "native_cost_prompt_usd": 0.01,
+            "native_cost_completion_usd": 0.02,
+            "native_cost_usd": 0.03,
+        }
+    )
+
+    observation = client.observations[0]
+    assert observation.kwargs["as_type"] == "generation"
+    assert observation.kwargs["model"] == "z-ai/glm-5.1"
+    assert observation.kwargs["usage_details"] == {
+        "input": 10,
+        "output": 5,
+        "total": 15,
+        "cache_read_input_tokens": 3,
+        "reasoning_output_tokens": 2,
+    }
+    assert observation.kwargs["cost_details"] == {"input": 0.01, "output": 0.02, "total": 0.03}
+
+
+def test_tool_span_captures_status_error_approval_and_side_effects() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=client,
+    )
+
+    with tracer.tool_span(
+        trace_id="turn_1",
+        tool_name="send_message",
+        tool_call_id="call_1",
+        args={"authorization": "Bearer secret", "text": "hello"},
+    ) as span:
+        tracer.record_behavior_event(
+            {
+                "event": "message.sent",
+                "customer_id": "cust_1",
+                "authorization": "Bearer secret",
+            }
+        )
+        span.set_result({"status": "approval_pending", "token": "secret"}, status="approval_pending")
+
+    observation = client.observations[0]
+    assert observation.kwargs["as_type"] == "tool"
+    assert observation.kwargs["input"]["authorization"] == "[redacted]"
+    update = observation.updates[0]
+    assert update["metadata"]["status"] == "approval_pending"
+    assert update["metadata"]["side_effect_count"] == 1
+    assert update["metadata"]["side_effects"][0]["payload"]["authorization"] == "[redacted]"
+    assert update["output"]["token"] == "[redacted]"
+
+
+def test_tool_span_marks_errors() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=client,
+    )
+
+    with pytest.raises(RuntimeError), tracer.tool_span(trace_id="turn_1", tool_name="broken"):
+        raise RuntimeError("boom")
+
+    update = client.observations[0].updates[0]
+    assert update["metadata"]["status"] == "error"
+    assert update["level"] == "ERROR"
+
+
+def test_redaction_covers_secrets_and_inline_media() -> None:
+    redacted = redact_for_langfuse(
+        {
+            "Authorization": "Bearer secret",
+            "api_key": "secret",
+            "password": "secret",
+            "image": "data:image/png;base64,AAAA",
+            "audio": {"type": "input_audio", "data": "base64-audio"},
+        }
+    )
+
+    assert redacted["Authorization"] == "[redacted]"
+    assert redacted["api_key"] == "[redacted]"
+    assert redacted["password"] == "[redacted]"
+    assert redacted["image"] == "data:image/png;base64,[redacted]"
+    assert redacted["audio"]["data"] == "[redacted-inline-media]"
+
+
+class _FakeCallbackTracer:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def build_callbacks(
+        self,
+        *,
+        user_id: str | None,
+        trace_id: str | None,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+        tags: list[str] | None,
+    ) -> list[Any]:
+        self.calls.append(
+            {
+                "user_id": user_id,
+                "trace_id": trace_id,
+                "session_id": session_id,
+                "metadata": dict(metadata or {}),
+                "tags": list(tags or []),
+            }
+        )
+        return ["langfuse-callback"]
+
+
+class _ConfigurableModel:
+    def __init__(self) -> None:
+        self.configs: list[dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def with_config(self, config: dict[str, Any]) -> _ConfigurableModel:
+        self.configs.append(config)
+        return self
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> object:
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return type("Response", (), {"content": "ok", "tool_calls": [], "usage": {}})()
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime.recursion_limit = 8
+    runtime._langfuse_tracer = _FakeCallbackTracer()
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
+    runtime._build_pending_context_summary = lambda **kwargs: ("", None)  # type: ignore[assignment]
+
+    async def _skill_state(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {}
+
+    runtime._pre_resolve_skill_state = _skill_state  # type: ignore[assignment]
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+
+    async def _no_pending_lock(*, customer_id: str, thread_id: str) -> bool:
+        del customer_id, thread_id
+        return False
+
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._has_pending_approval_lock = _no_pending_lock  # type: ignore[method-assign]
+
+    prepared = await runtime._prepare_turn_context(
+        thread_id="chat_test",
+        customer_id="telegram_test",
+        text="hello",
+        turn_mode="interactive",
+        include_pending_context=True,
+        trace_id="turn_test",
+    )
+
+    assert prepared is not None
+    assert prepared.config["callbacks"] == ["langfuse-callback"]
+    assert runtime._langfuse_tracer.calls[0]["user_id"] == "telegram_test"
+    assert runtime._langfuse_tracer.calls[0]["trace_id"] == "turn_test"
+    assert runtime._langfuse_tracer.calls[0]["session_id"] == "chat_test"
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_attaches_langfuse_callbacks_with_with_config(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._langfuse_tracer = _FakeCallbackTracer()
+    model = _ConfigurableModel()
+
+    await runtime.ainvoke_model(
+        model,
+        [HumanMessage(content="hi")],
+        model_name="google/gemini-3-flash-preview",
+        call_context={
+            "call_site": "graph_agent",
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "trace_id": "turn_test",
+            "turn_mode": "interactive",
+            "prompt_mode": "literal_chat",
+        },
+    )
+
+    assert model.configs
+    assert model.configs[0]["callbacks"] == ["langfuse-callback"]

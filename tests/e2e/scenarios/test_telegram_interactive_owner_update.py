@@ -151,7 +151,7 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     runtime._context_events = None
     runtime._thread_rollup_service = None
     runtime._link_alias_service = None
-    runtime._posthog_logger = None
+    runtime._langfuse_tracer = None
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime._max_user_reply_chars = 4000

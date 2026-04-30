@@ -124,6 +124,7 @@ class OpenAICompatibleKnowledgeOracleClient:
         model: str = _DEFAULT_ORACLE_MODEL,
         timeout_seconds: float = 45.0,
         trace_path: Path | None = None,
+        langfuse_tracer: Any | None = None,
     ) -> None:
         self.api_key = str(api_key or "").strip()
         self.base_url = str(base_url or "").strip().rstrip("/")
@@ -134,6 +135,7 @@ class OpenAICompatibleKnowledgeOracleClient:
         if not self.base_url:
             raise ValueError("base_url is required")
         self.trace_path = trace_path.resolve() if isinstance(trace_path, Path) else None
+        self.langfuse_tracer = langfuse_tracer
         self._trace_lock = threading.Lock()
 
     def answer(
@@ -256,9 +258,6 @@ class OpenAICompatibleKnowledgeOracleClient:
         elapsed_ms: int,
         call_site: str = "knowledge_oracle",
     ) -> None:
-        path = self.trace_path
-        if path is None:
-            return
         source_text = str(source_pack or "")
         payload: dict[str, Any] = {
             "ts": datetime.now(UTC).isoformat(),
@@ -291,6 +290,14 @@ class OpenAICompatibleKnowledgeOracleClient:
             "elapsed_ms": int(elapsed_ms),
             "usage": (response_payload or {}).get("usage") if isinstance(response_payload, dict) else None,
         }
+        tracer = getattr(self, "langfuse_tracer", None)
+        record_generation = getattr(tracer, "record_generation", None)
+        if callable(record_generation):
+            with suppress(Exception):
+                record_generation(payload)
+        path = self.trace_path
+        if path is None:
+            return
         serialized = json.dumps(payload, ensure_ascii=False, default=str)
 
         def _commit() -> None:
@@ -322,6 +329,7 @@ class BusinessKnowledgeService:
         db_path: Path,
         file_vault: FileVaultService,
         oracle_client: Any | None = None,
+        langfuse_tracer: Any | None = None,
         oracle_model: str = _DEFAULT_ORACLE_MODEL,
         max_source_pack_chars: int = _DEFAULT_SOURCE_PACK_CHAR_LIMIT,
         max_output_tokens: int = _DEFAULT_ORACLE_MAX_OUTPUT_TOKENS,
@@ -330,6 +338,7 @@ class BusinessKnowledgeService:
         self.db_path = db_path.resolve()
         self.file_vault = file_vault
         self.oracle_client = oracle_client
+        self.langfuse_tracer = langfuse_tracer
         self.oracle_model = str(oracle_model or "").strip() or _DEFAULT_ORACLE_MODEL
         self.max_source_pack_chars = max(1, int(max_source_pack_chars))
         self.max_output_tokens = max(1, int(max_output_tokens))
@@ -337,6 +346,29 @@ class BusinessKnowledgeService:
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.db_path, wal=True)
+
+    def _record_observability_span(
+        self,
+        *,
+        name: str,
+        input: Any | None = None,
+        output: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+        status: str = "ok",
+    ) -> None:
+        tracer = getattr(self, "langfuse_tracer", None)
+        record_span = getattr(tracer, "record_span", None)
+        if callable(record_span):
+            with suppress(Exception):
+                record_span(
+                    name=name,
+                    input=input,
+                    output=output,
+                    metadata=metadata,
+                    trace_id=trace_id,
+                    status=status,
+                )
 
     def _init_db(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
@@ -432,7 +464,7 @@ class BusinessKnowledgeService:
             self._load_sections(customer_id=cid, scope_type=safe_scope_type, scope_id=safe_scope_id)
         )
         timing_ms = {"total": _elapsed_ms(started)}
-        return {
+        result = {
             "ok": True,
             "customer_id": cid,
             "scope_type": safe_scope_type,
@@ -446,6 +478,13 @@ class BusinessKnowledgeService:
             },
             "diagnostics": {"timing_ms": timing_ms},
         }
+        self._record_observability_span(
+            name="knowledge.index_sources",
+            input={"customer_id": cid, "scope_type": safe_scope_type, "scope_id": safe_scope_id},
+            output={"source_count": len(sources), "section_count": section_count},
+            metadata={"timing_ms": timing_ms, "file_ids": safe_file_ids},
+        )
+        return result
 
     def _index_one_source(
         self,
@@ -672,6 +711,12 @@ class BusinessKnowledgeService:
             or ""
         )
         timing_ms["oracle_answer"] = _elapsed_ms(answer_started)
+        self._record_observability_span(
+            name="knowledge.oracle_answer",
+            input={"query": safe_query, "scope_type": safe_scope_type, "scope_id": safe_scope_id},
+            output={"answer_chars": len(raw_answer)},
+            metadata={"timing_ms": {"oracle_answer": timing_ms["oracle_answer"]}},
+        )
         timing_ms["total"] = _elapsed_ms(query_started)
         answer_extract = _clean_oracle_answer(raw_answer)
         result = self._query_result(
@@ -726,6 +771,12 @@ class BusinessKnowledgeService:
         facts_started = time.monotonic()
         facts = table_facts_from_sections(sections)
         timing_ms["table_facts"] = _elapsed_ms(facts_started)
+        self._record_observability_span(
+            name="knowledge.table_facts",
+            input={"section_count": len(sections), "query": query},
+            output={"fact_count": len(facts)},
+            metadata={"timing_ms": {"table_facts": timing_ms["table_facts"]}},
+        )
         if not facts:
             source_pack = _source_pack_for_sections(sections)
             timing_ms["source_pack_total"] = _elapsed_ms(started)
@@ -739,6 +790,12 @@ class BusinessKnowledgeService:
         intent_started = time.monotonic()
         intent = self._query_intent(query)
         timing_ms["intent"] = _elapsed_ms(intent_started)
+        self._record_observability_span(
+            name="knowledge.extract_intent",
+            input={"query": query},
+            output=_safe_intent_diagnostics(intent),
+            metadata={"timing_ms": {"intent": timing_ms["intent"]}},
+        )
         if intent["mode"] in {"category_overview", "corpus_overview"}:
             overview_started = time.monotonic()
             source_pack = table_overview_to_toon(
@@ -765,6 +822,12 @@ class BusinessKnowledgeService:
             limit=20,
         )
         timing_ms["table_select"] = _elapsed_ms(selection_started)
+        self._record_observability_span(
+            name="knowledge.select_table_evidence",
+            input={"query": query, "fact_count": len(facts)},
+            output={"selected_row_count": len(rows)},
+            metadata={"timing_ms": {"table_select": timing_ms["table_select"]}},
+        )
         if not rows:
             overview_started = time.monotonic()
             source_pack = table_overview_to_toon(

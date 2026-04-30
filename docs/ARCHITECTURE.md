@@ -193,7 +193,12 @@ Compaction is hysteresis-based: the runtime compacts at the high watermark, then
 - Structured agent behavior log is enabled by default through `AGENT_BEHAVIOR_LOG_ENABLED=true`
 - Default path: `.opentulpa/logs/agent_behavior.jsonl`
 - Logs include turn lifecycle, graph node outcomes, guardrail decisions, claim-check retries, and tool execution outcomes
-- Optional PostHog analytics can be enabled with `POSTHOG_API_KEY` and `POSTHOG_HOST`
+- Optional Langfuse observability can be enabled with `LANGFUSE_PUBLIC_KEY`
+  and `LANGFUSE_SECRET_KEY`; `LANGFUSE_BASE_URL` defaults to
+  `https://us.cloud.langfuse.com`
+- Langfuse environment filtering uses `LANGFUSE_TRACING_ENVIRONMENT` when set;
+  otherwise OpenTulpa derives it from `LANGFUSE_DEPLOYMENT_TAG`, Railway service
+  or environment metadata, then `local`
 
 ## Extension points
 

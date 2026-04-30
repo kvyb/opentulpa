@@ -1623,8 +1623,35 @@ def build_runtime_graph(runtime: Any):
                 set_customer_scope = getattr(runtime, "set_active_customer_id", None)
                 if callable(set_customer_scope):
                     scope_token = set_customer_scope(customer_id)
+                tool_span = None
+                span_factory = getattr(getattr(runtime, "_langfuse_tracer", None), "tool_span", None)
+                if callable(span_factory):
+                    tool_span = span_factory(
+                        trace_id=str(state.get("agent_trace_id", "")).strip() or None,
+                        tool_name=call_name,
+                        tool_call_id=call_id,
+                        args=args,
+                        metadata={
+                            "thread_id": thread_id,
+                            "customer_id": customer_id,
+                            "turn_mode": turn_mode,
+                            "execution_origin": execution_origin,
+                        },
+                    )
                 try:
-                    result = await tool_fn.ainvoke(args)
+                    if tool_span is None:
+                        result = await tool_fn.ainvoke(args)
+                    else:
+                        with tool_span:
+                            result = await tool_fn.ainvoke(args)
+                            result_status = "ok"
+                            if (
+                                isinstance(result, dict)
+                                and str(result.get("status", "")).strip().lower()
+                                == "approval_pending"
+                            ):
+                                result_status = "approval_pending"
+                            tool_span.set_result(result, status=result_status)
                 finally:
                     reset_customer_scope = getattr(runtime, "reset_active_customer_id", None)
                     if scope_token is not None and callable(reset_customer_scope):
