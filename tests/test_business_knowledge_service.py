@@ -14,6 +14,7 @@ from opentulpa.business_knowledge.service import (
 )
 from opentulpa.business_knowledge.table_normalizer import (
     select_table_evidence,
+    table_evidence_selection_stats,
     table_evidence_to_toon,
     table_facts_from_sections,
 )
@@ -200,6 +201,10 @@ def test_business_knowledge_indexes_xlsx_and_queries_oracle(tmp_path: Path) -> N
     assert "evidence_rows" in oracle.calls[0]["source_pack"]
     assert "Ceramic wash" in oracle.calls[0]["source_pack"]
     assert "129" in oracle.calls[0]["source_pack"]
+    assert result.diagnostics["source_pack"]["mode"] == "specific_fact"
+    assert result.diagnostics["source_pack"]["selection"]["row_count"] == 2
+    assert result.diagnostics["source_pack"]["selection"]["candidate_count"] >= 1
+    assert result.diagnostics["timing_ms"]["source_pack_total"] >= 0
 
     promoted = knowledge.promote_scope(
         customer_id="telegram_123",
@@ -249,6 +254,27 @@ def test_table_normalizer_emits_header_bound_cell_facts_for_generic_xlsx() -> No
     assert "evidence_rows[rank,score,file,table,row,item,row_label,cells]:" in toon
     assert "Vehicle = SUV" in toon
     assert "Price = 129" in toon
+
+
+def test_table_normalizer_keeps_fuzzy_typo_recall_with_bounded_candidates() -> None:
+    facts = table_facts_from_sections(_sections_from_xlsx(_xlsx_bytes()))
+
+    rows = select_table_evidence(
+        facts,
+        query="SUV ceramc wash price",
+        target_terms=["ceramc wash"],
+        qualifier_terms=["SUV", "Price"],
+    )
+    stats = table_evidence_selection_stats(
+        facts,
+        query="SUV ceramc wash price",
+        target_terms=["ceramc wash"],
+        qualifier_terms=["SUV", "Price"],
+    )
+
+    assert rows[0].item == "Ceramic wash"
+    assert stats["candidate_count"] <= stats["candidate_limit"]
+    assert stats["candidate_count"] >= 1
 
 
 def test_table_normalizer_keeps_dash_only_cells_as_values_not_headers() -> None:
@@ -383,6 +409,50 @@ def test_oracle_client_posts_default_model_with_openrouter_attribution(
     assert '"call_site": "knowledge_oracle"' in trace_text
     assert "SOURCE_PACK_SHA256" in trace_text
     assert "SECRET RAW SOURCE CONTENT" not in trace_text
+
+
+def test_oracle_client_traces_intent_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"mode":"specific_fact",'
+                                '"target_terms":["Ceramic wash"],'
+                                '"qualifier_terms":["SUV"],'
+                                '"ignore_terms":[]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    def _post(url: str, **kwargs: Any) -> _Response:
+        return _Response()
+
+    monkeypatch.setattr("opentulpa.business_knowledge.service.httpx.post", _post)
+
+    client = OpenAICompatibleKnowledgeOracleClient(
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        trace_path=tmp_path / "llm_call_traces.jsonl",
+    )
+
+    intent = client.extract_intent(query="SUV ceramic wash price")
+
+    assert intent["target_terms"] == ["Ceramic wash"]
+    assert intent["qualifier_terms"] == ["SUV"]
+    trace_text = (tmp_path / "llm_call_traces.jsonl").read_text(encoding="utf-8")
+    assert '"call_site": "knowledge_oracle_intent"' in trace_text
+    assert "SOURCE_PACK_CHARS: 0" in trace_text
 
 
 def test_business_knowledge_treats_oracle_no_source_as_empty_answer(tmp_path: Path) -> None:
@@ -553,6 +623,7 @@ def test_business_knowledge_flags_unsupported_binary_as_not_grounded(tmp_path: P
     assert indexed["sources"][0]["status"] == "unsupported"
     assert preflight["ok"] is False
     assert preflight["status"] == "needs_better_source"
+    assert preflight["diagnostics"]["timing_ms"]["preflight_total"] >= 0
     assert "unsupported" in " ".join(preflight["warnings"]).lower()
 
 
