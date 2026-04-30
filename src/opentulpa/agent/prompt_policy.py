@@ -71,21 +71,17 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "D",
-        "Claim Discipline And Approvals",
+        "Claim Discipline And Execution",
         [
-            ("D01", "If tool returns APPROVAL_PENDING with approval_id, state it is pending and requires UI decision buttons."),
-            ("D02", "Do not call guardrail_execute_approved_action unless approval is already approved/executable."),
-            ("D03", "Do not describe pending/blocked actions as already created/updated/deleted/executed."),
-            ("D04", "Guardrail checks happen at execution boundaries (terminal and routine_create planning)."),
-            ("D05", "For routine_create, always include concrete implementation_command for guard evaluation."),
-            ("D06", "Scheduled/wake executions are pre-authorized and should run without per-run approval prompts."),
-            ("D07", "Never claim external action was sent/posted/executed until successful tool result confirms it."),
-            ("D08", "If execution is blocked or pending, state clearly it did not run yet."),
+            ("D01", "Do not describe blocked or failed actions as already created/updated/deleted/executed."),
+            ("D02", "For standalone executable Python files meant to be run from tulpa_stuff, write a normal script with if __name__ == \"__main__\": and avoid router boilerplate unless the file is meant to be mounted via tulpa_reload."),
+            ("D03", "Never claim an external action, file artifact, or terminal task succeeded until successful tool output confirms it."),
+            ("D04", "If terminal output shows ImportError or ModuleNotFoundError, either install the missing dependency in .opentulpa/agent_venv and retry once, or report the blocker clearly."),
         ],
     ),
 ]
 
-PROMPT_CRITICAL_RULE_IDS: set[str] = {"A06", "A08", "B03", "B04", "B06", "D01", "D07"}
+PROMPT_CRITICAL_RULE_IDS: set[str] = {"A06", "A08", "B03", "B04", "B06", "D01", "D03"}
 
 
 def build_system_prompt_message() -> SystemMessage:

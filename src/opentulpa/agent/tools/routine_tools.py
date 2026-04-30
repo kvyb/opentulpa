@@ -6,20 +6,15 @@ from typing import Any
 
 from langchain.tools import tool
 
-from opentulpa.agent.tools.common import require_customer_id
-from opentulpa.agent.tools.guardrail_helpers import (
-    approval_pending_payload,
+from opentulpa.agent.tools.common import (
     normalize_cleanup_paths,
     normalize_command_for_working_dir,
-    normalize_execution_origin,
+    require_customer_id,
 )
 from opentulpa.agent.utils import looks_like_shell_command as _looks_like_shell_command
-from opentulpa.policy.execution_boundary import ExecutionBoundaryContext, ExecutionBoundaryGuard
 
 
 def register_routine_tools(runtime: Any) -> dict[str, Any]:
-    boundary_guard = ExecutionBoundaryGuard(runtime=runtime)
-
     @tool
     async def routine_create(
         name: str,
@@ -30,8 +25,6 @@ def register_routine_tools(runtime: Any) -> dict[str, Any]:
         cleanup_paths: list[str] | None = None,
         thread_id: str = "",
         execution_origin: str | None = None,
-        preapproved: bool = False,
-        guard_context: dict[str, Any] | None = None,
     ) -> Any:
         """
         Create a scheduled routine.
@@ -39,7 +32,7 @@ def register_routine_tools(runtime: Any) -> dict[str, Any]:
         - One-time: local ISO datetime (e.g. "2026-02-18T23:45:00+08:00")
         - instruction: explicit schedule-time scratchpad for each run. Include required scripts,
           files/paths, keys to read from storage, and expected output/action.
-        - implementation_command: planned shell/script command used for guardrail evaluation.
+        - implementation_command: planned shell/script command for the routine execution.
         - cleanup_paths: optional repo-relative file paths to remove when deleting this automation.
         """
         safe_name = str(name or "").strip()
@@ -69,51 +62,6 @@ def register_routine_tools(runtime: Any) -> dict[str, Any]:
                     "ROUTINE_IMPLEMENTATION_COMMAND_INVALID: implementation_command must be a "
                     "concrete shell command (executable + args)."
                 )
-            }
-
-        normalized_origin = normalize_execution_origin(
-            thread_id=thread_id,
-            execution_origin=execution_origin,
-        )
-
-        guard_payload = guard_context if isinstance(guard_context, dict) else {}
-        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
-        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
-        decision = await boundary_guard.evaluate(
-            ExecutionBoundaryContext(
-                customer_id=safe_customer,
-                thread_id=str(thread_id or "").strip() or f"chat-{safe_customer}",
-                action_name="routine_create",
-                action_args={
-                    "name": safe_name,
-                    "schedule": safe_schedule,
-                    "instruction": safe_instruction[:1200],
-                    "notify_user": bool(notify_user),
-                    "implementation_command": safe_command,
-                },
-                execution_origin=normalized_origin,
-                preapproved=bool(preapproved),
-                action_note=(
-                    "Routine creation with planned implementation command. "
-                    "Classify external write side effects for future scheduled behavior. "
-                    f"previous_user_message={previous_user[:800]} "
-                    f"previous_assistant_message={previous_assistant[:800]}"
-                ),
-            )
-        )
-        gate = str((decision or {}).get("gate", "allow")).strip().lower()
-        if gate == "require_approval":
-            return approval_pending_payload(
-                action_name="routine_create",
-                command_preview=safe_command,
-                decision=decision if isinstance(decision, dict) else {},
-            )
-        if gate == "deny":
-            return {
-                "ok": False,
-                "status": "denied",
-                "gate": "deny",
-                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
             }
 
         auto_notify = bool(notify_user)

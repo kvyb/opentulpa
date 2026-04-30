@@ -5,14 +5,14 @@ from __future__ import annotations
 import re
 import shutil
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from opentulpa.persistence.sqlite import connect_sqlite
 
 try:
     import fcntl
@@ -158,7 +158,7 @@ _DEFAULT_ROUTINE_SCHEDULE_COMPOSER_INSTRUCTIONS = (
     "Compose routine_create payloads so schedule-time behavior is explicit and deterministic.\n\n"
     "## Field mapping\n"
     "1. instruction: schedule-time scratchpad (what to run, files to read/write, expected output).\n"
-    "2. implementation_command: concrete shell/script command for scheduled execution and guardrail evaluation.\n\n"
+    "2. implementation_command: concrete shell/script command for scheduled execution.\n\n"
     "3. implementation_command path style: keep script/file arguments relative to working_dir.\n"
     "   Example with default working_dir=tulpa_stuff: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`.\n\n"
     "## Instruction style\n"

@@ -112,17 +112,6 @@ class Settings(BaseSettings):
         default=".opentulpa/link_aliases.db",
         description="SQLite path for customer-scoped long-link alias registry.",
     )
-    approvals_db_path: str = Field(
-        default=".opentulpa/pending_approvals.db",
-        description="SQLite path for external-impact pending approvals.",
-    )
-    approvals_ttl_minutes: int = Field(
-        default=10,
-        ge=1,
-        le=120,
-        description="Default expiration window (minutes) for approval challenges.",
-    )
-
     # Telegram
     telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")
     telegram_allowed_usernames: str | None = Field(
@@ -232,13 +221,6 @@ class Settings(BaseSettings):
             "Model used for multimodal understanding of non-text inputs such as Telegram "
             "attachments, browser screenshots, voice notes, and audio/video files before "
             "passing text summaries into the main chat model. "
-            "Recommended default is google/gemini-3-flash-preview."
-        ),
-    )
-    guardrail_classifier_model: str = Field(
-        default="google/gemini-3-flash-preview",
-        description=(
-            "Model used by guardrail intent classification for approval decisions. "
             "Recommended default is google/gemini-3-flash-preview."
         ),
     )

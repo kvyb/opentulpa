@@ -117,10 +117,7 @@ def test_business_message_webhook_triggers_matching_workflow_and_notifies_owner(
         get_telegram_business=lambda: telegram_business,
         get_intake_workflows=lambda: intake,
         get_telegram_chat=lambda: _FakeTelegramChat(),
-        get_approvals=lambda: _FakeApprovals(),
         get_agent_runtime=lambda: object(),
-        get_approval_execution_orchestrator=lambda: object(),
-        decide_approval_and_maybe_wake=lambda **kwargs: {},  # type: ignore[return-value]
     )
 
     with TestClient(app) as client:

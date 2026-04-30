@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import shlex
@@ -72,9 +71,6 @@ from opentulpa.agent.utils import (
     looks_like_shell_command as _looks_like_shell_command,
 )
 from opentulpa.agent.utils import (
-    message_to_text as _message_to_text,
-)
-from opentulpa.agent.utils import (
     safe_json as _safe_json,
 )
 from opentulpa.agent.workflow_setup_prompt_context import (
@@ -84,29 +80,16 @@ from opentulpa.agent.workflow_setup_prompt_context import (
 logger = logging.getLogger(__name__)
 
 
-def _compute_claim_check_retry_limit(runtime: Any) -> int:
-    """
-    Derive retry budget from graph recursion limit so claim-check retries
-    can keep driving progress instead of stopping after a tiny fixed count.
-    """
+def _graph_retry_budget(runtime: Any) -> int:
     try:
         recursion_limit = int(getattr(runtime, "recursion_limit", 30))
     except Exception:
         recursion_limit = 30
-    # Keep a small headroom for non-claim-check hops; still allow many retries.
     return max(3, min(24, recursion_limit - 6))
 
 
-def _compute_empty_output_retry_limit(runtime: Any) -> int:
-    """
-    Empty assistant outputs should self-repair quickly and then exit.
-    Long retry loops here burn context without producing user-visible progress.
-    """
-    return min(2, _compute_claim_check_retry_limit(runtime))
-
-
 def _workflow_setup_no_progress_retry_limit(runtime: Any) -> int:
-    return min(2, _compute_claim_check_retry_limit(runtime))
+    return min(2, _graph_retry_budget(runtime))
 
 
 def _build_workflow_setup_prompt_context(
@@ -536,13 +519,6 @@ def _extract_invoked_skill_snapshot(result: Any, *, requested_name: str) -> tupl
     return name, content
 
 
-def _normalize_approval_id(value: Any) -> str:
-    text = str(value or "").strip()
-    if text.lower() in {"none", "null"}:
-        return ""
-    return text
-
-
 def _summarize_tool_validation_errors(messages: list[ToolMessage]) -> str:
     seen: set[str] = set()
     parts: list[str] = []
@@ -665,7 +641,6 @@ def build_runtime_graph(runtime: Any):
             "implementation_command",
         ),
         "routine_delete": ("routine_id",),
-        "guardrail_execute_approved_action": ("approval_id",),
     }
     customer_scoped_tools: set[str] = {
         "send_owner_update",
@@ -719,7 +694,6 @@ def build_runtime_graph(runtime: Any):
         "routine_create",
         "routine_delete",
         "browser_use_run",
-        "guardrail_execute_approved_action",
     }
     forbidden_tool_args: dict[str, set[str]] = {name: {"customer_id"} for name in customer_scoped_tools}
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}
@@ -830,7 +804,7 @@ def build_runtime_graph(runtime: Any):
 
     async def agent_node(
         state: AgentState,
-    ) -> Command[Literal["agent", "validate_tools", "claim_check", "finalize_turn"]]:
+    ) -> Command[Literal["agent", "validate_tools", "finalize_turn"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
@@ -1411,8 +1385,8 @@ def build_runtime_graph(runtime: Any):
             update["active_invoked_skill_names"] = invoked_skill_names
             update["active_skill_context"] = invoked_skill_context
         has_tool_calls = isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
-        goto: Literal["validate_tools", "claim_check", "finalize_turn"] = (
-            "validate_tools" if has_tool_calls else ("finalize_turn" if turn_mode == "routine_wake" else "claim_check")
+        goto: Literal["validate_tools", "finalize_turn"] = (
+            "validate_tools" if has_tool_calls else "finalize_turn"
         )
         if (
             turn_mode == "workflow_setup"
@@ -1562,18 +1536,8 @@ def build_runtime_graph(runtime: Any):
         )
         await _emit_tool_call_preamble_update(state, message=last, turn_mode=turn_mode)
 
-        latest_user_for_guard = _latest_user_text(messages)
-        prior_assistant_for_guard = ""
-        for msg in reversed(messages[:-1]):
-            if isinstance(msg, AIMessage):
-                candidate = _content_to_text(getattr(msg, "content", "")).strip()
-                if candidate:
-                    prior_assistant_for_guard = candidate
-                    break
-
         tool_messages: list[ToolMessage] = []
         tool_outcomes: list[dict[str, Any]] = []
-        approval_handoff = False
         had_error = False
         failed_tool_names: list[str] = []
         failed_tool_errors: list[str] = []
@@ -1601,10 +1565,6 @@ def build_runtime_graph(runtime: Any):
                         **args,
                         "thread_id": thread_id,
                         "execution_origin": execution_origin,
-                        "guard_context": {
-                            "previous_user_message": latest_user_for_guard[:2000],
-                            "previous_assistant_message": prior_assistant_for_guard[:2000],
-                        },
                     }
                 if call_name == "routine_create":
                     latest_user = _latest_user_text(messages)
@@ -1644,14 +1604,7 @@ def build_runtime_graph(runtime: Any):
                     else:
                         with tool_span:
                             result = await tool_fn.ainvoke(args)
-                            result_status = "ok"
-                            if (
-                                isinstance(result, dict)
-                                and str(result.get("status", "")).strip().lower()
-                                == "approval_pending"
-                            ):
-                                result_status = "approval_pending"
-                            tool_span.set_result(result, status=result_status)
+                            tool_span.set_result(result, status="ok")
                 finally:
                     reset_customer_scope = getattr(runtime, "reset_active_customer_id", None)
                     if scope_token is not None and callable(reset_customer_scope):
@@ -1673,74 +1626,34 @@ def build_runtime_graph(runtime: Any):
                     model_visible_result_chars=len(model_visible_result_text),
                     tool_result_compressed=model_visible_result_text != result_text,
                 )
-                if (
-                    isinstance(result, dict)
-                    and str(result.get("status", "")).strip().lower() == "approval_pending"
-                    and _normalize_approval_id(result.get("approval_id"))
-                ):
-                    approval_id = _normalize_approval_id(result.get("approval_id"))
-                    approval_handoff = True
-                    compact_payload = {
-                        "status": "approval_pending",
-                        "approval_id": approval_id,
-                        "action_name": str(result.get("action_name", "")).strip() or call_name,
-                        "summary": str(result.get("summary", "")).strip() or None,
-                        "reason": str(result.get("reason", "")).strip() or None,
-                    }
-                    tool_messages.append(
-                        ToolMessage(
-                            content=_safe_json(compact_payload),
-                            tool_call_id=call_id,
-                            additional_kwargs={"opentulpa_control": compact_payload},
-                        )
-                    )
-                    tool_outcomes.append(
-                        {
-                            "tool_name": call_name,
-                            "tool_call_id": call_id,
-                            "status": "approval_pending",
-                            "approval_id": approval_id,
-                            "action_name": str(result.get("action_name", "")).strip() or call_name,
-                            "summary": str(result.get("summary", "")).strip() or None,
-                            "reason": str(result.get("reason", "")).strip() or None,
-                            "result_text": _safe_json(compact_payload),
-                        }
-                    )
-                    _log(
-                        state,
-                        "graph.tools.approval_handoff",
-                        tool_name=call_name,
+                tool_messages.append(
+                    ToolMessage(
+                        content=model_visible_result_text,
                         tool_call_id=call_id,
+                        additional_kwargs={"opentulpa_control": {"status": "ok"}},
                     )
-                else:
-                    tool_messages.append(
-                        ToolMessage(
-                            content=model_visible_result_text,
-                            tool_call_id=call_id,
-                            additional_kwargs={"opentulpa_control": {"status": "ok"}},
-                        )
-                    )
-                    tool_outcomes.append(
-                        {
-                            "tool_name": call_name,
-                            "tool_call_id": call_id,
-                            "status": "ok",
-                            "result_text": result_text,
-                        }
-                    )
-                    if call_name == "skill_get":
-                        requested_name = str(args.get("name", "")).strip()
-                        snapshot = _extract_invoked_skill_snapshot(result, requested_name=requested_name)
-                        if snapshot is not None:
-                            skill_name, skill_text = snapshot
-                            merged_names = [*invoked_skill_list]
-                            if skill_name not in merged_names:
-                                merged_names.append(skill_name)
-                            invoked_skill_list = merged_names[-3:]
-                            if invoked_skill_context:
-                                invoked_skill_context = f"{invoked_skill_context}\n\n---\n\n{skill_text}"
-                            else:
-                                invoked_skill_context = skill_text
+                )
+                tool_outcomes.append(
+                    {
+                        "tool_name": call_name,
+                        "tool_call_id": call_id,
+                        "status": "ok",
+                        "result_text": result_text,
+                    }
+                )
+                if call_name == "skill_get":
+                    requested_name = str(args.get("name", "")).strip()
+                    snapshot = _extract_invoked_skill_snapshot(result, requested_name=requested_name)
+                    if snapshot is not None:
+                        skill_name, skill_text = snapshot
+                        merged_names = [*invoked_skill_list]
+                        if skill_name not in merged_names:
+                            merged_names.append(skill_name)
+                        invoked_skill_list = merged_names[-3:]
+                        if invoked_skill_context:
+                            invoked_skill_context = f"{invoked_skill_context}\n\n---\n\n{skill_text}"
+                        else:
+                            invoked_skill_context = skill_text
             except Exception as exc:
                 had_error = True
                 error_text = f"TOOL_ERROR: {call_name} failed: {exc}"
@@ -1777,8 +1690,7 @@ def build_runtime_graph(runtime: Any):
         update: dict[str, Any] = {
             "messages": tool_messages,
             "tool_outcomes": tool_outcomes,
-            "approval_handoff": approval_handoff,
-            "turn_status": "approval_pending" if approval_handoff else "running",
+            "turn_status": "running",
             "active_invoked_skill_names": invoked_skill_list,
             "active_invoked_skill_context": invoked_skill_context,
             "active_skill_context": invoked_skill_context,
@@ -1820,8 +1732,7 @@ def build_runtime_graph(runtime: Any):
             emitted_messages=len(tool_messages),
             had_error=had_error,
         )
-        goto: Literal["agent", "__end__"] = END if approval_handoff else "agent"
-        return Command(update=update, goto=goto)
+        return Command(update=update, goto="agent")
 
     def _latest_turn_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
         if not messages:
@@ -1868,286 +1779,7 @@ def build_runtime_graph(runtime: Any):
         kept_messages = [message for idx, message in enumerate(turn_messages) if idx in keep_indices]
         return _enforce_tool_message_protocol(kept_messages), stale_summary_text
 
-    def _collect_recent_tool_outputs(turn_messages: list[AnyMessage]) -> list[str]:
-        if not turn_messages:
-            return []
-        outputs: list[str] = []
-        for msg in turn_messages:
-            if isinstance(msg, ToolMessage):
-                text = _content_to_text(getattr(msg, "content", "")).strip()
-                if text:
-                    outputs.append(text)
-        return outputs
-
-    def _serialize_turn_window(turn_messages: list[AnyMessage]) -> str:
-        parts: list[str] = []
-        for msg in turn_messages:
-            if isinstance(msg, HumanMessage):
-                role = "user"
-            elif isinstance(msg, AIMessage):
-                role = "assistant"
-            elif isinstance(msg, ToolMessage):
-                role = "tool"
-            else:
-                continue
-            text = _content_to_text(getattr(msg, "content", "")).strip()
-            if not text:
-                continue
-            chunk = f"[{role}] {text}"
-            parts.append(chunk)
-        return "\n".join(parts)
-
-    def _tail_messages_to_token_budget(
-        all_messages: list[AnyMessage],
-        *,
-        token_budget: int,
-    ) -> list[AnyMessage]:
-        if not all_messages:
-            return []
-        budget = max(200, int(token_budget))
-        kept_rev: list[AnyMessage] = []
-        used = 0
-        for msg in reversed(all_messages):
-            text = _message_to_text(msg)
-            tok = max(1, _approx_tokens(text))
-            if kept_rev and used + tok > budget:
-                break
-            kept_rev.append(msg)
-            used += tok
-            if used >= budget:
-                break
-        kept_rev.reverse()
-        return kept_rev
-
-    async def claim_check_node(state: AgentState) -> Command[Literal["agent", "finalize_turn"]]:
-        def _retry_backoff_seconds(retry_count: int) -> float:
-            safe_retry = max(0, int(retry_count))
-            return min(3.2, 0.2 * (2**safe_retry))
-
-        messages = state.get("messages", [])
-        if not messages:
-            return Command(
-                update={
-                    "claim_check_needs_retry": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_verdict": {"usable": True, "mismatch": False},
-                },
-                goto="finalize_turn",
-            )
-        last = messages[-1]
-        if not isinstance(last, AIMessage) or last.tool_calls:
-            return Command(
-                update={
-                    "claim_check_needs_retry": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_verdict": {"usable": True, "mismatch": False},
-                },
-                goto="finalize_turn",
-            )
-
-        retry_count = int(state.get("claim_check_retry_count", 0))
-        max_claim_check_retries = _compute_claim_check_retry_limit(runtime)
-        max_empty_output_retries = _compute_empty_output_retry_limit(runtime)
-        _log(
-            state,
-            "graph.claim_check.start",
-            retry_count=retry_count,
-            max_claim_check_retries=max_claim_check_retries,
-            max_empty_output_retries=max_empty_output_retries,
-        )
-
-        assistant_text = _content_to_text(getattr(last, "content", "")).strip()
-        if not assistant_text:
-            if retry_count >= max_empty_output_retries:
-                _log(
-                    state,
-                    "graph.claim_check.empty_output_exhausted",
-                    retry_count=retry_count,
-                )
-                return Command(
-                    update={
-                        "claim_check_needs_retry": False,
-                        "claim_check_retry_count": 0,
-                        "claim_check_verdict": {
-                            "usable": True,
-                            "mismatch": False,
-                            "reason": "empty_output_exhausted",
-                        },
-                    },
-                    goto="finalize_turn",
-                )
-            backoff_seconds = _retry_backoff_seconds(retry_count)
-            _log(
-                state,
-                "graph.claim_check.empty_output_retry",
-                retry_count=retry_count,
-                backoff_seconds=backoff_seconds,
-            )
-            await asyncio.sleep(backoff_seconds)
-            return Command(
-                update={
-                    "messages": [
-                        SystemMessage(
-                            content=(
-                                "SELF_CHECK_EMPTY_OUTPUT: Your previous response produced no visible output. "
-                                "Continue and provide a concrete answer or execute the needed tools now. "
-                                "Do not stop silently."
-                            )
-                        )
-                    ],
-                    "claim_check_needs_retry": True,
-                    "claim_check_retry_count": retry_count + 1,
-                    "claim_check_verdict": {
-                        "usable": True,
-                        "mismatch": True,
-                        "reason": "empty_output_retry",
-                    },
-                },
-                goto="agent",
-            )
-
-        turn_messages = _latest_turn_messages(messages)
-        if not turn_messages:
-            return Command(
-                update={
-                    "claim_check_needs_retry": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_verdict": {"usable": True, "mismatch": False},
-                },
-                goto="finalize_turn",
-            )
-        user_text = _content_to_text(getattr(turn_messages[0], "content", "")).strip()
-        recent_tool_outputs = _collect_recent_tool_outputs(turn_messages)
-        turn_window = _serialize_turn_window(turn_messages)
-        tool_budget = max(
-            300,
-            min(3000, int(getattr(runtime, "_context_short_term_low_tokens", 3500) * 0.25)),
-        )
-        recent_tool_outputs = [
-            _trim_text_to_token_budget(x, token_budget=tool_budget)
-            for x in recent_tool_outputs[-8:]
-        ]
-        turn_window_budget = max(
-            1200,
-            min(6000, int(getattr(runtime, "_context_short_term_low_tokens", 3500) * 0.6)),
-        )
-        turn_window = _trim_text_to_token_budget(turn_window, token_budget=turn_window_budget)
-        verdict = await runtime.verify_completion_claim(
-            user_text=user_text,
-            assistant_text=assistant_text,
-            recent_tool_outputs=recent_tool_outputs,
-            turn_window=turn_window,
-        )
-        _log(
-            state,
-            "graph.claim_check.verdict",
-            retry_count=retry_count,
-            usable=bool(verdict.get("usable", True)),
-            mismatch=bool(verdict.get("mismatch", False)),
-            applies=bool(verdict.get("applies", False)),
-            confidence=verdict.get("confidence"),
-        )
-        if not bool(verdict.get("usable", True)):
-            if retry_count >= max_claim_check_retries:
-                _log(
-                    state,
-                    "graph.claim_check.unusable_exhausted",
-                    retry_count=retry_count,
-                )
-                return Command(
-                    update={
-                        "claim_check_needs_retry": False,
-                        "claim_check_retry_count": 0,
-                        "claim_check_verdict": verdict,
-                    },
-                    goto="finalize_turn",
-                )
-            backoff_seconds = _retry_backoff_seconds(retry_count)
-            _log(
-                state,
-                "graph.claim_check.unusable_retry",
-                retry_count=retry_count,
-                backoff_seconds=backoff_seconds,
-            )
-            await asyncio.sleep(backoff_seconds)
-            reason = str(verdict.get("reason", "")).strip()[:180]
-            note = (
-                "SELF_CHECK_UNAVAILABLE: Claim checker returned an unusable decision. "
-                "Continue the turn and either execute the needed tool action now or restate status clearly."
-            )
-            if reason:
-                note += f" Reason={reason}."
-            return Command(
-                update={
-                    "messages": [SystemMessage(content=note)],
-                    "claim_check_needs_retry": True,
-                    "claim_check_retry_count": retry_count + 1,
-                    "claim_check_verdict": verdict,
-                },
-                goto="agent",
-            )
-        mismatch = bool(verdict.get("mismatch", False))
-        if not mismatch:
-            _log(state, "graph.claim_check.passed", retry_count=retry_count)
-            return Command(
-                update={
-                    "claim_check_needs_retry": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_verdict": verdict,
-                },
-                goto="finalize_turn",
-            )
-        if retry_count >= max_claim_check_retries:
-            _log(
-                state,
-                "graph.claim_check.mismatch_exhausted",
-                retry_count=retry_count,
-            )
-            return Command(
-                update={
-                    "claim_check_needs_retry": False,
-                    "claim_check_retry_count": 0,
-                    "claim_check_verdict": verdict,
-                },
-                goto="finalize_turn",
-            )
-
-        reason = str(verdict.get("reason", "")).strip()[:180]
-        repair = str(verdict.get("repair_instruction", "")).strip()[:220]
-        backoff_seconds = _retry_backoff_seconds(retry_count)
-        _log(
-            state,
-            "graph.claim_check.mismatch_retry",
-            retry_count=retry_count,
-            backoff_seconds=backoff_seconds,
-            reason=reason,
-        )
-        await asyncio.sleep(backoff_seconds)
-        note = (
-            "SELF_CHECK_FAILED: Your last reply likely claimed an immediate action was done "
-            "without confirmed tool evidence in this turn. "
-            "Do not repeat the claim. Either execute the required tool now or state pending status clearly."
-        )
-        if reason:
-            note += f" Reason={reason}."
-        if repair:
-            note += f" Fix={repair}."
-        return Command(
-            update={
-                "messages": [SystemMessage(content=note)],
-                "claim_check_needs_retry": True,
-                "claim_check_retry_count": retry_count + 1,
-                "claim_check_verdict": verdict,
-            },
-            goto="agent",
-        )
-
     async def finalize_turn_node(state: AgentState) -> dict[str, Any]:
-        if bool(state.get("approval_handoff", False)):
-            return {
-                "turn_status": "approval_pending",
-                "final_response_text": "",
-            }
         messages = state.get("messages", [])
         latest_human_index = -1
         for index, message in enumerate(messages):
@@ -2174,7 +1806,7 @@ def build_runtime_graph(runtime: Any):
         "agent",
         agent_node,
         retry_policy=RetryPolicy(max_attempts=3),
-        destinations=("agent", "validate_tools", "claim_check", "finalize_turn"),
+        destinations=("agent", "validate_tools", "finalize_turn"),
     )
     builder.add_node(
         "validate_tools",
@@ -2187,12 +1819,6 @@ def build_runtime_graph(runtime: Any):
         tools_node,
         retry_policy=RetryPolicy(max_attempts=3),
         destinations=("agent", END),
-    )
-    builder.add_node(
-        "claim_check",
-        claim_check_node,
-        retry_policy=RetryPolicy(max_attempts=2),
-        destinations=("agent", "finalize_turn"),
     )
     builder.add_node("finalize_turn", finalize_turn_node, retry_policy=RetryPolicy(max_attempts=1))
     builder.add_edge(START, "agent")

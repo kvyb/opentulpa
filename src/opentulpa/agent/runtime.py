@@ -654,7 +654,6 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
 
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
-STREAM_APPROVAL_HANDOFF_SIGNAL = "__TULPA_APPROVAL_HANDOFF__"
 STREAM_PROGRESS_PREFIX = "__TULPA_STREAM_PROGRESS__:"
 STREAM_EMPTY_REPLY_FALLBACK = (
     "I couldn't produce a visible user-facing reply for that step. "
@@ -719,28 +718,6 @@ class _WakeClassification(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     notify_user: bool = False
-    reason: str = ""
-
-
-class _ClaimCheckDecision(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    ok: bool = True
-    applies: bool = False
-    mismatch: bool = False
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    reason: str = ""
-    repair_instruction: str = ""
-
-
-class _GuardrailIntentDecision(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    ok: bool = True
-    gate: str = "allow"
-    impact_type: str = "read"
-    recipient_scope: str = "self"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
 
 
@@ -867,7 +844,7 @@ def _build_intake_workflow_system_prompt() -> str:
         "- reply_text should be plain outbound DM text, not explanations about JSON or system behavior.\n"
         '- If no reply is needed, use reply_action=none and reply_text="".\n'
         "- Use mark_cancelled only when the customer clearly cancels, abandons, or says they no longer want the booking.\n"
-        "- Never ask for Telegram approval. This is background workflow execution.\n\n"
+        "- Never ask for approval or confirmation. This is background workflow execution.\n\n"
         "Booking action policy:\n"
         "- If there is an active booking and the customer is continuing the same request, use update_active.\n"
         "- If there is a recent completed booking inside the edit window and the customer is correcting or changing that booking, use edit_recent_completed.\n"
@@ -1146,7 +1123,7 @@ def _build_intake_workflow_agent_prompt(
         "- Prefer minimal read-only tool usage first.\n"
         "- Do not create, update, delete, or run workflows/routines from inside this turn.\n"
         "- Do not call intake_workflow_upsert, intake_workflow_delete, intake_workflow_run, routine_create, or routine_delete.\n"
-        "- Do not ask the user for approval. This is background execution.\n"
+        "- Do not ask the user for confirmation. This is background execution.\n"
         "- Do not send the outbound source reply or perform the final booking write yourself in this turn; "
         "the intake workflow service will do the final idempotent reply/save after your decision.\n\n"
         "Final answer contract:\n"
@@ -1273,7 +1250,6 @@ class OpenTulpaLangGraphRuntime:
         wake_classifier_model_name: str | None = None,
         wake_execution_model_name: str | None = None,
         telegram_media_model_name: str | None = None,
-        guardrail_classifier_model_name: str | None = None,
         workflow_setup_input_classifier_model_name: str | None = None,
         checkpoint_db_path: str,
         recursion_limit: int = 30,
@@ -1324,12 +1300,6 @@ class OpenTulpaLangGraphRuntime:
             if str(telegram_media_model_name or "").strip()
             else "google/gemini-3-flash-preview"
         )
-        guardrail_model = (
-            str(guardrail_classifier_model_name).strip()
-            if str(guardrail_classifier_model_name or "").strip()
-            else "minimax/minimax-m2.5"
-        )
-        self._guardrail_classifier_model_name = _normalize_model_name(guardrail_model)
         workflow_setup_classifier_model = (
             str(workflow_setup_input_classifier_model_name).strip()
             if str(workflow_setup_input_classifier_model_name or "").strip()
@@ -1480,31 +1450,6 @@ class OpenTulpaLangGraphRuntime:
                     self.model_name,
                 )
                 self._telegram_media_model = self._model
-        if self._guardrail_classifier_model_name == self.model_name:
-            self._guardrail_classifier_model = self._model
-        elif self._guardrail_classifier_model_name == self._telegram_media_model_name:
-            self._guardrail_classifier_model = self._telegram_media_model
-        elif self._guardrail_classifier_model_name == self._wake_classifier_model_name:
-            self._guardrail_classifier_model = self._wake_classifier_model
-        elif self._guardrail_classifier_model_name == self._wake_execution_model_name:
-            self._guardrail_classifier_model = self._wake_execution_model
-        else:
-            try:
-                self._guardrail_classifier_model = _init_runtime_chat_model(
-                    self._guardrail_classifier_model_name,
-                    base_kwargs=model_init_kwargs,
-                    openrouter_base_url=self.openrouter_base_url,
-                    reasoning_effort=self._reasoning_effort,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to initialize guardrail classifier model '%s'; "
-                    "falling back to main model '%s'.",
-                    self._guardrail_classifier_model_name,
-                    self.model_name,
-                )
-                self._guardrail_classifier_model = self._model
-
         classifier_model_kwargs = dict(model_init_kwargs)
         classifier_model_kwargs["max_completion_tokens"] = min(
             int(classifier_model_kwargs.get("max_completion_tokens", 160) or 160),
@@ -1518,11 +1463,6 @@ class OpenTulpaLangGraphRuntime:
             self._workflow_setup_input_classifier_model = self._wake_execution_model
         elif self._workflow_setup_input_classifier_model_name == self._telegram_media_model_name:
             self._workflow_setup_input_classifier_model = self._telegram_media_model
-        elif (
-            self._workflow_setup_input_classifier_model_name
-            == self._guardrail_classifier_model_name
-        ):
-            self._workflow_setup_input_classifier_model = self._guardrail_classifier_model
         else:
             try:
                 self._workflow_setup_input_classifier_model = _init_runtime_chat_model(
@@ -1594,8 +1534,6 @@ class OpenTulpaLangGraphRuntime:
             return str(getattr(self, "_wake_classifier_model_name", "") or "").strip()
         if model is getattr(self, "_wake_execution_model", None):
             return str(getattr(self, "_wake_execution_model_name", "") or "").strip()
-        if model is getattr(self, "_guardrail_classifier_model", None):
-            return str(getattr(self, "_guardrail_classifier_model_name", "") or "").strip()
         if model is getattr(self, "_workflow_setup_input_classifier_model", None):
             return str(
                 getattr(self, "_workflow_setup_input_classifier_model_name", "") or ""
@@ -2130,82 +2068,9 @@ class OpenTulpaLangGraphRuntime:
         return dict(_extract_response_usage_fields(response))
 
     @staticmethod
-    def _tool_message_indicates_approval_handoff(message: Any) -> bool:
-        if not isinstance(message, ToolMessage):
-            return False
-        extras = getattr(message, "additional_kwargs", {}) or {}
-        if isinstance(extras, dict):
-            control = extras.get("opentulpa_control", {})
-            if isinstance(control, dict):
-                status = str(control.get("status", "")).strip().lower()
-                if status == "approval_pending":
-                    return True
-        raw_content = _content_to_text(getattr(message, "content", "")).strip()
-        if not raw_content or not raw_content.startswith("{"):
-            return False
-        try:
-            payload = json.loads(raw_content)
-        except Exception:
-            return False
-        if not isinstance(payload, dict):
-            return False
-        return str(payload.get("status", "")).strip().lower() == "approval_pending"
-
-    @staticmethod
-    def _build_approval_handoff_text(result: dict[str, Any]) -> str:
-        outcomes = result.get("tool_outcomes", [])
-        if not isinstance(outcomes, list):
-            return ""
-        for item in outcomes:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("status", "")).strip().lower() != "approval_pending":
-                continue
-            approval_id = str(item.get("approval_id", "")).strip()
-            action_summary = OpenTulpaLangGraphRuntime._approval_handoff_subject(item)
-            follow_up_hint = OpenTulpaLangGraphRuntime._approval_handoff_follow_up_hint(item)
-            if approval_id:
-                return (
-                    f"Approval required before execution of {action_summary}. "
-                    f"approval_id={approval_id}. Approve or deny this request in the UI."
-                    f"{follow_up_hint}"
-                )
-            return (
-                f"Approval required before execution of {action_summary}. "
-                f"Approve or deny in the UI.{follow_up_hint}"
-            )
-        return ""
-
-    @staticmethod
-    def _approval_handoff_subject(item: dict[str, Any]) -> str:
-        summary = " ".join(str(item.get("summary", "")).split()).strip()
-        if summary:
-            return summary[:180] + ("..." if len(summary) > 180 else "")
-        action_name = str(item.get("action_name", "") or item.get("tool_name", "")).strip()
-        if action_name:
-            return action_name
-        return "this action"
-
-    @staticmethod
-    def _approval_handoff_follow_up_hint(item: dict[str, Any]) -> str:
-        haystack = " ".join(
-            str(item.get(key, "")).strip().lower()
-            for key in ("summary", "action_name", "tool_name")
-        )
-        if any(token in haystack for token in ("send", "message", "post", "publish")):
-            return " If you want, I can draft the content here first before you approve anything."
-        if any(token in haystack for token in ("routine", "schedule", "automation", "remind")):
-            return (
-                " If you wanted discussion first, tell me to keep it in chat "
-                "and I will plan it with you before creating any routine."
-            )
-        return " If you want, I can explain the planned action before you approve it."
-
-    @staticmethod
     def _summarize_pending_payload(payload: Any, *, payload_limit: int = 240) -> str:
         if isinstance(payload, dict):
             allowed_keys = (
-                "approval_id",
                 "status",
                 "action_name",
                 "execution_ok",
@@ -2287,28 +2152,6 @@ class OpenTulpaLangGraphRuntime:
         if not pending:
             return "", through_id
         return self._format_pending_context(pending), through_id
-
-    async def _has_pending_approval_lock(self, *, customer_id: str, thread_id: str) -> bool:
-        cid = str(customer_id or "").strip()
-        tid = str(thread_id or "").strip()
-        if not cid or not tid:
-            return False
-        try:
-            response = await self._request_with_backoff(
-                "GET",
-                "/internal/approvals/pending/status",
-                params={"customer_id": cid, "thread_id": tid},
-                timeout=5.0,
-                retries=0,
-            )
-        except Exception:
-            return False
-        if response.status_code != 200:
-            return False
-        with suppress(Exception):
-            payload = response.json()
-            return bool(payload.get("pending", False))
-        return False
 
     def register_links_from_text(
         self,
@@ -2749,7 +2592,7 @@ class OpenTulpaLangGraphRuntime:
                 for c in shortlist
             ]
         )
-        selection_model = getattr(self, "_guardrail_classifier_model", None) or self._model
+        selection_model = getattr(self, "_wake_classifier_model", None) or self._model
         decision, _ = await self._invoke_structured_model(
             model=selection_model,
             schema=_SkillSelectionDecision,
@@ -3264,9 +3107,6 @@ class OpenTulpaLangGraphRuntime:
             "pending_context_summary": pending_context_summary,
             "agent_trace_id": trace_id,
             "tool_error_count": 0,
-            "approval_handoff": False,
-            "claim_check_retry_count": 0,
-            "claim_check_needs_retry": False,
             "workflow_setup_no_progress_retry_count": 0,
             "workflow_setup_repair_instruction": "",
             "frozen_prompt_context": None,
@@ -3288,8 +3128,6 @@ class OpenTulpaLangGraphRuntime:
         prompt_mode_override: str | None = None,
     ) -> _PreparedTurnContext | None:
         await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
-        if await self._has_pending_approval_lock(customer_id=customer_id, thread_id=thread_id):
-            return None
         user_text = str(text or "")
         self.register_links_from_text(
             customer_id=customer_id,
@@ -3569,38 +3407,7 @@ class OpenTulpaLangGraphRuntime:
                 forced_skill_names=forced_skill_names,
                 prompt_mode_override=prompt_mode_override,
             )
-            if prepared is None:
-                self.log_behavior_event(
-                    event="turn_blocked_pending_approval",
-                    trace_id=turn_trace_id,
-                    mode="ainvoke",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    turn_mode=normalized_turn_mode,
-                )
-                return ""
             result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
-            if (
-                bool(result.get("approval_handoff", False))
-                or str(result.get("turn_status", "")) == "approval_pending"
-            ):
-                self.log_behavior_event(
-                    event="turn_approval_handoff",
-                    trace_id=turn_trace_id,
-                    mode="ainvoke",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    turn_mode=normalized_turn_mode,
-                )
-                handoff_text = self._build_approval_handoff_text(result)
-                if handoff_text:
-                    self.register_links_from_text(
-                        customer_id=customer_id,
-                        text=handoff_text,
-                        source="assistant_turn",
-                        limit=10,
-                    )
-                return handoff_text
             final_reply = str(result.get("final_response_text", "")).strip()
             if final_reply:
                 self.register_links_from_text(
@@ -3798,25 +3605,12 @@ class OpenTulpaLangGraphRuntime:
                 forced_skill_names=forced_skill_names,
                 prompt_mode_override=prompt_mode_override,
             )
-            if prepared is None:
-                yielded_any = True
-                self.log_behavior_event(
-                    event="turn_blocked_pending_approval",
-                    trace_id=turn_trace_id,
-                    mode="astream",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    turn_mode=normalized_turn_mode,
-                )
-                yield STREAM_APPROVAL_HANDOFF_SIGNAL
-                return
             config = prepared.config
             segment_accumulated = ""
             stream_key = ""
             yielded_any = False
             in_tool_phase = False
             suppress_live_text_until_completion = False
-            approval_handoff_detected = False
             stream_started_at = time.monotonic()
             stream_no_visible_timeout_s = float(
                 str(os.environ.get("AGENT_STREAM_NO_VISIBLE_PROGRESS_SECONDS", "210")).strip()
@@ -3884,43 +3678,6 @@ class OpenTulpaLangGraphRuntime:
                     )
                 if node_name != "agent":
                     stream_tool_chunks += 1
-                    if node_name == "tools" and self._tool_message_indicates_approval_handoff(
-                        message_chunk
-                    ):
-                        approval_handoff_detected = True
-                        self.log_behavior_event(
-                            event="turn_stream_tool_approval_handoff_detected",
-                            trace_id=turn_trace_id,
-                            thread_id=thread_id,
-                            customer_id=customer_id,
-                            stream_total_chunks=stream_total_chunks,
-                            turn_mode=normalized_turn_mode,
-                        )
-                        if buffered_visible and not yielded_any:
-                            self.log_behavior_event(
-                                event="turn_stream_precommit_discarded",
-                                trace_id=turn_trace_id,
-                                thread_id=thread_id,
-                                customer_id=customer_id,
-                                output_chars=len(buffered_visible.strip()),
-                                reason="approval_handoff",
-                                turn_mode=normalized_turn_mode,
-                            )
-                            buffered_visible = ""
-                            buffered_visible_truncated = False
-                            buffered_visible_source_chars = 0
-                            _finalize_segment(register_links=False)
-                        self.log_behavior_event(
-                            event="turn_approval_handoff",
-                            trace_id=turn_trace_id,
-                            mode="astream",
-                            thread_id=thread_id,
-                            customer_id=customer_id,
-                            turn_mode=normalized_turn_mode,
-                        )
-                        yielded_any = True
-                        yield STREAM_APPROVAL_HANDOFF_SIGNAL
-                        break
                     if (
                         self._stream_chunk_is_tool_phase(node_name, message_chunk)
                         and not in_tool_phase
@@ -4067,7 +3824,7 @@ class OpenTulpaLangGraphRuntime:
             if prepared.through_id is not None and self._context_events is not None:
                 self._context_events.clear_events(customer_id, through_id=prepared.through_id)
             _finalize_segment()
-            if buffered_visible and not approval_handoff_detected:
+            if buffered_visible:
                 buffered_candidate = buffered_visible.strip()
                 if self._looks_like_provisional_reply(buffered_candidate):
                     self.log_behavior_event(
@@ -4116,17 +3873,6 @@ class OpenTulpaLangGraphRuntime:
                     buffered_visible = ""
                     buffered_visible_truncated = False
                     buffered_visible_source_chars = 0
-            if not yielded_any and approval_handoff_detected:
-                yielded_any = True
-                self.log_behavior_event(
-                    event="turn_approval_handoff",
-                    trace_id=turn_trace_id,
-                    mode="astream",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    turn_mode=normalized_turn_mode,
-                )
-                yield STREAM_APPROVAL_HANDOFF_SIGNAL
             if not yielded_any:
                 logger.warning(
                     "runtime.astream_text no_visible_chunks thread_id=%s customer_id=%s; invoking fallback",
@@ -4150,21 +3896,6 @@ class OpenTulpaLangGraphRuntime:
                     prepared.graph_input,
                     config=config,
                 )
-                if (
-                    bool(fallback_result.get("approval_handoff", False))
-                    or str(fallback_result.get("turn_status", "")) == "approval_pending"
-                ):
-                    yielded_any = True
-                    self.log_behavior_event(
-                        event="turn_approval_handoff",
-                        trace_id=turn_trace_id,
-                        mode="astream",
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                        turn_mode=normalized_turn_mode,
-                    )
-                    yield STREAM_APPROVAL_HANDOFF_SIGNAL
-                    fallback_result = {"messages": []}
                 fallback_messages = fallback_result.get("messages", [])
                 fallback_yielded = False
                 fallback_text = str(fallback_result.get("final_response_text", "")).strip()
@@ -4709,106 +4440,6 @@ class OpenTulpaLangGraphRuntime:
             "reason": str(decision.reason).strip()[:500],
         }
 
-    async def verify_completion_claim(
-        self,
-        *,
-        user_text: str,
-        assistant_text: str,
-        recent_tool_outputs: list[str],
-        turn_window: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Verify that immediate-action completion claims are supported by tool evidence.
-
-        This check is intentionally conservative: on uncertainty it should not force a retry.
-        """
-        safe_assistant = str(assistant_text or "").strip()
-        if not safe_assistant:
-            return {
-                "ok": True,
-                "applies": False,
-                "mismatch": False,
-                "confidence": 0.0,
-                "reason": "empty_assistant_text",
-                "repair_instruction": "",
-                "usable": True,
-            }
-        safe_user = str(user_text or "").strip()
-        safe_turn_window = str(turn_window or "").strip()
-        safe_tools: list[str] = []
-        for raw in recent_tool_outputs or []:
-            text = " ".join(str(raw or "").split()).strip()
-            if text:
-                safe_tools.append(text)
-
-        decision, invoke_error = await self._invoke_structured_model(
-            model=self._guardrail_classifier_model,
-            schema=_ClaimCheckDecision,
-            messages=[
-                SystemMessage(
-                    content=(
-                        "You verify assistant execution claims against tool evidence.\n"
-                        "Return strict JSON only with keys:\n"
-                        "ok (bool), applies (bool), mismatch (bool), confidence (0..1), "
-                        "reason (string <= 180 chars), repair_instruction (string <= 220 chars).\n"
-                        "Decision policy (conservative, non-aggressive):\n"
-                        "- applies=true only if assistant explicitly claims something was already done/launched/sent/posted/scheduled now.\n"
-                        "- applies=true if assistant commits to an immediate follow-up action in this same turn "
-                        "(e.g., 'doing this now', 'retrying now', 'give me a moment') that should produce tool evidence.\n"
-                        "- applies=true if assistant asks the user to approve/deny or says approval is pending now.\n"
-                        "- If user_message asks only for an outcome/failure summary, assistant must not promise "
-                        "new immediate execution unless tool evidence exists in this turn.\n"
-                        "- If assistant is future-tense or conditional without immediate-action claims, set applies=false and mismatch=false.\n"
-                        "- mismatch=true only when there is a clear immediate completion claim without matching success evidence in tool outputs.\n"
-                        "- mismatch=true when assistant commits immediate follow-up execution now but no matching tool evidence exists.\n"
-                        "- If assistant claims completed/updated/created/scheduled now AND also states approval is pending, set mismatch=true.\n"
-                        "- If assistant asks for approval (or says approval is pending) but tool evidence lacks a pending-approval artifact "
-                        "(e.g., approval_id, APPROVAL_PENDING, or explicit pending challenge), set mismatch=true.\n"
-                        "- If evidence is ambiguous/partial, prefer mismatch=false.\n"
-                        "- If tool outputs show approval pending, denial, or tool error while assistant claims success now, mismatch=true.\n"
-                        "- If assistant claims it fetched/initialized/updated specific content (e.g., named headlines, numbers, concrete facts) "
-                        "but those concrete details are not present in tool outputs from this turn, set mismatch=true.\n"
-                        "- repair_instruction should tell the agent to either run the missing tool now or restate status honestly.\n"
-                        "No markdown. No extra keys."
-                    )
-                ),
-                HumanMessage(
-                    content=(
-                        f"user_message={safe_user}\n"
-                        f"assistant_message={safe_assistant}\n"
-                        f"turn_window={safe_turn_window}\n"
-                        f"recent_tool_outputs={json.dumps(safe_tools, ensure_ascii=False)}"
-                    )
-                ),
-            ],
-        )
-        if decision is None or not isinstance(decision, _ClaimCheckDecision):
-            return {
-                "ok": False,
-                "applies": False,
-                "mismatch": False,
-                "confidence": 0.0,
-                "reason": (
-                    f"classifier_error:{invoke_error}"
-                    if invoke_error
-                    else "invalid_checker_output:no_json_object"
-                ),
-                "repair_instruction": "",
-                "usable": False,
-            }
-        applies = bool(decision.applies)
-        mismatch = bool(decision.mismatch) if applies else False
-        confidence = float(decision.confidence)
-        return {
-            "ok": bool(decision.ok),
-            "applies": applies,
-            "mismatch": mismatch,
-            "confidence": max(0.0, min(confidence, 1.0)),
-            "reason": str(decision.reason).strip()[:180],
-            "repair_instruction": str(decision.repair_instruction).strip()[:220],
-            "usable": True,
-        }
-
     async def classify_routine_create_intent(
         self,
         *,
@@ -4837,7 +4468,7 @@ class OpenTulpaLangGraphRuntime:
                 safe_args[key_text] = str(value)[:300]
 
         decision, invoke_error = await self._invoke_structured_model(
-            model=getattr(self, "_guardrail_classifier_model", None) or self._model,
+            model=getattr(self, "_wake_classifier_model", None) or self._model,
             schema=_RoutineCreateIntentDecision,
             messages=[
                 SystemMessage(
@@ -4851,7 +4482,7 @@ class OpenTulpaLangGraphRuntime:
                         "job, routine, or automation, or when it is a positive confirmation to the "
                         "prior assistant's explicit question about creating or recreating this routine.\n"
                         "This is multilingual: judge intent semantically, not by exact keywords.\n"
-                        "Do not decide safety or external side effects here. Another guardrail handles that.\n"
+                        "Do not decide safety or external side effects here. Focus only on whether the user authorized creating this routine.\n"
                         "Do not allow if the user asked to only discuss/draft, declined, changed the subject, "
                         "or if the proposed routine materially differs from what the user authorized.\n"
                         "If unsure, set allow_create=false and explain the missing authorization."
@@ -4877,217 +4508,6 @@ class OpenTulpaLangGraphRuntime:
             "confidence": max(0.0, min(float(decision.confidence), 1.0)),
             "reason": str(decision.reason).strip()[:180],
         }
-
-    async def classify_guardrail_intent(
-        self,
-        *,
-        action_name: str,
-        action_args: dict[str, Any],
-        action_note: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Isolated, compact classifier for approval guardrails.
-
-        Returns strict JSON-like payload:
-        {
-          "ok": bool,
-          "gate": "allow|require_approval|deny",
-          "impact_type": "read|write|purchase|costly",
-          "recipient_scope": "self|external|unknown",
-          "confidence": float,
-          "reason": str
-        }
-        """
-        safe_name = str(action_name or "").strip()
-        if not safe_name:
-            return {"ok": False, "error": "missing_action_name"}
-
-        safe_args: dict[str, Any] = {}
-        sensitive_parts = {"key", "token", "secret", "password", "authorization", "api"}
-        for key, value in (action_args or {}).items():
-            key_text = str(key).strip()
-            lower_key = key_text.lower()
-            if any(part in lower_key for part in sensitive_parts):
-                safe_args[key_text] = "***"
-                continue
-            if isinstance(value, str):
-                if lower_key in {"command", "script", "implementation_command", "code"}:
-                    safe_args[key_text] = value[:12000]
-                else:
-                    safe_args[key_text] = value[:500]
-            elif isinstance(value, (int, float, bool)) or value is None:
-                safe_args[key_text] = value
-            elif isinstance(value, list):
-                safe_args[key_text] = [str(item)[:120] for item in value[:12]]
-            elif isinstance(value, dict):
-                safe_args[key_text] = {
-                    str(k)[:40]: str(v)[:120] for k, v in list(value.items())[:12]
-                }
-            else:
-                safe_args[key_text] = str(value)[:200]
-
-        decision, invoke_error = await self._invoke_structured_model(
-            model=self._guardrail_classifier_model,
-            schema=_GuardrailIntentDecision,
-            messages=[
-                SystemMessage(
-                    content=(
-                        "Classify action safety intent for an approval gate.\n"
-                        "Return strict JSON object only with keys:\n"
-                        "ok (bool), gate (allow|require_approval|deny),\n"
-                        "impact_type (read|write|purchase|costly),\n"
-                        "recipient_scope (self|external|unknown),\n"
-                        "confidence (0..1), reason (string <= 160 chars).\n"
-                        "Rules:\n"
-                        "- Approval should be required in exactly one case: external write side effects.\n"
-                        "- External write means mutating/posting/sending/purchasing/updating data on services "
-                        "outside this local project/runtime.\n"
-                        "- Treat ANY non-localhost network mutation as external write.\n"
-                        "- For shell/terminal commands, classify from literal command intent, not user phrasing.\n"
-                        "- If command contains write verbs/flags with remote URLs, set gate=require_approval.\n"
-                        "- High-signal external write indicators include: "
-                        "curl -X POST|PUT|PATCH|DELETE, --request POST|PUT|PATCH|DELETE, "
-                        "--data/-d/--json with http(s) URL, requests.post/put/patch/delete, "
-                        "httpx.post/put/patch/delete, fetch(...,{method:'POST'|'PUT'|'PATCH'|'DELETE'}).\n"
-                        "- URLs to localhost/127.0.0.1/::1 are local; do not treat as external by URL alone.\n"
-                        "- Internal reads/writes (repo files, local artifacts, local config/state) are allow.\n"
-                        "- Remote reads/fetch/summarization without external mutation are allow.\n"
-                        "- Never set gate=require_approval for read-only actions, including external/API/web "
-                        "reads.\n"
-                        "- For tulpa_run_terminal, classify from full command/script text in action_args.command.\n"
-                        "- For routine_create, evaluate planned downstream behavior from action_args + action_note:\n"
-                        "  * inspect implementation_command/implementation fields as the execution artifact.\n"
-                        "  * if future scheduled behavior includes external writes, set gate=require_approval.\n"
-                        "  * otherwise set gate=allow.\n"
-                        "- For non-routine actions, set gate=require_approval only when this immediate action "
-                        "implies external write side effects.\n"
-                        "- If uncertain on a command that includes a non-localhost URL plus write-like markers, "
-                        "escalate to require_approval.\n"
-                        "- If uncertain without write-like markers, set gate=allow with recipient_scope=unknown "
-                        "or self as appropriate.\n"
-                        "- Use deny only for actions that should never run as requested.\n"
-                        "- Treat action_note as agent reasoning about next planned action and likely tool path.\n"
-                        "Do not include any extra keys or markdown."
-                    )
-                ),
-                HumanMessage(
-                    content=(
-                        f"action_name={safe_name}\n"
-                        f"action_args={json.dumps(safe_args, ensure_ascii=False)[:20000]}\n"
-                        f"action_note={str(action_note or '').strip()[:2000]}"
-                    )
-                ),
-            ],
-        )
-        if decision is None or not isinstance(decision, _GuardrailIntentDecision):
-            detail = invoke_error or "invalid_guardrail_output"
-            return {"ok": False, "error": f"classifier_error:{detail}"}
-
-        gate = str(decision.gate).strip().lower()
-        impact_type = str(decision.impact_type).strip().lower()
-        recipient_scope = str(decision.recipient_scope).strip().lower()
-        if gate not in {"allow", "require_approval", "deny"}:
-            return {"ok": False, "error": "invalid_gate"}
-        if impact_type not in {"read", "write", "purchase", "costly"}:
-            return {"ok": False, "error": "invalid_impact_type"}
-        if recipient_scope not in {"self", "external", "unknown"}:
-            return {"ok": False, "error": "invalid_recipient_scope"}
-        return {
-            "ok": bool(decision.ok),
-            "gate": gate,
-            "impact_type": impact_type,
-            "recipient_scope": recipient_scope,
-            "confidence": max(0.0, min(float(decision.confidence), 1.0)),
-            "reason": str(decision.reason).strip()[:160],
-        }
-
-    async def evaluate_tool_guardrail(
-        self,
-        *,
-        customer_id: str,
-        thread_id: str,
-        action_name: str,
-        action_args: dict[str, Any],
-        action_note: str | None = None,
-    ) -> dict[str, Any]:
-        """Call upstream approval broker to evaluate a tool call at action time."""
-        safe_cmd = ""
-        if action_name == "tulpa_run_terminal":
-            safe_cmd = str((action_args or {}).get("command", "")).strip()[:300]
-        try:
-            response = await self._request_with_backoff(
-                "POST",
-                "/internal/approvals/evaluate",
-                json_body={
-                    "customer_id": customer_id,
-                    "thread_id": thread_id,
-                    "action_name": action_name,
-                    "action_args": action_args if isinstance(action_args, dict) else {},
-                    "action_note": str(action_note or "").strip()[:2000],
-                    "defer_challenge_delivery": True,
-                },
-                timeout=12.0,
-                retries=1,
-            )
-            if response.status_code != 200:
-                self.log_behavior_event(
-                    event="guardrail.evaluate.http_error",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    action_name=action_name,
-                    command=safe_cmd,
-                    status_code=response.status_code,
-                    gate="require_approval",
-                )
-                return {
-                    "gate": "require_approval",
-                    "reason": f"guardrail_http_{response.status_code}",
-                    "summary": f"execute {action_name}",
-                }
-            payload = response.json()
-            if isinstance(payload, dict):
-                self.log_behavior_event(
-                    event="guardrail.evaluate.decision",
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    action_name=action_name,
-                    command=safe_cmd,
-                    gate=str(payload.get("gate", "")),
-                    reason=str(payload.get("reason", ""))[:200],
-                    impact_type=str(payload.get("impact_type", "")),
-                    recipient_scope=str(payload.get("recipient_scope", "")),
-                    confidence=payload.get("confidence"),
-                )
-                return payload
-            self.log_behavior_event(
-                event="guardrail.evaluate.invalid_payload",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                action_name=action_name,
-                command=safe_cmd,
-                gate="require_approval",
-            )
-            return {
-                "gate": "require_approval",
-                "reason": "guardrail_invalid_payload",
-                "summary": f"execute {action_name}",
-            }
-        except Exception as exc:
-            exc_name = type(exc).__name__
-            self.log_behavior_event(
-                event="guardrail.evaluate.exception",
-                thread_id=thread_id,
-                customer_id=customer_id,
-                action_name=action_name,
-                command=safe_cmd,
-                gate="require_approval",
-                error=f"{exc_name}: {exc}",
-            )
-            return {
-                "gate": "require_approval",
-                "reason": f"guardrail_request_error:{exc_name}",
-                "summary": f"execute {action_name}",
-            }
 
     async def _request_with_backoff(
         self,
@@ -5190,7 +4610,7 @@ class OpenTulpaLangGraphRuntime:
         """
         Public runtime API for tool execution outside normal graph turns.
 
-        Used by approval execution to avoid coupling to private runtime attributes.
+        Used by API routes and orchestrators without coupling to private runtime attributes.
         """
         await self.start()
         self.log_behavior_event(

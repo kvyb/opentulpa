@@ -24,7 +24,6 @@ def test_runtime_passes_reasoning_effort_to_init_chat_model(monkeypatch) -> None
         model_name="openai/gpt-5-mini",
         reasoning_effort="medium",
         wake_classifier_model_name="openai/gpt-5-mini",
-        guardrail_classifier_model_name="openai/gpt-5-mini",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
@@ -49,7 +48,6 @@ def test_runtime_caps_gemini_flash_lite_preview_output_tokens(monkeypatch) -> No
         wake_classifier_model_name="google/gemini-3.1-flash-lite-preview",
         wake_execution_model_name="google/gemini-3.1-flash-lite-preview",
         telegram_media_model_name="google/gemini-3.1-flash-lite-preview",
-        guardrail_classifier_model_name="google/gemini-3.1-flash-lite-preview",
         max_completion_tokens=4096,
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
@@ -76,7 +74,6 @@ def test_runtime_defaults_reasoning_effort_medium_for_all_agent_models(monkeypat
         wake_classifier_model_name="google/gemini-3-flash-preview",
         wake_execution_model_name="google/gemini-3-flash-preview",
         telegram_media_model_name="google/gemini-3-flash-preview",
-        guardrail_classifier_model_name="google/gemini-3-flash-preview",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
@@ -107,7 +104,6 @@ def test_runtime_can_disable_deepseek_v4_pro_thinking_with_empty_reasoning_effor
         wake_classifier_model_name="google/gemini-3-flash-preview",
         wake_execution_model_name="google/gemini-3-flash-preview",
         telegram_media_model_name="google/gemini-3-flash-preview",
-        guardrail_classifier_model_name="google/gemini-3-flash-preview",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
@@ -137,7 +133,6 @@ def test_runtime_keeps_explicit_reasoning_effort_for_deepseek_v4_pro(monkeypatch
         model_name="deepseek/deepseek-v4-pro",
         reasoning_effort="medium",
         wake_classifier_model_name="deepseek/deepseek-v4-pro",
-        guardrail_classifier_model_name="deepseek/deepseek-v4-pro",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
@@ -172,7 +167,6 @@ def test_runtime_uses_openrouter_adapter_for_deepseek_reasoning(monkeypatch) -> 
         wake_classifier_model_name="google/gemini-3-flash-preview",
         wake_execution_model_name="google/gemini-3-flash-preview",
         telegram_media_model_name="google/gemini-3-flash-preview",
-        guardrail_classifier_model_name="google/gemini-3-flash-preview",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
@@ -204,7 +198,6 @@ def test_runtime_uses_openrouter_adapter_to_disable_deepseek_reasoning(monkeypat
         model_name="deepseek/deepseek-v4-pro",
         reasoning_effort="",
         wake_classifier_model_name="deepseek/deepseek-v4-pro",
-        guardrail_classifier_model_name="deepseek/deepseek-v4-pro",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
@@ -288,7 +281,6 @@ def test_runtime_sets_openrouter_app_headers_on_model_init(monkeypatch) -> None:
         openrouter_base_url="https://openrouter.ai/api/v1",
         model_name="openai/gpt-5-mini",
         wake_classifier_model_name="openai/gpt-5-mini",
-        guardrail_classifier_model_name="openai/gpt-5-mini",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 

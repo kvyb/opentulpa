@@ -6,7 +6,6 @@ from importlib import import_module
 from typing import Any
 
 _ROUTE_IMPORTS = {
-    "register_approval_routes": "opentulpa.api.routes.approvals",
     "register_chat_routes": "opentulpa.api.routes.chat",
     "register_composio_routes": "opentulpa.api.routes.composio",
     "register_debug_log_routes": "opentulpa.api.routes.debug_logs",

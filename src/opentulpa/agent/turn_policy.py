@@ -6,7 +6,7 @@ from typing import Literal
 
 from opentulpa.agent.lc_messages import SystemMessage
 
-TurnMode = Literal["interactive", "workflow_setup", "routine_wake", "approval_recovery", "event_notification"]
+TurnMode = Literal["interactive", "workflow_setup", "routine_wake", "event_notification"]
 
 
 def normalize_turn_mode(value: str | None) -> TurnMode:
@@ -15,8 +15,6 @@ def normalize_turn_mode(value: str | None) -> TurnMode:
         return "workflow_setup"
     if normalized == "routine_wake":
         return "routine_wake"
-    if normalized == "approval_recovery":
-        return "approval_recovery"
     if normalized == "event_notification":
         return "event_notification"
     return "interactive"
@@ -63,16 +61,6 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "Focus on doing the work, then return a concise outcome summary."
             )
         )
-    if normalized == "approval_recovery":
-        return SystemMessage(
-            content=(
-                "Turn mode: approval_recovery.\n"
-                "A previously approved action is being executed, repaired, or summarized.\n"
-                "You may use tools needed to finish or repair the already-approved task.\n"
-                "Treat this as continuation of the approved execution, not a fresh interactive approval request.\n"
-                "Do not ask the user to repeat the same approval flow unless a genuinely unrelated new action is required."
-            )
-        )
     if normalized == "event_notification":
         return SystemMessage(
             content=(
@@ -95,8 +83,6 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
 def execution_origin_for_turn_mode(turn_mode: str | None, *, thread_id: str | None = None) -> str:
     normalized = normalize_turn_mode(turn_mode)
     if normalized == "routine_wake":
-        return "scheduled"
-    if normalized == "approval_recovery":
         return "scheduled"
     if normalized == "event_notification":
         return "interactive"

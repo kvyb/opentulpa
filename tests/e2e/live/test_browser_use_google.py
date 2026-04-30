@@ -98,7 +98,6 @@ def test_live_llm_uses_browser_use_run_for_google_search(tmp_path: Path) -> None
         openrouter_base_url=str(_settings.openrouter_base_url or "").strip(),
         model_name=str(_settings.llm_model or "").strip(),
         wake_classifier_model_name=str(_settings.llm_model or "").strip(),
-        guardrail_classifier_model_name=str(_settings.llm_model or "").strip(),
         checkpoint_db_path=str(tmp_path / "live_browser_use_checkpoints.sqlite"),
         behavior_log_enabled=True,
         behavior_log_path=str(behavior_log),

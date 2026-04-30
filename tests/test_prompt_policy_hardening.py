@@ -7,7 +7,6 @@ from opentulpa.agent.graph_builder import (
     _build_tool_validation_repair_message,
     _enforce_tool_message_protocol,
     _extract_invoked_skill_snapshot,
-    _normalize_approval_id,
     _routine_create_intent_validation_error,
     _sanitize_history_messages_for_model,
     _summarize_tool_validation_errors,
@@ -45,9 +44,9 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "[SECTION A] Core Behavior" in text
     assert "[SECTION B] Scheduling And Routines" in text
     assert "[SECTION C] Tool Selection" in text
-    assert "[SECTION D] Claim Discipline And Approvals" in text
+    assert "[SECTION D] Claim Discipline And Execution" in text
     # Critical rule IDs should be present in output for integrity checks.
-    for rid in ("A06", "A08", "B03", "B04", "B06", "D01", "D07"):
+    for rid in ("A06", "A08", "B03", "B04", "B06", "D01", "D03"):
         assert f"- {rid}:" in text
     assert "skill glossary as high-level discovery only" in text
     assert "call skill_get(name)" in text
@@ -102,7 +101,6 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     interactive = str(build_turn_mode_system_message("interactive").content)
     workflow_setup = str(build_turn_mode_system_message("workflow_setup").content)
     routine_wake = str(build_turn_mode_system_message("routine_wake").content)
-    approval_recovery = str(build_turn_mode_system_message("approval_recovery").content)
     event_notification = str(build_turn_mode_system_message("event_notification").content)
 
     assert "live user-guided turn" in interactive
@@ -120,12 +118,9 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
     assert "Return the user-visible routine notification" in routine_wake
-    assert "previously approved action" in approval_recovery
-    assert "continuation of the approved execution" in approval_recovery
     assert "background event/status notification" in event_notification
     assert normalize_turn_mode("unexpected") == "interactive"
     assert execution_origin_for_turn_mode("routine_wake") == "scheduled"
-    assert execution_origin_for_turn_mode("approval_recovery") == "scheduled"
     assert execution_origin_for_turn_mode("interactive", thread_id="wake_legacy") == "scheduled"
     assert execution_origin_for_turn_mode("event_notification", thread_id="wake_legacy") == "interactive"
 
@@ -532,22 +527,6 @@ def test_validate_model_tool_call_rejects_routine_create_during_event_notificati
     assert "TURN_MODE_MISMATCH" in err
 
 
-def test_sanitize_history_keeps_tool_response_shape_for_approval_handoff() -> None:
-    messages = [
-        HumanMessage(content="run login"),
-        AIMessage(
-            content="",
-            tool_calls=[{"id": "call_1", "name": "tulpa_run_terminal", "args": {"command": "python3 x.py"}}],
-        ),
-        ToolMessage(content='{"status":"approval_pending","approval_id":"apr_x"}', tool_call_id="call_1"),
-    ]
-    sanitized = _sanitize_history_messages_for_model(messages)
-    assert len(sanitized) == 3
-    assert isinstance(sanitized[2], ToolMessage)
-    assert str(sanitized[2].content) == '{"status":"approval_pending","approval_id":"apr_x"}'
-    assert str(getattr(sanitized[2], "tool_call_id", "")) == "call_1"
-
-
 def test_sanitize_history_drops_internal_system_messages() -> None:
     messages = [
         HumanMessage(content="run login"),
@@ -692,13 +671,6 @@ def test_enforce_tool_message_protocol_keeps_complete_tool_segment_after_system_
     assert bool(getattr(repaired[1], "tool_calls", []))
     assert isinstance(repaired[2], ToolMessage)
     assert isinstance(repaired[3], AIMessage)
-
-
-def test_normalize_approval_id_rejects_none_and_null_strings() -> None:
-    assert _normalize_approval_id(None) == ""
-    assert _normalize_approval_id("None") == ""
-    assert _normalize_approval_id("null") == ""
-    assert _normalize_approval_id("apr_123") == "apr_123"
 
 
 def test_prompt_mode_classifier_prefers_literal_chat_for_short_definition_question() -> None:

@@ -12,7 +12,6 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from opentulpa.api.routes import (
-    register_approval_routes,
     register_chat_routes,
     register_composio_routes,
     register_debug_log_routes,
@@ -33,14 +32,10 @@ from opentulpa.api.routes import (
 )
 from opentulpa.api.tulpa_loader import TulpaRouterLoader
 from opentulpa.application import (
-    ApprovalExecutionOrchestrator,
     TurnOrchestrator,
     WakeOrchestrator,
     WorkflowSetupOrchestrator,
 )
-from opentulpa.approvals.adapters.telegram import TelegramApprovalAdapter
-from opentulpa.approvals.broker import ApprovalBroker
-from opentulpa.approvals.store import PendingApprovalStore
 from opentulpa.business_knowledge import BusinessKnowledgeService
 from opentulpa.business_knowledge.service import OpenAICompatibleKnowledgeOracleClient
 from opentulpa.context.customer_profiles import CustomerProfileService
@@ -372,57 +367,6 @@ def create_app(
     def get_turn_orchestrator() -> TurnOrchestrator:
         return turn_orchestrator
 
-    def resolve_approval_origin(customer_id: str, thread_id: str) -> dict[str, Any]:
-        if telegram_chat is None:
-            return {}
-        slots = telegram_chat.find_session_slots(customer_id)
-        if not slots:
-            return {}
-        selected = None
-        safe_thread = str(thread_id or "").strip()
-        for slot in slots:
-            if safe_thread and safe_thread in {
-                str(slot.get("thread_id", "")).strip(),
-                str(slot.get("wake_thread_id", "")).strip(),
-            }:
-                selected = slot
-                break
-        if selected is None:
-            selected = slots[0]
-        chat_id = str(selected.get("chat_id", "")).strip()
-        user_id = str(selected.get("user_id", "")).strip()
-        if not chat_id:
-            return {}
-        return {
-            "origin_interface": "telegram",
-            "origin_user_id": user_id,
-            "origin_conversation_id": chat_id,
-        }
-
-    approval_db = Path(settings.approvals_db_path)
-    if not approval_db.is_absolute():
-        approval_db = (PROJECT_ROOT / approval_db).resolve()
-    approval_store = PendingApprovalStore(db_path=approval_db)
-    telegram_adapter = TelegramApprovalAdapter(client=telegram_client) if telegram_client else None
-    approvals = ApprovalBroker(
-        store=approval_store,
-        runtime=runtime,
-        approval_ttl_minutes=settings.approvals_ttl_minutes,
-        adapters={"telegram": telegram_adapter} if telegram_adapter is not None else {},
-        origin_resolver=resolve_approval_origin,
-    )
-
-    def get_approvals() -> ApprovalBroker:
-        return approvals
-
-    approval_execution_orchestrator = ApprovalExecutionOrchestrator(
-        get_agent_runtime=get_agent_runtime,
-        get_context_events=get_context_events,
-    )
-
-    def get_approval_execution_orchestrator() -> ApprovalExecutionOrchestrator:
-        return approval_execution_orchestrator
-
     wake_queue_service: WakeQueueService | None = None
     tulpa_loader: TulpaRouterLoader | None = None
     tulpa_router = APIRouter()
@@ -439,7 +383,6 @@ def create_app(
         get_telegram_chat=get_telegram_chat,
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
-        get_approvals=get_approvals,
         get_intake_workflows=get_intake_workflows,
     )
 
@@ -480,7 +423,7 @@ def create_app(
 
     app = FastAPI(
         title="OpenTulpa",
-        description="Persistent agent runtime API with durable context and guarded execution",
+        description="Persistent agent runtime API with durable context and direct execution",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -562,12 +505,6 @@ def create_app(
     register_system_routes(app)
     register_composio_routes(app, get_composio=get_composio)
 
-    decide_approval_and_maybe_wake = register_approval_routes(
-        app,
-        get_approvals=get_approvals,
-        get_wake_queue=get_wake_queue,
-        get_agent_runtime=get_agent_runtime,
-    )
     register_scheduler_routes(
         app,
         get_scheduler=get_scheduler,
@@ -592,10 +529,7 @@ def create_app(
         get_telegram_business=get_telegram_business,
         get_intake_workflows=get_intake_workflows,
         get_telegram_chat=get_telegram_chat,
-        get_approvals=get_approvals,
         get_agent_runtime=get_agent_runtime,
-        get_approval_execution_orchestrator=get_approval_execution_orchestrator,
-        decide_approval_and_maybe_wake=decide_approval_and_maybe_wake,
     )
 
     refresh_tulpa_mounts()

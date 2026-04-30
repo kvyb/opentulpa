@@ -100,7 +100,6 @@ def test_runtime_compress_tool_result_for_model_uses_headroom_service(monkeypatc
         wake_classifier_model_name="openai/gpt-5-mini",
         wake_execution_model_name="openai/gpt-5-mini",
         telegram_media_model_name="openai/gpt-5-mini",
-        guardrail_classifier_model_name="openai/gpt-5-mini",
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 

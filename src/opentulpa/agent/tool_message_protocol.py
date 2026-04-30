@@ -2,56 +2,7 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from opentulpa.agent.lc_messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
-from opentulpa.agent.utils import (
-    content_to_text as _content_to_text,
-)
-from opentulpa.agent.utils import (
-    safe_json as _safe_json,
-)
-
-
-def tool_message_control_payload(message: ToolMessage) -> dict[str, Any]:
-    raw_extra = getattr(message, "additional_kwargs", {}) or {}
-    if isinstance(raw_extra, dict):
-        maybe_control = raw_extra.get("opentulpa_control", {})
-        if isinstance(maybe_control, dict):
-            return maybe_control
-    raw_text = _content_to_text(getattr(message, "content", "")).strip()
-    if not raw_text or not raw_text.startswith("{"):
-        return {}
-    try:
-        parsed = json.loads(raw_text)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def tool_message_is_approval_pending(message: ToolMessage) -> bool:
-    payload = tool_message_control_payload(message)
-    status = str(payload.get("status", "")).strip().lower()
-    return status == "approval_pending"
-
-
-def compact_approval_pending_tool_message(message: ToolMessage) -> ToolMessage | None:
-    if not tool_message_is_approval_pending(message):
-        return None
-    payload = tool_message_control_payload(message)
-    approval_id = str(payload.get("approval_id", "")).strip()
-    compact_payload: dict[str, Any] = {"status": "approval_pending"}
-    if approval_id:
-        compact_payload["approval_id"] = approval_id
-    tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
-    if not tool_call_id:
-        return None
-    return ToolMessage(
-        content=_safe_json(compact_payload),
-        tool_call_id=tool_call_id,
-        additional_kwargs={"opentulpa_control": compact_payload},
-    )
 
 
 def sanitize_history_messages_for_model(messages: list[AnyMessage]) -> list[AnyMessage]:
@@ -68,11 +19,6 @@ def sanitize_history_messages_for_model(messages: list[AnyMessage]) -> list[AnyM
                 clean_kwargs.pop("tool_calls", None)
                 clean_kwargs.pop("function_call", None)
                 sanitized.append(msg.model_copy(update={"additional_kwargs": clean_kwargs}))
-                continue
-        if isinstance(msg, ToolMessage):
-            compact = compact_approval_pending_tool_message(msg)
-            if compact is not None:
-                sanitized.append(compact)
                 continue
         sanitized.append(msg)
     return sanitized

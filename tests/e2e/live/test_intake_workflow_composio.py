@@ -128,7 +128,6 @@ def live_runtime(tmp_path: Path) -> OpenTulpaLangGraphRuntime:
         openrouter_api_key=str(settings.openrouter_api_key or "").strip(),
         model_name=settings.llm_model,
         wake_classifier_model_name=settings.wake_classifier_model,
-        guardrail_classifier_model_name=settings.guardrail_classifier_model,
         checkpoint_db_path=str(tmp_path / "live_intake_checkpoints.sqlite"),
         behavior_log_path=str(tmp_path / "live_intake_behavior.jsonl"),
         behavior_log_enabled=True,

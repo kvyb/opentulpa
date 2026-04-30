@@ -15,11 +15,11 @@ from langchain.tools import tool
 
 from opentulpa.agent.file_analysis import summarize_uploaded_blob
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
-from opentulpa.agent.tools.common import require_customer_id, require_thread_id
-from opentulpa.agent.tools.guardrail_helpers import (
-    approval_pending_payload,
+from opentulpa.agent.tools.common import (
     normalize_command_for_working_dir,
     normalize_execution_origin,
+    require_customer_id,
+    require_thread_id,
 )
 from opentulpa.agent.utils import content_to_text as _content_to_text
 from opentulpa.agent.utils import extract_html_title as _extract_html_title
@@ -35,7 +35,6 @@ from opentulpa.context.customer_profile_models import (
     TimeProfileSetRequest,
     TimeProfileSetResponse,
 )
-from opentulpa.policy.execution_boundary import ExecutionBoundaryContext, ExecutionBoundaryGuard
 
 
 def _tool_error_payload(tool_name: str, response: Any) -> dict[str, Any]:
@@ -48,6 +47,29 @@ def _tool_error_payload(tool_name: str, response: Any) -> dict[str, Any]:
     payload = dict(payload)
     payload["error"] = f"{tool_name} failed ({response.status_code})"
     return payload
+
+
+_MISSING_MODULE_RE = re.compile(
+    r"(?:ModuleNotFoundError: No module named|ImportError: No module named) ['\"]([^'\"]+)['\"]"
+)
+
+
+def _decorate_python_dependency_failure(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    stderr = str(payload.get("stderr", "") or "").strip()
+    match = _MISSING_MODULE_RE.search(stderr)
+    if not match:
+        return payload
+    missing_module = match.group(1).strip()
+    safe_payload = dict(payload)
+    safe_payload["missing_python_module"] = missing_module
+    safe_payload["agent_hint"] = (
+        "Missing Python dependency in .opentulpa/agent_venv. "
+        "If this package is needed for the task, install it in that venv and retry once. "
+        "Otherwise report the dependency blocker clearly."
+    )
+    return safe_payload
 
 
 def _trim_tool_text(value: Any, *, limit: int = 160) -> str:
@@ -455,8 +477,6 @@ async def _sync_proactive_heartbeat(
 
 
 def register_core_tools(runtime: Any) -> dict[str, Any]:
-    boundary_guard = ExecutionBoundaryGuard(runtime=runtime)
-
     @tool
     async def send_owner_update(message: str, dedupe_key: str = "") -> Any:
         """Send a short interim update to the current owner/support Telegram chat.
@@ -1097,10 +1117,8 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         timeout_seconds: int = 90,
         thread_id: str = "",
         execution_origin: str | None = None,
-        preapproved: bool = False,
-        guard_context: dict[str, Any] | None = None,
     ) -> Any:
-        """Run executable shell/script command through execution-boundary guard."""
+        """Run executable shell/script command in the agent venv."""
         safe_working_dir = str(working_dir or "").strip() or "tulpa_stuff"
         safe_command = normalize_command_for_working_dir(
             command=str(command or "").strip(),
@@ -1114,51 +1132,12 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
                 )
             }
         safe_timeout = max(5, min(int(timeout_seconds), 600))
-        safe_customer = require_customer_id(runtime)
+        require_customer_id(runtime)
         safe_thread = str(thread_id or "").strip()
         normalized_origin = normalize_execution_origin(
             thread_id=safe_thread,
             execution_origin=execution_origin,
         )
-
-        guard_payload = guard_context if isinstance(guard_context, dict) else {}
-        previous_user = str(guard_payload.get("previous_user_message", "")).strip()
-        previous_assistant = str(guard_payload.get("previous_assistant_message", "")).strip()
-        decision = await boundary_guard.evaluate(
-            ExecutionBoundaryContext(
-                customer_id=safe_customer,
-                thread_id=safe_thread or (f"chat-{safe_customer}" if safe_customer else "interactive"),
-                action_name="tulpa_run_terminal",
-                action_args={
-                    "command": safe_command,
-                    "working_dir": safe_working_dir,
-                    "timeout_seconds": safe_timeout,
-                    "execution_origin": normalized_origin,
-                },
-                execution_origin=normalized_origin,
-                preapproved=bool(preapproved),
-                action_note=(
-                    "Execution-boundary guard check for terminal/script action. "
-                    "Decide based on full command external write side effects. "
-                    f"previous_user_message={previous_user[:800]} "
-                    f"previous_assistant_message={previous_assistant[:800]}"
-                ),
-            )
-        )
-        gate = str((decision or {}).get("gate", "allow")).strip().lower()
-        if gate == "require_approval":
-            return approval_pending_payload(
-                action_name="tulpa_run_terminal",
-                command_preview=safe_command,
-                decision=decision if isinstance(decision, dict) else {},
-            )
-        if gate == "deny":
-            return {
-                "ok": False,
-                "status": "denied",
-                "gate": "deny",
-                "reason": str((decision or {}).get("reason", "guardrail_denied")).strip(),
-            }
 
         r = await runtime._request_with_backoff(
             "POST",
@@ -1176,6 +1155,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         payload = r.json()
         if isinstance(payload, dict):
             payload["execution_origin"] = normalized_origin
+            payload = _decorate_python_dependency_failure(payload)
         return payload
 
     @tool
@@ -1257,24 +1237,6 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("task", {})
 
     @tool
-    async def guardrail_execute_approved_action(approval_id: str) -> Any:
-        """Execute a previously approved external-impact action exactly once."""
-        customer_id = require_customer_id(runtime)
-        aid = str(approval_id or "").strip()
-        if not aid:
-            return {"error": "guardrail_execute_approved_action requires approval_id"}
-        r = await runtime._request_with_backoff(
-            "POST",
-            "/internal/approvals/execute",
-            json_body={"approval_id": aid, "customer_id": customer_id},
-            timeout=600.0,
-            retries=0,
-        )
-        if r.status_code != 200:
-            return {"error": f"guardrail_execute_approved_action failed: {r.text}"}
-        return r.json()
-
-    @tool
     async def server_time() -> Any:
         """Get server time."""
         now_local = datetime.now().astimezone()
@@ -1318,6 +1280,5 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         "task_artifacts": task_artifacts,
         "task_relaunch": task_relaunch,
         "task_cancel": task_cancel,
-        "guardrail_execute_approved_action": guardrail_execute_approved_action,
         "server_time": server_time,
     }

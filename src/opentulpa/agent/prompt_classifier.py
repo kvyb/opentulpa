@@ -39,7 +39,7 @@ def classify_prompt_mode(user_text: str, *, turn_mode: str) -> PromptMode:
     normalized_turn_mode = str(turn_mode or "").strip().lower()
     if normalized_turn_mode == "workflow_setup":
         return "workflow_setup"
-    if normalized_turn_mode in {"routine_wake", "approval_recovery", "event_notification"}:
+    if normalized_turn_mode in {"routine_wake", "event_notification"}:
         return "execution"
 
     text = str(user_text or "").strip()

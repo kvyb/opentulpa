@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opentulpa.agent.runtime import (
-    STREAM_APPROVAL_HANDOFF_SIGNAL,
     STREAM_PROGRESS_PREFIX,
     STREAM_WAIT_SIGNAL,
     MergedInputSuppressedError,
@@ -220,7 +219,7 @@ async def _deliver_workflow_setup_run_when_ready(
             if run.pending_texts:
                 continue
             safe = str(final_text or "").strip()
-            if not safe or is_low_signal_reply(safe) or safe == STREAM_APPROVAL_HANDOFF_SIGNAL:
+            if not safe or is_low_signal_reply(safe):
                 return
             client = TelegramClient(bot_token)
             try:
@@ -524,10 +523,7 @@ async def stream_langgraph_reply_to_telegram(
                         if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
                             _WORKFLOW_SETUP_RUNS.pop(run_key, None)
                         safe = str(recovered or "").strip()
-                        if safe == STREAM_APPROVAL_HANDOFF_SIGNAL:
-                            suppressed = True
-                            final_reply = None
-                        elif safe and not is_low_signal_reply(safe):
+                        if safe and not is_low_signal_reply(safe):
                             final_reply = safe
         else:
             stream = agent_runtime.astream_text(
@@ -610,12 +606,6 @@ async def stream_langgraph_reply_to_telegram(
                         waiting_for_segment = True
                         last_streamed = ""
                     continue
-                if isinstance(partial, str) and partial == STREAM_APPROVAL_HANDOFF_SIGNAL:
-                    # Approval UI delivery is handled out-of-band by approval adapters.
-                    draft_enabled = False
-                    suppressed = True
-                    final_reply = None
-                    break
                 if not isinstance(partial, str):
                     continue
                 consecutive_timeouts = 0
