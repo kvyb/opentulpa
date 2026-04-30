@@ -13,6 +13,7 @@ from opentulpa.business_knowledge.models import KnowledgeSourceSection
 
 _ROW_RE = re.compile(r"^Row\s+(\d+):\s*(.*)$")
 _TOKEN_RE = re.compile(r"[\w`-]+", re.UNICODE)
+_MAX_FUZZY_CANDIDATES = 80
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,12 +84,14 @@ def select_table_evidence(
     if not safe_targets:
         safe_targets = [str(query or "").strip()]
 
+    candidates = _candidate_rows(
+        rows,
+        target_terms=safe_targets,
+        qualifier_terms=safe_qualifiers,
+        limit=max(_MAX_FUZZY_CANDIDATES, max(1, int(limit)) * 8),
+    )
     scored: list[TableRowEvidence] = []
-    for row in rows:
-        identity_text = f"{row.table} {row.item} {row.row_label}"
-        context_text = " ".join(
-            f"{fact.item} {fact.row_label} {fact.header} {fact.column} {fact.value}" for fact in row.cells
-        )
+    for row, identity_text, context_text in candidates:
         target_score = _target_coverage_score(
             target_terms=safe_targets,
             identity_text=identity_text,
@@ -115,6 +118,34 @@ def select_table_evidence(
         )
     scored.sort(key=lambda row: (-row.score, row.source_order, row.row, row.table, row.item.casefold()))
     return scored[: max(1, int(limit))]
+
+
+def table_evidence_selection_stats(
+    facts: list[TableFact],
+    *,
+    query: str,
+    target_terms: list[str],
+    qualifier_terms: list[str],
+    limit: int = 20,
+) -> dict[str, Any]:
+    rows = _rows_from_facts(facts)
+    safe_targets = [term for term in _clean_terms(target_terms) if term]
+    safe_qualifiers = [term for term in _clean_terms(qualifier_terms) if term]
+    if not safe_targets:
+        safe_targets = [str(query or "").strip()]
+    candidates = _candidate_rows(
+        rows,
+        target_terms=safe_targets,
+        qualifier_terms=safe_qualifiers,
+        limit=max(_MAX_FUZZY_CANDIDATES, max(1, int(limit)) * 8),
+    )
+    return {
+        "row_count": len(rows),
+        "candidate_count": len(candidates),
+        "candidate_limit": max(_MAX_FUZZY_CANDIDATES, max(1, int(limit)) * 8),
+        "target_term_count": len(safe_targets),
+        "qualifier_term_count": len(safe_qualifiers),
+    }
 
 
 def table_evidence_to_toon(
@@ -428,6 +459,113 @@ def _rows_from_facts(facts: list[TableFact]) -> list[TableRowEvidence]:
     return rows
 
 
+def _candidate_rows(
+    rows: list[TableRowEvidence],
+    *,
+    target_terms: list[str],
+    qualifier_terms: list[str],
+    limit: int,
+) -> list[tuple[TableRowEvidence, str, str]]:
+    prepared: list[tuple[float, TableRowEvidence, str, str]] = []
+    for row in rows:
+        identity_text = f"{row.table} {row.item} {row.row_label}"
+        context_text = " ".join(
+            f"{fact.item} {fact.row_label} {fact.header} {fact.column} {fact.value}"
+            for fact in row.cells
+        )
+        target_score = _cheap_coverage_score(target_terms, identity_text, context_text)
+        if target_score <= 0:
+            continue
+        qualifier_score = _cheap_coverage_score(qualifier_terms, context_text, "")
+        direct_score = max(
+            (_cheap_phrase_score(term, row.item) for term in target_terms),
+            default=0.0,
+        )
+        prepared.append(
+            (
+                (target_score * 100.0) + (qualifier_score * 18.0) + (direct_score * 30.0),
+                row,
+                identity_text,
+                context_text,
+            )
+        )
+    if not prepared:
+        prepared = _fallback_identity_candidates(rows, target_terms=target_terms)
+    prepared.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].source_order,
+            item[1].row,
+            item[1].table,
+            item[1].item.casefold(),
+        )
+    )
+    return [(row, identity, context) for _, row, identity, context in prepared[: max(1, int(limit))]]
+
+
+def _fallback_identity_candidates(
+    rows: list[TableRowEvidence],
+    *,
+    target_terms: list[str],
+) -> list[tuple[float, TableRowEvidence, str, str]]:
+    candidates: list[tuple[float, TableRowEvidence, str, str]] = []
+    for row in rows:
+        identity_text = f"{row.table} {row.item} {row.row_label}"
+        context_text = " ".join(
+            f"{fact.item} {fact.row_label} {fact.header} {fact.column} {fact.value}"
+            for fact in row.cells
+        )
+        score = max((_phrase_match_score(term, identity_text) for term in target_terms), default=0.0)
+        if score > 0:
+            candidates.append((score * 100.0, row, identity_text, context_text))
+    return candidates
+
+
+def _cheap_coverage_score(needles: list[str], identity_text: str, context_text: str) -> float:
+    terms = [term for term in needles if _normalized_text(term)]
+    if not terms:
+        return 0.0
+    identity = _normalized_text(identity_text)
+    context = _normalized_text(context_text)
+    return sum(
+        max(
+            _cheap_phrase_score(term, identity),
+            _cheap_phrase_score(term, context) * 0.75,
+        )
+        for term in terms
+    ) / len(terms)
+
+
+def _cheap_phrase_score(needle: str, haystack: str) -> float:
+    needle_norm = _normalized_text(needle)
+    haystack_norm = _normalized_text(haystack)
+    if not needle_norm or not haystack_norm:
+        return 0.0
+    if needle_norm in haystack_norm or haystack_norm in needle_norm:
+        return 1.0
+    needle_tokens = _tokens(needle_norm)
+    haystack_tokens = _tokens(haystack_norm)
+    if not needle_tokens or not haystack_tokens:
+        return 0.0
+    haystack_token_set = set(haystack_tokens)
+    haystack_prefixes = {
+        token[:4]
+        for token in haystack_token_set
+        if len(token) >= 4 and not any(char.isdigit() for char in token)
+    }
+    matched = sum(
+        1
+        for token in needle_tokens
+        if token in haystack_token_set
+        or (
+            len(token) >= 4
+            and not any(char.isdigit() for char in token)
+            and token[:4] in haystack_prefixes
+        )
+    )
+    return matched / len(needle_tokens)
+
+
 def _phrase_match_score(needle: str, haystack: str) -> float:
     needle_norm = _normalized_text(needle)
     haystack_norm = _normalized_text(haystack)
@@ -435,6 +573,8 @@ def _phrase_match_score(needle: str, haystack: str) -> float:
         return 0.0
     if needle_norm in haystack_norm or haystack_norm in needle_norm:
         return 1.0
+    if len(needle_norm) > 80 or len(haystack_norm) > 300:
+        return _cheap_phrase_score(needle_norm, haystack_norm)
     needle_tokens = _tokens(needle_norm)
     haystack_tokens = _tokens(haystack_norm)
     if not needle_tokens or not haystack_tokens:
@@ -484,6 +624,8 @@ def _token_matches(left: str, right: str) -> bool:
     shorter = min(len(left), len(right))
     if shared_prefix >= 4 and shorter >= 4 and shared_prefix / shorter >= 0.66:
         return True
+    if abs(len(left) - len(right)) > max(2, shorter // 2):
+        return False
     return len(left) >= 4 and len(right) >= 4 and difflib.SequenceMatcher(None, left, right).ratio() >= 0.9
 
 

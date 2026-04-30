@@ -45,3 +45,4 @@ class KnowledgeQueryResult:
     source_count: int = 0
     section_count: int = 0
     cached: bool = False
+    diagnostics: dict[str, Any] = field(default_factory=dict)

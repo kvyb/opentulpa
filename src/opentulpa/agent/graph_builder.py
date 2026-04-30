@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shlex
 from datetime import datetime, timedelta
@@ -749,6 +750,84 @@ def build_runtime_graph(runtime: Any):
         payload.update(fields)
         log_event(event=event, **payload)
 
+    async def _emit_tool_call_preamble_update(
+        state: AgentState,
+        *,
+        message: AIMessage,
+        turn_mode: str,
+    ) -> None:
+        if turn_mode not in {"interactive", "workflow_setup"}:
+            return
+        text = _content_to_text(getattr(message, "content", "")).strip()
+        if not text:
+            return
+        tool_calls = getattr(message, "tool_calls", []) or []
+        tool_names = [
+            str(call.get("name", "")).strip()
+            for call in tool_calls
+            if isinstance(call, dict) and str(call.get("name", "")).strip()
+        ]
+        if "send_owner_update" in tool_names:
+            _log(
+                state,
+                "graph.tools.preamble_update",
+                sent=False,
+                reason="send_owner_update_tool_present",
+                chars=len(text),
+                turn_mode=turn_mode,
+            )
+            return
+        emitter = getattr(runtime, "emit_interactive_update", None)
+        if not callable(emitter):
+            _log(
+                state,
+                "graph.tools.preamble_update",
+                sent=False,
+                reason="missing_interactive_emitter",
+                chars=len(text),
+                turn_mode=turn_mode,
+            )
+            return
+        max_chars = 1200
+        visible_text = text if len(text) <= max_chars else f"{text[: max_chars - 3].rstrip()}..."
+        tool_call_ids = [
+            str(call.get("id", "")).strip()
+            for call in tool_calls
+            if isinstance(call, dict) and str(call.get("id", "")).strip()
+        ]
+        dedupe_source = "|".join(
+            [
+                str(state.get("agent_trace_id", "")).strip(),
+                str(state.get("thread_id", "")).strip(),
+                ",".join(tool_call_ids),
+                visible_text,
+            ]
+        )
+        dedupe_key = "tool_call_preamble:" + hashlib.sha256(
+            dedupe_source.encode("utf-8")
+        ).hexdigest()[:32]
+        try:
+            result = await emitter(text=visible_text, dedupe_key=dedupe_key)
+            _log(
+                state,
+                "graph.tools.preamble_update",
+                sent=bool(isinstance(result, dict) and result.get("sent")),
+                duplicate=bool(isinstance(result, dict) and result.get("duplicate")),
+                chars=len(visible_text),
+                turn_mode=turn_mode,
+                tool_names=tool_names[:5],
+            )
+        except Exception as exc:
+            _log(
+                state,
+                "graph.tools.preamble_update",
+                sent=False,
+                reason="emit_failed",
+                error=str(exc)[:500],
+                chars=len(visible_text),
+                turn_mode=turn_mode,
+            )
+
     async def agent_node(
         state: AgentState,
     ) -> Command[Literal["agent", "validate_tools", "claim_check", "finalize_turn"]]:
@@ -1481,6 +1560,7 @@ def build_runtime_graph(runtime: Any):
             execution_origin=execution_origin,
             turn_mode=turn_mode,
         )
+        await _emit_tool_call_preamble_update(state, message=last, turn_mode=turn_mode)
 
         latest_user_for_guard = _latest_user_text(messages)
         prior_assistant_for_guard = ""
