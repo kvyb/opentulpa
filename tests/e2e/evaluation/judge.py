@@ -197,7 +197,7 @@ def evaluate_e2e_scenario_with_llm_judge(
         "If evidence is sparse, say so and use verdict='inconclusive' instead of claiming failure.\n"
         "Treat scenario details as authoritative facts emitted by the test itself.\n"
         "Do not mark a scenario as failed only because logs are sparse when details show concrete success signals.\n"
-        "If an API response explicitly says gate='allow', do not describe it as require_approval.\n"
+        "If an API response explicitly says an action was allowed, do not describe it as blocked.\n"
         "Return strict JSON only. No markdown. No code fences. No prose outside JSON.\n"
         "Return exactly these keys:\n"
         "{\n"

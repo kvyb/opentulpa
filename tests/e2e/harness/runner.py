@@ -363,38 +363,6 @@ class E2EHarness:
         )
         return write_status_report(self.status_report_path, payload)
 
-    def latest_approval_id_from_calls(
-        self,
-        *,
-        action_name: str,
-        calls: list[dict[str, Any]] | None = None,
-    ) -> str:
-        for item in reversed(calls or self.internal_api_calls_since(0)):
-            if str(item.get("path", "")).strip() != "/internal/approvals/evaluate":
-                continue
-            json_body = item.get("json_body", {})
-            if not isinstance(json_body, dict):
-                continue
-            if str(json_body.get("action_name", "")).strip() != str(action_name or "").strip():
-                continue
-            payload = _decode_json_object(str(item.get("response_text", "")))
-            approval_id = str(payload.get("approval_id", "")).strip()
-            if approval_id and approval_id.lower() not in {"none", "null"}:
-                return approval_id
-        return ""
-
-    def get_approval(self, approval_id: str) -> dict[str, Any]:
-        response = self.client.get(f"/internal/approvals/{approval_id}")
-        payload = response.json()
-        self.recorder.add(
-            "approval_get",
-            approval_id=approval_id,
-            status_code=int(response.status_code),
-            payload=payload,
-        )
-        return {"status_code": int(response.status_code), "payload": payload}
-
-
 def _require_openai_compatible_env() -> tuple[str, str]:
     settings = get_settings()
     api_key = str(settings.openai_compatible_api_key or "").strip()
@@ -479,7 +447,6 @@ def build_harness(
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "test-secret")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USERNAMES", "")
-    monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / f"{scenario_name}_approvals.sqlite"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / f"{scenario_name}_links.sqlite"))
     isolated_project_root = tmp_path / "project_root"
     isolated_project_root.mkdir(parents=True, exist_ok=True)
@@ -506,12 +473,6 @@ def build_harness(
             os.getenv(
                 "OPENTULPA_E2E_WAKE_MODEL",
                 settings.wake_classifier_model or settings.llm_model,
-            )
-        ),
-        guardrail_classifier_model_name=str(
-            os.getenv(
-                "OPENTULPA_E2E_GUARDRAIL_MODEL",
-                settings.guardrail_classifier_model or settings.llm_model,
             )
         ),
         checkpoint_db_path=str(tmp_path / f"{scenario_name}_checkpoints.sqlite"),
@@ -550,13 +511,6 @@ def close_harness(harness: E2EHarness) -> None:
         harness.client.__exit__(None, None, None)
     finally:
         get_settings.cache_clear()
-
-
-def extract_approval_id(text: str) -> str:
-    import re
-
-    match = re.search(r"\bapr_[a-z0-9_-]{6,40}\b", str(text or ""), flags=re.IGNORECASE)
-    return str(match.group(0)).strip() if match else ""
 
 
 def _decode_json_object(text: str) -> dict[str, Any]:

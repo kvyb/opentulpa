@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 from opentulpa.agent.runtime import (
-    STREAM_APPROVAL_HANDOFF_SIGNAL,
     STREAM_PROGRESS_PREFIX,
     STREAM_WAIT_SIGNAL,
 )
@@ -155,14 +154,6 @@ class _PacedChunkRuntime:
         yield "Chunk one. Chunk two."
         await asyncio.sleep(1.0)
         yield "Chunk one. Chunk two. Chunk three."
-
-
-class _PartialThenApprovalRuntime:
-    async def astream_text(self, **kwargs):
-        yield "I started checking that for you."
-        yield STREAM_APPROVAL_HANDOFF_SIGNAL
-        yield "This should never be visible."
-
 
 class _AlwaysPendingInteractiveSession:
     async def has_pending_items(self) -> bool:
@@ -601,27 +592,6 @@ async def test_non_private_chat_bypasses_draft_streaming(
     assert fake_client.draft_calls == []
     assert fake_client.message_calls == [(-100123456, "Here is the finished result.", "HTML")]
 
-
-@pytest.mark.asyncio
-async def test_approval_handoff_stops_draft_streaming_without_final_send(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = _FakeTelegramClient("dummy")
-    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
-
-    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
-        agent_runtime=_PartialThenApprovalRuntime(),
-        thread_id="chat-approval",
-        customer_id="telegram_approval",
-        text="check",
-        bot_token="dummy",
-        chat_id=1,
-    )
-
-    assert suppressed is True
-    assert final is None
-    assert fake_client.draft_calls == []
-    assert fake_client.message_calls == []
 
 
 @pytest.mark.asyncio

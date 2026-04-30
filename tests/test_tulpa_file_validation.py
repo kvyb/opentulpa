@@ -29,7 +29,7 @@ def test_write_file_rejects_python_syntax_errors() -> None:
 
 def test_write_file_rejects_tulpa_modules_without_router() -> None:
     rel = _tmp_rel("missing_router")
-    with pytest.raises(ValueError, match="must define top-level 'router'"):
+    with pytest.raises(ValueError, match="must either define a top-level 'router'"):
         sandbox.write_file(rel, "def helper() -> str:\n    return 'ok'\n")
     _cleanup(rel)
 

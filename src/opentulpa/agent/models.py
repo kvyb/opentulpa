@@ -13,8 +13,7 @@ from opentulpa.agent.lc_messages import AnyMessage
 class ToolOutcome(TypedDict, total=False):
     tool_name: str
     tool_call_id: str
-    status: Literal["ok", "error", "approval_pending"]
-    approval_id: str
+    status: Literal["ok", "error"]
     result_text: str
     error: str
 
@@ -25,9 +24,9 @@ class AgentState(TypedDict, total=False):
     customer_id: str
     thread_id: str
     compact_wake: bool
-    turn_mode: Literal["interactive", "workflow_setup", "routine_wake", "approval_recovery", "event_notification"]
+    turn_mode: Literal["interactive", "workflow_setup", "routine_wake", "event_notification"]
     prompt_mode: Literal["literal_chat", "task_chat", "execution", "workflow_setup"]
-    turn_status: Literal["running", "approval_pending", "completed", "failed"]
+    turn_status: Literal["running", "completed", "failed"]
     final_response_text: str
     pending_context_summary: str
     active_skill_query: str
@@ -41,10 +40,6 @@ class AgentState(TypedDict, total=False):
     tool_validation_passed: bool
     tool_error_count: int
     last_tool_error: str
-    approval_handoff: bool
-    claim_check_verdict: dict[str, Any]
-    claim_check_needs_retry: bool
-    claim_check_retry_count: int
     workflow_setup_no_progress_retry_count: int
     workflow_setup_repair_instruction: str
     frozen_prompt_context: dict[str, Any] | None

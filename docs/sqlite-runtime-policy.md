@@ -9,7 +9,6 @@ These stores are owned by OpenTulpa runtime code and now use the shared connecti
 - `src/opentulpa/scheduler/service.py`
 - `src/opentulpa/intake/service.py`
 - `src/opentulpa/intake/workflow_setup_store.py`
-- `src/opentulpa/approvals/store.py`
 - `src/opentulpa/context/service.py`
 - `src/opentulpa/context/customer_profiles.py`
 - `src/opentulpa/context/link_aliases.py`

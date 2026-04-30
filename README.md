@@ -66,7 +66,7 @@ You can ask it to:
 - turn recurring work into scheduled routines
 - turn operational processes into durable workflows
 
-It can also recover from routine execution failures: inspect the error, adjust the script or tool arguments, rerun validation, and report what changed. That does not mean it should silently do risky things. External-impact work can still be approval-gated.
+It can also recover from routine execution failures: inspect the error, adjust the script or tool arguments, rerun validation, and report what changed. That does not mean it should silently do risky things. External-impact work should stay explicit and evidence-backed.
 
 The inbound employee mode is one important specialization of this general agent. The broader promise is that OpenTulpa can act like a personal assistant with memory, tools, and the ability to make useful work repeatable.
 
@@ -88,7 +88,7 @@ In practice:
 4. It prepares durable operating context from the relevant material.
 5. It saves the workflow, skill, or routine.
 6. It executes the work on future messages, schedules, or events.
-7. You inspect logs, approvals, artifacts, bookings, and behavior traces when needed.
+7. You inspect logs, artifacts, bookings, and behavior traces when needed.
 
 This is the core difference from a normal chatbot. OpenTulpa is meant to keep carrying the process, not restart from zero every time.
 
@@ -121,7 +121,7 @@ OpenTulpa can use tools to move beyond answers:
 - internal APIs
 - Telegram bot and Telegram Business APIs
 - Composio-backed third-party tools
-- approval-gated external actions
+- external tool actions
 
 The employee does not just know things. It can do the operational step after it has enough information.
 
@@ -211,7 +211,7 @@ The best workflows are narrow and operational. The more clearly you define the j
 | Knowledge | Ad hoc prompt context | Prepared workflow knowledge bound to the worker |
 | Execution | Often demo-level | Real tools, browser work, scripts, APIs, and sink writes |
 | Customer inboxes | Usually separate bot code | Telegram Business and Instagram intake can be configured in chat |
-| Safety | Easy to over-trust | Approval gates and explicit handoff boundaries |
+| Safety | Easy to over-trust | Explicit handoff boundaries and conservative execution |
 | Ownership | Vendor black box | Local state, logs, SQLite, and inspectable artifacts |
 
 OpenTulpa is not a form builder and not just a chat UI. It is a runtime for agents that need to keep state and do work.
@@ -229,7 +229,7 @@ load durable context, workflow state, files, and memory
         |
 plan and call tools through LangGraph
         |
-validate risky actions and approval gates
+validate tool calls and execution constraints
         |
 reply, write outputs, or schedule follow-up
         |
@@ -240,7 +240,7 @@ Core pieces:
 
 - **FastAPI** for webhooks and internal routes
 - **LangGraph** for runtime orchestration and tool loops
-- **SQLite** for checkpoints, approvals, context, intake workflows, and bookings
+- **SQLite** for checkpoints, context, intake workflows, and bookings
 - **Mem0 with embedded Qdrant** for vector-backed memory
 - **Telegram** as the main operator interface
 - **Telegram Business and Instagram** for customer-facing intake
@@ -296,7 +296,6 @@ llm_reasoning_effort: medium
 wake_execution_model: z-ai/glm-5.1
 memory_llm_model: google/gemini-3-flash-preview
 multimodal_llm: google/gemini-3-flash-preview
-guardrail_classifier_model: google/gemini-3-flash-preview
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
 ```
 
@@ -304,7 +303,7 @@ This repo currently assumes:
 
 - `GLM 5.1` for main chat and wake execution
 - `medium` reasoning effort for agent-owned LLM calls by default
-- `Gemini Flash` for memory extraction, multimodal work, guardrail classification, and some test judging
+- `Gemini Flash` for memory extraction, multimodal work, and some test judging
 - `Gemini Flash Lite` for workflow business knowledge oracle queries over normalized uploaded files
 - `MULTIMODAL_LLM` should be set when your main model is not multimodal
 
@@ -347,7 +346,6 @@ Useful operational surfaces:
 
 - behavior logs and LLM traces
 - `/debug_logs` for server log dumps through Telegram
-- approval prompts for risky actions
 - durable workflow snapshots
 - persisted bookings and sink-write status
 - support operator act-as binding for customer tenants
@@ -375,9 +373,8 @@ LANGFUSE_TRACING_ENVIRONMENT=opentulpa-alpha
 OpenTulpa is designed to be useful without being reckless.
 
 - Read-only and internal actions can proceed directly.
-- External-impact actions can be forced through an approval gate.
+- External-impact actions should stay explicit and evidence-backed.
 - Unclear or higher-risk cases bias toward asking first.
-- Pending approvals are durable, single-use, and time-limited.
 - Public exposure is limited to webhook and health routes.
 - Workflow setup asks for confirmation before activation.
 - Intake workflows should avoid unsupported services instead of inventing answers.
@@ -482,7 +479,7 @@ Useful `.env` knobs:
 
 OpenTulpa keeps its working state on disk.
 
-- `.opentulpa/` for checkpoints, approvals, context, logs, databases, file vaults, and prepared workflow knowledge
+- `.opentulpa/` for checkpoints, context, logs, databases, file vaults, and prepared workflow knowledge
 - `tulpa_stuff/` for generated artifacts and related working files
 
 That means you can inspect the state, back it up, mount it into a persistent volume, and understand what the employee has been doing.

@@ -25,9 +25,9 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("A12", "If the user says to keep it in chat, draft together here, or not create a routine yet, stay in chat mode and do not call scheduling tools."),
             ("A13", "Assistant prose attached to a tool-call step may be surfaced as a live chat update. Keep attached prose concise, factual, and safe to show; do not attach private reasoning or large drafts to tool calls."),
             ("A14", "During live owner/support turns (interactive chat or workflow_setup), use concise attached tool-call prose or send_owner_update for intentional interim progress messages when you will continue working with tools."),
-            ("A15", "For long-running live owner/support work, call send_owner_update once early when you expect multiple tool calls, slow file processing, browser/search work, terminal checks, or workflow setup compilation; optionally send another update after a major milestone. Do not use send_owner_update for inbound lead/intake processing, routine wakes, approval recovery, or background event notifications."),
+            ("A15", "For long-running live owner/support work, call send_owner_update once early when you expect multiple tool calls, slow file processing, browser/search work, terminal checks, or workflow setup compilation; optionally send another update after a major milestone. Do not use send_owner_update for inbound lead/intake processing, routine wakes, or background event notifications."),
             ("A16", "If you need tools or extra work, do that work first, then produce a current-turn user-facing answer with either the concrete result or a plain blocker/failure report."),
-            ("A17", "Do not give timing promises or say you will follow up later unless a real deferred task, routine, or approval handoff was actually created."),
+            ("A17", "Do not give timing promises or say you will follow up later unless a real deferred task or routine was actually created."),
             ("A18", "For short direct follow-up questions, answer in chat first unless fresh external state or an actual side effect is required."),
             ("A19", "If the user asks whether something was done, answer that status question directly before proposing next steps or extra actions."),
         ],
@@ -71,21 +71,17 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
     ),
     (
         "D",
-        "Claim Discipline And Approvals",
+        "Claim Discipline And Execution",
         [
-            ("D01", "If tool returns APPROVAL_PENDING with approval_id, state it is pending and requires UI decision buttons."),
-            ("D02", "Do not call guardrail_execute_approved_action unless approval is already approved/executable."),
-            ("D03", "Do not describe pending/blocked actions as already created/updated/deleted/executed."),
-            ("D04", "Guardrail checks happen at execution boundaries (terminal and routine_create planning)."),
-            ("D05", "For routine_create, always include concrete implementation_command for guard evaluation."),
-            ("D06", "Scheduled/wake executions are pre-authorized and should run without per-run approval prompts."),
-            ("D07", "Never claim external action was sent/posted/executed until successful tool result confirms it."),
-            ("D08", "If execution is blocked or pending, state clearly it did not run yet."),
+            ("D01", "Do not describe blocked or failed actions as already created/updated/deleted/executed."),
+            ("D02", "For standalone executable Python files meant to be run from tulpa_stuff, write a normal script with if __name__ == \"__main__\": and avoid router boilerplate unless the file is meant to be mounted via tulpa_reload."),
+            ("D03", "Never claim an external action, file artifact, or terminal task succeeded until successful tool output confirms it."),
+            ("D04", "If terminal output shows ImportError or ModuleNotFoundError, either install the missing dependency in .opentulpa/agent_venv and retry once, or report the blocker clearly."),
         ],
     ),
 ]
 
-PROMPT_CRITICAL_RULE_IDS: set[str] = {"A06", "A08", "B03", "B04", "B06", "D01", "D07"}
+PROMPT_CRITICAL_RULE_IDS: set[str] = {"A06", "A08", "B03", "B04", "B06", "D01", "D03"}
 
 
 def build_system_prompt_message() -> SystemMessage:

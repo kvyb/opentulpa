@@ -59,14 +59,9 @@ def _build_runtime(tmp_path, graph: Any) -> OpenTulpaLangGraphRuntime:
         del customer_id, user_text
         return {}
 
-    async def _no_pending_lock(*, customer_id: str, thread_id: str) -> bool:
-        del customer_id, thread_id
-        return False
-
     runtime.start = _noop_start  # type: ignore[method-assign]
     runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
     runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
-    runtime._has_pending_approval_lock = _no_pending_lock  # type: ignore[method-assign]
     return runtime
 
 

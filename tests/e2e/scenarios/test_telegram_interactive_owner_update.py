@@ -81,10 +81,6 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
         del thread_id, customer_id
         return None
 
-    async def _no_pending_approval(*, customer_id: str, thread_id: str) -> bool:
-        del customer_id, thread_id
-        return False
-
     async def _empty_skill_state(**kwargs: Any) -> dict[str, Any]:
         del kwargs
         return {}
@@ -96,10 +92,6 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     async def _directive(customer_id: str) -> str | None:
         del customer_id
         return None
-
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
 
     async def _ainvoke_model(
         model: Any,
@@ -168,7 +160,6 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     runtime._tools = {}
 
     runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._has_pending_approval_lock = _no_pending_approval  # type: ignore[method-assign]
     runtime._pre_resolve_skill_state = _empty_skill_state  # type: ignore[method-assign]
     runtime._load_active_directive = _directive  # type: ignore[method-assign]
     runtime._load_memory_grounding_context = _empty_memory_grounding  # type: ignore[method-assign]
@@ -179,7 +170,6 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.model_with_tools_for_turn_mode = lambda turn_mode: runtime._model_with_tools  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: behavior_events.append(kwargs)  # type: ignore[assignment]
@@ -218,7 +208,6 @@ def test_telegram_interactive_chat_can_send_owner_update_before_search_final(
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "100")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USERNAMES", "")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
-    monkeypatch.setenv("APPROVALS_DB_PATH", str(tmp_path / "approvals.sqlite"))
     monkeypatch.setenv("LINK_ALIAS_DB_PATH", str(tmp_path / "links.sqlite"))
     monkeypatch.setattr(sandbox_module, "PROJECT_ROOT", project_root)
     monkeypatch.setattr(app_module, "PROJECT_ROOT", project_root)

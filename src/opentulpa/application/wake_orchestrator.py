@@ -22,7 +22,6 @@ class WakeOrchestrator:
         get_telegram_chat: Callable[[], Any],
         get_telegram_client: Callable[[], Any],
         get_agent_runtime: Callable[[], Any],
-        get_approvals: Callable[[], Any] | None = None,
         get_intake_workflows: Callable[[], Any] | None = None,
     ) -> None:
         self._settings = settings
@@ -30,7 +29,6 @@ class WakeOrchestrator:
         self._get_telegram_chat = get_telegram_chat
         self._get_telegram_client = get_telegram_client
         self._get_agent_runtime = get_agent_runtime
-        self._get_approvals = get_approvals
         self._get_intake_workflows = get_intake_workflows
 
     def _backlog(self, *, customer_id: str, source: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -85,81 +83,15 @@ class WakeOrchestrator:
             return text
         return text[:1197].rstrip() + "..."
 
-    async def _flush_deferred_challenges(self, *, chat_id: int | str) -> None:
-        if self._get_approvals is None:
-            return
-        with suppress(Exception):
-            await self._get_approvals().flush_deferred_challenges(
-                origin_interface="telegram",
-                origin_conversation_id=str(chat_id),
-            )
-
     async def handle_event(self, body: dict[str, Any]) -> None:
         wake_type = str(body.get("type", "")).strip()
-        if wake_type not in {"task_event", "routine_event", "approval_event"}:
+        if wake_type not in {"task_event", "routine_event"}:
             return
 
-        if wake_type == "approval_event":
-            await self._handle_approval_event(body)
-            return
         if wake_type == "task_event":
             await self._handle_task_event(body)
             return
         await self._handle_routine_event(body)
-
-    async def _handle_approval_event(self, body: dict[str, Any]) -> None:
-        customer_id = str(body.get("customer_id", "")).strip()
-        payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
-        event_type = str(body.get("event_type", payload.get("event_type", "approved"))).strip()
-        if not customer_id:
-            return
-        queue_payload = {
-            "approval_id": str(body.get("approval_id", payload.get("approval_id", ""))).strip(),
-            "event_type": event_type,
-            "payload": payload,
-        }
-        runtime = self._get_agent_runtime()
-        if not self._settings.telegram_bot_token or runtime is None:
-            self._backlog(
-                customer_id=customer_id,
-                source="approval",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-
-        try:
-            replies = await self._get_telegram_chat().relay_event(
-                customer_id=customer_id,
-                event_label=f"approval/{event_type}",
-                payload=queue_payload,
-                agent_runtime=runtime,
-            )
-        except Exception:
-            self._backlog(
-                customer_id=customer_id,
-                source="approval",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        if not replies:
-            self._backlog(
-                customer_id=customer_id,
-                source="approval",
-                event_type=event_type,
-                payload=queue_payload,
-            )
-            return
-        for item in replies:
-            await self._get_telegram_client().send_message(
-                chat_id=item["chat_id"],
-                text=item["text"],
-                parse_mode="HTML",
-            )
-            with suppress(Exception):
-                self._get_telegram_chat().touch_assistant_message(int(item["chat_id"]))
-            await self._flush_deferred_challenges(chat_id=item["chat_id"])
 
     async def _handle_task_event(self, body: dict[str, Any]) -> None:
         customer_id = str(body.get("customer_id", "")).strip()
@@ -228,7 +160,6 @@ class WakeOrchestrator:
                 text=item["text"],
                 parse_mode="HTML",
             )
-            await self._flush_deferred_challenges(chat_id=item["chat_id"])
 
     async def _handle_routine_event(self, body: dict[str, Any]) -> None:
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
@@ -336,7 +267,6 @@ class WakeOrchestrator:
                 )
                 with suppress(Exception):
                     self._get_telegram_chat().touch_assistant_message(chat_id)
-                await self._flush_deferred_challenges(chat_id=chat_id)
                 notified_chat_ids.append(chat_id)
             self._record_routine_execution(
                 customer_id=customer_id,
@@ -444,7 +374,6 @@ class WakeOrchestrator:
             )
             with suppress(Exception):
                 self._get_telegram_chat().touch_assistant_message(chat_id)
-            await self._flush_deferred_challenges(chat_id=chat_id)
             notified_chat_ids.append(chat_id)
         self._record_routine_execution(
             customer_id=customer_id,

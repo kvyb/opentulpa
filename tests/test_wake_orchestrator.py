@@ -57,25 +57,6 @@ class _FakeTelegramClient:
         return True
 
 
-class _FakeApprovals:
-    def __init__(self) -> None:
-        self.flush_calls: list[dict[str, str]] = []
-
-    async def flush_deferred_challenges(
-        self,
-        *,
-        origin_interface: str,
-        origin_conversation_id: str,
-    ) -> int:
-        self.flush_calls.append(
-            {
-                "origin_interface": origin_interface,
-                "origin_conversation_id": origin_conversation_id,
-            }
-        )
-        return 1
-
-
 class _FakeRuntime:
     def __init__(self, result: str = "wake update") -> None:
         self.result = result
@@ -129,12 +110,11 @@ class _FakeIntakeWorkflows:
 
 
 @pytest.mark.asyncio
-async def test_routine_event_flushes_deferred_approval_challenges() -> None:
+async def test_routine_event_notifies_and_records_execution() -> None:
     settings = SimpleNamespace(telegram_bot_token="test-token")
     context_events = _FakeContextEvents()
     chat = _FakeTelegramChat()
     client = _FakeTelegramClient()
-    approvals = _FakeApprovals()
     runtime = _FakeRuntime(result="routine done")
 
     orchestrator = WakeOrchestrator(
@@ -143,7 +123,6 @@ async def test_routine_event_flushes_deferred_approval_challenges() -> None:
         get_telegram_chat=lambda: chat,
         get_telegram_client=lambda: client,
         get_agent_runtime=lambda: runtime,
-        get_approvals=lambda: approvals,
     )
 
     await orchestrator.handle_event(
@@ -166,12 +145,6 @@ async def test_routine_event_flushes_deferred_approval_challenges() -> None:
         }
     )
 
-    assert approvals.flush_calls == [
-        {
-            "origin_interface": "telegram",
-            "origin_conversation_id": "166",
-        }
-    ]
     assert client.sent
     assert runtime.calls
     assert runtime.calls[0]["turn_mode"] == "routine_wake"
@@ -197,7 +170,6 @@ async def test_routine_event_silent_mode_still_executes_and_backlogs() -> None:
         get_telegram_chat=lambda: chat,
         get_telegram_client=lambda: client,
         get_agent_runtime=lambda: runtime,
-        get_approvals=None,
     )
 
     await orchestrator.handle_event(
@@ -243,7 +215,6 @@ async def test_routine_event_uses_compact_literal_chat_wake_prompt() -> None:
         get_telegram_chat=lambda: chat,
         get_telegram_client=lambda: client,
         get_agent_runtime=lambda: runtime,
-        get_approvals=None,
     )
 
     await orchestrator.handle_event(
@@ -296,7 +267,6 @@ async def test_intake_workflow_routine_uses_intake_runner_and_skips_runtime() ->
         get_telegram_chat=lambda: chat,
         get_telegram_client=lambda: client,
         get_agent_runtime=lambda: runtime,
-        get_approvals=None,
         get_intake_workflows=lambda: intake,
     )
 
@@ -344,7 +314,6 @@ async def test_routine_event_missing_instruction_fails_invalid() -> None:
         get_telegram_chat=lambda: chat,
         get_telegram_client=lambda: client,
         get_agent_runtime=lambda: runtime,
-        get_approvals=None,
     )
 
     await orchestrator.handle_event(

@@ -77,8 +77,6 @@ DEFAULT_TERMINAL_COMMAND_ALLOWLIST = {
     "sqlite3",
 }
 TERMINAL_COMMAND_ALLOWLIST_ENV = "OPENTULPA_TERMINAL_COMMAND_ALLOWLIST"
-
-
 def get_terminal_command_allowlist() -> set[str]:
     raw = str(os.environ.get(TERMINAL_COMMAND_ALLOWLIST_ENV, "")).strip()
     if not raw:
@@ -270,8 +268,9 @@ def validate_generated_file(relative_path: str) -> dict[str, Any]:
         names = _extract_router_names(tree)
         if "router" not in names:
             raise ValueError(
-                "tulpa_stuff module must define top-level 'router' for FastAPI mounting. "
-                "Use: from fastapi import APIRouter; router = APIRouter()."
+                "tulpa_stuff Python file must either define a top-level 'router' for FastAPI mounting "
+                "or be a standalone executable script with if __name__ == '__main__':. "
+                "Use router modules only when the file is meant for tulpa_reload."
             )
         result["router_contract_ok"] = True
     return result
@@ -356,7 +355,7 @@ def run_terminal(
         )
         try:
             subprocess.run(
-                [sys.executable, "-m", "venv", str(AGENT_VENV_DIR)],
+                [sys.executable, "-m", "venv", "--system-site-packages", str(AGENT_VENV_DIR)],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
@@ -372,7 +371,7 @@ def run_terminal(
             )
             raise RuntimeError(
                 f"Agent venv setup failed at {AGENT_VENV_DIR}. "
-                "Create it manually with: python3 -m venv .opentulpa/agent_venv"
+                "Create it manually with: python3 -m venv --system-site-packages .opentulpa/agent_venv"
             ) from exc
         _debug_log(
             hypothesis_id="sandbox",

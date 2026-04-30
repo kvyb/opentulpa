@@ -243,10 +243,6 @@ async def test_graph_agent_injects_interactive_fragments_before_second_model_cal
         del kwargs
         return ""
 
-    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {"usable": True, "mismatch": False, "applies": True}
-
     async def _ainvoke_model(
         model: Any,
         messages: list[Any],
@@ -281,7 +277,6 @@ async def test_graph_agent_injects_interactive_fragments_before_second_model_cal
     runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
-    runtime.verify_completion_claim = _verify_completion_claim  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
