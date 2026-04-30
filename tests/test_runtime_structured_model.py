@@ -244,6 +244,49 @@ async def test_invoke_structured_model_records_single_llm_call_trace_on_success(
 
 
 @pytest.mark.asyncio
+async def test_invoke_structured_model_logs_preprovider_behavior_events(tmp_path: Path) -> None:
+    behavior_log = tmp_path / "agent_behavior.jsonl"
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_enabled=True,
+        behavior_log_path=str(behavior_log),
+    )
+    model = _StructuredModel({"ok": True, "reason": "native"})
+
+    parsed, error = await runtime._invoke_structured_model(
+        model=model,
+        messages=[],
+        schema=_Schema,
+        call_context={
+            "call_site": "intake_workflow_decision",
+            "trace_id": "intake_trace_test",
+            "thread_id": "intake_decision_iwf_conv",
+            "customer_id": "telegram_123",
+            "turn_mode": "routine_wake",
+            "prompt_mode": "structured_intake",
+        },
+    )
+
+    assert isinstance(parsed, _Schema)
+    assert error is None
+    events = [
+        json.loads(line)
+        for line in behavior_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    event_names = [str(item.get("event", "")) for item in events]
+    assert "llm.invoke.start" in event_names
+    assert "llm.invoke.runner_ready" in event_names
+    assert "llm.invoke.await_provider" in event_names
+    assert "llm.invoke.finish" in event_names
+    assert event_names.index("llm.invoke.start") < event_names.index("llm.invoke.await_provider")
+    assert event_names.index("llm.invoke.await_provider") < event_names.index("llm.invoke.finish")
+
+
+@pytest.mark.asyncio
 async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.model_name = "google/gemini-3-flash-preview"

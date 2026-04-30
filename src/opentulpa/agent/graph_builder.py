@@ -117,6 +117,31 @@ def _build_workflow_setup_prompt_context(
     return _build_workflow_setup_control_context(session)
 
 
+def _thread_has_active_workflow_setup(
+    runtime: Any,
+    *,
+    customer_id: str,
+    thread_id: str,
+) -> bool:
+    service = getattr(runtime, "_workflow_setup_service", None)
+    if service is None or not hasattr(service, "get_thread_session"):
+        return False
+    try:
+        session = service.get_thread_session(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            include_paused=False,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to check workflow setup status (customer_id=%s, thread_id=%s)",
+            customer_id,
+            thread_id,
+        )
+        return False
+    return str((session or {}).get("status", "") or "").strip().lower() == "active"
+
+
 def _make_prompt_context_entry(*, section: str, content: str) -> dict[str, str] | None:
     safe_section = str(section or "").strip()
     safe_content = str(content or "").strip()
@@ -809,6 +834,21 @@ def build_runtime_graph(runtime: Any):
         thread_id = state.get("thread_id", "")
         turn_mode = _normalize_turn_mode(state.get("turn_mode"))
         prompt_mode = str(state.get("prompt_mode", "task_chat")).strip().lower() or "task_chat"
+        prompt_context_update: dict[str, Any] = {}
+        if turn_mode == "interactive" and _thread_has_active_workflow_setup(
+            runtime,
+            customer_id=customer_id,
+            thread_id=thread_id,
+        ):
+            turn_mode = "workflow_setup"
+            prompt_mode = "workflow_setup"
+            prompt_context_update["turn_mode"] = turn_mode
+            prompt_context_update["prompt_mode"] = prompt_mode
+            _log(
+                state,
+                "graph.workflow_setup.promoted_turn_mode",
+                turn_mode=turn_mode,
+            )
         messages = state.get("messages", [])
         injected_messages: list[HumanMessage] = []
         if turn_mode == "interactive":
@@ -852,7 +892,6 @@ def build_runtime_graph(runtime: Any):
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
         frozen_prompt_context_raw = state.get("frozen_prompt_context")
-        prompt_context_update: dict[str, Any] = {}
         if _frozen_prompt_context_matches(
             frozen_prompt_context_raw,
             latest_user=latest_user,
