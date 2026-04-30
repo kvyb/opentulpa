@@ -245,10 +245,6 @@ def _owner_progress_snapshot(
     progress_kinds: list[str] = []
     if internal_calls:
         progress_kinds.append("internal_calls")
-    if thread_id:
-        progress_kinds.append("thread_bound")
-    if setup_session:
-        progress_kinds.append("setup_session")
     if workflow_count > workflow_count_before:
         progress_kinds.append("workflow_created")
     return {
