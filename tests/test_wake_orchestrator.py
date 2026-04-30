@@ -175,6 +175,12 @@ async def test_routine_event_flushes_deferred_approval_challenges() -> None:
     assert client.sent
     assert runtime.calls
     assert runtime.calls[0]["turn_mode"] == "routine_wake"
+    assert context_events.events
+    payload = context_events.events[-1]["payload"]
+    assert payload["routine_id"] == "rtn_123"
+    assert payload["execution_status"] == "executed"
+    assert payload["execution_summary"] == "routine done"
+    assert payload["notification_status"] == "sent"
 
 
 @pytest.mark.asyncio
@@ -219,6 +225,7 @@ async def test_routine_event_silent_mode_still_executes_and_backlogs() -> None:
     assert queued["event_type"] == "scheduled"
     payload = queued["payload"]
     assert payload["execution_status"] == "executed"
+    assert payload["notification_status"] == "skipped"
     assert "updated timelog" in payload["execution_summary"]
 
 

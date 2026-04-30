@@ -1584,6 +1584,17 @@ class OpenTulpaLangGraphRuntime:
             return self._wake_execution_model_with_tools
         return self._model_with_tools
 
+    def tools_for_turn_mode(self, turn_mode: str) -> list[Any]:
+        normalized_turn_mode = str(turn_mode or "").strip().lower()
+        blocked_tools: set[str] = set()
+        if normalized_turn_mode == "routine_wake":
+            blocked_tools.add("send_owner_update")
+        return [
+            tool
+            for name, tool in self._tools.items()
+            if str(name or "").strip() not in blocked_tools
+        ]
+
     def prepare_messages_for_prompt_cache(
         self,
         messages: list[Any],
@@ -2172,6 +2183,11 @@ class OpenTulpaLangGraphRuntime:
                 "status",
                 "action_name",
                 "execution_ok",
+                "execution_status",
+                "execution_summary",
+                "execution_error",
+                "notification_status",
+                "notification_error",
                 "retryable",
                 "event_label",
                 "routine_id",
@@ -3162,13 +3178,10 @@ class OpenTulpaLangGraphRuntime:
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
         self._register_tools()
-        self._model_with_tools = self._model.bind_tools(list(self._tools.values()))
-        if self._wake_execution_model is self._model:
-            self._wake_execution_model_with_tools = self._model_with_tools
-        else:
-            self._wake_execution_model_with_tools = self._wake_execution_model.bind_tools(
-                list(self._tools.values())
-            )
+        self._model_with_tools = self._model.bind_tools(self.tools_for_turn_mode("interactive"))
+        self._wake_execution_model_with_tools = self._wake_execution_model.bind_tools(
+            self.tools_for_turn_mode("routine_wake")
+        )
         self._graph = self._build_graph()
         manager = self.get_browser_use_local_manager()
         with suppress(Exception):

@@ -59,6 +59,7 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "This is a scheduled routine execution, not an interactive user turn.\n"
                 "Execute autonomously using tools and skills as needed.\n"
                 "Do not stop to ask clarifying questions unless the instruction is materially blocked or missing a required dependency.\n"
+                "Return the user-visible routine notification or blocker summary as the final answer.\n"
                 "Focus on doing the work, then return a concise outcome summary."
             )
         )

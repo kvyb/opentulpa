@@ -41,6 +41,36 @@ class WakeOrchestrator:
             payload=payload,
         )
 
+    def _record_routine_execution(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        notification_status: str,
+        notification_error: str = "",
+        notified_chat_ids: list[int] | None = None,
+    ) -> None:
+        event_payload: dict[str, Any] = {
+            "routine_id": str(payload.get("routine_id", "") or "").strip(),
+            "routine_name": str(payload.get("routine_name", "") or "").strip(),
+            "execution_status": str(payload.get("execution_status", "") or "").strip(),
+            "execution_summary": str(payload.get("execution_summary", "") or "").strip()[:1200],
+            "execution_error": str(payload.get("execution_error", "") or "").strip()[:500],
+            "notify_user": bool(payload.get("notify_user", False)),
+            "notification_status": str(notification_status or "").strip(),
+            "notification_error": str(notification_error or "").strip()[:500],
+        }
+        if notified_chat_ids:
+            event_payload["notified_chat_ids"] = [int(chat_id) for chat_id in notified_chat_ids[:5]]
+        with suppress(Exception):
+            self._backlog(
+                customer_id=customer_id,
+                source="routine",
+                event_type=event_type,
+                payload={key: value for key, value in event_payload.items() if value not in ("", None)},
+            )
+
     @staticmethod
     def _compact_payload_summary(payload: dict[str, Any]) -> str:
         if not isinstance(payload, dict) or not payload:
@@ -268,11 +298,18 @@ class WakeOrchestrator:
                     or "workflow execution failed"
                 )
             if not notify_user or not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
-                self._backlog(
+                self._record_routine_execution(
                     customer_id=customer_id,
-                    source="routine",
                     event_type=event_type,
                     payload=queue_payload,
+                    notification_status="skipped",
+                    notification_error=(
+                        "notify_user=false"
+                        if not notify_user
+                        else "telegram_bot_token_missing"
+                        if not self._settings.telegram_bot_token
+                        else "no_notify_token"
+                    ),
                 )
                 return
             slots: list[dict[str, Any]] = []
@@ -281,13 +318,15 @@ class WakeOrchestrator:
             owner_slots = [slot for slot in slots if str(slot.get("role", "")).strip() != "support"]
             slots = owner_slots or slots[:1]
             if not slots:
-                self._backlog(
+                self._record_routine_execution(
                     customer_id=customer_id,
-                    source="routine",
                     event_type=event_type,
                     payload=queue_payload,
+                    notification_status="backlogged",
+                    notification_error="no_telegram_session_slots",
                 )
                 return
+            notified_chat_ids: list[int] = []
             for slot in slots:
                 chat_id = int(slot["chat_id"])
                 await self._get_telegram_client().send_message(
@@ -298,6 +337,14 @@ class WakeOrchestrator:
                 with suppress(Exception):
                     self._get_telegram_chat().touch_assistant_message(chat_id)
                 await self._flush_deferred_challenges(chat_id=chat_id)
+                notified_chat_ids.append(chat_id)
+            self._record_routine_execution(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=queue_payload,
+                notification_status="sent",
+                notified_chat_ids=notified_chat_ids,
+            )
             return
 
         routine_instruction = str(payload.get("instruction", "")).strip()
@@ -354,19 +401,23 @@ class WakeOrchestrator:
         queue_payload["execution_summary"] = execution_summary[:2000]
 
         if not notify_user:
-            self._backlog(
+            self._record_routine_execution(
                 customer_id=customer_id,
-                source="routine",
                 event_type=event_type,
                 payload=queue_payload,
+                notification_status="skipped",
+                notification_error="notify_user=false",
             )
             return
         if not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
-            self._backlog(
+            self._record_routine_execution(
                 customer_id=customer_id,
-                source="routine",
                 event_type=event_type,
                 payload=queue_payload,
+                notification_status="skipped",
+                notification_error=(
+                    "telegram_bot_token_missing" if not self._settings.telegram_bot_token else "no_notify_token"
+                ),
             )
             return
 
@@ -374,14 +425,16 @@ class WakeOrchestrator:
         with suppress(Exception):
             slots = self._get_telegram_chat().find_session_slots(customer_id)
         if not slots:
-            self._backlog(
+            self._record_routine_execution(
                 customer_id=customer_id,
-                source="routine",
                 event_type=event_type,
                 payload=queue_payload,
+                notification_status="backlogged",
+                notification_error="no_telegram_session_slots",
             )
             return
 
+        notified_chat_ids: list[int] = []
         for slot in slots:
             chat_id = int(slot["chat_id"])
             await self._get_telegram_client().send_message(
@@ -392,6 +445,14 @@ class WakeOrchestrator:
             with suppress(Exception):
                 self._get_telegram_chat().touch_assistant_message(chat_id)
             await self._flush_deferred_challenges(chat_id=chat_id)
+            notified_chat_ids.append(chat_id)
+        self._record_routine_execution(
+            customer_id=customer_id,
+            event_type=event_type,
+            payload=queue_payload,
+            notification_status="sent",
+            notified_chat_ids=notified_chat_ids,
+        )
 
 
 def _safe_error_list(value: Any) -> list[str]:

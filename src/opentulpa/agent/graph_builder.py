@@ -371,6 +371,13 @@ def _validate_model_tool_call(
                 "(example: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."
             )
 
+    if call_name == "send_owner_update" and _normalize_turn_mode(turn_mode) == "routine_wake":
+        return (
+            "TOOL_VALIDATION_ERROR: send_owner_update is only for live owner/support turns. "
+            "For routine_wake, put the user-visible routine notification or blocker summary "
+            "in the final assistant response so the wake orchestrator can deliver it."
+        )
+
     if call_name in {"tulpa_read_file", "tulpa_write_file", "tulpa_validate_file", "tulpa_file_send"}:
         path_arg = str(args.get("path", "")).strip()
         duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
@@ -1324,10 +1331,9 @@ def build_runtime_graph(runtime: Any):
             update["active_invoked_skill_context"] = invoked_skill_context
             update["active_invoked_skill_names"] = invoked_skill_names
             update["active_skill_context"] = invoked_skill_context
-        goto: Literal["validate_tools", "claim_check"] = (
-            "validate_tools"
-            if isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
-            else "claim_check"
+        has_tool_calls = isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
+        goto: Literal["validate_tools", "claim_check", "finalize_turn"] = (
+            "validate_tools" if has_tool_calls else ("finalize_turn" if turn_mode == "routine_wake" else "claim_check")
         )
         if (
             turn_mode == "workflow_setup"

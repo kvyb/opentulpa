@@ -285,6 +285,54 @@ async def test_graph_claim_check_repairs_false_success_claim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_graph_routine_wake_skips_claim_check() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    behavior_events: list[str] = []
+    call_count = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal call_count
+        call_count += 1
+        return AIMessage(content="Routine complete. 3 stories sent.")
+
+    async def _verify_completion_claim(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        raise AssertionError("routine_wake should not invoke claim-check")
+
+    _install_minimal_graph_runtime_stubs(
+        runtime,
+        ainvoke_model=_ainvoke_model,
+        verify_completion_claim=_verify_completion_claim,
+        behavior_events=behavior_events,
+    )
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="System update: a scheduled routine fired.")],
+            "customer_id": "telegram_test",
+            "thread_id": "routine_rtn_test_wake_123",
+            "turn_mode": "routine_wake",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_routine_skip_claim",
+        },
+        config={"configurable": {"thread_id": "routine_rtn_test_wake_123"}, "recursion_limit": 8},
+    )
+
+    assert call_count == 1
+    assert result["final_response_text"] == "Routine complete. 3 stories sent."
+    assert "graph.claim_check.start" not in behavior_events
+
+
+@pytest.mark.asyncio
 async def test_graph_claim_check_repairs_empty_output() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     call_count = 0
@@ -320,6 +368,30 @@ async def test_graph_claim_check_repairs_empty_output() -> None:
     )
     assert call_count == 2
     assert result["final_response_text"] == "Here is the answer."
+
+
+def test_pending_context_surfaces_routine_execution_summary() -> None:
+    text = OpenTulpaLangGraphRuntime._format_pending_context(
+        [
+            {
+                "source": "routine",
+                "event_type": "scheduled",
+                "payload": {
+                    "routine_id": "rtn_mtsb77",
+                    "routine_name": "daily-ai-oss-briefing",
+                    "execution_status": "executed",
+                    "execution_summary": "Briefing sent with three fresh stories.",
+                    "notification_status": "sent",
+                },
+            }
+        ]
+    )
+
+    assert "[routine/scheduled]" in text
+    assert "routine_id=rtn_mtsb77" in text
+    assert "execution_status=executed" in text
+    assert "Briefing sent with three fresh stories" in text
+    assert "notification_status=sent" in text
 
 
 @pytest.mark.asyncio
