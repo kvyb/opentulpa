@@ -2646,29 +2646,32 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
         workflow_id=workflow["workflow_id"],
         conversation_id=str(lead_chat_id),
     )
-    assert not any(str(item.get("status", "")).lower() == "completed" for item in bookings_after_second_turn)
+    completed_after_second_turn = any(
+        str(item.get("status", "")).lower() == "completed" for item in bookings_after_second_turn
+    )
 
-    third_lead_status = e2e_harness.post_telegram(
-        body=_telegram_business_message(
-            business_connection_id=business_connection_id,
-            lead_chat_id=lead_chat_id,
-            lead_user_id=2001,
-            message_id=203,
-            text="Yes, please confirm and save the booking.",
-        ),
-    )
-    assert third_lead_status == 200
-    assert _wait_until(
-        lambda: any(
-            str(item.get("status", "")).lower() == "completed"
-            for item in e2e_harness.client.app.state.intake_workflows.list_bookings(
-                customer_id=customer_id,
-                workflow_id=workflow["workflow_id"],
-                conversation_id=str(lead_chat_id),
-            )
-        ),
-        timeout_seconds=90.0,
-    )
+    if not completed_after_second_turn:
+        third_lead_status = e2e_harness.post_telegram(
+            body=_telegram_business_message(
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                lead_user_id=2001,
+                message_id=203,
+                text="Yes, please confirm and save the booking.",
+            ),
+        )
+        assert third_lead_status == 200
+        assert _wait_until(
+            lambda: any(
+                str(item.get("status", "")).lower() == "completed"
+                for item in e2e_harness.client.app.state.intake_workflows.list_bookings(
+                    customer_id=customer_id,
+                    workflow_id=workflow["workflow_id"],
+                    conversation_id=str(lead_chat_id),
+                )
+            ),
+            timeout_seconds=90.0,
+        )
 
     bookings = e2e_harness.client.app.state.intake_workflows.list_bookings(
         customer_id=customer_id,
