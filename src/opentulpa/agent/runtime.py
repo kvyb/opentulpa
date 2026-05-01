@@ -4269,12 +4269,12 @@ class OpenTulpaLangGraphRuntime:
 
         if not sent:
             async with lock:
-                sent_keys_by_thread.setdefault(thread_id, set()).discard(key)
+                sent_keys_by_thread.setdefault(resolved_thread_id, set()).discard(key)
             return {"ok": False, "sent": False, "reason": "send_failed"}
 
         self.log_behavior_event(
             event="interactive_owner_update_sent",
-            thread_id=thread_id,
+            thread_id=resolved_thread_id,
             customer_id=self.get_active_customer_id(),
             chars=len(safe_text),
         )

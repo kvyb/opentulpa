@@ -26,6 +26,16 @@ class _ToolFirstRuntime:
         yield "I checked the inbox. 3 priority emails found."
 
 
+class _TraceContextRuntime:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._langfuse_tracer = self
+
+    def trace_context(self, **kwargs):
+        self.calls.append(kwargs)
+        return relay_module.nullcontext()
+
+
 class _DelayedSingleReplyRuntime:
     async def astream_text(self, **kwargs):
         await asyncio.sleep(0.4)
@@ -591,6 +601,32 @@ async def test_non_private_chat_bypasses_draft_streaming(
     assert final == "Here is the finished result."
     assert fake_client.draft_calls == []
     assert fake_client.message_calls == [(-100123456, "Here is the finished result.", "HTML")]
+
+
+def test_telegram_observability_context_maps_customer_and_thread_to_langfuse_kwargs() -> None:
+    runtime = _TraceContextRuntime()
+
+    with relay_module._telegram_observability_context(
+        agent_runtime=runtime,
+        thread_id="chat_1",
+        customer_id="telegram_1",
+        text="hello",
+        chat_id=123,
+        turn_mode="interactive",
+    ):
+        pass
+
+    assert runtime.calls == [
+        {
+            "name": "opentulpa.telegram.turn",
+            "trace_id": None,
+            "user_id": "telegram_1",
+            "session_id": "chat_1",
+            "input": {"text": "hello", "chat_id": 123, "mode": "telegram"},
+            "metadata": {"turn_mode": "interactive", "chat_id": 123},
+            "tags": ["interactive", "telegram"],
+        }
+    ]
 
 
 

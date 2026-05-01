@@ -102,8 +102,8 @@ def _telegram_observability_context(
     return trace_context(
         name="opentulpa.telegram.turn",
         trace_id=None,
-        customer_id=customer_id,
-        thread_id=thread_id,
+        user_id=customer_id,
+        session_id=thread_id,
         input={"text": str(text or ""), "chat_id": chat_id, "mode": "telegram"},
         metadata={"turn_mode": normalize_turn_mode(turn_mode), "chat_id": chat_id},
         tags=[normalize_turn_mode(turn_mode), "telegram"],

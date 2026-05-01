@@ -63,3 +63,28 @@ async def test_emit_interactive_update_stops_after_sender_clear() -> None:
         "sent": False,
         "reason": "interactive_update_unavailable",
     }
+
+
+@pytest.mark.asyncio
+async def test_emit_interactive_update_failed_send_clears_fallback_thread_dedupe() -> None:
+    runtime = _runtime_for_updates()
+    runtime.set_active_customer_id("telegram_1")
+    runtime.set_active_thread_id("thread_1")
+    attempts: list[str] = []
+    events: list[dict[str, Any]] = []
+
+    async def _sender(text: str) -> dict[str, Any]:
+        attempts.append(text)
+        return {"sent": False}
+
+    runtime.log_behavior_event = lambda **kwargs: events.append(kwargs)  # type: ignore[assignment]
+    await runtime.register_interactive_update_sender(thread_id="thread_1", sender=_sender)
+
+    first = await runtime.emit_interactive_update(text="Проверяю прайс.", dedupe_key="price")
+    second = await runtime.emit_interactive_update(text="Проверяю прайс.", dedupe_key="price")
+
+    assert first == {"ok": False, "sent": False, "reason": "send_failed"}
+    assert second == {"ok": False, "sent": False, "reason": "send_failed"}
+    assert attempts == ["Проверяю прайс.", "Проверяю прайс."]
+    assert runtime._interactive_update_sent_keys["thread_1"] == set()
+    assert events == []
