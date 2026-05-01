@@ -601,6 +601,7 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
         required_fields=["name", "time"],
         field_guidance={"time": "Always confirm the final appointment time explicitly."},
         assistant_instructions="Be concise and never promise unavailable slots.",
+        business_facts={"prices": {"basic_wash": "1000 RUB"}},
         knowledge_file_ids=[str(record["id"])],
         sink_type="local_csv",
         sink_config={"file_path": "tulpa_stuff/bookings.csv"},
@@ -611,6 +612,7 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
     assert workflow["schedule"] == ""
     assert workflow["routine_id"] == ""
     assert workflow["assistant_instructions"] == "Be concise and never promise unavailable slots."
+    assert workflow["business_facts"] == {"prices": {"basic_wash": "1000 RUB"}}
     assert workflow["knowledge_file_ids"] == [str(record["id"])]
     skill = skills.get_skill(
         customer_id="telegram_123",
@@ -626,11 +628,48 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
     assert "single durable intake policy" in skill["skill_markdown"]
     assert "cannot be edited in place" in skill["skill_markdown"]
     assert "Always confirm the final appointment time explicitly." in skill["skill_markdown"]
+    assert "1000 RUB" in skill["skill_markdown"]
     workflow_file = json.loads(skill["supporting_files"]["workflow.json"])
     assert workflow_file["source_config"] == {"business_connection_id": "bc_123"}
     assert workflow_file["field_guidance"] == {
         "time": "Always confirm the final appointment time explicitly."
     }
+    assert workflow_file["business_facts"] == {"prices": {"basic_wash": "1000 RUB"}}
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_business_facts_do_not_store_large_source_blobs(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Need a car wash tomorrow 3pm, SUV, interior and exterior.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio(summary, conversation),
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time"],
+        business_facts={"extracted_spreadsheet_text": "row data\n" * 3000},
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    rendered = json.dumps(workflow["business_facts"], ensure_ascii=False)
+    assert len(rendered) < 1000
+    assert "too large to store inline" in rendered
 
 
 @pytest.mark.asyncio
@@ -1076,6 +1115,7 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
         intent_description="Handle Telegram Business appointment requests.",
         required_fields=["name", "time"],
         assistant_instructions="Be concise and confirm only explicit booking times.",
+        business_facts={"prices": {"express_wash": "1000 RUB"}},
         knowledge_file_ids=[str(knowledge["id"])],
         sink_type="local_csv",
         sink_config={"file_path": "tulpa_stuff/bookings.csv"},
@@ -1090,6 +1130,11 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert result["ok"] is True
     assert len(runtime.calls) == 2
     assert runtime.calls[0]["workflow"]["assistant_instructions"] == "Be concise and confirm only explicit booking times."
+    assert runtime.calls[0]["workflow"]["business_facts"] == {
+        "prices": {"express_wash": "1000 RUB"}
+    }
+    assert "Owner-Provided Business Facts" in runtime.calls[0]["workflow"]["workflow_skill"]
+    assert "1000 RUB" in runtime.calls[0]["workflow"]["workflow_skill"]
     assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == [str(knowledge["id"])]
     assert runtime.calls[0]["workflow"]["knowledge_answer"] == ""
     assert "Reference numbers" in runtime.calls[1]["workflow"]["knowledge_answer"]

@@ -122,6 +122,7 @@ def build_intake_workflow_skill(
     )
     knowledge_file_ids = _unique_string_list(safe_workflow.get("knowledge_file_ids"))
     field_guidance = _safe_dict(safe_workflow.get("field_guidance"))
+    business_facts = _safe_dict(safe_workflow.get("business_facts"))
     source_config = _safe_dict(safe_workflow.get("source_config"))
     intent_match_required = _truthy_config_flag(source_config.get("intent_match_required"))
     sink_config = _safe_dict(safe_workflow.get("sink_config"))
@@ -206,6 +207,13 @@ def build_intake_workflow_skill(
                 + "\n".join(guidance_lines)
                 + "\n"
             )
+    if business_facts:
+        instructions += (
+            "\n## Owner-Provided Business Facts\n"
+            "- These are compact facts explicitly provided by the owner during setup.\n"
+            "- Treat them as authoritative workflow configuration unless bound knowledge answers contradict them.\n"
+            f"- Facts JSON: {_json_dumps(business_facts)}\n"
+        )
     assistant_instructions = str(safe_workflow.get("assistant_instructions", "") or "").strip()
     if assistant_instructions:
         instructions += (
@@ -259,6 +267,7 @@ def build_intake_workflow_skill(
                 "required_fields": safe_workflow["required_fields"],
                 "field_guidance": field_guidance,
                 "assistant_instructions": safe_workflow.get("assistant_instructions", ""),
+                "business_facts": business_facts,
                 "knowledge_file_ids": knowledge_file_ids,
                 "sink_type": safe_workflow["sink_type"],
                 "sink_config": safe_workflow.get("sink_config", {}),

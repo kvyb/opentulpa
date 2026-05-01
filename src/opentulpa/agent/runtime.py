@@ -809,8 +809,9 @@ def _build_intake_workflow_system_prompt() -> str:
         "Field extraction policy:\n"
         "- Extract fields only from evidence in the conversation or saved state.\n"
         "- Do not invent or infer missing business details unless the value is explicitly or near-explicitly stated.\n"
-        "- When answering business facts from source material, use workflow.knowledge_answer or request a service-side lookup only when workflow.knowledge_file_ids is non-empty. If no bound files or answer text directly support the fact, say you need to confirm instead of inventing it.\n"
-        "- Business knowledge returns only plain answer text. Leave knowledge_source_refs empty. Set grounding_status to grounded only when that text directly supports the business fact; otherwise use no_source.\n"
+        "- workflow.business_facts and workflow.workflow_skill are owner-provided workflow configuration. Use those compact inline facts as authoritative business facts unless workflow.knowledge_answer directly contradicts them.\n"
+        "- When answering business facts from source material, use workflow.business_facts, workflow.workflow_skill, workflow.knowledge_answer, or request a service-side lookup only when workflow.knowledge_file_ids is non-empty. If no owner-provided inline fact, bound file, or answer text supports the fact, say you need to confirm instead of inventing it.\n"
+        "- Business knowledge returns only plain answer text. Leave knowledge_source_refs empty. Set grounding_status to grounded when workflow.business_facts, workflow.workflow_skill, or that answer text directly supports the business fact; otherwise use no_source.\n"
         "- If an active booking already contains source-backed business facts and the latest customer message only supplies missing customer-provided fields, do not query business knowledge again. Reuse the active booking fields and return the save decision.\n"
         "- Light normalization is allowed: trim whitespace, standardize obvious time/date phrasing, preserve meaning.\n"
         "- If customer messages conflict, prefer the latest customer-provided value unless the newer message is too vague to override the earlier one.\n"
@@ -828,10 +829,10 @@ def _build_intake_workflow_system_prompt() -> str:
         "Business knowledge request policy:\n"
         "- If workflow has knowledge_file_ids, workflow.knowledge_answer is empty, and the latest message needs a "
         "source-backed price, service, policy, menu, or capability fact that is not already present in saved "
-        "booking state, set needs_business_knowledge=true and business_knowledge_query to one concise natural "
+        "booking state or workflow.business_facts/workflow.workflow_skill, set needs_business_knowledge=true and business_knowledge_query to one concise natural "
         "language query. Do not guess the fact and do not ask the customer before the knowledge lookup.\n"
         "- If workflow.knowledge_file_ids is empty, never set needs_business_knowledge=true. Use workflow "
-        "instructions and field guidance when possible; otherwise say the fact needs confirmation and ask the "
+        "business_facts, workflow_skill, instructions, and field guidance when possible; otherwise say the fact needs confirmation and ask the "
         "next missing required field.\n"
         "- When needs_business_knowledge=true, return the partial classification and extracted customer-provided "
         "fields, but set ready_to_save=false, reply_action=none, and keep reply_text empty.\n"
@@ -920,6 +921,12 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
         for key, value in guidance_map.items()
         if str(key or "").strip()
     }
+    business_facts = safe_workflow.get("business_facts")
+    compact_business_facts = _compact_jsonish_dict(
+        business_facts,
+        item_limit=12,
+        char_limit=220,
+    )
     sink_config = safe_workflow.get("sink_config")
     safe_sink_config = sink_config if isinstance(sink_config, dict) else {}
     compact_sink: dict[str, Any] = {}
@@ -965,6 +972,8 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             safe_workflow.get("assistant_instructions", ""),
             limit=400,
         ),
+        "business_facts": compact_business_facts,
+        "workflow_skill": _trim_text_chars(safe_workflow.get("workflow_skill", ""), limit=3200),
         "knowledge_file_ids": [
             str(item or "").strip()
             for item in list(safe_workflow.get("knowledge_file_ids") or [])[:12]
@@ -1115,8 +1124,9 @@ def _build_intake_workflow_agent_prompt(
         "non-empty, workflow.knowledge_answer is empty, and a source-backed business fact is needed, return "
         "needs_business_knowledge=true with one concise business_knowledge_query. The intake service will run "
         "the oracle and call you again with workflow.knowledge_answer.\n"
+        "- workflow.business_facts and workflow.workflow_skill are owner-provided workflow configuration. Use them for compact inline business facts such as prices, service menu highlights, hours, discounts, locations, and policies.\n"
         "- If workflow.knowledge_file_ids is empty, never set needs_business_knowledge=true. Use workflow "
-        "instructions and field guidance when possible; otherwise say the fact needs confirmation and ask the "
+        "business_facts, workflow_skill, instructions, and field guidance when possible; otherwise say the fact needs confirmation and ask the "
         "next missing required field.\n"
         "- If workflow.knowledge_answer is present, use it and return a final decision. Do not request knowledge again.\n"
         "- If active_booking.extracted_fields already contains the needed source-backed business facts and the latest inbound message supplies only missing customer-provided fields, return the merged decision without requesting business knowledge.\n"
@@ -1145,7 +1155,7 @@ def _build_intake_workflow_agent_prompt(
         "source-backed business fact is requested.\n"
         "- If execution_feedback is present, you are replanning after a real tool or application error. "
         "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
-        "- For source-backed business facts in reply_text or save_payload, leave knowledge_source_refs empty and set grounding_status=grounded only when workflow.knowledge_answer or business_knowledge_query directly supports the fact. If no business knowledge answer supports a fact, set grounding_status=no_source and ask to confirm instead.\n"
+        "- For business facts in reply_text or save_payload, leave knowledge_source_refs empty and set grounding_status=grounded when workflow.business_facts, workflow.workflow_skill, workflow.knowledge_answer, or business_knowledge_query directly supports the fact. If none supports a fact, set grounding_status=no_source and ask to confirm instead.\n"
         "- sink_arguments is for sink-specific write arguments or overrides discovered during this turn; "
         "leave it empty when not needed.\n"
         "- Unless workflow.intent_match_required is true, do not use intent as a front-door filter; reply usefully when the source conversation can be moved forward.\n\n"

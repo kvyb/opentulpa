@@ -34,6 +34,10 @@ _TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS = 3.0
 _TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE = "telegram_business_webhook_settled"
 _PENDING_RUN_POLL_SECONDS = 0.2
 _PENDING_RUN_MAX_CONCURRENCY = 4
+_BUSINESS_FACTS_MAX_KEYS = 32
+_BUSINESS_FACTS_MAX_LIST_ITEMS = 20
+_BUSINESS_FACTS_MAX_STRING_CHARS = 500
+_BUSINESS_FACTS_MAX_JSON_CHARS = 12000
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,51 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 def _safe_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _compact_business_fact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for raw_key, raw_value in list(value.items())[:_BUSINESS_FACTS_MAX_KEYS]:
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            out[key] = _compact_business_fact_value(raw_value)
+        return out
+    if isinstance(value, list):
+        return [
+            _compact_business_fact_value(item)
+            for item in value[:_BUSINESS_FACTS_MAX_LIST_ITEMS]
+        ]
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    text = str(value or "").strip()
+    if len(text) <= _BUSINESS_FACTS_MAX_STRING_CHARS:
+        return text
+    return text[: _BUSINESS_FACTS_MAX_STRING_CHARS - 3].rstrip() + "..."
+
+
+def _normalize_business_facts(value: Any) -> dict[str, Any]:
+    facts = _safe_dict(value)
+    if len(_json_dumps(facts)) > _BUSINESS_FACTS_MAX_JSON_CHARS:
+        return {
+            "summary": (
+                "Owner-provided business facts were too large to store inline. "
+                "Keep large source material in knowledge files."
+            )
+        }
+    compact = _compact_business_fact_value(facts)
+    if not isinstance(compact, dict):
+        return {}
+    rendered = _json_dumps(compact)
+    if len(rendered) <= _BUSINESS_FACTS_MAX_JSON_CHARS:
+        return compact
+    return {
+        "summary": (
+            "Owner-provided business facts were too large to store inline. "
+            "Keep large source material in knowledge files."
+        )
+    }
 
 
 def _unique_strings(values: list[Any]) -> list[str]:
@@ -925,6 +974,7 @@ class IntakeWorkflowService:
                     required_fields_json TEXT NOT NULL,
                     field_guidance_json TEXT NOT NULL,
                     assistant_instructions TEXT NOT NULL DEFAULT '',
+                    business_facts_json TEXT NOT NULL DEFAULT '{}',
                     knowledge_file_ids_json TEXT NOT NULL DEFAULT '[]',
                     sink_type TEXT NOT NULL,
                     sink_config_json TEXT NOT NULL,
@@ -1016,6 +1066,7 @@ class IntakeWorkflowService:
         existing = {str(row["name"] or "") for row in rows}
         required_columns = {
             "assistant_instructions": "TEXT NOT NULL DEFAULT ''",
+            "business_facts_json": "TEXT NOT NULL DEFAULT '{}'",
             "knowledge_file_ids_json": "TEXT NOT NULL DEFAULT '[]'",
         }
         for column, column_type in required_columns.items():
@@ -1061,6 +1112,7 @@ class IntakeWorkflowService:
         required_fields: list[str],
         field_guidance: dict[str, Any] | None,
         assistant_instructions: str,
+        business_facts: dict[str, Any] | None,
         knowledge_file_ids: list[str],
         sink_type: str,
         sink_config: dict[str, Any] | None,
@@ -1079,6 +1131,7 @@ class IntakeWorkflowService:
         safe_source_config = _safe_dict(source_config)
         safe_field_guidance = _safe_dict(field_guidance)
         safe_assistant_instructions = str(assistant_instructions or "").strip()
+        safe_business_facts = _normalize_business_facts(business_facts)
         safe_knowledge_file_ids = _unique_string_list(knowledge_file_ids)
         if not safe_customer:
             raise ValueError("customer_id is required")
@@ -1141,6 +1194,7 @@ class IntakeWorkflowService:
             "required_fields": safe_required_fields,
             "field_guidance": safe_field_guidance,
             "assistant_instructions": safe_assistant_instructions,
+            "business_facts": safe_business_facts,
             "knowledge_file_ids": safe_knowledge_file_ids,
             "sink_type": safe_sink_type,
             "sink_config": safe_sink_config,
@@ -1348,6 +1402,7 @@ class IntakeWorkflowService:
             "required_fields": json.loads(row["required_fields_json"] or "[]"),
             "field_guidance": json.loads(row["field_guidance_json"] or "{}"),
             "assistant_instructions": str(row["assistant_instructions"] or ""),
+            "business_facts": json.loads(row["business_facts_json"] or "{}"),
             "knowledge_file_ids": json.loads(row["knowledge_file_ids_json"] or "[]"),
             "sink_type": str(row["sink_type"]),
             "sink_config": json.loads(row["sink_config_json"] or "{}"),
@@ -1393,6 +1448,7 @@ class IntakeWorkflowService:
             ],
             "field_guidance": _safe_dict(workflow.get("field_guidance")),
             "assistant_instructions": str(workflow.get("assistant_instructions", "") or ""),
+            "business_facts": _safe_dict(workflow.get("business_facts")),
             "knowledge_file_ids": [
                 str(item or "").strip()
                 for item in _safe_list(workflow.get("knowledge_file_ids"))
@@ -1418,6 +1474,7 @@ class IntakeWorkflowService:
         required_fields: list[str],
         field_guidance: dict[str, Any] | None = None,
         assistant_instructions: str = "",
+        business_facts: dict[str, Any] | None = None,
         knowledge_file_ids: list[str] | None = None,
         sink_type: str,
         sink_config: dict[str, Any] | None = None,
@@ -1437,6 +1494,7 @@ class IntakeWorkflowService:
                 required_fields=required_fields,
                 field_guidance=field_guidance,
                 assistant_instructions=assistant_instructions,
+                business_facts=business_facts,
                 knowledge_file_ids=knowledge_file_ids or [],
                 sink_type=sink_type,
                 sink_config=sink_config,
@@ -1634,6 +1692,7 @@ class IntakeWorkflowService:
         required_fields: list[str],
         field_guidance: dict[str, Any] | None = None,
         assistant_instructions: str = "",
+        business_facts: dict[str, Any] | None = None,
         knowledge_file_ids: list[str] | None = None,
         sink_type: str,
         sink_config: dict[str, Any] | None = None,
@@ -1675,6 +1734,7 @@ class IntakeWorkflowService:
             required_fields=required_fields,
             field_guidance=field_guidance,
             assistant_instructions=assistant_instructions,
+            business_facts=business_facts,
             knowledge_file_ids=knowledge_file_ids or [],
             sink_type=sink_type,
             sink_config=sink_config,
@@ -1693,10 +1753,10 @@ class IntakeWorkflowService:
                 INSERT INTO intake_workflows (
                     workflow_id, customer_id, name, channel, provider, source_config_json,
                     intent_description, required_fields_json, field_guidance_json,
-                    assistant_instructions, knowledge_file_ids_json, sink_type,
+                    assistant_instructions, business_facts_json, knowledge_file_ids_json, sink_type,
                     sink_config_json, schedule, notify_user, enabled, routine_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
                     customer_id=excluded.customer_id,
                     name=excluded.name,
@@ -1707,6 +1767,7 @@ class IntakeWorkflowService:
                     required_fields_json=excluded.required_fields_json,
                     field_guidance_json=excluded.field_guidance_json,
                     assistant_instructions=excluded.assistant_instructions,
+                    business_facts_json=excluded.business_facts_json,
                     knowledge_file_ids_json=excluded.knowledge_file_ids_json,
                     sink_type=excluded.sink_type,
                     sink_config_json=excluded.sink_config_json,
@@ -1727,6 +1788,7 @@ class IntakeWorkflowService:
                     _json_dumps(workflow["required_fields"]),
                     _json_dumps(workflow["field_guidance"]),
                     workflow["assistant_instructions"],
+                    _json_dumps(workflow["business_facts"]),
                     _json_dumps(workflow["knowledge_file_ids"]),
                     workflow["sink_type"],
                     _json_dumps(workflow["sink_config"]),
@@ -2062,6 +2124,23 @@ class IntakeWorkflowService:
             enabled=True,
             supporting_files=dict(skill.get("supporting_files") or {}),
         )
+
+    def _workflow_skill_context(self, *, customer_id: str, workflow_id: str) -> str:
+        if self._skill_store is None:
+            return ""
+        try:
+            skill = self._skill_store.get_skill(
+                customer_id=str(customer_id or "").strip(),
+                name=workflow_skill_name(str(workflow_id or "").strip()),
+                include_files=False,
+                include_global=False,
+            )
+        except Exception:
+            logger.exception("Failed to load generated intake workflow skill")
+            return ""
+        if not isinstance(skill, dict):
+            return ""
+        return str(skill.get("skill_markdown", "") or "").strip()
 
     def _get_active_booking(
         self,
@@ -3023,6 +3102,11 @@ class IntakeWorkflowService:
             "required_fields": workflow.get("required_fields"),
             "field_guidance": workflow.get("field_guidance"),
             "assistant_instructions": workflow.get("assistant_instructions", ""),
+            "business_facts": _safe_dict(workflow.get("business_facts")),
+            "workflow_skill": self._workflow_skill_context(
+                customer_id=str(workflow.get("customer_id", "") or ""),
+                workflow_id=str(workflow.get("workflow_id", "") or ""),
+            ),
             "knowledge_file_ids": _unique_string_list(workflow.get("knowledge_file_ids")),
             "knowledge_answer": "",
             "sink_type": workflow.get("sink_type"),

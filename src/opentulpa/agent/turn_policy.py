@@ -42,6 +42,7 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "Synthesize a concise intent_description from the user's stated goal instead of asking for it as a form field when the goal is already clear.\n"
                 "Do not add an intent pre-filter by default; set source_config.intent_match_required=true only if the owner explicitly asks to handle only messages matching the stated intent.\n"
                 "Keep the setup schema machine-readable: required_fields are stable ASCII snake_case ids, while localized labels, owner wording, and extraction hints belong in field_guidance, assistant_instructions, or sink field mappings.\n"
+                "Store compact owner-stated business facts such as prices, service menu highlights, hours, discounts, locations, and policies in draft.business_facts so future intake turns can rely on them without bound files. Do not paste uploaded files, spreadsheets, large tables, or extracted document text into business_facts; bind files through knowledge_file_ids instead.\n"
                 "field_guidance keys must match required_fields ids; do not create a separate localized field id when a stable id can represent the same meaning.\n"
                 "Once the draft has channel, purpose, required fields, sink, and behavior rules, propose it with explicit assumptions and wait for confirmation instead of asking optional questions.\n"
                 "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it.\n"

@@ -82,6 +82,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         source_config: dict[str, Any] | None | str = None,
         field_guidance: dict[str, Any] | None | str = None,
         assistant_instructions: str = "",
+        business_facts: dict[str, Any] | None | str = None,
         knowledge_file_ids: list[str] | None = None,
         notify_user: bool = True,
         enabled: bool = True,
@@ -143,6 +144,10 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
           the user's goals, reply style, qualification rules, booking policy, escalation boundaries,
           important constraints, and any other operating instructions learned during the conversation that
           should persist for future inbox turns.
+        - business_facts should store compact explicit facts the owner states in chat and that intake may
+          rely on without a bound source file: prices, service menu highlights, hours, discounts, addresses,
+          policies, package names, and other concrete facts. Do not copy uploaded files, spreadsheets, long
+          catalogues, or extracted document text into business_facts; keep those in knowledge_file_ids.
         - knowledge_file_ids is optional. Use it only when the user explicitly wants uploaded source files bound to the workflow.
         - For spreadsheets or broad source docs, call business_knowledge_index on the original uploaded file ids, query the business knowledge with business_knowledge_query for representative business facts, then bind those same source file ids here.
         - The workflow must still work when knowledge_file_ids is empty; in that case rely on the saved instructions
@@ -184,6 +189,11 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
             else ({"notes": str(field_guidance).strip()} if str(field_guidance or "").strip() else None)
         )
         safe_assistant_instructions = str(assistant_instructions or "").strip()
+        safe_business_facts = (
+            business_facts
+            if isinstance(business_facts, dict)
+            else ({"notes": str(business_facts).strip()} if str(business_facts or "").strip() else None)
+        )
         if not safe_name:
             return {"error": "intake_workflow_upsert failed: name is required"}
         if not safe_intent:
@@ -215,6 +225,7 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
                 "required_fields": safe_required_fields,
                 "field_guidance": safe_field_guidance,
                 "assistant_instructions": safe_assistant_instructions,
+                "business_facts": safe_business_facts,
                 "knowledge_file_ids": safe_knowledge_file_ids,
                 "sink_type": safe_sink_type,
                 "sink_config": safe_sink_config,
@@ -360,7 +371,11 @@ def register_intake_tools(runtime: Any) -> dict[str, Any]:
         put output column labels in draft_patch.sink_config.field_mapping keyed by required field id.
         draft_patch.required_fields must be stable ASCII snake_case ids, not display labels.
         Put localized wording, owner terminology, and extraction hints in draft_patch.field_guidance
-        or draft_patch.assistant_instructions. field_guidance keys must match required_fields ids.
+        or draft_patch.assistant_instructions. Store compact owner-stated facts like prices,
+        service menu highlights, hours, discounts, addresses, and policies in draft_patch.business_facts.
+        Do not paste uploaded file contents, large tables, or extracted document text into business_facts;
+        bind files through draft_patch.knowledge_file_ids instead.
+        field_guidance keys must match required_fields ids.
         Do not set draft_patch.source_config.intent_match_required by default; set it to true only
         when the owner explicitly wants the workflow to ignore messages that do not match the stated intent.
         When replacing field-specific guidance or sink_config.field_mapping, send the full current object.
