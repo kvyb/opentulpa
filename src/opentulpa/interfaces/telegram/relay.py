@@ -574,7 +574,19 @@ async def stream_langgraph_reply_to_telegram(
                 text=text,
                 turn_mode=turn_mode,
             )
-            stream_iter = stream.__aiter__()
+            stream_done = object()
+            stream_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+            async def _pump_stream() -> None:
+                try:
+                    async for partial in stream:
+                        await stream_queue.put(("chunk", partial))
+                except BaseException as exc:
+                    await stream_queue.put(("error", exc))
+                else:
+                    await stream_queue.put(("done", stream_done))
+
+            next_chunk_task = asyncio.create_task(_pump_stream())
             while True:
                 if not last_streamed:
                     timeout_s = (
@@ -589,16 +601,10 @@ async def stream_langgraph_reply_to_telegram(
                         else stream_idle_retry_timeout_s
                     )
                 try:
-                    if next_chunk_task is None:
-                        next_chunk_task = asyncio.create_task(stream_iter.__anext__())
-                    partial = await asyncio.wait_for(
-                        asyncio.shield(next_chunk_task),
+                    stream_status, stream_payload = await asyncio.wait_for(
+                        stream_queue.get(),
                         timeout=timeout_s,
                     )
-                    next_chunk_task = None
-                except StopAsyncIteration:
-                    next_chunk_task = None
-                    break
                 except TimeoutError:
                     consecutive_timeouts += 1
                     if consecutive_timeouts < max_consecutive_timeouts:
@@ -616,9 +622,6 @@ async def stream_langgraph_reply_to_telegram(
                             async with asyncio.timeout(1.0):
                                 await next_chunk_task
                     next_chunk_task = None
-                    with suppress(Exception):
-                        async with asyncio.timeout(1.0):
-                            await stream.aclose()
                     recovered_text = await _recover_after_stream_timeout()
                     if recovered_text:
                         logger.warning(
@@ -642,6 +645,15 @@ async def stream_langgraph_reply_to_telegram(
                     )
                     final_reply = timeout_text
                     break
+                if stream_status == "done":
+                    next_chunk_task = None
+                    break
+                if stream_status == "error":
+                    next_chunk_task = None
+                    if isinstance(stream_payload, BaseException):
+                        raise stream_payload
+                    raise RuntimeError(str(stream_payload))
+                partial = stream_payload
                 progress_text = partial if isinstance(partial, str) else ""
                 if progress_text and _is_progress_signal(progress_text):
                     if not waiting_for_segment:

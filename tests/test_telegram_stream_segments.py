@@ -165,6 +165,16 @@ class _PacedChunkRuntime:
         await asyncio.sleep(1.0)
         yield "Chunk one. Chunk two. Chunk three."
 
+
+class _TaskStableStreamRuntime:
+    async def astream_text(self, **kwargs):
+        owner_task = asyncio.current_task()
+        yield "First stable chunk."
+        await asyncio.sleep(0.01)
+        assert asyncio.current_task() is owner_task
+        yield "First stable chunk. Second stable chunk."
+
+
 class _AlwaysPendingInteractiveSession:
     async def has_pending_items(self) -> bool:
         return True
@@ -496,6 +506,27 @@ async def test_stream_paces_draft_updates_by_time_not_by_token(
         "Chunk one. Chunk two. Chunk three.",
     ]
     assert fake_client.message_calls == [(1, "Chunk one. Chunk two. Chunk three.", "HTML")]
+
+
+@pytest.mark.asyncio
+async def test_stream_drives_runtime_generator_from_one_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=_TaskStableStreamRuntime(),
+        thread_id="chat-stable",
+        customer_id="telegram_stable",
+        text="hello",
+        bot_token="dummy",
+        chat_id=1,
+    )
+
+    assert suppressed is False
+    assert final == "First stable chunk. Second stable chunk."
+    assert fake_client.message_calls == [(1, "First stable chunk. Second stable chunk.", "HTML")]
 
 
 @pytest.mark.asyncio
