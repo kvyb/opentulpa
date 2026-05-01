@@ -38,7 +38,7 @@ class _FakeObservationContext:
         self.client.observations.append(self.observation)
         self.client.current_trace_id = (
             self.observation.kwargs.get("trace_context", {}) or {}
-        ).get("trace_id")
+        ).get("trace_id") or "generated_trace_id"
         return self.observation
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -158,7 +158,7 @@ def test_langfuse_environment_override_is_normalized_and_installed(monkeypatch) 
     assert callbacks
     assert tracer.environment == "env-langfuse-prod"
     assert os.environ["LANGFUSE_TRACING_ENVIRONMENT"] == "env-langfuse-prod"
-    assert _FakeCallbackHandler.init_kwargs[0]["trace_context"]["trace_id"]
+    assert _FakeCallbackHandler.init_kwargs[0] == {}
 
 
 def test_langfuse_callbacks_skip_without_active_root_span() -> None:
@@ -210,12 +210,10 @@ def test_langfuse_callbacks_attach_to_active_root_span() -> None:
         )
 
     assert callbacks
-    assert _FakeCallbackHandler.init_kwargs == [
-        {"trace_context": {"trace_id": "f" * 32, "parent_span_id": "a" * 16}}
-    ]
+    assert _FakeCallbackHandler.init_kwargs == [{}]
 
 
-def test_langfuse_trace_context_uses_deterministic_trace_id_and_deployment_tag() -> None:
+def test_langfuse_trace_context_uses_active_root_span_and_deployment_tag() -> None:
     client = _FakeLangfuseClient()
     tracer = LangfuseTracer(
         public_key="pk",
@@ -236,10 +234,11 @@ def test_langfuse_trace_context_uses_deterministic_trace_id_and_deployment_tag()
         pass
 
     observation = client.observations[0]
-    assert observation.kwargs["trace_context"]["trace_id"] == "f" * 32
+    assert "trace_context" not in observation.kwargs
     assert observation.kwargs["metadata"]["deployment_tag"] == "carwash-test"
     assert observation.kwargs["metadata"]["environment"] == "carwash-test"
     assert observation.kwargs["metadata"]["turn_mode"] == "interactive"
+    assert observation.kwargs["metadata"]["opentulpa_trace_id"] == "turn_123"
     assert observation.ended is True
     assert "env:carwash-test" in tracer.tags(["interactive"])
 
@@ -388,7 +387,7 @@ def test_tool_span_inherits_active_trace_context() -> None:
             pass
 
     root, tool = client.observations
-    assert root.kwargs["trace_context"]["trace_id"] == "f" * 32
+    assert "trace_context" not in root.kwargs
     assert "trace_context" not in tool.kwargs
 
 

@@ -8,7 +8,7 @@ import logging
 import time
 import zlib
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -84,6 +84,30 @@ def _is_progress_signal(partial: str) -> bool:
     if partial == STREAM_WAIT_SIGNAL:
         return True
     return partial.startswith(STREAM_PROGRESS_PREFIX)
+
+
+def _telegram_observability_context(
+    *,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    chat_id: int,
+    turn_mode: str,
+) -> Any:
+    tracer = getattr(agent_runtime, "_langfuse_tracer", None)
+    trace_context = getattr(tracer, "trace_context", None)
+    if not callable(trace_context):
+        return nullcontext()
+    return trace_context(
+        name="opentulpa.telegram.turn",
+        trace_id=None,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        input={"text": str(text or ""), "chat_id": chat_id, "mode": "telegram"},
+        metadata={"turn_mode": normalize_turn_mode(turn_mode), "chat_id": chat_id},
+        tags=[normalize_turn_mode(turn_mode), "telegram"],
+    )
 
 
 def debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
@@ -332,6 +356,24 @@ async def stream_langgraph_reply_to_telegram(
         customer_id,
         len(str(text or "")),
     )
+    observability_context = _telegram_observability_context(
+        agent_runtime=agent_runtime,
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        chat_id=chat_id,
+        turn_mode=turn_mode,
+    )
+    observability_context.__enter__()
+    observability_closed = False
+
+    def _close_observability_context() -> None:
+        nonlocal observability_closed
+        if observability_closed:
+            return
+        observability_closed = True
+        with suppress(Exception):
+            observability_context.__exit__(None, None, None)
 
     async def _session_has_pending_items() -> bool:
         if interactive_session is None or not hasattr(interactive_session, "has_pending_items"):
@@ -641,6 +683,7 @@ async def stream_langgraph_reply_to_telegram(
         if hasattr(client, "aclose"):
             with suppress(Exception):
                 await client.aclose()
+        _close_observability_context()
         raise
     if next_chunk_task is not None and not next_chunk_task.done():
         next_chunk_task.cancel()
@@ -692,6 +735,7 @@ async def stream_langgraph_reply_to_telegram(
     if hasattr(client, "aclose"):
         with suppress(Exception):
             await client.aclose()
+    _close_observability_context()
     return final_reply, suppressed
 
 

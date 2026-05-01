@@ -187,8 +187,11 @@ async def test_graph_surfaces_tool_call_preamble_as_live_update() -> None:
             sequence.append("tool")
             return {"status": "ok"}
 
-    async def _emit_update(*, text: str, dedupe_key: str = "") -> dict[str, bool]:
+    async def _emit_update(
+        *, text: str, dedupe_key: str = "", thread_id: str | None = None
+    ) -> dict[str, bool]:
         assert dedupe_key.startswith("tool_call_preamble:")
+        assert thread_id == "chat_tool_preamble"
         sequence.append(f"emit:{text}")
         return {"sent": True, "duplicate": False}
 
@@ -245,8 +248,10 @@ async def test_graph_does_not_duplicate_send_owner_update_preamble() -> None:
             tool_calls.append(args)
             return {"sent": True, "duplicate": False}
 
-    async def _emit_update(*, text: str, dedupe_key: str = "") -> dict[str, bool]:
-        del dedupe_key
+    async def _emit_update(
+        *, text: str, dedupe_key: str = "", thread_id: str | None = None
+    ) -> dict[str, bool]:
+        del dedupe_key, thread_id
         emitted.append(text)
         return {"sent": True, "duplicate": False}
 

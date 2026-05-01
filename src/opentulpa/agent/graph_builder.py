@@ -806,7 +806,11 @@ def build_runtime_graph(runtime: Any):
             dedupe_source.encode("utf-8")
         ).hexdigest()[:32]
         try:
-            result = await emitter(text=visible_text, dedupe_key=dedupe_key)
+            result = await emitter(
+                text=visible_text,
+                dedupe_key=dedupe_key,
+                thread_id=str(state.get("thread_id", "")).strip() or None,
+            )
             _log(
                 state,
                 "graph.tools.preamble_update",
