@@ -55,11 +55,10 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "Assistant prose attached to a tool-call step may be surfaced as a live chat update" in text
     assert "do not attach private reasoning or large drafts to tool calls" in text
     assert "call send_owner_update once early" in text
-    assert "live interactive owner/support turns" in text
+    assert "owner/support turns" in text
     assert "use concise attached tool-call prose or send_owner_update" in text
-    assert "For long-running live interactive owner/support work" in text
-    assert "Do not use send_owner_update for workflow setup" in text
-    assert "inbound lead/intake processing" in text
+    assert "For long-running owner/support work" in text
+    assert "inbound lead/intake workflow execution" in text
     assert "concrete result or a plain blocker/failure report" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
@@ -108,9 +107,8 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "attach one concise visible progress sentence" in interactive
     assert "call send_owner_update as the first tool call" in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
-    assert "Do not send interim Telegram updates" in workflow_setup
-    assert "normal proposal/final delivery path" in workflow_setup
-    assert "send_owner_update as the first tool call" not in workflow_setup
+    assert "attach one concise visible progress sentence" in workflow_setup
+    assert "call send_owner_update as the first tool call" in workflow_setup
     assert "track original source_file_ids" in workflow_setup
     assert "do not ask for polling, scanning, or schedule intervals" in workflow_setup
     assert "required_fields are stable ASCII snake_case ids" in workflow_setup
@@ -511,7 +509,7 @@ def test_validate_model_tool_call_rejects_owner_update_during_routine_wake() -> 
     assert "routine_wake" in err
 
 
-def test_validate_model_tool_call_rejects_owner_update_during_workflow_setup() -> None:
+def test_validate_model_tool_call_allows_owner_update_during_workflow_setup() -> None:
     err = _validate_model_tool_call(
         call_name="send_owner_update",
         args={"message": "Still working."},
@@ -520,9 +518,7 @@ def test_validate_model_tool_call_rejects_owner_update_during_workflow_setup() -
         required_args={"send_owner_update": ("message",)},
         forbidden_tool_args={},
     )
-    assert err is not None
-    assert "send_owner_update is only for live owner/support turns" in err
-    assert "workflow_setup" in err
+    assert err is None
 
 
 def test_validate_model_tool_call_rejects_routine_create_during_event_notification() -> None:

@@ -380,7 +380,10 @@ def _validate_model_tool_call(
                 "(example: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."
             )
 
-    if call_name == "send_owner_update" and _normalize_turn_mode(turn_mode) != "interactive":
+    if call_name == "send_owner_update" and _normalize_turn_mode(turn_mode) in {
+        "routine_wake",
+        "event_notification",
+    }:
         normalized_turn_mode = _normalize_turn_mode(turn_mode)
         return (
             "TOOL_VALIDATION_ERROR: send_owner_update is only for live owner/support turns. "
@@ -756,7 +759,7 @@ def build_runtime_graph(runtime: Any):
         message: AIMessage,
         turn_mode: str,
     ) -> None:
-        if turn_mode != "interactive":
+        if turn_mode not in {"interactive", "workflow_setup"}:
             return
         text = _content_to_text(getattr(message, "content", "")).strip()
         if not text:

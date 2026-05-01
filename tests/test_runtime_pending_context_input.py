@@ -238,7 +238,7 @@ async def test_graph_surfaces_tool_call_preamble_as_live_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_does_not_surface_tool_call_preamble_for_workflow_setup() -> None:
+async def test_graph_surfaces_tool_call_preamble_for_workflow_setup() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     sequence: list[str] = []
 
@@ -251,8 +251,9 @@ async def test_graph_does_not_surface_tool_call_preamble_for_workflow_setup() ->
     async def _emit_update(
         *, text: str, dedupe_key: str = "", thread_id: str | None = None
     ) -> dict[str, bool]:
-        del text, dedupe_key, thread_id
-        sequence.append("emit")
+        assert dedupe_key.startswith("tool_call_preamble:")
+        assert thread_id == "chat_workflow_setup"
+        sequence.append(f"emit:{text}")
         return {"sent": True, "duplicate": False}
 
     calls = 0
@@ -291,6 +292,66 @@ async def test_graph_does_not_surface_tool_call_preamble_for_workflow_setup() ->
             "agent_trace_id": "turn_workflow_setup",
         },
         config={"configurable": {"thread_id": "chat_workflow_setup"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Готово."
+    assert sequence == ["emit:Черновик заполнен. Запускаю предпроверку:", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_graph_does_not_surface_tool_call_preamble_for_background_turns() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    sequence: list[str] = []
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            sequence.append("tool")
+            return {"status": "ok"}
+
+    async def _emit_update(
+        *, text: str, dedupe_key: str = "", thread_id: str | None = None
+    ) -> dict[str, bool]:
+        del text, dedupe_key, thread_id
+        sequence.append("emit")
+        return {"sent": True, "duplicate": False}
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="Проверяю входящий запрос:",
+                tool_calls=[{"id": "call_check", "name": "fake_tool", "args": {}}],
+            )
+        return AIMessage(content="Готово.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"fake_tool": _FakeTool()}
+    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="inbound customer message")],
+            "customer_id": "telegram_customer",
+            "thread_id": "chat_customer_ingest",
+            "turn_mode": "event_notification",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_customer_ingest",
+        },
+        config={"configurable": {"thread_id": "chat_customer_ingest"}, "recursion_limit": 8},
     )
 
     assert result["final_response_text"] == "Готово."
@@ -350,7 +411,7 @@ async def test_graph_does_not_duplicate_send_owner_update_preamble() -> None:
             "messages": [HumanMessage(content="работаешь?")],
             "customer_id": "telegram_test",
             "thread_id": "chat_owner_update",
-            "turn_mode": "interactive",
+            "turn_mode": "workflow_setup",
             "turn_status": "running",
             "final_response_text": "",
             "pending_context_summary": "",
