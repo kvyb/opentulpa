@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from langgraph.graph.message import add_messages
+from langgraph.managed.is_last_step import RemainingSteps
 from typing_extensions import TypedDict
 
 from opentulpa.agent.lc_messages import AnyMessage
@@ -44,3 +45,5 @@ class AgentState(TypedDict, total=False):
     workflow_setup_repair_instruction: str
     frozen_prompt_context: dict[str, Any] | None
     frozen_history_projection: dict[str, Any] | None
+    remaining_steps: RemainingSteps
+    loop_limit_status_update_sent: bool
