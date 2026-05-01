@@ -334,7 +334,12 @@ class _LangfuseToolSpan:
             ),
         }
         trace_context = self.tracer.trace_context_payload(self.trace_id)
-        if trace_context:
+        current_trace_id = None
+        current_trace = getattr(client, "get_current_trace_id", None)
+        if callable(current_trace):
+            with suppress(Exception):
+                current_trace_id = current_trace()
+        if trace_context and not current_trace_id:
             kwargs["trace_context"] = trace_context
         with suppress(Exception):
             self._ctx = client.start_as_current_observation(**kwargs)
@@ -509,28 +514,6 @@ class LangfuseTracer:
 
     @contextmanager
     def _observation_context(self, client: Any, kwargs: dict[str, Any]) -> Any:
-        trace_context = kwargs.get("trace_context")
-        start_observation = getattr(client, "start_observation", None)
-        if trace_context and callable(start_observation):
-            observation = start_observation(**kwargs)
-            observation_id = _clean_text(
-                getattr(observation, "id", None) or getattr(observation, "observation_id", None)
-            )
-            token: contextvars.Token[Any] | None = None
-            if observation_id:
-                token = _ACTIVE_OBSERVATION_ID.set(observation_id)
-            try:
-                yield observation
-            finally:
-                if token is not None:
-                    with suppress(Exception):
-                        _ACTIVE_OBSERVATION_ID.reset(token)
-                end = getattr(observation, "end", None)
-                if callable(end):
-                    with suppress(Exception):
-                        end()
-            return
-
         observation_context = client.start_as_current_observation(**kwargs)
         observation = observation_context.__enter__()
         observation_id = _clean_text(
