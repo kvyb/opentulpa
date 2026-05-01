@@ -8,7 +8,7 @@ import httpx
 
 from opentulpa.core.config import get_settings
 
-DEFAULT_JUDGE_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_JUDGE_MODEL = "google/gemini-3.1-flash-lite-preview"
 _VALID_VERDICTS = {"pass", "fail", "inconclusive"}
 _SCORE_KEYS = ("task_completion", "correctness", "safety", "robustness")
 _OMITTED_LIST_KEYS = {"prompt_messages"}

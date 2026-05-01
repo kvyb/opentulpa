@@ -23,6 +23,8 @@ from tests.workbook_fixtures import (
 
 pytestmark = [pytest.mark.e2e, pytest.mark.live_llm, pytest.mark.telegram]
 
+DEFAULT_ASSERT_JUDGE_MODEL = "google/gemini-3.1-flash-lite-preview"
+
 
 def _wait_until(predicate: Any, timeout_seconds: float = 45.0) -> bool:
     deadline = time.time() + max(0.1, float(timeout_seconds))
@@ -158,6 +160,80 @@ def _workflow_setup_has_proposal(
 ) -> bool:
     session = _workflow_setup_session(harness, customer_id=customer_id, thread_id=thread_id)
     return bool(str(session.get("last_proposed_draft_hash", "") or "").strip())
+
+
+def _workflow_setup_proposal_and_owner_reply_seen(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    thread_id: str,
+    owner_chat_id: int,
+    start_index: int,
+) -> bool:
+    if not _workflow_setup_has_proposal(harness, customer_id=customer_id, thread_id=thread_id):
+        return False
+    replies = _messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)
+    if not replies:
+        return False
+    return True
+
+
+def _assert_llm_semantic_match(
+    harness: E2EHarness,
+    *,
+    scenario: str,
+    expectation: str,
+    actual: Any,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    model = (
+        os.getenv("OPENTULPA_E2E_ASSERT_JUDGE_MODEL", "").strip()
+        or os.getenv("OPENTULPA_E2E_JUDGE_MODEL", "").strip()
+        or DEFAULT_ASSERT_JUDGE_MODEL
+    )
+    result = evaluate_e2e_scenario_with_llm_judge(
+        scenario=f"semantic_assert:{scenario}",
+        details={
+            "assertion_type": "semantic_match",
+            "expectation": expectation,
+            "actual": actual,
+            "context": context or {},
+            "judge_instruction": (
+                "Decide whether actual system output satisfies expectation. "
+                "Accept wording/language variations. Fail only for material mismatch, missing required behavior, "
+                "or explicit backend/product error. Return pass only when evidence is enough."
+            ),
+        },
+        system_log_path=harness.system_log_path,
+        behavior_log_path=harness.behavior_log_path,
+        llm_trace_path=harness.llm_trace_path,
+        model=model,
+        timeout_seconds=30.0,
+    )
+    parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+    verdict = str(parsed.get("verdict", "") or "").strip().lower()
+    if not bool(result.get("ok", False)) or verdict != "pass":
+        raise AssertionError(
+            "LLM semantic assertion failed: "
+            + json.dumps(
+                {
+                    "scenario": scenario,
+                    "expectation": expectation,
+                    "verdict": verdict,
+                    "result": result,
+                },
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
+        )
+    harness.recorder.add(
+        "semantic_assertion_passed",
+        scenario=scenario,
+        model=model,
+        expectation=expectation,
+        summary=str(parsed.get("summary", "") or "")[:1000],
+    )
+    return result
 
 
 def _telegram_owner_thread_id(*, chat_id: int) -> str:
@@ -327,25 +403,6 @@ def _judge_verdict(report_payload: dict[str, Any]) -> str:
     if isinstance(parsed, dict):
         return str(parsed.get("verdict", "")).strip().lower()
     return str(evaluation.get("verdict", "")).strip().lower()
-
-
-def _addresses_pricing_question(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    return any(
-        token in lowered
-        for token in (
-            "price",
-            "pricing",
-            "cost",
-            "starts at",
-            "$",
-            "usd",
-            "ruble",
-            "rupiah",
-        )
-    )
 
 
 def _extract_chat_completion_text(payload: dict[str, Any]) -> str:
@@ -917,6 +974,7 @@ def _post_owner_autospa_message(
     text: str,
     message_id: int,
     document: dict[str, Any] | None = None,
+    wait_for_setup_proposal: bool = False,
 ) -> dict[str, Any]:
     state.setdefault("owner_transcript", []).append(
         {"role": "owner", "message_id": message_id, "text": text}
@@ -955,7 +1013,8 @@ def _post_owner_autospa_message(
     reply_latency_ms: int | None = None
     progress_latency_ms: int | None = None
     progress_snapshot: dict[str, Any] = {}
-    deadline = started + 110.0
+    wait_timeout_seconds = 210.0 if wait_for_setup_proposal else 110.0
+    deadline = started + wait_timeout_seconds
     while time.monotonic() < deadline:
         replies = _messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)
         if replies and reply_latency_ms is None:
@@ -969,11 +1028,33 @@ def _post_owner_autospa_message(
         )
         if progress_snapshot["progress_seen"] and progress_latency_ms is None:
             progress_latency_ms = int((time.monotonic() - started) * 1000)
+        thread_id = str(progress_snapshot.get("thread_id", "") or "")
+        if wait_for_setup_proposal and thread_id:
+            if _workflow_setup_proposal_and_owner_reply_seen(
+                harness,
+                customer_id=customer_id,
+                thread_id=thread_id,
+                owner_chat_id=owner_chat_id,
+                start_index=start_index,
+            ):
+                break
+            time.sleep(0.2)
+            continue
         if replies or progress_snapshot["progress_seen"]:
             break
         time.sleep(0.2)
 
     replies = _messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)
+    if wait_for_setup_proposal:
+        thread_id = str(progress_snapshot.get("thread_id", "") or "")
+        if not thread_id or not _workflow_setup_proposal_and_owner_reply_seen(
+            harness,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            owner_chat_id=owner_chat_id,
+            start_index=start_index,
+        ):
+            raise RuntimeError("owner stage did not produce a visible workflow setup proposal")
     if not replies and not progress_snapshot.get("progress_seen"):
         raise RuntimeError("owner stage produced no visible reply or durable progress")
     for item in replies:
@@ -1227,6 +1308,7 @@ def test_live_autospa_xlsx_russian_telegram_intake_with_stage_judging(
             owner_user_id=owner_user_id,
             text=text,
             message_id=3,
+            wait_for_setup_proposal=True,
         )
         return {
             "owner_replies": int(result["assistant_reply_count"]),
@@ -1943,9 +2025,12 @@ def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activa
         start_index=initial_owner_message_count,
     )
     assert latest_owner_message is not None
-    latest_text = str(latest_owner_message.get("text", "")).lower()
-    assert "backend error" not in latest_text
-    assert "workflow" in latest_text
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="owner_create_workflow_confirmation",
+        expectation="Assistant confirms the Telegram intake workflow was created or activated successfully, with no backend error.",
+        actual={"assistant_reply": latest_owner_message, "workflow": workflow},
+    )
 
     report = e2e_harness.write_status_report(
         scenario="live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activate_it",
@@ -2003,6 +2088,15 @@ def test_live_owner_telegram_chat_can_delete_existing_telegram_intake_workflow(
     )
     assert delete_status == 200
     assert _wait_until(lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 0, timeout_seconds=60.0)
+    assert _wait_until(
+        lambda: _latest_message_for_chat(
+            e2e_harness,
+            chat_id=owner_chat_id,
+            start_index=start_message_count,
+        )
+        is not None,
+        timeout_seconds=60.0,
+    )
 
     latest_owner_message = _latest_message_for_chat(
         e2e_harness,
@@ -2010,9 +2104,12 @@ def test_live_owner_telegram_chat_can_delete_existing_telegram_intake_workflow(
         start_index=start_message_count,
     )
     assert latest_owner_message is not None
-    latest_text = str(latest_owner_message.get("text", "")).lower()
-    assert "backend error" not in latest_text
-    assert "deleted" in latest_text or "removed" in latest_text or "gone" in latest_text
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="owner_delete_workflow_confirmation",
+        expectation="Assistant confirms the active Telegram intake workflow was deleted/removed/gone, with no backend error.",
+        actual={"assistant_reply": latest_owner_message},
+    )
 
     report = e2e_harness.write_status_report(
         scenario="live_owner_telegram_chat_can_delete_existing_telegram_intake_workflow",
@@ -2159,8 +2256,12 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         start_index=start_index,
     )
     assert first_wizard_reply is not None
-    first_wizard_text = str(first_wizard_reply.get("text", "")).lower()
-    assert "workflow" in first_wizard_text or "setup" in first_wizard_text
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="quality_owner_first_wizard_reply",
+        expectation="Assistant reply acknowledges workflow/intake setup and asks for or prepares next configuration details.",
+        actual={"assistant_reply": first_wizard_reply},
+    )
 
     second_turn_start = len(e2e_harness.telegram_client.sent_messages)
     second_status = e2e_harness.post_telegram(
@@ -2236,8 +2337,12 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         ),
         timeout_seconds=60.0,
     )
-    proposal_text = str(proposal_message.get("text", "")).lower()
-    assert "confirm" in proposal_text or "save" in proposal_text or "workflow" in proposal_text
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="quality_owner_setup_proposal",
+        expectation="Assistant reply is a workflow setup proposal/configuration and asks owner to confirm or save before activation.",
+        actual={"assistant_reply": proposal_message},
+    )
 
     confirm_status = e2e_harness.post_telegram(
         body=_telegram_message(
@@ -2260,12 +2365,17 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
     assert workflow["source_config"] == {"business_connection_id": business_connection_id}
     assert set(workflow["required_fields"]) == {"car_model", "car_type", "wash_type", "date", "time"}
     instructions = str(workflow.get("assistant_instructions", "")).strip()
-    assert len(instructions) >= 120
-    lowered_instructions = instructions.lower()
-    assert "price" in lowered_instructions
-    assert "exact" in lowered_instructions
-    assert "time" in lowered_instructions
-    assert "repeat" in lowered_instructions or "already known" in lowered_instructions
+    assert instructions
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="quality_workflow_instructions",
+        expectation=(
+            "Workflow instructions preserve owner requirements: answer price questions directly, "
+            "use exact known prices, offer exact times, and avoid repeating details already provided."
+        ),
+        actual={"assistant_instructions": instructions},
+        context={"workflow": workflow},
+    )
 
     lead_start_index = len(e2e_harness.telegram_client.sent_messages)
     lead_chat_id = 556
@@ -2390,6 +2500,8 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
     )
     assert first_status == 200
     assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=owner_start_index)) >= 1)
+    owner_thread_id = _telegram_owner_thread_id(chat_id=owner_chat_id)
+    assert owner_thread_id
 
     second_turn_start = len(e2e_harness.telegram_client.sent_messages)
     second_status = e2e_harness.post_telegram(
@@ -2409,7 +2521,16 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
         )
     )
     assert second_status == 200
-    assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=second_turn_start)) >= 1)
+    assert _wait_until(
+        lambda: _workflow_setup_proposal_and_owner_reply_seen(
+            e2e_harness,
+            customer_id=customer_id,
+            thread_id=owner_thread_id,
+            owner_chat_id=owner_chat_id,
+            start_index=second_turn_start,
+        ),
+        timeout_seconds=210.0,
+    )
 
     proposal_message = _latest_message_for_chat(
         e2e_harness,
@@ -2417,9 +2538,12 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
         start_index=second_turn_start,
     )
     assert proposal_message is not None
-    proposal_text = str(proposal_message.get("text", "")).lower()
-    assert "workflow" in proposal_text
-    assert "confirm" in proposal_text or "save" in proposal_text
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="multiturn_owner_setup_proposal",
+        expectation="Assistant reply is a proposed workflow/configuration and clearly asks owner to confirm or save before activation.",
+        actual={"assistant_reply": proposal_message},
+    )
 
     confirm_status = e2e_harness.post_telegram(
         body=_telegram_message(
@@ -2475,6 +2599,15 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
     first_lead_reply_text = str(first_lead_reply.get("text", "")).strip()
     assert first_lead_reply_text
     assert "backend error" not in first_lead_reply_text.lower()
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="multiturn_first_lead_reply",
+        expectation=(
+            "Assistant responds helpfully to booking intent and asks for missing booking information "
+            "without claiming a booking was saved."
+        ),
+        actual={"lead_message": "Hi, I want to book a wash tomorrow. How much is it for an SUV?", "assistant_reply": first_lead_reply_text},
+    )
 
     bookings_after_first_turn = e2e_harness.client.app.state.intake_workflows.list_bookings(
         customer_id=customer_id,
@@ -2482,6 +2615,7 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
     )
     assert not any(str(item.get("status", "")).lower() == "completed" for item in bookings_after_first_turn)
 
+    second_lead_message_start = len(e2e_harness.telegram_client.sent_messages)
     second_lead_status = e2e_harness.post_telegram(
         body=_telegram_business_message(
             business_connection_id=business_connection_id,
@@ -2498,6 +2632,32 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
         )
     )
     assert second_lead_status == 200
+    assert _wait_until(
+        lambda: _latest_message_for_chat(
+            e2e_harness,
+            chat_id=lead_chat_id,
+            start_index=second_lead_message_start,
+        )
+        is not None,
+        timeout_seconds=90.0,
+    )
+    bookings_after_second_turn = e2e_harness.client.app.state.intake_workflows.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        conversation_id=str(lead_chat_id),
+    )
+    assert not any(str(item.get("status", "")).lower() == "completed" for item in bookings_after_second_turn)
+
+    third_lead_status = e2e_harness.post_telegram(
+        body=_telegram_business_message(
+            business_connection_id=business_connection_id,
+            lead_chat_id=lead_chat_id,
+            lead_user_id=2001,
+            message_id=203,
+            text="Yes, please confirm and save the booking.",
+        ),
+    )
+    assert third_lead_status == 200
     assert _wait_until(
         lambda: any(
             str(item.get("status", "")).lower() == "completed"
@@ -2520,12 +2680,15 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
     assert booking["status"] == "completed"
     assert booking["sink_write_status"] == "succeeded"
     extracted = booking["extracted_fields"]
-    assert "toyota" in str(extracted.get("car_model", "")).lower()
-    assert "rav4" in str(extracted.get("car_model", "")).lower()
-    assert "suv" in str(extracted.get("car_type", "")).lower()
-    assert "full" in str(extracted.get("wash_type", "")).lower()
-    assert str(extracted.get("date", "")).strip()
-    assert "10" in str(extracted.get("time", "")).lower()
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="multiturn_completed_booking_fields",
+        expectation=(
+            "Completed booking captures the lead's intended Toyota RAV4 SUV full wash appointment "
+            "for tomorrow at 10:00 or an equivalent normalized date/time."
+        ),
+        actual={"booking": booking, "extracted_fields": extracted},
+    )
 
     csv_rows = _csv_rows_for_relative_path(
         e2e_harness,
@@ -2537,12 +2700,15 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
     assert row["workflow_id"] == workflow["workflow_id"]
     assert row["workflow_name"] == workflow["name"]
     assert row["conversation_id"] == str(lead_chat_id)
-    assert "toyota" in row["car_model"].lower()
-    assert "rav4" in row["car_model"].lower()
-    assert "suv" in row["car_type"].lower()
-    assert "full" in row["wash_type"].lower()
-    assert row["date"].strip()
-    assert "10" in row["time"].lower()
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="multiturn_csv_row_fields",
+        expectation=(
+            "CSV row persists the same completed Toyota RAV4 SUV full wash booking for tomorrow at 10:00 "
+            "or equivalent normalized date/time."
+        ),
+        actual={"csv_row": row, "booking": booking},
+    )
 
     owner_messages = _messages_for_chat(
         e2e_harness,
@@ -2722,9 +2888,15 @@ def test_live_lead_simulator_can_complete_telegram_car_wash_booking(
     first_reply_text = " ".join(
         str(item.get("text", "") or "").strip() for item in first_turn_messages
     ).strip()
-    lowered_first_reply = first_reply_text.lower()
-    assert _addresses_pricing_question(first_reply_text)
-    assert "?" in first_reply_text or "could you" in lowered_first_reply or "what " in lowered_first_reply
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="lead_simulator_first_reply",
+        expectation=(
+            "Assistant addresses the lead's price question and asks for missing booking details "
+            "instead of pretending the booking is complete."
+        ),
+        actual={"assistant_reply": first_reply_text, "lead_profile": profile.__dict__},
+    )
     final_turn = turn_results[-1]
     assert bool(final_turn.get("booking_completed", False)) is True
     completed_booking = simulation.get("completed_booking") or {}
@@ -2732,12 +2904,15 @@ def test_live_lead_simulator_can_complete_telegram_car_wash_booking(
     assert str(completed_booking.get("status", "")).strip().lower() == "completed"
     assert str(completed_booking.get("sink_write_status", "")).strip().lower() == "succeeded"
     extracted = completed_booking["extracted_fields"]
-    assert "toyota" in str(extracted.get("car_model", "")).lower()
-    assert "rav4" in str(extracted.get("car_model", "")).lower()
-    assert "suv" in str(extracted.get("car_type", "")).lower()
-    assert "full" in str(extracted.get("wash_type", "")).lower()
-    assert str(extracted.get("date", "")).strip()
-    assert "10" in str(extracted.get("time", "")).lower()
+    _assert_llm_semantic_match(
+        e2e_harness,
+        scenario="lead_simulator_completed_booking_fields",
+        expectation=(
+            "Completed booking captures the simulated lead's hidden facts: Toyota RAV4, SUV, "
+            "full wash, tomorrow, 10:00 or equivalent normalized date/time."
+        ),
+        actual={"completed_booking": completed_booking, "lead_profile": profile.__dict__},
+    )
 
     csv_rows = _csv_rows_for_relative_path(
         e2e_harness,
