@@ -92,6 +92,23 @@ def _workflow_setup_no_progress_retry_limit(runtime: Any) -> int:
     return min(2, _graph_retry_budget(runtime))
 
 
+LOOP_LIMIT_STATUS_REMAINING_STEPS = 3
+LOOP_LIMIT_STATUS_UPDATE_TEXT = (
+    "Still working, but this turn is near its step limit. "
+    "I’ll stop tool work and send the current result or blocker now."
+)
+LOOP_LIMIT_FINAL_STATUS_TEXT = (
+    "I hit the turn step limit while working. Current status: I was still using tools "
+    "and could not safely continue in this turn. Send a short follow-up and I’ll resume "
+    "from the latest state."
+)
+LOOP_LIMIT_REPAIR_INSTRUCTION = (
+    "LOOP_LIMIT_APPROACHING: This turn is near its graph step limit. Do not call more tools. "
+    "Write a concise user-facing status update now with what is done, the current blocker, "
+    "or the next exact step."
+)
+
+
 def _build_workflow_setup_prompt_context(
     runtime: Any,
     *,
@@ -380,11 +397,15 @@ def _validate_model_tool_call(
                 "(example: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."
             )
 
-    if call_name == "send_owner_update" and _normalize_turn_mode(turn_mode) == "routine_wake":
+    if call_name == "send_owner_update" and _normalize_turn_mode(turn_mode) in {
+        "routine_wake",
+        "event_notification",
+    }:
+        normalized_turn_mode = _normalize_turn_mode(turn_mode)
         return (
             "TOOL_VALIDATION_ERROR: send_owner_update is only for live owner/support turns. "
-            "For routine_wake, put the user-visible routine notification or blocker summary "
-            "in the final assistant response so the wake orchestrator can deliver it."
+            f"For {normalized_turn_mode}, put the user-visible notification, proposal, or blocker "
+            "summary in the final assistant response so the owning orchestrator can deliver it."
         )
 
     if call_name in {"tulpa_read_file", "tulpa_write_file", "tulpa_validate_file", "tulpa_file_send"}:
@@ -749,6 +770,77 @@ def build_runtime_graph(runtime: Any):
         payload.update(fields)
         log_event(event=event, **payload)
 
+    def _remaining_steps(state: AgentState) -> int | None:
+        try:
+            remaining = int(state.get("remaining_steps", 0))
+        except Exception:
+            return None
+        return remaining if remaining > 0 else None
+
+    def _loop_limit_near(state: AgentState) -> bool:
+        remaining = _remaining_steps(state)
+        return remaining is not None and remaining <= LOOP_LIMIT_STATUS_REMAINING_STEPS
+
+    async def _emit_loop_limit_status_update(
+        state: AgentState,
+        *,
+        turn_mode: str,
+    ) -> bool:
+        if turn_mode not in {"interactive", "workflow_setup"}:
+            return False
+        if bool(state.get("loop_limit_status_update_sent")):
+            return False
+        if not _loop_limit_near(state):
+            return False
+        emitter = getattr(runtime, "emit_interactive_update", None)
+        if not callable(emitter):
+            _log(
+                state,
+                "graph.loop_limit_status_update",
+                sent=False,
+                reason="missing_interactive_emitter",
+                remaining_steps=_remaining_steps(state),
+                turn_mode=turn_mode,
+            )
+            return False
+        try:
+            result = await emitter(
+                text=LOOP_LIMIT_STATUS_UPDATE_TEXT,
+                dedupe_key=(
+                    "loop_limit_status:"
+                    + hashlib.sha256(
+                        "|".join(
+                            [
+                                str(state.get("agent_trace_id", "")).strip(),
+                                str(state.get("thread_id", "")).strip(),
+                            ]
+                        ).encode("utf-8")
+                    ).hexdigest()[:32]
+                ),
+                thread_id=str(state.get("thread_id", "")).strip() or None,
+            )
+            sent = bool(isinstance(result, dict) and result.get("sent"))
+            _log(
+                state,
+                "graph.loop_limit_status_update",
+                sent=sent,
+                duplicate=bool(isinstance(result, dict) and result.get("duplicate")),
+                remaining_steps=_remaining_steps(state),
+                turn_mode=turn_mode,
+            )
+            return sent
+        except Exception as exc:
+            _log(
+                state,
+                "graph.loop_limit_status_update",
+                sent=False,
+                reason="emit_failed",
+                error=str(exc)[:500],
+                remaining_steps=_remaining_steps(state),
+                turn_mode=turn_mode,
+            )
+            return False
+
     async def _emit_tool_call_preamble_update(
         state: AgentState,
         *,
@@ -806,7 +898,11 @@ def build_runtime_graph(runtime: Any):
             dedupe_source.encode("utf-8")
         ).hexdigest()[:32]
         try:
-            result = await emitter(text=visible_text, dedupe_key=dedupe_key)
+            result = await emitter(
+                text=visible_text,
+                dedupe_key=dedupe_key,
+                thread_id=str(state.get("thread_id", "")).strip() or None,
+            )
             _log(
                 state,
                 "graph.tools.preamble_update",
@@ -870,6 +966,10 @@ def build_runtime_graph(runtime: Any):
             latest_user_chars=len(latest_user),
             turn_mode=turn_mode,
             injected_user_messages=len(injected_messages),
+        )
+        loop_limit_status_sent = await _emit_loop_limit_status_update(
+            state,
+            turn_mode=turn_mode,
         )
         cached_query = str(state.get("active_skill_query", "")).strip()
         cached_names = state.get("active_skill_names", []) or []
@@ -1298,6 +1398,9 @@ def build_runtime_graph(runtime: Any):
         ]
         dynamic_late_messages: list[AnyMessage] = []
         dynamic_late_sections: list[str] = []
+        if _loop_limit_near(state):
+            dynamic_late_messages.append(SystemMessage(content=LOOP_LIMIT_REPAIR_INSTRUCTION))
+            dynamic_late_sections.append("loop_limit_repair")
         if turn_mode == "workflow_setup":
             workflow_setup_context = _build_workflow_setup_prompt_context(
                 runtime,
@@ -1418,6 +1521,8 @@ def build_runtime_graph(runtime: Any):
             "workflow_setup_repair_instruction": "",
             **prompt_context_update,
         }
+        if loop_limit_status_sent:
+            update["loop_limit_status_update_sent"] = True
         if skill_query:
             update["active_skill_query"] = skill_query
             update["active_skill_names"] = skill_names
@@ -1427,6 +1532,22 @@ def build_runtime_graph(runtime: Any):
             update["active_invoked_skill_names"] = invoked_skill_names
             update["active_skill_context"] = invoked_skill_context
         has_tool_calls = isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
+        if has_tool_calls and _loop_limit_near(state):
+            _log(
+                state,
+                "graph.loop_limit_tool_call_blocked",
+                tool_call_count=len(getattr(response, "tool_calls", []) or []),
+                remaining_steps=_remaining_steps(state),
+                turn_mode=turn_mode,
+            )
+            update["messages"] = [
+                *injected_messages,
+                response,
+                AIMessage(content=LOOP_LIMIT_FINAL_STATUS_TEXT),
+            ]
+            update["tool_validation_passed"] = False
+            update["loop_limit_status_update_sent"] = True
+            return Command(update=update, goto="finalize_turn")
         goto: Literal["validate_tools", "finalize_turn"] = (
             "validate_tools" if has_tool_calls else "finalize_turn"
         )
@@ -1469,7 +1590,9 @@ def build_runtime_graph(runtime: Any):
                 return Command(update=update, goto="agent")
         return Command(update=update, goto=goto)
 
-    async def validate_tool_calls_node(state: AgentState) -> Command[Literal["tools", "agent"]]:
+    async def validate_tool_calls_node(
+        state: AgentState,
+    ) -> Command[Literal["tools", "agent", "finalize_turn"]]:
         messages = state.get("messages", [])
         if not messages:
             return Command(update={"tool_validation_passed": True}, goto="tools")
@@ -1486,13 +1609,30 @@ def build_runtime_graph(runtime: Any):
         validation_errors: list[ToolMessage] = []
         latest_user = _latest_user_text(messages)
         prior_assistant = ""
+        turn_mode = _normalize_turn_mode(state.get("turn_mode"))
+        if _loop_limit_near(state):
+            _log(
+                state,
+                "graph.loop_limit_tool_call_blocked",
+                tool_call_count=len(last.tool_calls),
+                remaining_steps=_remaining_steps(state),
+                turn_mode=turn_mode,
+            )
+            return Command(
+                update={
+                    "messages": [AIMessage(content=LOOP_LIMIT_FINAL_STATUS_TEXT)],
+                    "tool_validation_passed": False,
+                    "turn_status": "running",
+                    "loop_limit_status_update_sent": True,
+                },
+                goto="finalize_turn",
+            )
         for msg in reversed(messages[:-1]):
             if isinstance(msg, AIMessage):
                 candidate = _content_to_text(getattr(msg, "content", "")).strip()
                 if candidate:
                     prior_assistant = candidate
                     break
-        turn_mode = _normalize_turn_mode(state.get("turn_mode"))
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))

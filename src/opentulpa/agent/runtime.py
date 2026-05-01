@@ -4224,9 +4224,10 @@ class OpenTulpaLangGraphRuntime:
         *,
         text: str,
         dedupe_key: str = "",
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
-        thread_id = self.get_active_thread_id()
-        if not thread_id:
+        resolved_thread_id = str(thread_id or "").strip() or self.get_active_thread_id()
+        if not resolved_thread_id:
             return {"ok": False, "sent": False, "reason": "missing_thread_id"}
         safe_text = str(text or "").strip()
         if not safe_text:
@@ -4242,10 +4243,10 @@ class OpenTulpaLangGraphRuntime:
             return {"ok": False, "sent": False, "reason": "interactive_update_unavailable"}
 
         async with lock:
-            sender = senders.get(thread_id)
+            sender = senders.get(resolved_thread_id)
             if sender is None:
                 return {"ok": False, "sent": False, "reason": "interactive_update_unavailable"}
-            sent_keys = sent_keys_by_thread.setdefault(thread_id, set())
+            sent_keys = sent_keys_by_thread.setdefault(resolved_thread_id, set())
             if key in sent_keys:
                 return {"ok": True, "sent": False, "duplicate": True}
             sent_keys.add(key)
@@ -4257,10 +4258,10 @@ class OpenTulpaLangGraphRuntime:
             sent = bool(result.get("sent", True)) if isinstance(result, dict) else bool(result)
         except Exception as exc:
             async with lock:
-                sent_keys_by_thread.setdefault(thread_id, set()).discard(key)
+                sent_keys_by_thread.setdefault(resolved_thread_id, set()).discard(key)
             self.log_behavior_event(
                 event="interactive_owner_update_failed",
-                thread_id=thread_id,
+                thread_id=resolved_thread_id,
                 customer_id=self.get_active_customer_id(),
                 error=type(exc).__name__,
             )
@@ -4268,12 +4269,12 @@ class OpenTulpaLangGraphRuntime:
 
         if not sent:
             async with lock:
-                sent_keys_by_thread.setdefault(thread_id, set()).discard(key)
+                sent_keys_by_thread.setdefault(resolved_thread_id, set()).discard(key)
             return {"ok": False, "sent": False, "reason": "send_failed"}
 
         self.log_behavior_event(
             event="interactive_owner_update_sent",
-            thread_id=thread_id,
+            thread_id=resolved_thread_id,
             customer_id=self.get_active_customer_id(),
             chars=len(safe_text),
         )

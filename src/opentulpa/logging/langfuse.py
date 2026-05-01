@@ -572,11 +572,10 @@ class LangfuseTracer:
             "as_type": "span",
             "name": _clean_text(name) or "opentulpa.trace",
             "input": _json_safe(input),
-            "metadata": self.base_metadata(metadata),
+            "metadata": self.base_metadata(
+                {**dict(metadata or {}), "opentulpa_trace_id": _clean_text(trace_id) or None}
+            ),
         }
-        trace_context = self.trace_context_payload(trace_id)
-        if trace_context:
-            kwargs["trace_context"] = trace_context
         try:
             observation_context = self._observation_context(client, kwargs)
             observation = observation_context.__enter__()
@@ -628,11 +627,7 @@ class LangfuseTracer:
             if not active_observation_id:
                 logger.debug("Skipping Langfuse callback handler without active root observation.")
                 return []
-            trace_context = self.trace_context_payload(trace_id)
-            if trace_context:
-                trace_context = {**trace_context, "parent_span_id": active_observation_id}
-            kwargs = {"trace_context": trace_context} if trace_context else {}
-            return [callback_cls(**kwargs)]
+            return [callback_cls()]
         except Exception:
             logger.exception("Failed to build Langfuse callback handler.")
             return []

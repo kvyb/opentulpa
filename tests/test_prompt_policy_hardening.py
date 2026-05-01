@@ -55,15 +55,18 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "Assistant prose attached to a tool-call step may be surfaced as a live chat update" in text
     assert "do not attach private reasoning or large drafts to tool calls" in text
     assert "call send_owner_update once early" in text
-    assert "live owner/support turns" in text
+    assert "owner/support turns" in text
     assert "use concise attached tool-call prose or send_owner_update" in text
-    assert "For long-running live owner/support work" in text
-    assert "Do not use send_owner_update for inbound lead/intake processing" in text
+    assert "For long-running owner/support work" in text
+    assert "inbound lead/intake workflow execution" in text
     assert "concrete result or a plain blocker/failure report" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
     assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text
     assert "restate the needed facts in the reply" in text
+    assert "verify current docs/schema for the exact model" in text
+    assert "change only the failing parameter or step" in text
+    assert "Never embed secrets in generated files or tool arguments" in text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
@@ -507,6 +510,18 @@ def test_validate_model_tool_call_rejects_owner_update_during_routine_wake() -> 
     assert err is not None
     assert "send_owner_update is only for live owner/support turns" in err
     assert "routine_wake" in err
+
+
+def test_validate_model_tool_call_allows_owner_update_during_workflow_setup() -> None:
+    err = _validate_model_tool_call(
+        call_name="send_owner_update",
+        args={"message": "Still working."},
+        latest_user_text="Let's build the intake workflow.",
+        turn_mode="workflow_setup",
+        required_args={"send_owner_update": ("message",)},
+        forbidden_tool_args={},
+    )
+    assert err is None
 
 
 def test_validate_model_tool_call_rejects_routine_create_during_event_notification() -> None:
