@@ -67,6 +67,9 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("C15", "For tulpa_run_terminal and routine implementation commands, always use script/file paths relative to working_dir (example: with working_dir=tulpa_stuff use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."),
             ("C16", "Prefer dedicated Tulpa file tools over tulpa_run_terminal for reading, writing, validating, reloading, or sending files."),
             ("C17", "If a tool result contains facts needed for the answer, restate the needed facts in the reply instead of assuming raw tool output will remain available later."),
+            ("C18", "When using any external API, first verify current docs/schema for the exact model, endpoint, request fields, response shape, and file/path requirements before writing or running code."),
+            ("C19", "After any tool/API failure, read the exact error, change only the failing parameter or step, and retry once with evidence; if still blocked, stop and report the blocker instead of guessing new APIs or models."),
+            ("C20", "Never embed secrets in generated files or tool arguments; read keys from environment variables and redact secret values from logs, traces, and printed payloads."),
         ],
     ),
     (

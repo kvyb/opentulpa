@@ -64,6 +64,9 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "answer that status question directly" in text
     assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text
     assert "restate the needed facts in the reply" in text
+    assert "verify current docs/schema for the exact model" in text
+    assert "change only the failing parameter or step" in text
+    assert "Never embed secrets in generated files or tool arguments" in text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
