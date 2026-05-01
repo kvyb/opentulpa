@@ -33,6 +33,7 @@ def register_intake_workflow_routes(
                 required_fields=body.get("required_fields") if isinstance(body.get("required_fields"), list) else [],
                 field_guidance=body.get("field_guidance") if isinstance(body.get("field_guidance"), dict) else None,
                 assistant_instructions=str(body.get("assistant_instructions", "")).strip(),
+                business_facts=body.get("business_facts") if isinstance(body.get("business_facts"), dict) else None,
                 knowledge_file_ids=body.get("knowledge_file_ids") if isinstance(body.get("knowledge_file_ids"), list) else None,
                 sink_type=str(body.get("sink_type", "")).strip(),
                 sink_config=body.get("sink_config") if isinstance(body.get("sink_config"), dict) else None,

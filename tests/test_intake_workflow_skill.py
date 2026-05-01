@@ -15,6 +15,10 @@ def test_build_intake_workflow_skill_uses_shared_template_for_instagram_and_tele
         "required_fields": ["name", "time"],
         "field_guidance": {"time": "Confirm the final appointment time explicitly."},
         "assistant_instructions": "Be concise and do not promise unavailable slots.",
+        "business_facts": {
+            "prices": {"small_wash": "1000 RUB"},
+            "hours": "Daily 10:00-20:00",
+        },
         "knowledge_file_ids": [],
         "sink_type": "local_csv",
         "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
@@ -40,6 +44,9 @@ def test_build_intake_workflow_skill_uses_shared_template_for_instagram_and_tele
         payload = json.loads(skill["supporting_files"]["workflow.json"])
         assert payload["intent_description"] == "Handle customer appointment requests."
         assert payload["required_fields"] == ["name", "time"]
+        assert payload["business_facts"]["prices"]["small_wash"] == "1000 RUB"
+        assert "## Owner-Provided Business Facts" in markdown
+        assert "1000 RUB" in markdown
 
     assert "Instagram DMs" in str(instagram["skill_markdown"])
     assert "Telegram Business DMs" in str(telegram["skill_markdown"])

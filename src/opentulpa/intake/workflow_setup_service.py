@@ -76,7 +76,7 @@ def _merge_draft(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         safe_key = str(key or "").strip()
         if not safe_key:
             continue
-        if safe_key == "field_guidance" and isinstance(value, dict):
+        if safe_key in {"field_guidance", "business_facts"} and isinstance(value, dict):
             merged[safe_key] = dict(value)
             continue
         if safe_key == "sink_config" and isinstance(value, dict):
@@ -164,6 +164,7 @@ class WorkflowSetupService:
                     "required_fields": [],
                     "field_guidance": {},
                     "assistant_instructions": "",
+                    "business_facts": {},
                     "knowledge_file_ids": [],
                     "sink_type": "",
                     "sink_config": {},
@@ -316,6 +317,7 @@ class WorkflowSetupService:
                     "assistant_instructions": str(
                         workflow_snapshot.get("assistant_instructions", "") or ""
                     ),
+                    "business_facts": _safe_dict(workflow_snapshot.get("business_facts")),
                     "knowledge_file_ids": [
                         str(item or "").strip()
                         for item in _safe_list(workflow_snapshot.get("knowledge_file_ids"))
@@ -425,6 +427,7 @@ class WorkflowSetupService:
                 required_fields=_safe_list(draft.get("required_fields")),
                 field_guidance=_safe_dict(draft.get("field_guidance")),
                 assistant_instructions=str(draft.get("assistant_instructions", "") or ""),
+                business_facts=_safe_dict(draft.get("business_facts")),
                 knowledge_file_ids=_safe_list(draft.get("knowledge_file_ids")),
                 sink_type=str(draft.get("sink_type", "") or ""),
                 sink_config=_safe_dict(draft.get("sink_config")),

@@ -606,6 +606,11 @@ async def test_decide_intake_workflow_compacts_prompt_payload() -> None:
             "intent_description": long_text,
             "required_fields": ["day", "time", "car_type", "wash_type"],
             "field_guidance": {"wash_type": long_text},
+            "business_facts": {
+                "prices": {"basic_wash": "1000 RUB"},
+                "long_note": long_text,
+            },
+            "workflow_skill": "Owner-Provided Business Facts\nbasic_wash costs 1000 RUB\n" + long_text,
             "sink_type": "google_sheets_composio",
             "sink_config": {
                 "tool_slug": "GOOGLESHEETS_ADD_ROW",
@@ -637,6 +642,9 @@ async def test_decide_intake_workflow_compacts_prompt_payload() -> None:
     assert human_text.count('"sender_role"') == 6
     assert ('"text": "' + ("x" * 301)) not in human_text
     assert human_text.count('"phase"') == 2
+    assert '"business_facts": {"prices":' in human_text
+    assert "1000 RUB" in human_text
+    assert "Owner-Provided Business Facts" in human_text
     assert '"static_argument_keys": ["spreadsheet_id"]' in human_text
     assert '"static_arguments": {"spreadsheet_id": "' in human_text
 
