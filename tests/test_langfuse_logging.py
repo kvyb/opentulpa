@@ -42,6 +42,7 @@ class _FakeObservationContext:
         return self.observation
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.observation.end()
         self.client.current_trace_id = None
         return False
 
@@ -366,6 +367,29 @@ def test_tool_span_captures_status_and_side_effects() -> None:
     assert update["metadata"]["side_effect_count"] == 1
     assert update["metadata"]["side_effects"][0]["payload"]["authorization"] == "[redacted]"
     assert update["output"]["token"] == "[redacted]"
+
+
+def test_tool_span_inherits_active_trace_context() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=client,
+    )
+
+    with tracer.trace_context(
+        name="opentulpa.turn.interactive",
+        trace_id="turn_1",
+        user_id="cust_1",
+        session_id="thread_1",
+    ):
+        with tracer.tool_span(trace_id="turn_1", tool_name="send_message"):
+            pass
+
+    root, tool = client.observations
+    assert root.kwargs["trace_context"]["trace_id"] == "f" * 32
+    assert "trace_context" not in tool.kwargs
 
 
 def test_tool_span_marks_errors() -> None:
