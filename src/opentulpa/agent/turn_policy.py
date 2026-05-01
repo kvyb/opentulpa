@@ -37,7 +37,7 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
                 "Ask one high-value setup question at a time.\n"
                 "If uploaded files are part of the workflow, track original source_file_ids and prepare them with business_knowledge_index.\n"
                 "Before proposing a file-grounded workflow, query the business knowledge for representative facts and run setup preflight so unsupported or weak files are caught.\n"
-                "If file inspection, knowledge prep, or workflow compilation will take multiple tool calls, attach one concise visible progress sentence to the tool-call step or call send_owner_update as the first tool call before continuing.\n"
+                "Do not send interim Telegram updates from attached tool-call prose or send_owner_update; workflow setup should publish only through its normal proposal/final delivery path.\n"
                 "For telegram_business_dm workflows, do not ask for polling, scanning, or schedule intervals; inbound Telegram Business messages trigger the workflow directly.\n"
                 "Synthesize a concise intent_description from the user's stated goal instead of asking for it as a form field when the goal is already clear.\n"
                 "Do not add an intent pre-filter by default; set source_config.intent_match_required=true only if the owner explicitly asks to handle only messages matching the stated intent.\n"
