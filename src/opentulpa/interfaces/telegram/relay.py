@@ -100,7 +100,7 @@ def _telegram_observability_context(
     if not callable(trace_context):
         return nullcontext()
     return trace_context(
-        name="opentulpa.telegram.turn",
+        name="opentulpa.interactive.turn",
         trace_id=None,
         user_id=customer_id,
         session_id=thread_id,

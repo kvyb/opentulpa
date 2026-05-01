@@ -285,6 +285,56 @@ def test_record_generation_captures_usage_and_cost() -> None:
     assert observation.kwargs["cost_details"] == {"input": 0.01, "output": 0.02, "total": 0.03}
 
 
+def test_trace_context_rolls_up_child_generation_usage_and_cost() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=client,
+    )
+
+    with tracer.trace_context(
+        name="opentulpa.interactive.turn",
+        trace_id="turn_1",
+        user_id="cust_1",
+        session_id="thread_1",
+    ):
+        tracer.record_generation(
+            {
+                "model_name": "model-a",
+                "call_site": "graph_agent",
+                "trace_id": "turn_1",
+                "native_tokens_prompt": 10,
+                "native_tokens_completion": 5,
+                "native_tokens_total": 15,
+                "native_cost_prompt_usd": 0.01,
+                "native_cost_completion_usd": 0.02,
+                "native_cost_usd": 0.03,
+            }
+        )
+        tracer.record_generation(
+            {
+                "model_name": "model-b",
+                "call_site": "tool_repair",
+                "trace_id": "turn_1",
+                "native_tokens_prompt": 7,
+                "native_tokens_completion": 3,
+                "native_tokens_total": 10,
+                "native_cost_prompt_usd": 0.004,
+                "native_cost_completion_usd": 0.006,
+                "native_cost_usd": 0.01,
+            }
+        )
+
+    root = client.observations[0]
+    assert root.kwargs["name"] == "opentulpa.interactive.turn"
+    assert root.updates[-1]["usage_details"] == {"input": 17, "output": 8, "total": 25}
+    assert root.updates[-1]["cost_details"] == pytest.approx(
+        {"input": 0.014, "output": 0.026, "total": 0.04}
+    )
+
+
 def test_record_generation_maps_openrouter_upstream_cost_details() -> None:
     client = _FakeLangfuseClient()
     tracer = LangfuseTracer(

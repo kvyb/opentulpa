@@ -649,7 +649,7 @@ def test_telegram_observability_context_maps_customer_and_thread_to_langfuse_kwa
 
     assert runtime.calls == [
         {
-            "name": "opentulpa.telegram.turn",
+            "name": "opentulpa.interactive.turn",
             "trace_id": None,
             "user_id": "telegram_1",
             "session_id": "chat_1",

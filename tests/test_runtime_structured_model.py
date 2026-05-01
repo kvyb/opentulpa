@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,15 @@ class _StructuredModel:
     def with_structured_output(self, _schema: type[BaseModel]) -> _StructuredRunner:
         self.runner = _StructuredRunner(self._payload)
         return self.runner
+
+
+class _RecordingTracer:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def trace_context(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return nullcontext()
 
 
 class _FallbackResponse:
@@ -310,6 +320,8 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     runtime._model = model
     runtime._wake_execution_model = model
     runtime._wake_execution_model_name = "google/gemini-3-flash-preview"
+    tracer = _RecordingTracer()
+    runtime._langfuse_tracer = tracer
 
     decision = await runtime.decide_intake_workflow(
         customer_id="telegram_123",
@@ -355,6 +367,13 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     assert "needs_business_knowledge=true" in system_text
     assert "If workflow.knowledge_file_ids is empty, never set needs_business_knowledge=true" in system_text
     assert "business_knowledge_query to one concise natural language query" in system_text
+    assert tracer.calls[0]["name"] == "opentulpa.intake.turn"
+    assert tracer.calls[0]["input"] == {
+        "workflow_id": "iwf_123",
+        "conversation_id": "conv_1",
+        "incoming_id": "latest",
+    }
+    assert tracer.calls[0]["metadata"]["incoming_id"] == "latest"
 
 
 @pytest.mark.asyncio

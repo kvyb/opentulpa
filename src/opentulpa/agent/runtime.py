@@ -4474,17 +4474,22 @@ class OpenTulpaLangGraphRuntime:
                 )
         if decision is None:
             with self._observability_trace_context(
-                name="opentulpa.intake.decision",
+                name="opentulpa.intake.turn",
                 trace_id=structured_trace_id,
                 customer_id=customer_id,
                 thread_id=structured_thread_id,
-                input={"workflow_id": workflow_id, "conversation_id": conversation_id},
+                input={
+                    "workflow_id": workflow_id,
+                    "conversation_id": conversation_id,
+                    "incoming_id": latest_inbound_id,
+                },
                 metadata={
                     "turn_mode": "routine_wake",
                     "prompt_mode": "structured_intake",
                     "workflow_id": workflow_id,
                     "conversation_id": conversation_id,
                     "latest_inbound_message_id": latest_inbound_id,
+                    "incoming_id": latest_inbound_id,
                 },
                 tags=["intake", "routine_wake"],
             ):
@@ -4515,6 +4520,7 @@ class OpenTulpaLangGraphRuntime:
                         "workflow_id": workflow_id,
                         "conversation_id": conversation_id,
                         "latest_inbound_message_id": latest_inbound_id,
+                        "incoming_id": latest_inbound_id,
                     },
                 )
         if decision is None or not isinstance(decision, _IntakeWorkflowDecision):

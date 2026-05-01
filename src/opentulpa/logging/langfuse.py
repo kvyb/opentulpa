@@ -30,6 +30,9 @@ _ACTIVE_OBSERVATION_ID: contextvars.ContextVar[str | None] = contextvars.Context
     "opentulpa_langfuse_active_observation_id",
     default=None,
 )
+_ACTIVE_TRACE_USAGE: contextvars.ContextVar[tuple[_TraceUsageAccumulator, ...]] = (
+    contextvars.ContextVar("opentulpa_langfuse_active_trace_usage", default=())
+)
 
 
 class _NoopContext:
@@ -295,6 +298,18 @@ def _record_metadata(record: dict[str, Any]) -> dict[str, Any]:
         "usage",
     }
     return {key: _json_safe(value) for key, value in record.items() if key not in excluded}
+
+
+@dataclass
+class _TraceUsageAccumulator:
+    usage: dict[str, int] = field(default_factory=dict)
+    cost: dict[str, float] = field(default_factory=dict)
+
+    def add(self, *, usage: dict[str, int], cost: dict[str, float]) -> None:
+        for key, value in usage.items():
+            self.usage[key] = int(self.usage.get(key, 0)) + int(value)
+        for key, value in cost.items():
+            self.cost[key] = float(self.cost.get(key, 0.0)) + float(value)
 
 
 @dataclass
@@ -591,9 +606,23 @@ class LangfuseTracer:
         )
         with suppress(Exception):
             attributes_context.__enter__()
+        usage_accumulator = _TraceUsageAccumulator()
+        usage_token = _ACTIVE_TRACE_USAGE.set(
+            (*_ACTIVE_TRACE_USAGE.get(), usage_accumulator)
+        )
         try:
             yield observation
         finally:
+            if usage_accumulator.usage or usage_accumulator.cost:
+                update = getattr(observation, "update", None)
+                if callable(update):
+                    with suppress(Exception):
+                        update(
+                            usage_details=dict(usage_accumulator.usage) or None,
+                            cost_details=dict(usage_accumulator.cost) or None,
+                        )
+            with suppress(Exception):
+                _ACTIVE_TRACE_USAGE.reset(usage_token)
             with suppress(Exception):
                 attributes_context.__exit__(None, None, None)
             with suppress(Exception):
@@ -660,6 +689,8 @@ class LangfuseTracer:
             kwargs["usage_details"] = usage
         if cost:
             kwargs["cost_details"] = cost
+        for accumulator in _ACTIVE_TRACE_USAGE.get():
+            accumulator.add(usage=usage, cost=cost)
         trace_context = self.trace_context_payload(record.get("trace_id"))
         current_trace_id = None
         current_trace = getattr(client, "get_current_trace_id", None)
