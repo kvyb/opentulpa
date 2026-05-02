@@ -1,0 +1,16 @@
+services:
+  opentulpa:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      OPENTULPA_DATA_ROOT: /app/opentulpa_data
+    ports:
+      - "8000:8000"
+    volumes:
+      - opentulpa_data:/app/opentulpa_data
+    command: ["./start.sh", "run", "server"]
+
+volumes:
+  opentulpa_data:

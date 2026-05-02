@@ -19,7 +19,7 @@ OPENAI_COMPATIBLE_API_KEY=...
 Then run:
 
 ```bash
-./start.sh --app
+./start.sh server
 ```
 
 Health checks:
@@ -31,20 +31,20 @@ Health checks:
 
 `start.sh` supports two useful modes:
 
-- `--app`: run the FastAPI app directly
-- default manager mode: run the app through the quick-tunnel manager flow
+- `server`: run the FastAPI app directly
+- `local`: run the app through the Cloudflare tunnel and Telegram webhook sync flow
 
 In practice:
 
-- use `./start.sh --app` for direct local app runs
-- use `./start.sh` when you want the managed local Telegram flow with `cloudflared`
+- use `./start.sh server` for direct app server runs
+- use `./start.sh local` or `./start.sh` when you want the managed local Telegram flow with `cloudflared`
 
 ## Local setup
 
 Requirements:
 
-- Python `3.12+`
-- [`uv`](https://docs.astral.sh/uv/)
+- Python `3.12` for local startup. `./start.sh` asks uv for Python 3.12 by default.
+- [`uv`](https://docs.astral.sh/uv/) (`start.sh` can install it if missing)
 - an OpenAI-compatible API key
 
 Base setup:
@@ -64,7 +64,7 @@ OPENAI_COMPATIBLE_API_KEY=...
 Run locally:
 
 ```bash
-./start.sh --app
+./start.sh server
 ```
 
 ## Telegram setup
@@ -75,9 +75,9 @@ For local use:
 
 1. create a bot in `@BotFather`
 2. set `TELEGRAM_BOT_TOKEN` in `.env`
-3. run `./start.sh`
+3. run `./start.sh local`
 
-When you use the default manager flow, `start.sh` will also handle dependency setup for Playwright Chromium and `cloudflared` if needed.
+When you use local mode, `start.sh` will also handle dependency setup for Playwright Chromium and `cloudflared` if needed.
 
 ## Telegram Business intake
 
@@ -132,55 +132,60 @@ unchanged.
 
 | Command | Meaning |
 |---|---|
-| `./start.sh` | Install and run in manager mode |
-| `./start.sh --app` | Install and run in direct app mode |
+| `./start.sh` | Install and run local Telegram mode |
+| `./start.sh local` | Install and run app + Cloudflare tunnel + Telegram webhook sync |
+| `./start.sh server` | Install and run the plain app server |
 | `./start.sh install` | Install only |
-| `./start.sh run --app` | Run only |
+| `./start.sh run server` | Run the plain app server without installing |
+| `./start.sh doctor` | Check local startup readiness |
 
 Useful `.env` knobs:
 
-- `START_MODE=auto|app|manager`
+- `START_MODE=local|server|auto`
 - `INSTALL_BROWSER_USE=1|0`
 - `INSTALL_CLOUDFLARED=auto|1|0`
+- `INSTALL_UV=1|auto|0` controls uv bootstrap; default `1` installs uv when missing after first checking `PATH`
+- `UV_PYTHON=3.12` controls the Python interpreter uv uses for local startup
 - `AGENT_PROMPT_CACHING_ENABLED=1|0`
+
+Compatibility aliases still work but are deprecated: `--app` maps to `server`, and `--manager` maps to `local`.
 
 ## Docker
 
 The included `Dockerfile` already installs Python dependencies, Node.js/npm, and Playwright Chromium.
 
-Build and run:
+Run with Docker Compose:
 
 ```bash
-docker build -t opentulpa .
-docker run --rm -p 8000:8000 --env-file .env opentulpa
+docker compose up --build
 ```
 
-Use Docker for local API testing or as the base for cloud deployment.
+Compose is optional. It loads `.env`, maps port `8000`, mounts a persistent volume at `/app/opentulpa_data`, and starts `./start.sh run server` inside the container.
 
 ## Railway
 
-Railway builds from the included `Dockerfile`.
+Railway builds from the included `Dockerfile` and starts through the same server entrypoint: `./start.sh run server`.
 
 ### Required settings
 
 - `OPENAI_COMPATIBLE_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
-
-### Recommended settings
-
 - `TELEGRAM_WEBHOOK_SECRET`
 - `PUBLIC_BASE_URL=https://your-service.up.railway.app`
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+- `TELEGRAM_ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERNAMES`
+
+### Recommended settings
+
+- `COMPOSIO_API_KEY` for connector integrations such as Google Sheets and Instagram
 - Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=z-ai/glm-5.1`, `LLM_REASONING_EFFORT=medium`, `WAKE_EXECUTION_MODEL=z-ai/glm-5.1`, Gemini Flash for memory/media, Gemini Flash Lite for the business knowledge oracle)
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 
 ### Optional settings
 
-- `COMPOSIO_API_KEY`
 - `COMPOSIO_DEFAULT_CALLBACK_URL`
 - `AGENT_PROMPT_CACHING_ENABLED=1|0`
-- `TELEGRAM_ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERNAMES`
 - `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`
 
 ### Railway setup checklist
@@ -190,13 +195,13 @@ Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
 3. Set:
    - `OPENAI_COMPATIBLE_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
-   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
-4. Optionally set:
    - `TELEGRAM_WEBHOOK_SECRET`
    - `PUBLIC_BASE_URL`
+   - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+   - `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+4. Optionally set:
    - `COMPOSIO_API_KEY`
    - `COMPOSIO_DEFAULT_CALLBACK_URL`
-   - `TELEGRAM_ALLOWED_USERNAMES`
    - `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`
 5. Deploy
 
@@ -214,6 +219,12 @@ Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set
 - `PUBLIC_BASE_URL` should be set so webhook registration is correct
 - the same deployed bot and webhook handle both ordinary Telegram chat and Telegram Business updates
 - OpenTulpa persists Telegram Business inbox state locally, so use persistent storage
+
+## Telegram owner and support access
+
+`TELEGRAM_ALLOWED_USERNAMES` and `TELEGRAM_ALLOWED_USER_IDS` are the owner/operator allowlist for normal bot chat. Configure at least one of them.
+
+Allowed users are not automatically pooled into one owner tenant. Each normal allowed Telegram chat gets its own owner session by default, with a default `customer_id` shaped like `telegram_<user_id>`. If several humans should operate on the same customer tenant without sharing the owner's chat history, configure them as support operators instead and have them bind to that tenant.
 
 ## Support operator access
 

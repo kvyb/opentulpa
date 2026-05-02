@@ -21,9 +21,11 @@ RUN mkdir -p /app/tulpa_stuff \
     && uv sync --frozen --no-dev \
     && uv run playwright install --with-deps chromium
 
+COPY start.sh /app/start.sh
+
 ENV HOST=0.0.0.0
 ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["uv", "run", "python", "-m", "opentulpa"]
+CMD ["./start.sh", "run", "server"]

@@ -2,7 +2,7 @@
 builder = "DOCKERFILE"
 
 [deploy]
-startCommand = "uv run python -m opentulpa"
+startCommand = "./start.sh run server"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 600
 restartPolicyType = "ON_FAILURE"
