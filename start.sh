@@ -114,6 +114,37 @@ telegram_allowlist_is_set() {
   env_is_set "TELEGRAM_ALLOWED_USERNAMES" || env_is_set "TELEGRAM_ALLOWED_USER_IDS"
 }
 
+yaml_value_is_set() {
+  local key="$1"
+  local line value
+  line="$(grep -E "^[[:space:]]*${key}:[[:space:]]*" "${REPO_ROOT}/opentulpa.config.yaml" 2>/dev/null | head -n 1 || true)"
+  [[ -n "${line}" ]] || return 1
+  value="${line#*:}"
+  value="${value%%#*}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  [[ -n "${value}" && "${value}" != "null" && "${value}" != "\"\"" && "${value}" != "''" ]]
+}
+
+multimodal_model_is_set() {
+  env_is_set "MULTIMODAL_LLM" || yaml_value_is_set "multimodal_llm"
+}
+
+openrouter_base_url_is_set() {
+  local base="${OPENAI_COMPATIBLE_BASE_URL:-${OPENROUTER_BASE_URL:-}}"
+  base="$(printf '%s' "${base}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${base}" == *"openrouter.ai"* ]]
+}
+
+emit_model_config_notice() {
+  if ! multimodal_model_is_set; then
+    log "warning: MULTIMODAL_LLM is not set and opentulpa.config.yaml has no multimodal_llm; image/file/browser functionality may not work."
+  fi
+  if ! openrouter_base_url_is_set; then
+    log "warning: OPENAI_COMPATIBLE_BASE_URL is not OpenRouter. Check opentulpa.config.yaml model settings, especially multimodal_llm, memory_llm_model, and business_knowledge_oracle_model."
+  fi
+}
+
 prompt_env_value() {
   local key="$1"
   local prompt="$2"
@@ -383,6 +414,7 @@ ensure_required_env() {
   if ! env_is_set "COMPOSIO_API_KEY"; then
     log "warning: COMPOSIO_API_KEY is not set; connector integrations such as Google Sheets and Instagram will be unavailable."
   fi
+  emit_model_config_notice
 
   if [[ "${#missing[@]}" -eq 0 ]]; then
     return 0

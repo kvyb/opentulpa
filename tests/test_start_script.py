@@ -14,6 +14,7 @@ EMPTY_REQUIRED_ENV = {
     "COMPOSIO_API_KEY": "",
     "TELEGRAM_ALLOWED_USERNAMES": "",
     "TELEGRAM_ALLOWED_USER_IDS": "",
+    "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
 }
 
 
@@ -144,3 +145,20 @@ def test_start_script_missing_uv_dry_run_bootstraps_by_default_then_syncs() -> N
     assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in result.stdout
     assert "[start] uv sync" in result.stdout
     assert "uv run python -m opentulpa" in result.stdout
+
+
+def test_start_script_warns_when_base_url_is_not_openrouter() -> None:
+    env = {
+        **EMPTY_REQUIRED_ENV,
+        "OPENAI_COMPATIBLE_BASE_URL": "https://api.openai.com/v1",
+    }
+    result = _run_start(
+        "server",
+        "--dry-run",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert "OPENAI_COMPATIBLE_BASE_URL is not OpenRouter" in result.stdout
+    assert "opentulpa.config.yaml model settings" in result.stdout
+    assert "multimodal_llm" in result.stdout

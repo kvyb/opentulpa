@@ -182,6 +182,8 @@ Railway builds from the included `Dockerfile` and starts through the same server
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 
+If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml` before startup. `multimodal_llm` must point at a working multimodal model or file, image, browser, and other multimodal features will not work correctly.
+
 ### Optional settings
 
 - `COMPOSIO_DEFAULT_CALLBACK_URL`

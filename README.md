@@ -271,6 +271,8 @@ For local Telegram mode, set these in `.env` or enter them when the script promp
 
 `COMPOSIO_API_KEY` is highly recommended for connector integrations such as Google Sheets and Instagram, but it is not required for startup.
 
+Model defaults live in `opentulpa.config.yaml`. If you do not use the default OpenRouter base URL, review the model settings there before startup, especially `multimodal_llm`; file, image, browser, and other multimodal functionality depends on it.
+
 ### Plain App Server
 
 Use server mode when you only want the FastAPI app without the local tunnel/webhook manager:
