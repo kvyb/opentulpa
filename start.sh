@@ -114,6 +114,10 @@ telegram_allowlist_is_set() {
   env_is_set "TELEGRAM_ALLOWED_USERNAMES" || env_is_set "TELEGRAM_ALLOWED_USER_IDS"
 }
 
+public_base_url_is_set() {
+  env_is_set "PUBLIC_BASE_URL" || env_is_set "RAILWAY_PUBLIC_DOMAIN"
+}
+
 yaml_value_is_set() {
   local key="$1"
   local line value
@@ -492,7 +496,7 @@ ensure_env_file() {
   if [[ -f "${REPO_ROOT}/.env" ]]; then
     return 0
   fi
-  [[ -f "${REPO_ROOT}/.env.example" ]] || die ".env is missing and .env.example was not found"
+  [[ -f "${REPO_ROOT}/.env.example" ]] || return 1
   run_cmd cp "${REPO_ROOT}/.env.example" "${REPO_ROOT}/.env"
 }
 
@@ -503,7 +507,7 @@ ensure_required_env() {
   if [[ "${MODE}" == "install" ]]; then
     return 0
   fi
-  ensure_env_file
+  ensure_env_file || true
   load_dotenv
 
   env_is_set "OPENAI_COMPATIBLE_API_KEY" || missing+=("OPENAI_COMPATIBLE_API_KEY")
@@ -518,7 +522,7 @@ ensure_required_env() {
   if [[ "${runtime}" == "server" ]]; then
     env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
     env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
-    env_is_set "PUBLIC_BASE_URL" || missing+=("PUBLIC_BASE_URL")
+    public_base_url_is_set || missing+=("PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN")
     env_is_set "OPENTULPA_DATA_ROOT" || missing+=("OPENTULPA_DATA_ROOT")
     if ! telegram_allowlist_is_set; then
       missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
@@ -553,7 +557,7 @@ ensure_required_env() {
   fi
   if [[ "${runtime}" == "server" ]]; then
     env_is_set "TELEGRAM_WEBHOOK_SECRET" || prompt_env_value "TELEGRAM_WEBHOOK_SECRET" "TELEGRAM_WEBHOOK_SECRET" 1
-    env_is_set "PUBLIC_BASE_URL" || prompt_env_value "PUBLIC_BASE_URL" "PUBLIC_BASE_URL"
+    public_base_url_is_set || prompt_env_value "PUBLIC_BASE_URL" "PUBLIC_BASE_URL"
     env_is_set "OPENTULPA_DATA_ROOT" || prompt_env_value "OPENTULPA_DATA_ROOT" "OPENTULPA_DATA_ROOT" 0 "/app/opentulpa_data"
   fi
 }
@@ -655,7 +659,11 @@ run_doctor() {
   local failures=0
 
   doctor_check "uv is available" "$(command -v uv >/dev/null 2>&1 && echo 1 || echo 0)" "curl -LsSf https://astral.sh/uv/install.sh | sh" || failures=$((failures + 1))
-  doctor_check ".env exists" "$([[ -f "${REPO_ROOT}/.env" ]] && echo 1 || echo 0)" "cp .env.example .env and set required values" || failures=$((failures + 1))
+  if [[ -f "${REPO_ROOT}/.env" ]]; then
+    echo "[doctor] ok: .env exists"
+  else
+    echo "[doctor] info: .env is missing; relying on process environment variables"
+  fi
   load_dotenv
   doctor_check "OPENAI_COMPATIBLE_API_KEY is set" "$(env_is_set "OPENAI_COMPATIBLE_API_KEY" && echo 1 || echo 0)" "set OPENAI_COMPATIBLE_API_KEY in .env" || failures=$((failures + 1))
   doctor_check "TELEGRAM_BOT_TOKEN is set" "$(env_is_set "TELEGRAM_BOT_TOKEN" && echo 1 || echo 0)" "set TELEGRAM_BOT_TOKEN in .env" || failures=$((failures + 1))
@@ -669,7 +677,7 @@ run_doctor() {
   check_model_catalog
   if [[ "${runtime}" == "server" ]]; then
     doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET in .env" || failures=$((failures + 1))
-    doctor_check "PUBLIC_BASE_URL is set" "$(env_is_set "PUBLIC_BASE_URL" && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL" || failures=$((failures + 1))
+    doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL, or rely on Railway's RAILWAY_PUBLIC_DOMAIN" || failures=$((failures + 1))
     doctor_check "OPENTULPA_DATA_ROOT is set" "$(env_is_set "OPENTULPA_DATA_ROOT" && echo 1 || echo 0)" "set OPENTULPA_DATA_ROOT=/app/opentulpa_data and mount persistent storage there" || failures=$((failures + 1))
     if env_is_set "OPENTULPA_DATA_ROOT"; then
       doctor_check "OPENTULPA_DATA_ROOT is writable" "$(mkdir -p "${OPENTULPA_DATA_ROOT}" 2>/dev/null && [[ -w "${OPENTULPA_DATA_ROOT}" ]] && echo 1 || echo 0)" "mount a writable persistent volume at OPENTULPA_DATA_ROOT" || failures=$((failures + 1))

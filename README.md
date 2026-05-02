@@ -400,7 +400,7 @@ Docker Compose is optional. It runs server mode, loads `.env`, maps port `8000`,
 
 1. Create a Railway project from this repo.
 2. Add one volume at `/app/opentulpa_data`.
-3. Set `OPENAI_COMPATIBLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, `OPENTULPA_DATA_ROOT=/app/opentulpa_data`, and `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`.
+3. Set `OPENAI_COMPATIBLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `OPENTULPA_DATA_ROOT=/app/opentulpa_data`, and `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`. Set `PUBLIC_BASE_URL` if you do not want to rely on Railway's `RAILWAY_PUBLIC_DOMAIN` fallback.
 4. Deploy.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full checklist.
@@ -489,7 +489,7 @@ Required for server mode:
 - `OPENAI_COMPATIBLE_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
-- `PUBLIC_BASE_URL`
+- `PUBLIC_BASE_URL` or Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
 - `OPENTULPA_DATA_ROOT`
 - `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
 

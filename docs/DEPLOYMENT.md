@@ -171,7 +171,7 @@ Railway builds from the included `Dockerfile` and starts through the same server
 - `OPENAI_COMPATIBLE_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
-- `PUBLIC_BASE_URL=https://your-service.up.railway.app`
+- `PUBLIC_BASE_URL=https://your-service.up.railway.app` or Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
 - `TELEGRAM_ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERNAMES`
 
@@ -198,7 +198,7 @@ If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml
    - `OPENAI_COMPATIBLE_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_WEBHOOK_SECRET`
-   - `PUBLIC_BASE_URL`
+   - `PUBLIC_BASE_URL` if you do not want to rely on Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
    - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
    - `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
 4. Optionally set:
@@ -218,7 +218,7 @@ If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml
 ### Telegram Business notes for production
 
 - the business account owner must connect the bot inside Telegram after deploy
-- `PUBLIC_BASE_URL` should be set so webhook registration is correct
+- `PUBLIC_BASE_URL` should be set so webhook registration is explicit; when unset on Railway, OpenTulpa falls back to `RAILWAY_PUBLIC_DOMAIN`
 - the same deployed bot and webhook handle both ordinary Telegram chat and Telegram Business updates
 - OpenTulpa persists Telegram Business inbox state locally, so use persistent storage
 

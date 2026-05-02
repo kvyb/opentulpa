@@ -54,7 +54,7 @@ def test_start_script_dry_run_server_mode() -> None:
     assert "required .env value(s) missing for server:" in result.stdout
     assert "OPENAI_COMPATIBLE_API_KEY" in result.stdout
     assert "TELEGRAM_WEBHOOK_SECRET" in result.stdout
-    assert "PUBLIC_BASE_URL" in result.stdout
+    assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" in result.stdout
     assert "OPENTULPA_DATA_ROOT" in result.stdout
     assert "TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS" in result.stdout
     assert "warning: COMPOSIO_API_KEY is not set" in result.stdout
@@ -204,3 +204,47 @@ exit 22
     assert "memory_llm_model=google/gemini-3-flash-preview" in result.stdout
     assert "multimodal_llm=google/gemini-3-flash-preview" in result.stdout
     assert "openai_compatible_embedding_model=openai/text-embedding-3-small" in result.stdout
+
+
+def test_start_script_run_server_accepts_platform_env_without_dotenv(tmp_path: Path) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(0o755)
+    env = {
+        "OPENAI_COMPATIBLE_API_KEY": "test-key",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
+        "TELEGRAM_BOT_TOKEN": "test-token",
+        "TELEGRAM_WEBHOOK_SECRET": "test-secret",
+        "RAILWAY_PUBLIC_DOMAIN": "opentulpa.example.railway.app",
+        "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+        "TELEGRAM_ALLOWED_USERNAMES": "owner",
+        "TELEGRAM_ALLOWED_USER_IDS": "",
+        "COMPOSIO_API_KEY": "",
+    }
+
+    result = subprocess.run(
+        ["bash", "./start.sh", "run", "server", "--dry-run"],
+        cwd=tmp_path,
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert ".env is missing" not in result.stderr
+    assert ".env.example was not found" not in result.stderr
+    assert "required .env value(s) missing" not in result.stdout
+    assert "uv run python -m opentulpa" in result.stdout
+
+
+def test_start_script_server_accepts_railway_public_domain_fallback() -> None:
+    env = {
+        **EMPTY_REQUIRED_ENV,
+        "RAILWAY_PUBLIC_DOMAIN": "opentulpa.example.railway.app",
+    }
+
+    result = _run_start("server", "--dry-run", env=env)
+
+    assert result.returncode == 0
+    assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" not in result.stdout
