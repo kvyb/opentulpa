@@ -256,7 +256,7 @@ No external database is required by default.
 ### Local Telegram Mode
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/kvyb/opentulpa.git
 cd opentulpa
 ./start.sh
 ```
@@ -368,21 +368,6 @@ LANGFUSE_TRACING_ENVIRONMENT=opentulpa-alpha
 ```
 
 `LANGFUSE_BASE_URL` defaults to `https://us.cloud.langfuse.com`. When enabled, OpenTulpa sends turn traces, LLM generations, tool spans, side-effect summaries, token/cost metadata, and deployment/environment tags to Langfuse. Local JSONL logs still stay on disk.
-
----
-
-## Safety Model
-
-OpenTulpa is designed to be useful without being reckless.
-
-- Read-only and internal actions can proceed directly.
-- External-impact actions should stay explicit and evidence-backed.
-- Unclear or higher-risk cases bias toward asking first.
-- Public exposure is limited to webhook and health routes.
-- Workflow setup asks for confirmation before activation.
-- Intake workflows should avoid unsupported services instead of inventing answers.
-
-For external integrations, read [docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md).
 
 ---
 
