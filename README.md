@@ -253,27 +253,27 @@ No external database is required by default.
 
 ## Quick Start
 
-### Requirements
-
-- Python `3.12` for local startup. `./start.sh` asks uv for Python 3.12 by default.
-- [`uv`](https://docs.astral.sh/uv/) (`start.sh` can install it if missing)
-- an OpenAI-compatible API key
-
-### Run Locally
+### Local Telegram Mode
 
 ```bash
 git clone <repo-url>
 cd opentulpa
-cp .env.example .env
+./start.sh
 ```
 
-Set your model API key in `.env`:
+`./start.sh` is the normal local command. It checks for `uv`, installs it if missing, asks uv for Python 3.12, installs dependencies, creates `.env` from `.env.example` when needed, checks required settings, starts the app, starts a Cloudflare tunnel, and syncs the Telegram webhook.
 
-```bash
-OPENAI_COMPATIBLE_API_KEY=...
-```
+For local Telegram mode, set these in `.env` or enter them when the script prompts:
 
-Start the app:
+- `OPENAI_COMPATIBLE_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+
+`COMPOSIO_API_KEY` is highly recommended for connector integrations such as Google Sheets and Instagram, but it is not required for startup.
+
+### Plain App Server
+
+Use server mode when you only want the FastAPI app without the local tunnel/webhook manager:
 
 ```bash
 ./start.sh server
