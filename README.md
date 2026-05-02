@@ -271,7 +271,7 @@ For local Telegram mode, set these in `.env` or enter them when the script promp
 
 `COMPOSIO_API_KEY` is highly recommended for connector integrations such as Google Sheets and Instagram, but it is not required for startup.
 
-Model defaults live in `opentulpa.config.yaml`. If you do not use the default OpenRouter base URL, review the model settings there before startup, especially `multimodal_llm`; file, image, browser, and other multimodal functionality depends on it.
+Model defaults live in `opentulpa.config.yaml`. If you do not use the default OpenRouter base URL, review the model settings there before startup: `llm_model`, `wake_execution_model`, `workflow_setup_input_classifier_model`, `memory_llm_model`, `multimodal_llm`, `business_knowledge_oracle_model`, `openai_compatible_embedding_model`, and optional `browser_use_model`. File, image, browser, memory, workflow setup, and source-grounded knowledge features depend on these model roles being valid for your provider. When an API key is present, `start.sh` calls the OpenAI-compatible `/models` endpoint and warns if the configured model IDs are not listed.
 
 ### Plain App Server
 
@@ -307,7 +307,7 @@ This repo currently assumes:
 - `medium` reasoning effort for agent-owned LLM calls by default
 - `Gemini Flash` for memory extraction, multimodal work, and some test judging
 - `Gemini Flash Lite` for workflow business knowledge oracle queries over normalized uploaded files
-- `MULTIMODAL_LLM` should be set when your main model is not multimodal
+- `MULTIMODAL_LLM` should be set to a working multimodal model when your main model is not multimodal
 
 DeepSeek V4 Pro is still supported. When a DeepSeek model is used through OpenRouter, OpenTulpa routes it through the OpenRouter LangChain adapter so `reasoning_details` are preserved across tool-call loops, which DeepSeek thinking mode requires.
 

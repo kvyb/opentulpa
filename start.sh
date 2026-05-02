@@ -126,6 +126,34 @@ yaml_value_is_set() {
   [[ -n "${value}" && "${value}" != "null" && "${value}" != "\"\"" && "${value}" != "''" ]]
 }
 
+yaml_value() {
+  local key="$1"
+  local line value
+  line="$(grep -E "^[[:space:]]*${key}:[[:space:]]*" "${REPO_ROOT}/opentulpa.config.yaml" 2>/dev/null | head -n 1 || true)"
+  [[ -n "${line}" ]] || return 0
+  value="${line#*:}"
+  value="${value%%#*}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  [[ "${value}" == "null" ]] && return 0
+  printf '%s\n' "${value}"
+}
+
+config_value() {
+  local env_key="$1"
+  local yaml_key="$2"
+  local value="${!env_key:-}"
+  if [[ -n "${value}" && "${value}" != "..." ]]; then
+    printf '%s\n' "${value}"
+    return 0
+  fi
+  yaml_value "${yaml_key}"
+}
+
 multimodal_model_is_set() {
   env_is_set "MULTIMODAL_LLM" || yaml_value_is_set "multimodal_llm"
 }
@@ -141,7 +169,93 @@ emit_model_config_notice() {
     log "warning: MULTIMODAL_LLM is not set and opentulpa.config.yaml has no multimodal_llm; image/file/browser functionality may not work."
   fi
   if ! openrouter_base_url_is_set; then
-    log "warning: OPENAI_COMPATIBLE_BASE_URL is not OpenRouter. Check opentulpa.config.yaml model settings, especially multimodal_llm, memory_llm_model, and business_knowledge_oracle_model."
+    log "warning: OPENAI_COMPATIBLE_BASE_URL is not OpenRouter. Check opentulpa.config.yaml model settings for this provider: llm_model, wake_execution_model, workflow_setup_input_classifier_model, memory_llm_model, multimodal_llm, business_knowledge_oracle_model, openai_compatible_embedding_model, and optional browser_use_model."
+  fi
+}
+
+check_model_catalog() {
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
+  if ! env_is_set "OPENAI_COMPATIBLE_API_KEY"; then
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    log "info: curl is not available; skipping OpenAI-compatible /models check."
+    return 0
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    log "info: python3 is not available; skipping OpenAI-compatible /models check."
+    return 0
+  }
+
+  local base_url="${OPENAI_COMPATIBLE_BASE_URL:-${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}}"
+  base_url="${base_url%/}"
+
+  local -a role_specs=(
+    "llm_model|LLM_MODEL|llm_model"
+    "wake_execution_model|WAKE_EXECUTION_MODEL|wake_execution_model"
+    "workflow_setup_input_classifier_model|WORKFLOW_SETUP_INPUT_CLASSIFIER_MODEL|workflow_setup_input_classifier_model"
+    "memory_llm_model|MEMORY_LLM_MODEL|memory_llm_model"
+    "multimodal_llm|MULTIMODAL_LLM|multimodal_llm"
+    "business_knowledge_oracle_model|BUSINESS_KNOWLEDGE_ORACLE_MODEL|business_knowledge_oracle_model"
+    "openai_compatible_embedding_model|OPENAI_COMPATIBLE_EMBEDDING_MODEL|openai_compatible_embedding_model"
+    "browser_use_model|BROWSER_USE_MODEL|browser_use_model"
+  )
+  local expected_lines="" spec role env_key yaml_key model
+  for spec in "${role_specs[@]}"; do
+    IFS='|' read -r role env_key yaml_key <<<"${spec}"
+    model="$(config_value "${env_key}" "${yaml_key}")"
+    [[ -n "${model}" && "${model}" != "null" ]] || continue
+    expected_lines+="${role}|${model}"$'\n'
+  done
+  [[ -n "${expected_lines}" ]] || return 0
+
+  local catalog
+  if ! catalog="$(curl -fsS -H "Authorization: Bearer ${OPENAI_COMPATIBLE_API_KEY}" "${base_url}/models" 2>/dev/null)"; then
+    log "warning: could not fetch ${base_url}/models; verify opentulpa.config.yaml model IDs against your provider."
+    return 0
+  fi
+
+  local missing
+  missing="$(
+    EXPECTED_MODELS="${expected_lines}" python3 -c '
+import json
+import os
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+
+items = payload.get("data") if isinstance(payload, dict) else payload
+ids = set()
+if isinstance(items, list):
+    for item in items:
+        if isinstance(item, dict) and item.get("id"):
+            ids.add(str(item["id"]))
+        elif isinstance(item, str):
+            ids.add(item)
+
+missing = []
+for line in os.environ.get("EXPECTED_MODELS", "").splitlines():
+    if not line.strip() or "|" not in line:
+        continue
+    role, model = line.split("|", 1)
+    if model not in ids:
+        missing.append(f"{role}={model}")
+
+if missing:
+    print(", ".join(missing))
+' <<<"${catalog}" || printf '%s' "__parse_error__"
+  )"
+  if [[ "${missing}" == "__parse_error__" ]]; then
+    log "warning: ${base_url}/models returned an unexpected response; verify opentulpa.config.yaml model IDs manually."
+  elif [[ -n "${missing}" ]]; then
+    log "warning: ${base_url}/models did not list configured model(s): ${missing}. Update opentulpa.config.yaml or provider env overrides."
+  else
+    log "OpenAI-compatible /models check passed for configured model IDs."
   fi
 }
 
@@ -415,6 +529,7 @@ ensure_required_env() {
     log "warning: COMPOSIO_API_KEY is not set; connector integrations such as Google Sheets and Instagram will be unavailable."
   fi
   emit_model_config_notice
+  check_model_catalog
 
   if [[ "${#missing[@]}" -eq 0 ]]; then
     return 0
@@ -550,6 +665,8 @@ run_doctor() {
   else
     echo "[doctor] warn: COMPOSIO_API_KEY is not set; connector integrations such as Google Sheets and Instagram will be unavailable"
   fi
+  emit_model_config_notice
+  check_model_catalog
   if [[ "${runtime}" == "server" ]]; then
     doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET in .env" || failures=$((failures + 1))
     doctor_check "PUBLIC_BASE_URL is set" "$(env_is_set "PUBLIC_BASE_URL" && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL" || failures=$((failures + 1))

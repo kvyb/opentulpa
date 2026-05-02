@@ -182,7 +182,7 @@ Railway builds from the included `Dockerfile` and starts through the same server
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 
-If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml` before startup. `multimodal_llm` must point at a working multimodal model or file, image, browser, and other multimodal features will not work correctly.
+If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml` before startup. The provider must have valid model IDs for `llm_model`, `wake_execution_model`, `workflow_setup_input_classifier_model`, `memory_llm_model`, `multimodal_llm`, `business_knowledge_oracle_model`, `openai_compatible_embedding_model`, and optional `browser_use_model`. File, image, browser, memory, workflow setup, and source-grounded knowledge features will not work correctly if those roles point at unavailable or incompatible models. When an API key is present, `start.sh` calls the provider's OpenAI-compatible `/models` endpoint and warns if configured model IDs are missing from the catalog; it still cannot infer capabilities such as multimodal support from providers that do not expose those flags.
 
 ### Optional settings
 

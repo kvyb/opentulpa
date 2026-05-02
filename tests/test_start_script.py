@@ -161,4 +161,46 @@ def test_start_script_warns_when_base_url_is_not_openrouter() -> None:
     assert result.returncode == 0
     assert "OPENAI_COMPATIBLE_BASE_URL is not OpenRouter" in result.stdout
     assert "opentulpa.config.yaml model settings" in result.stdout
+    assert "llm_model" in result.stdout
+    assert "wake_execution_model" in result.stdout
+    assert "workflow_setup_input_classifier_model" in result.stdout
+    assert "memory_llm_model" in result.stdout
     assert "multimodal_llm" in result.stdout
+    assert "business_knowledge_oracle_model" in result.stdout
+    assert "openai_compatible_embedding_model" in result.stdout
+    assert "browser_use_model" in result.stdout
+
+
+def test_start_script_doctor_warns_for_configured_models_missing_from_catalog(tmp_path: Path) -> None:
+    fake_curl = tmp_path / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env bash
+if [[ "$*" == *"/models"* ]]; then
+  printf '%s\n' '{"data":[{"id":"z-ai/glm-5.1"}]}'
+  exit 0
+fi
+exit 22
+""",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    env = {
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "OPENAI_COMPATIBLE_API_KEY": "test-key",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://provider.example/v1",
+        "TELEGRAM_BOT_TOKEN": "test-token",
+        "TELEGRAM_WEBHOOK_SECRET": "test-secret",
+        "PUBLIC_BASE_URL": "https://app.example",
+        "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+        "TELEGRAM_ALLOWED_USERNAMES": "owner",
+        "TELEGRAM_ALLOWED_USER_IDS": "",
+        "COMPOSIO_API_KEY": "",
+    }
+
+    result = _run_start("doctor", "server", env=env)
+
+    assert result.returncode == 0
+    assert "https://provider.example/v1/models did not list configured model(s)" in result.stdout
+    assert "memory_llm_model=google/gemini-3-flash-preview" in result.stdout
+    assert "multimodal_llm=google/gemini-3-flash-preview" in result.stdout
+    assert "openai_compatible_embedding_model=openai/text-embedding-3-small" in result.stdout
