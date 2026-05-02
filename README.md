@@ -5,7 +5,7 @@
 <h1 align="center">OpenTulpa</h1>
 
 <p align="center">
-  <strong>A self-hosted digital employee you brief, equip, and delegate to, in chat.</strong><br/>
+  <strong>A self-hosted digital AI agent and employee you brief, equip, and delegate to, in chat.</strong><br/>
   Persistent memory, durable workflow state, and native Telegram &amp; Instagram inbox handling. Runs on your infrastructure.
 </p>
 
