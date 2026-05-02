@@ -65,24 +65,16 @@ The script uses `uv` with Python 3.12, prompts for missing required values, star
 
 Composio is optional for first run. Add it later when you want Google Sheets, Gmail, Slack, Instagram, or other app connectors.
 
-### What `start.sh` Actually Does
+### What `start.sh` Does
 
-Running a shell script from the internet deserves a clear side-effect list. In default local mode, `./start.sh` does this:
+1. **Bootstraps `uv`** if missing (via Astral's installer) → `~/.local/bin/uv`
+2. **Syncs Python deps** with `uv sync` (Python 3.12) → project `.venv/`
+3. **Installs Chromium** via Playwright → `~/.cache/ms-playwright/` *(skip with `--no-browser-use`)*
+4. **Installs `cloudflared`** if missing, for the Telegram tunnel → Homebrew (macOS) or `.deb` via `sudo dpkg` (Linux) *(skip with `--no-cloudflared`)*
+5. **Creates `.env`** from `.env.example` and prompts for missing values
+6. **Starts the app** on `127.0.0.1:8000`, opens a Cloudflare tunnel, and points Telegram at the webhook
 
-| Step | What happens | Where it touches your system |
-|---|---|---|
-| 1. Ensure `uv` | Uses `uv` if present; otherwise bootstraps it with Astral's installer unless disabled | Usually `~/.local/bin/uv` or `~/.cargo/bin/uv` |
-| 2. Sync Python deps | Runs `uv sync` with `UV_PYTHON=3.12` by default | Project `.venv/` and uv's normal cache |
-| 3. Install Chromium | Runs `uv run playwright install chromium` unless `--no-browser-use` or `INSTALL_BROWSER_USE=0` is set | Playwright's browser cache, commonly `~/.cache/ms-playwright/` |
-| 4. Ensure `cloudflared` | Uses `cloudflared` if present; otherwise installs it for local Telegram mode when allowed | macOS: Homebrew. Linux: Cloudflare `.deb` via `dpkg`, using `sudo` when needed |
-| 5. Create/load `.env` | Copies `.env.example` to `.env` when missing, loads existing values, and appends prompted missing values | Repo-local `.env` |
-| 6. Check model IDs | If an API key is already available, calls the provider's `/models` endpoint and warns about configured model IDs that are not listed | Network call to `OPENAI_COMPATIBLE_BASE_URL` or the OpenRouter default |
-| 7. Start the app | Runs the FastAPI app through `uv run python` | Local process on `127.0.0.1:8000` by default |
-| 8. Open tunnel and webhook | Runs `cloudflared tunnel --url ...`, then points Telegram at the tunnel webhook URL | Network calls to Cloudflare and `api.telegram.org` |
-
-No `sudo` is used for Python dependencies. `sudo` may be used only if Linux needs to install the `cloudflared` `.deb`. Use `./start.sh --no-cloudflared` to avoid automatic `cloudflared` installation, or `./start.sh server` to run without the local tunnel/webhook manager.
-
-To remove first-run local artifacts, delete the repo checkout. Optional cleanup: remove Playwright's browser cache and uninstall `cloudflared` using the package manager that installed it.
+`sudo` is only ever used for the `cloudflared` `.deb` on Linux — never for Python deps. To uninstall: delete the repo, clear Playwright's browser cache, and remove `cloudflared` via your package manager.
 
 Prefer Docker or Railway? See [Deployment](docs/DEPLOYMENT.md).
 
