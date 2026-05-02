@@ -253,30 +253,32 @@ No external database is required by default.
 
 ## Quick Start
 
-### Requirements
-
-- Python `3.12+`
-- [`uv`](https://docs.astral.sh/uv/)
-- an OpenAI-compatible API key
-
-### Run Locally
+### Local Telegram Mode
 
 ```bash
 git clone <repo-url>
 cd opentulpa
-cp .env.example .env
+./start.sh
 ```
 
-Set your model API key in `.env`:
+`./start.sh` is the normal local command. It checks for `uv`, installs it if missing, asks uv for Python 3.12, installs dependencies, creates `.env` from `.env.example` when needed, checks required settings, starts the app, starts a Cloudflare tunnel, and syncs the Telegram webhook.
+
+For local Telegram mode, set these in `.env` or enter them when the script prompts:
+
+- `OPENAI_COMPATIBLE_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+
+`COMPOSIO_API_KEY` is highly recommended for connector integrations such as Google Sheets and Instagram, but it is not required for startup.
+
+Model defaults live in `opentulpa.config.yaml`. If you do not use the default OpenRouter base URL, review the model settings there before startup: `llm_model`, `wake_execution_model`, `workflow_setup_input_classifier_model`, `memory_llm_model`, `multimodal_llm`, `business_knowledge_oracle_model`, `openai_compatible_embedding_model`, and optional `browser_use_model`. File, image, browser, memory, workflow setup, and source-grounded knowledge features depend on these model roles being valid for your provider. When an API key is present, `start.sh` calls the OpenAI-compatible `/models` endpoint and warns if the configured model IDs are not listed.
+
+### Plain App Server
+
+Use server mode when you only want the FastAPI app without the local tunnel/webhook manager:
 
 ```bash
-OPENAI_COMPATIBLE_API_KEY=...
-```
-
-Start the app:
-
-```bash
-./start.sh --app
+./start.sh server
 ```
 
 Health checks:
@@ -305,7 +307,7 @@ This repo currently assumes:
 - `medium` reasoning effort for agent-owned LLM calls by default
 - `Gemini Flash` for memory extraction, multimodal work, and some test judging
 - `Gemini Flash Lite` for workflow business knowledge oracle queries over normalized uploaded files
-- `MULTIMODAL_LLM` should be set when your main model is not multimodal
+- `MULTIMODAL_LLM` should be set to a working multimodal model when your main model is not multimodal
 
 DeepSeek V4 Pro is still supported. When a DeepSeek model is used through OpenRouter, OpenTulpa routes it through the OpenRouter LangChain adapter so `reasoning_details` are preserved across tool-call loops, which DeepSeek thinking mode requires.
 
@@ -319,10 +321,9 @@ Basic Telegram bot setup:
 
 1. Create a bot with `@BotFather`.
 2. Add `TELEGRAM_BOT_TOKEN` to `.env`.
-3. Install `cloudflared` if you want the quick-tunnel manager flow.
-4. Run `./start.sh`.
+3. Run `./start.sh local`.
 
-`start.sh` handles Python dependencies, Playwright Chromium, and tunnel setup.
+`start.sh local` handles Python dependencies, Playwright Chromium, Cloudflare tunnel setup, and Telegram webhook sync.
 
 Telegram Business intake setup:
 
@@ -353,6 +354,8 @@ Useful operational surfaces:
 - fake and live E2E scenarios for Telegram intake and workflow setup
 
 Support operators are trusted operators. They can bind to a customer tenant, debug or set up workflows with owner-level access, and keep their own support conversation history separate from the owner's chat. Customer-facing proactive events still go to the owner by default.
+
+Normal allowed Telegram users are configured with `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`. They are allowed to use the bot, but they are not automatically merged into one owner account; each normal Telegram chat gets its own owner session by default. Use support operators when multiple humans should work inside the same customer tenant without sharing the owner chat thread.
 
 ### Langfuse Observability
 
@@ -388,19 +391,17 @@ For external integrations, read [docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md](docs/EX
 ### Docker
 
 ```bash
-docker build -t opentulpa .
-docker run --rm -p 8000:8000 --env-file .env opentulpa
+docker compose up --build
 ```
 
-The image includes Python dependencies, Node.js/npm, and Playwright.
+Docker Compose is optional. It runs server mode, loads `.env`, maps port `8000`, and mounts a persistent volume at `/app/opentulpa_data`.
 
 ### Railway
 
 1. Create a Railway project from this repo.
 2. Add one volume at `/app/opentulpa_data`.
-3. Set `OPENAI_COMPATIBLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
-4. Optionally set `TELEGRAM_WEBHOOK_SECRET` and `PUBLIC_BASE_URL`.
-5. Deploy.
+3. Set `OPENAI_COMPATIBLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `OPENTULPA_DATA_ROOT=/app/opentulpa_data`, and `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`. Set `PUBLIC_BASE_URL` if you do not want to rely on Railway's `RAILWAY_PUBLIC_DOMAIN` fallback.
+4. Deploy.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full checklist.
 
@@ -461,17 +462,42 @@ COMPOSIO_DEFAULT_CALLBACK_URL=https://your-public-base/webhook/composio/callback
 
 | Command | Meaning |
 |---|---|
-| `./start.sh` | Install and run in quick-tunnel manager mode |
-| `./start.sh --app` | Install and run in direct app mode |
+| `./start.sh` | Install and run local Telegram mode |
+| `./start.sh local` | Install and run app + Cloudflare tunnel + Telegram webhook sync |
+| `./start.sh server` | Install and run the plain app server |
 | `./start.sh install` | Install only |
-| `./start.sh run --app` | Run only |
+| `./start.sh run server` | Run the plain app server without installing |
+| `./start.sh doctor` | Check local startup readiness |
 
 Useful `.env` knobs:
 
-- `START_MODE=auto|app|manager`
+- `START_MODE=local|server|auto`
 - `INSTALL_BROWSER_USE=1|0`
 - `INSTALL_CLOUDFLARED=auto|1|0`
+- `INSTALL_UV=1|auto|0` controls uv bootstrap; default `1` installs uv when missing after first checking `PATH`
+- `UV_PYTHON=3.12` controls the Python interpreter uv uses for local startup
 - `CAPSOLVER_API_KEY=...` enables an optional Browser Use CAPTCHA action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile pages. When set, Browser Use tasks are told to call the solver if a supported CAPTCHA blocks progress. Leave it unset to keep CAPTCHA solving disabled.
+
+Required for local Telegram mode:
+
+- `OPENAI_COMPATIBLE_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+
+Required for server mode:
+
+- `OPENAI_COMPATIBLE_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `PUBLIC_BASE_URL` or Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
+- `OPENTULPA_DATA_ROOT`
+- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+
+Highly recommended for full agent connector functionality:
+
+- `COMPOSIO_API_KEY`
+
+Compatibility aliases still work but are deprecated: `--app` maps to `server`, and `--manager` maps to `local`.
 
 ---
 

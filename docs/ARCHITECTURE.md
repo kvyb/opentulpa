@@ -85,6 +85,8 @@ The runtime should not treat a large spreadsheet, PDF, or policy dump as permane
 
 Support operators are trusted operators configured by `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`.
 
+Normal Telegram access is controlled separately by `TELEGRAM_ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERNAMES`. Those users are allowed to use the bot as owners/operators, but they do not automatically share one owner tenant. A normal allowed chat creates or reuses its own owner session and defaults to `customer_id=telegram_<user_id>` when no existing mapping is present.
+
 1. Support chat sends `/support_customers`
 2. Support binds to a customer with `/support_bind <number-or-customer_id>`
 3. Normal support messages run with `customer_id=<bound_customer_id>` and a support-specific `thread_id`
