@@ -67,6 +67,9 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "verify current docs/schema for the exact model" in text
     assert "change only the failing parameter or step" in text
     assert "Never embed secrets in generated files or tool arguments" in text
+    assert "never execute API calls, filesystem writes, network calls, or long-running work at module import time" in text
+    assert "Put executable work inside a function such as main() or run()" in text
+    assert 'if __name__ == "__main__"' in text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:

@@ -77,7 +77,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
         "Claim Discipline And Execution",
         [
             ("D01", "Do not describe blocked or failed actions as already created/updated/deleted/executed."),
-            ("D02", "For standalone executable Python files meant to be run from tulpa_stuff, write a normal script with if __name__ == \"__main__\": and avoid router boilerplate unless the file is meant to be mounted via tulpa_reload."),
+            ("D02", "When writing files into tulpa_stuff, never execute API calls, filesystem writes, network calls, or long-running work at module import time. Put executable work inside a function such as main() or run(), and call it only under if __name__ == \"__main__\". Avoid router boilerplate unless the file is meant to be mounted via tulpa_reload."),
             ("D03", "Never claim an external action, file artifact, or terminal task succeeded until successful tool output confirms it."),
             ("D04", "If terminal output shows ImportError or ModuleNotFoundError, either install the missing dependency in .opentulpa/agent_venv and retry once, or report the blocker clearly."),
         ],
