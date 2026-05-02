@@ -66,6 +66,19 @@ class TulpaRouterLoader:
             return False
         return any(_is_router_assignment(stmt) for stmt in _module_level_statements(tree))
 
+    def _top_level_import_warning(self, module_name: str) -> str | None:
+        path = self.package_dir / f"{module_name}.py"
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), filename=str(path))
+        except Exception:
+            return "module could not be parsed"
+        for stmt in tree.body:
+            if _is_safe_module_level_statement(stmt):
+                continue
+            lineno = getattr(stmt, "lineno", "?")
+            return f"unsafe top-level statement at line {lineno}: {type(stmt).__name__}"
+        return None
+
     def _import_module(self, module_name: str) -> ModuleType:
         full_name = f"{self.package_name}.{module_name}"
         if full_name in sys.modules:
@@ -83,6 +96,20 @@ class TulpaRouterLoader:
 
         for module_name in self._module_names():
             if not self._appears_to_export_router(module_name):
+                continue
+            safety_warning = self._top_level_import_warning(module_name)
+            if safety_warning is not None:
+                logger.warning(
+                    "Skipping tulpa module %s due to import safety guard: %s",
+                    module_name,
+                    safety_warning,
+                )
+                warnings.append(
+                    {
+                        "module": module_name,
+                        "warning": f"import safety guard: {safety_warning}",
+                    }
+                )
                 continue
             try:
                 module = self._import_module(module_name)
@@ -133,6 +160,52 @@ def _module_level_statements(tree: ast.Module) -> list[ast.stmt]:
                 out.extend(handler.body)
             out.extend(stmt.orelse)
     return out
+
+
+def _is_safe_module_level_statement(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef):
+        return True
+    if isinstance(stmt, ast.Expr):
+        return isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
+    if isinstance(stmt, ast.Assign):
+        return _is_router_assignment(stmt) or _is_safe_constant_assignment(stmt)
+    if isinstance(stmt, ast.AnnAssign):
+        return _is_safe_literal(stmt.value)
+    if isinstance(stmt, ast.If) and _is_main_guard(stmt.test):
+        return True
+    return False
+
+
+def _is_safe_constant_assignment(stmt: ast.Assign) -> bool:
+    return _is_safe_literal(stmt.value)
+
+
+def _is_safe_literal(value: ast.AST | None) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, ast.Constant):
+        return True
+    if isinstance(value, ast.List | ast.Tuple | ast.Set):
+        return all(_is_safe_literal(item) for item in value.elts)
+    if isinstance(value, ast.Dict):
+        return all(
+            _is_safe_literal(key) and _is_safe_literal(item)
+            for key, item in zip(value.keys, value.values, strict=False)
+        )
+    return False
+
+
+def _is_main_guard(test: ast.AST) -> bool:
+    if not isinstance(test, ast.Compare):
+        return False
+    if not isinstance(test.left, ast.Name) or test.left.id != "__name__":
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    comparator = test.comparators[0]
+    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
 
 
 def _is_router_assignment(stmt: ast.stmt) -> bool:
