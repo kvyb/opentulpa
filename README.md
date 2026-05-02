@@ -1,261 +1,84 @@
 <p align="center">
-  <img src="docs/assets/opentulpa-logo.png" alt="OpenTulpa Logo" />
+  <img src="docs/assets/opentulpa-logo.png" alt="OpenTulpa" width="180"/>
 </p>
 
 <h1 align="center">OpenTulpa</h1>
 
 <p align="center">
-  <strong>A self-hosted personal agent and digital employee you brief, equip, and delegate to in chat.</strong><br/>
-  OpenTulpa keeps context, writes scripts, uses tools, learns workflows, works customer inboxes, and writes outcomes back into your systems.
+  <strong>A self-hosted digital employee you brief, equip, and delegate to, in chat.</strong><br/>
+  Persistent memory, durable workflow state, human-in-the-loop approvals, and native Telegram &amp; Instagram inbox handling. Runs on your infrastructure.
 </p>
 
 <p align="center">
-  <a href="#what-opentulpa-is">What It Is</a> ·
-  <a href="#general-agent-work">General Agent Work</a> ·
-  <a href="#the-employee-loop">Employee Loop</a> ·
-  <a href="#customer-facing-work">Customer Work</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
-  <a href="docs/DEPLOYMENT.md">Deployment</a> ·
-  <a href="docs/E2E_TESTING.md">E2E Testing</a> ·
-  <a href="docs/CHAT_COOKBOOK.md">Prompt Cookbook</a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> ·
+  <a href="#what-you-can-delegate">Delegate</a> ·
+  <a href="#how-it-works">How It Works</a> ·
+  <a href="docs/DEPLOYMENT.md">Deploy</a> ·
+  <a href="docs/CHAT_COOKBOOK.md">Cookbook</a>
 </p>
-
----
-
-## What OpenTulpa Is
-
-OpenTulpa is a persistent, self-hosted agent runtime for delegated work. It is useful as a normal personal assistant first, and as a durable workflow employee when you ask it to keep doing a job.
-
-The product idea is simple: you should be able to ask it to do almost anything a capable assistant could do with a computer, then turn repeated work into something durable.
-
-You can ask one-off questions, hand it files, tell it to research something, ask it to write or run scripts, debug failures, summarize logs, inspect websites, create automations, or prepare workflows. When the job should repeat, you brief it, give it business context, connect the tools it may use, approve the workflow, and then let it keep working from durable state.
-
-That can mean:
-
-- working for you in chat
-- writing scripts and artifacts
-- debugging errors and retrying with fixes
-- running scheduled operational routines
-- watching for events and wakeups
-- handling inbound Telegram Business or Instagram conversations
-- collecting required fields from leads
-- using your own source material when answering
-- learning preferences, skills, and reusable workflows
-- writing completed results into Google Sheets, CRMs, files, or internal systems
-
-The goal is not "AI replies." The goal is an employee-shaped loop: understand the job, use the available context, take the next action, persist state, and hand off exceptions.
-
----
-
-## General Agent Work
-
-OpenTulpa is not only an inbound-message worker. It is a standard tool-using agent that you can talk to directly.
-
-You can ask it to:
-
-- research a topic and cite what it found
-- read and summarize files
-- inspect logs and explain failures
-- write small scripts or utilities
-- run terminal checks and repair failing code
-- browse websites or use browser automation
-- create generated artifacts
-- remember preferences and decisions
-- turn repeated instructions into skills
-- turn recurring work into scheduled routines
-- turn operational processes into durable workflows
-
-It can also recover from routine execution failures: inspect the error, adjust the script or tool arguments, rerun validation, and report what changed. That does not mean it should silently do risky things. External-impact work should stay explicit and evidence-backed.
-
-The inbound employee mode is one important specialization of this general agent. The broader promise is that OpenTulpa can act like a personal assistant with memory, tools, and the ability to make useful work repeatable.
-
----
-
-## The Employee Loop
-
-OpenTulpa is built around a durable operating loop:
-
-```text
-brief the employee -> equip it with context and tools -> confirm the workflow -> run it -> review logs and outcomes
-```
-
-In practice:
-
-1. You explain the job in chat.
-2. You attach or point it at the source material it needs.
-3. OpenTulpa asks missing setup questions.
-4. It prepares durable operating context from the relevant material.
-5. It saves the workflow, skill, or routine.
-6. It executes the work on future messages, schedules, or events.
-7. You inspect logs, artifacts, bookings, and behavior traces when needed.
-
-This is the core difference from a normal chatbot. OpenTulpa is meant to keep carrying the process, not restart from zero every time.
-
-### Equip The Employee
-
-Source material can be almost anything useful for the job:
-
-- pasted instructions
-- PDFs, docs, spreadsheets, CSVs, price lists, FAQs, and policies
-- websites and fetched pages
-- prior decisions and saved memory
-- uploaded files from Telegram
-- Google Sheets or other connected app state
-- owner corrections during setup
-- support-operator edits later
-- screenshots or images when multimodal support is configured
-
-The important step is preparation. For broad or messy material, OpenTulpa should inspect the source first, select the relevant parts, compile a smaller workflow knowledge pack, and bind that prepared knowledge to the workflow.
-
-For example, a large price spreadsheet is not treated as a blob that gets pasted into every future prompt. The setup agent inspects the workbook, selects the relevant sheets or rows, creates a Markdown knowledge pack, and attaches that prepared file to the intake worker. The same pattern applies to policies, FAQs, docs, and other business material.
-
-### Tools Complete The Job
-
-OpenTulpa can use tools to move beyond answers:
-
-- browser automation
-- web retrieval
-- generated scripts
-- local files and artifacts
-- internal APIs
-- Telegram bot and Telegram Business APIs
-- Composio-backed third-party tools
-- external tool actions
-
-The employee does not just know things. It can do the operational step after it has enough information.
-
----
-
-## Customer-Facing Work
-
-One of the main use cases is turning a setup conversation into a live inbound worker.
-
-You can say, in ordinary chat:
-
-```text
-Handle incoming Telegram Business messages for my car wash.
-
-Ask what service the customer wants, answer pricing questions from the attached materials,
-collect name, phone, vehicle, date, and time, then write completed bookings to this Google Sheet.
-
-If the customer asks about a service outside this workflow, politely redirect them to the owner.
-Ask me to confirm the workflow before activating it.
-```
-
-OpenTulpa should then:
-
-```mermaid
-flowchart LR
-    A["Owner briefs OpenTulpa in chat"] --> B["OpenTulpa inspects source material and asks setup questions"]
-    B --> C["OpenTulpa prepares durable workflow knowledge"]
-    C --> D["Owner confirms the workflow"]
-    D --> E["Lead messages Telegram Business or Instagram"]
-    E --> F["OpenTulpa continues the lead conversation from saved state"]
-    F --> G["OpenTulpa asks missing questions and applies rules"]
-    G --> H["OpenTulpa confirms or records the completed outcome"]
-    H --> I["Google Sheets, CRM, file, or internal sink is updated"]
-    G --> J["Owner is notified when human attention is needed"]
-```
-
-Proof from a live Instagram DM flow:
 
 <p align="center">
-  <img src="docs/assets/Opentulpa-conversation-insta.jpg" alt="Instagram conversation handled by OpenTulpa" width="320" />
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"/>
+  <img src="https://img.shields.io/badge/self--hosted-yes-success.svg" alt="Self-hosted"/>
+  <img src="https://img.shields.io/badge/status-actively%20developed-brightgreen.svg" alt="Status"/>
+  <img src="https://img.shields.io/badge/stack-LangGraph%20%7C%20FastAPI%20%7C%20Mem0%20%7C%20Qdrant%20%7C%20Composio%20%7C%20Playwright-informational" alt="Stack"/>
 </p>
 
-For a narrow, well-specified workflow, this is closer to a junior front-desk employee than a generic assistant:
+<p align="center">
+  <sub>Targets OpenAI-compatible providers · App integrations via Composio · No external database required</sub>
+</p>
 
-- it responds quickly
-- asks the next missing question
-- uses the business's rules and source material
-- avoids unsupported services instead of inventing answers
-- collects the fields needed for handoff
-- writes the result into the destination system
-- keeps the owner out of routine back-and-forth
+---
+
+## Why OpenTulpa
+
+OpenTulpa is a **self-hosted agent runtime** built for work that repeats. You brief it in chat (goals, tools, source material, escalation rules) and it keeps working across sessions: saving skills, running scheduled routines, handling inbound customer DMs on Telegram and Instagram, and writing outcomes back into your systems.
+
+It works as a personal operator on day one, and becomes a durable workflow employee the moment the work starts repeating. Most "AI agents" forget the job between sessions. OpenTulpa is built the other way around: **brief it once, and it keeps working**, on a runtime you own and can inspect.
+
+|  | Typical agent app | **OpenTulpa** |
+|---|---|---|
+| Context | Session-bound | Persistent memory, files, checkpoints, workflow state |
+| Setup | Prompt every time | Brief once, saved skills, routines, intake workflows |
+| Knowledge | Pasted into prompts | Prepared knowledge packs bound to each worker |
+| Execution | One-off | Real tools, browser, scripts, APIs, sink writes |
+| Customer DMs | Separate bot code | Telegram Business + Instagram configured in chat |
+| Integrations | Hand-rolled per tool | App connectors via Composio (Google, Slack, Notion, HubSpot...) |
+| Side effects | Fire and forget | Approval gate: durable, single-use, time-limited |
+| Ownership | Vendor black box | Local SQLite + embedded Qdrant, yours to inspect |
 
 ---
 
 ## What You Can Delegate
 
-OpenTulpa can handle both owner-facing work and customer-facing work.
+### Owner-facing: your personal operator
 
-Owner-facing examples:
+- **Research** topics, files, and links; produce reports and summaries with citations
+- **Write, execute, and debug** Python/shell scripts in a sandboxed workspace, with automatic retry on failure
+- **Monitor** dashboards, competitors, inboxes, or error signals and ping you only on exceptions
+- **Scheduled routines** that run while you sleep. For example, a 7am brief that scrapes your dashboards, summarizes overnight errors, and DMs you the top three
+- **Remember** preferences, decisions, and project context across sessions, not just within one chat
 
-- research a topic, links, or uploaded files
-- produce reports and summaries
-- monitor websites, competitors, dashboards, or error signals
-- run scheduled routines and morning briefs
-- generate artifacts and scripts
-- remember preferences, decisions, and project context
+### Customer-facing: runs inbound DMs end to end
 
-Customer-facing examples:
+- **Qualify** inbound leads on Telegram Business or Instagram
+- **Answer** pricing and service questions from approved source material only
+- **Collect** appointment or intake fields across multiple messages, tolerating typos and reorderings
+- **Book, update, or cancel** records inside allowed edit windows, writing to Google Sheets, Calendar, or any Composio-connected system
+- **Escalate** anything outside the workflow to you instead of guessing
 
-- qualify inbound leads
-- answer service or pricing questions from approved source material
-- collect appointment or intake fields over multiple messages
-- book or update a customer record
-- cancel or change a booking inside an allowed edit window
-- escalate exceptions to the owner
+The best workflows are **narrow and operational**. The clearer you define the job, tools, source material, required fields, and escalation boundary, the more employee-like the result.
 
-The best workflows are narrow and operational. The more clearly you define the job, tools, source material, required fields, and escalation boundary, the more employee-like the result becomes.
+> **Example brief, pasted into chat:**
+> *"Handle incoming Telegram Business messages for my car wash. Answer pricing from the attached sheet, collect name / phone / vehicle / date / time, write completed bookings to this Google Sheet. Redirect anything outside this workflow to me. Confirm the workflow before activating."*
 
----
-
-## What Makes It Different
-
-| Area | Typical agent app | OpenTulpa |
-|---|---|---|
-| Context | Mostly session-bound | Persistent memory, files, checkpoints, and workflow state |
-| Setup | Prompt each time | Brief once, then save durable skills, routines, or intake workflows |
-| Knowledge | Ad hoc prompt context | Prepared workflow knowledge bound to the worker |
-| Execution | Often demo-level | Real tools, browser work, scripts, APIs, and sink writes |
-| Customer inboxes | Usually separate bot code | Telegram Business and Instagram intake can be configured in chat |
-| Safety | Easy to over-trust | Explicit handoff boundaries and conservative execution |
-| Ownership | Vendor black box | Local state, logs, SQLite, and inspectable artifacts |
-
-OpenTulpa is not a form builder and not just a chat UI. It is a runtime for agents that need to keep state and do work.
-
----
-
-## How It Works
-
-At a high level:
-
-```text
-incoming message or request
-        |
-load durable context, workflow state, files, and memory
-        |
-plan and call tools through LangGraph
-        |
-validate tool calls and execution constraints
-        |
-reply, write outputs, or schedule follow-up
-        |
-persist state, logs, artifacts, and traces
-```
-
-Core pieces:
-
-- **FastAPI** for webhooks and internal routes
-- **LangGraph** for runtime orchestration and tool loops
-- **SQLite** for checkpoints, context, intake workflows, and bookings
-- **Mem0 with embedded Qdrant** for vector-backed memory
-- **Telegram** as the main operator interface
-- **Telegram Business and Instagram** for customer-facing intake
-- **Composio** for optional third-party tools
-- **Local files** for artifacts, logs, and prepared workflow knowledge
-
-No external database is required by default.
+<p align="center">
+  <img src="docs/assets/opentulpa-conversation-insta.jpg" alt="Instagram conversation handled by OpenTulpa" width="360"/>
+</p>
 
 ---
 
 ## Quick Start
-
-### Local Telegram Mode
-
-Add the required keys to `.env`, then run:
 
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
@@ -263,219 +86,66 @@ cd opentulpa
 ./start.sh
 ```
 
-Required keys:
+`start.sh` bootstraps `uv`, installs dependencies, creates `.env`, launches the app, opens a Cloudflare tunnel, and syncs the Telegram webhook.
 
-- `OPENAI_COMPATIBLE_API_KEY`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+Set these when prompted, or add them to `.env`:
 
-### Plain App Server
-
-```bash
-./start.sh server
-```
-
-Health checks: `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/agent/healthz`.
-
----
-
-## Telegram And Inbound Setup
-
-Telegram is the main control surface for OpenTulpa.
-
-Basic Telegram bot setup:
-
-1. Create a bot with `@BotFather`.
-2. Add `TELEGRAM_BOT_TOKEN` to `.env`.
-3. Run `./start.sh local`.
-
-`start.sh local` handles Python dependencies, Playwright Chromium, Cloudflare tunnel setup, and Telegram webhook sync.
-
-Telegram Business intake setup:
-
-1. Create the bot in `@BotFather`.
-2. Enable Business Mode for that bot.
-3. Connect the bot to the Telegram Business account.
-4. Grant the required business inbox permissions.
-5. Brief OpenTulpa in chat and confirm the workflow it proposes.
-
-Once active, OpenTulpa receives business inbox updates, persists each lead conversation, reloads the lead's previous state on each message, and continues the workflow until the outcome is complete or needs escalation.
-
-Instagram works through the same concept: connect the account, brief the intake behavior in chat, then let the runtime continue DM conversations, collect missing fields, and complete the booking or lead capture flow.
-
----
-
-## Operations
-
-OpenTulpa is designed to be operated, not just demoed.
-
-Useful operational surfaces:
-
-- behavior logs and LLM traces
-- `/debug_logs` for server log dumps through Telegram
-- durable workflow snapshots
-- persisted bookings and sink-write status
-- support operator act-as binding for customer tenants
-- separate support threads so support setup/debug chat does not pollute the owner's main chat
-- fake and live E2E scenarios for Telegram intake and workflow setup
-
-Support operators are trusted operators. They can bind to a customer tenant, debug or set up workflows with owner-level access, and keep their own support conversation history separate from the owner's chat. Customer-facing proactive events still go to the owner by default.
-
-Normal allowed Telegram users are configured with `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`. They are allowed to use the bot, but they are not automatically merged into one owner account; each normal Telegram chat gets its own owner session by default. Use support operators when multiple humans should work inside the same customer tenant without sharing the owner chat thread.
-
-### Langfuse Observability
-
-Langfuse is optional and enabled when both keys are present:
-
-```bash
-LANGFUSE_PUBLIC_KEY=...
-LANGFUSE_SECRET_KEY=...
-LANGFUSE_TRACING_ENVIRONMENT=opentulpa-alpha
-```
-
-`LANGFUSE_BASE_URL` defaults to `https://us.cloud.langfuse.com`. When enabled, OpenTulpa sends turn traces, LLM generations, tool spans, side-effect summaries, token/cost metadata, and deployment/environment tags to Langfuse. Local JSONL logs still stay on disk.
-
----
-
-## Deployment
-
-### Docker
-
-```bash
-docker compose up --build
-```
-
-Docker Compose is optional. It runs server mode, loads `.env`, maps port `8000`, and mounts a persistent volume at `/app/opentulpa_data`.
-
-### Railway
-
-1. Create a Railway project from this repo.
-2. Add one volume at `/app/opentulpa_data`.
-3. Set `OPENAI_COMPATIBLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `OPENTULPA_DATA_ROOT=/app/opentulpa_data`, and `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`. Set `PUBLIC_BASE_URL` if you do not want to rely on Railway's `RAILWAY_PUBLIC_DOMAIN` fallback.
-4. Deploy.
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full checklist.
-
----
-
-## E2E Testing
-
-For realistic Telegram and intake scenario testing:
-
-```bash
-uv run pytest tests/e2e/scenarios --run-e2e -q -rs
-```
-
-The E2E suite uses the same settings loader as the app, so running from the repo root will pick up `.env` automatically. Live model scenarios add `--run-live-llm`.
-
-See [docs/E2E_TESTING.md](docs/E2E_TESTING.md) for live-LLM prerequisites, Telegram intake workflow commands, scenario-vs-live integration notes, and troubleshooting.
-
----
-
-## More Setup Options
-
-### Browser Automation
-
-Installed by default. Skip it with:
-
-```bash
-./start.sh --no-browser-use
-```
-
-Browser Use CAPTCHA solving is optional and disabled by default. To enable the
-CapSolver-backed action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile
-pages, set:
-
-```bash
-CAPSOLVER_API_KEY=...
-```
-
-When this key is present, OpenTulpa registers `solve_captcha_with_capsolver`
-for Browser Use tasks and tells the browser agent to call it if a supported
-CAPTCHA blocks progress. If the key is absent, Browser Use runs without the
-solver action or CAPTCHA-specific prompt hint.
-
-### Composio
-
-If you want access to supported third-party apps:
-
-```bash
+```env
+OPENAI_COMPATIBLE_API_KEY=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USERNAMES=your_handle
 COMPOSIO_API_KEY=...
 ```
 
-The callback URL is derived automatically when possible. Override only if needed:
+**Composio is strongly recommended.** It unlocks app connectors for Google Workspace, Slack, Notion, Linear, HubSpot, Gmail, Instagram, and more without writing custom integration code.
 
-```bash
-COMPOSIO_DEFAULT_CALLBACK_URL=https://your-public-base/webhook/composio/callback
-```
+Then message your bot on Telegram. Health check: `http://127.0.0.1:8000/healthz`.
 
-### Script Modes
-
-| Command | Meaning |
-|---|---|
-| `./start.sh` | Install and run local Telegram mode |
-| `./start.sh local` | Install and run app + Cloudflare tunnel + Telegram webhook sync |
-| `./start.sh server` | Install and run the plain app server |
-| `./start.sh install` | Install only |
-| `./start.sh run server` | Run the plain app server without installing |
-| `./start.sh doctor` | Check local startup readiness |
-
-Useful `.env` knobs:
-
-- `START_MODE=local|server|auto`
-- `INSTALL_BROWSER_USE=1|0`
-- `INSTALL_CLOUDFLARED=auto|1|0`
-- `INSTALL_UV=1|auto|0` controls uv bootstrap; default `1` installs uv when missing after first checking `PATH`
-- `UV_PYTHON=3.12` controls the Python interpreter uv uses for local startup
-- `CAPSOLVER_API_KEY=...` enables an optional Browser Use CAPTCHA action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile pages. When set, Browser Use tasks are told to call the solver if a supported CAPTCHA blocks progress. Leave it unset to keep CAPTCHA solving disabled.
-
-Required for local Telegram mode:
-
-- `OPENAI_COMPATIBLE_API_KEY`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
-
-Required for server mode:
-
-- `OPENAI_COMPATIBLE_API_KEY`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_WEBHOOK_SECRET`
-- `PUBLIC_BASE_URL` or Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
-- `OPENTULPA_DATA_ROOT`
-- `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
-
-Highly recommended for full agent connector functionality:
-
-- `COMPOSIO_API_KEY`
-
-Compatibility aliases still work but are deprecated: `--app` maps to `server`, and `--manager` maps to `local`.
+OpenTulpa targets OpenAI-compatible providers such as OpenAI-compatible proxies, OpenRouter, Groq, local vLLM, and similar runtimes. Specific model, multimodal, and tool-calling behavior depends on the provider and model you choose. Defaults live in `opentulpa.config.yaml`.
 
 ---
 
-## What Gets Stored Locally
+## How It Works
 
-OpenTulpa keeps its working state on disk.
+```text
+incoming message or event
+        |
+  load durable context: workflow state, files, memory, checkpoints
+        |
+  plan and call tools via LangGraph
+        |
+  validate tool calls and gate external side effects
+        |
+  reply, write outputs, or schedule follow-up
+        |
+  persist state, logs, artifacts, and traces
+```
 
-- `.opentulpa/` for checkpoints, context, logs, databases, file vaults, and prepared workflow knowledge
-- `tulpa_stuff/` for generated artifacts and related working files
+Core pieces: **FastAPI** for webhooks, **LangGraph** for orchestration, **SQLite** for checkpoints and workflow state, **Mem0 + embedded Qdrant** for memory, **Composio** for third-party connectors, and **Playwright** for browser automation. No external database required.
 
-That means you can inspect the state, back it up, mount it into a persistent volume, and understand what the employee has been doing.
+The runtime is modular around models and tools. Bring an OpenAI-compatible model provider, use Composio-backed connectors, or add your own LangGraph tool definitions where the workflow needs custom actions.
+
+**Inspectable by design.** Everything the employee does lands on disk under `.opentulpa/` (checkpoints, context, logs, databases, knowledge packs) and `tulpa_stuff/` (generated artifacts). Back it up, mount it as a volume, or read it directly. You always know what's happening.
 
 ---
 
 ## Docs
 
-| Doc | Why you would read it |
+| Doc | Why you'd read it |
 |---|---|
 | [Architecture](docs/ARCHITECTURE.md) | Runtime layout, request flows, safety controls, extension points |
 | [Deployment](docs/DEPLOYMENT.md) | Local, Docker, and Railway setup |
 | [E2E Testing](docs/E2E_TESTING.md) | Realistic workflow and intake validation |
-| [Prompt Cookbook](docs/CHAT_COOKBOOK.md) | Concrete prompt patterns and use cases |
+| [Chat Cookbook](docs/CHAT_COOKBOOK.md) | Concrete prompt patterns and use cases |
 | [External Tool Safety Checklist](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md) | Rules for connecting high-impact tools safely |
 
 ---
 
 <p align="center">
   <strong>Stop re-explaining. Start delegating.</strong><br/>
-  <a href="#quick-start">Run your first self-hosted digital employee</a>
+  <em>Run your first self-hosted digital employee.</em>
+</p>
+
+<p align="center">
+  <sub>MIT licensed</sub>
 </p>
