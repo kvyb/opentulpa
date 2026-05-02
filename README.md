@@ -255,61 +255,27 @@ No external database is required by default.
 
 ### Local Telegram Mode
 
+Add the required keys to `.env`, then run:
+
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
 cd opentulpa
 ./start.sh
 ```
 
-`./start.sh` is the normal local command. It checks for `uv`, installs it if missing, asks uv for Python 3.12, installs dependencies, creates `.env` from `.env.example` when needed, checks required settings, starts the app, starts a Cloudflare tunnel, and syncs the Telegram webhook.
-
-For local Telegram mode, set these in `.env` or enter them when the script prompts:
+Required keys:
 
 - `OPENAI_COMPATIBLE_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
 
-`COMPOSIO_API_KEY` is highly recommended for connector integrations such as Google Sheets and Instagram, but it is not required for startup.
-
-Model defaults live in `opentulpa.config.yaml`. If you do not use the default OpenRouter base URL, review the model settings there before startup: `llm_model`, `wake_execution_model`, `workflow_setup_input_classifier_model`, `memory_llm_model`, `multimodal_llm`, `business_knowledge_oracle_model`, `openai_compatible_embedding_model`, and optional `browser_use_model`. File, image, browser, memory, workflow setup, and source-grounded knowledge features depend on these model roles being valid for your provider. When an API key is present, `start.sh` calls the OpenAI-compatible `/models` endpoint and warns if the configured model IDs are not listed.
-
 ### Plain App Server
-
-Use server mode when you only want the FastAPI app without the local tunnel/webhook manager:
 
 ```bash
 ./start.sh server
 ```
 
-Health checks:
-
-- `http://127.0.0.1:8000/healthz`
-- `http://127.0.0.1:8000/agent/healthz`
-
-### Recommended Runtime Models
-
-Default runtime settings live in `opentulpa.config.yaml`.
-
-Recommended model split in this repo:
-
-```yaml
-llm_model: z-ai/glm-5.1
-llm_reasoning_effort: medium
-wake_execution_model: z-ai/glm-5.1
-memory_llm_model: google/gemini-3-flash-preview
-multimodal_llm: google/gemini-3-flash-preview
-business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
-```
-
-This repo currently assumes:
-
-- `GLM 5.1` for main chat and wake execution
-- `medium` reasoning effort for agent-owned LLM calls by default
-- `Gemini Flash` for memory extraction, multimodal work, and some test judging
-- `Gemini Flash Lite` for workflow business knowledge oracle queries over normalized uploaded files
-- `MULTIMODAL_LLM` should be set to a working multimodal model when your main model is not multimodal
-
-DeepSeek V4 Pro is still supported. When a DeepSeek model is used through OpenRouter, OpenTulpa routes it through the OpenRouter LangChain adapter so `reasoning_details` are preserved across tool-call loops, which DeepSeek thinking mode requires.
+Health checks: `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/agent/healthz`.
 
 ---
 
