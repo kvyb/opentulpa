@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A self-hosted digital employee you brief, equip, and delegate to, in chat.</strong><br/>
-  Persistent memory, durable workflow state, human-in-the-loop approvals, and native Telegram &amp; Instagram inbox handling. Runs on your infrastructure.
+  Persistent memory, durable workflow state, and native Telegram &amp; Instagram inbox handling. Runs on your infrastructure.
 </p>
 
 <p align="center">
@@ -21,7 +21,6 @@
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"/>
   <img src="https://img.shields.io/badge/self--hosted-yes-success.svg" alt="Self-hosted"/>
   <img src="https://img.shields.io/badge/status-actively%20developed-brightgreen.svg" alt="Status"/>
-  <img src="https://img.shields.io/badge/stack-LangGraph%20%7C%20FastAPI%20%7C%20Mem0%20%7C%20Qdrant%20%7C%20Composio%20%7C%20Playwright-informational" alt="Stack"/>
 </p>
 
 <p align="center">
@@ -44,8 +43,48 @@ It works as a personal operator on day one, and becomes a durable workflow emplo
 | Execution | One-off | Real tools, browser, scripts, APIs, sink writes |
 | Customer DMs | Separate bot code | Telegram Business + Instagram configured in chat |
 | Integrations | Hand-rolled per tool | App connectors via Composio (Google, Slack, Notion, HubSpot...) |
-| Side effects | Fire and forget | Approval gate: durable, single-use, time-limited |
 | Ownership | Vendor black box | Local SQLite + embedded Qdrant, yours to inspect |
+
+---
+
+## Quick Start
+
+Minimum to get a reply from your own agent in Telegram:
+
+1. A Telegram bot token from [@BotFather](https://t.me/BotFather)
+2. An OpenAI-compatible API key
+3. macOS or Linux with `bash` and `curl`
+
+```bash
+git clone https://github.com/kvyb/opentulpa.git
+cd opentulpa
+./start.sh
+```
+
+The script uses `uv` with Python 3.12, prompts for missing required values, starts the app, opens a Cloudflare tunnel, and syncs the Telegram webhook. Then message your bot on Telegram.
+
+Composio is optional for first run. Add it later when you want Google Sheets, Gmail, Slack, Instagram, or other app connectors.
+
+### What `start.sh` Actually Does
+
+Running a shell script from the internet deserves a clear side-effect list. In default local mode, `./start.sh` does this:
+
+| Step | What happens | Where it touches your system |
+|---|---|---|
+| 1. Ensure `uv` | Uses `uv` if present; otherwise bootstraps it with Astral's installer unless disabled | Usually `~/.local/bin/uv` or `~/.cargo/bin/uv` |
+| 2. Sync Python deps | Runs `uv sync` with `UV_PYTHON=3.12` by default | Project `.venv/` and uv's normal cache |
+| 3. Install Chromium | Runs `uv run playwright install chromium` unless `--no-browser-use` or `INSTALL_BROWSER_USE=0` is set | Playwright's browser cache, commonly `~/.cache/ms-playwright/` |
+| 4. Ensure `cloudflared` | Uses `cloudflared` if present; otherwise installs it for local Telegram mode when allowed | macOS: Homebrew. Linux: Cloudflare `.deb` via `dpkg`, using `sudo` when needed |
+| 5. Create/load `.env` | Copies `.env.example` to `.env` when missing, loads existing values, and appends prompted missing values | Repo-local `.env` |
+| 6. Check model IDs | If an API key is already available, calls the provider's `/models` endpoint and warns about configured model IDs that are not listed | Network call to `OPENAI_COMPATIBLE_BASE_URL` or the OpenRouter default |
+| 7. Start the app | Runs the FastAPI app through `uv run python` | Local process on `127.0.0.1:8000` by default |
+| 8. Open tunnel and webhook | Runs `cloudflared tunnel --url ...`, then points Telegram at the tunnel webhook URL | Network calls to Cloudflare and `api.telegram.org` |
+
+No `sudo` is used for Python dependencies. `sudo` may be used only if Linux needs to install the `cloudflared` `.deb`. Use `./start.sh --no-cloudflared` to avoid automatic `cloudflared` installation, or `./start.sh server` to run without the local tunnel/webhook manager.
+
+To remove first-run local artifacts, delete the repo checkout. Optional cleanup: remove Playwright's browser cache and uninstall `cloudflared` using the package manager that installed it.
+
+Prefer Docker or Railway? See [Deployment](docs/DEPLOYMENT.md).
 
 ---
 
@@ -62,12 +101,14 @@ It works as a personal operator on day one, and becomes a durable workflow emplo
 ### Customer-facing: runs inbound DMs end to end
 
 - **Qualify** inbound leads on Telegram Business or Instagram
-- **Answer** pricing and service questions from approved source material only
+- **Answer** pricing and service questions from trusted source material only
 - **Collect** appointment or intake fields across multiple messages, tolerating typos and reorderings
 - **Book, update, or cancel** records inside allowed edit windows, writing to Google Sheets, Calendar, or any Composio-connected system
 - **Escalate** anything outside the workflow to you instead of guessing
 
-The best workflows are **narrow and operational**. The clearer you define the job, tools, source material, required fields, and escalation boundary, the more employee-like the result.
+> **The best workflows are narrow and operational.**
+
+The clearer you define the job, tools, source material, required fields, and escalation boundary, the more employee-like the result.
 
 > **Example brief, pasted into chat:**
 > *"Handle incoming Telegram Business messages for my car wash. Answer pricing from the attached sheet, collect name / phone / vehicle / date / time, write completed bookings to this Google Sheet. Redirect anything outside this workflow to me. Confirm the workflow before activating."*
@@ -78,15 +119,7 @@ The best workflows are **narrow and operational**. The clearer you define the jo
 
 ---
 
-## Quick Start
-
-```bash
-git clone https://github.com/kvyb/opentulpa.git
-cd opentulpa
-./start.sh
-```
-
-`start.sh` bootstraps `uv`, installs dependencies, creates `.env`, launches the app, opens a Cloudflare tunnel, and syncs the Telegram webhook.
+## Configuration
 
 Set these when prompted, or add them to `.env`:
 
@@ -114,7 +147,7 @@ incoming message or event
         |
   plan and call tools via LangGraph
         |
-  validate tool calls and gate external side effects
+  validate tool calls and execution constraints
         |
   reply, write outputs, or schedule follow-up
         |
