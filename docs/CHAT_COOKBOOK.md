@@ -131,7 +131,7 @@ This lets OpenTulpa act like a front-desk employee inside a customer-facing chan
 
 ### Slack summarizer
 
-> "Monitor the Slack channels where I'm tagged, summarize the important threads, and draft responses I can approve before sending."
+> "Monitor the Slack channels where I'm tagged, summarize the important threads, and draft responses for review."
 
 ### GitHub triage
 
@@ -164,7 +164,7 @@ Good examples:
 
 - "Use these pricing files as source material, but only for the services in this workflow. Inspect them first and prepare the relevant knowledge before activating."
 - "Read these policies, extract the rules that affect customer replies, and bind the prepared policy summary to the workflow."
-- "Use this Google Sheet as the system of record, but ask me before activating any workflow that writes to it."
+- "Use this Google Sheet as the system of record, but show me the workflow proposal before saving it."
 - "If the source material does not contain a price or answer, say that directly and escalate instead of guessing."
 
 ## What usually works poorly

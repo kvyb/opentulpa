@@ -5,7 +5,7 @@ This guide covers the practical ways to run OpenTulpa today.
 If you just want the fastest local path, do this:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/kvyb/opentulpa.git
 cd opentulpa
 cp .env.example .env
 ```
@@ -50,7 +50,7 @@ Requirements:
 Base setup:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/kvyb/opentulpa.git
 cd opentulpa
 cp .env.example .env
 ```
