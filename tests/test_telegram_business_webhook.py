@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from opentulpa.api.routes import telegram_webhook as telegram_webhook_module
 from opentulpa.api.routes.telegram_webhook import register_telegram_webhook_routes
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
 
@@ -142,3 +144,69 @@ def test_business_message_webhook_triggers_matching_workflow_and_notifies_owner(
     ]
     assert telegram_client.messages[0]["chat_id"] == "777"
     assert "Telegram Business workflow issue: send failed" in str(telegram_client.messages[0]["text"])
+
+
+def test_telegram_webhook_writes_debug_log_events_for_secret_and_business_updates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(telegram_webhook_module, "PROJECT_ROOT", tmp_path)
+    app = FastAPI()
+    telegram_client = _RecordingTelegramClient()
+    telegram_business = TelegramBusinessService(db_path=tmp_path / "telegram_business.db")
+    settings = SimpleNamespace(
+        telegram_bot_token="bot-token",
+        telegram_webhook_secret="secret-token",
+        telegram_allowed_user_ids=None,
+        telegram_allowed_usernames=None,
+    )
+
+    register_telegram_webhook_routes(
+        app,
+        settings=settings,
+        get_telegram_client=lambda: telegram_client,
+        get_telegram_business=lambda: telegram_business,
+        get_intake_workflows=lambda: _FakeIntakeWorkflows(),
+        get_telegram_chat=lambda: _FakeTelegramChat(),
+        get_agent_runtime=lambda: object(),
+    )
+
+    with TestClient(app) as client:
+        rejected = client.post(
+            "/webhook/telegram",
+            json={"update_id": 1},
+            headers={"x-telegram-bot-api-secret-token": "wrong"},
+        )
+        accepted = client.post(
+            "/webhook/telegram",
+            json={
+                "update_id": 2,
+                "business_connection": {
+                    "id": "bc_456",
+                    "user_chat_id": 888,
+                    "is_enabled": True,
+                    "user": {"id": 456, "is_bot": False, "first_name": "Lee"},
+                    "rights": {"can_reply": True},
+                },
+            },
+            headers={"x-telegram-bot-api-secret-token": "secret-token"},
+        )
+        _wait_for_webhook_tasks(app)
+
+    assert rejected.status_code == 403
+    assert accepted.status_code == 200
+
+    log_paths = sorted((tmp_path / ".opentulpa" / "logs" / "webhooks").glob("telegram-webhook-*.jsonl"))
+    assert len(log_paths) == 1
+    events = [json.loads(line) for line in log_paths[0].read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in events] == [
+        "rejected_invalid_secret",
+        "accepted",
+        "business_update_handled",
+    ]
+    assert events[0]["has_secret_header"] is True
+    assert events[1]["update_id"] == 2
+    assert events[1]["has_business_update"] is True
+    assert events[1]["update_keys"] == ["business_connection", "update_id"]
+    assert events[2]["kind"] == "business_connection"
+    assert events[2]["business_connection_id"] == "bc_456"

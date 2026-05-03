@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import types
@@ -104,6 +105,55 @@ def test_ensure_telegram_webhook_secret_generates_when_missing(monkeypatch) -> N
     generated = entry._ensure_telegram_webhook_secret(settings)
     assert generated
     assert os.environ.get("TELEGRAM_WEBHOOK_SECRET") == generated
+
+
+def test_auto_configure_telegram_webhook_posts_secret_and_business_updates(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _Resp:
+        status_code = 200
+        content = b'{"ok":true}'
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, data: dict[str, object] | None = None) -> _Resp:
+            calls.append({"url": url, "data": data or {}})
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.com/")
+    settings = SimpleNamespace(
+        telegram_bot_token="123:abc",
+        telegram_webhook_secret="settings-secret",
+    )
+
+    entry._auto_configure_telegram_webhook(settings)
+
+    assert len(calls) == 1
+    assert str(calls[0]["url"]).endswith("/setWebhook")
+    payload = calls[0]["data"]
+    assert isinstance(payload, dict)
+    assert payload["url"] == "https://example.com/webhook/telegram"
+    assert payload["secret_token"] == "settings-secret"
+    allowed_updates = json.loads(str(payload["allowed_updates"]))
+    assert "business_connection" in allowed_updates
+    assert "business_message" in allowed_updates
+    assert "edited_business_message" in allowed_updates
+    assert "deleted_business_messages" in allowed_updates
 
 
 def test_telegram_bot_commands_include_debug_logs() -> None:

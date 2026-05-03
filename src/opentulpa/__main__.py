@@ -1,5 +1,6 @@
 """OpenTulpa entry point."""
 
+import json
 import os
 import secrets
 import shutil
@@ -26,6 +27,17 @@ from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
 from opentulpa.tasks.service import TaskService
+
+TELEGRAM_WEBHOOK_ALLOWED_UPDATES = [
+    "message",
+    "edited_message",
+    "callback_query",
+    "my_chat_member",
+    "business_connection",
+    "business_message",
+    "edited_business_message",
+    "deleted_business_messages",
+]
 
 
 async def _wake_callback(payload: dict) -> None:
@@ -201,7 +213,11 @@ def _auto_configure_telegram_webhook(settings: Any) -> None:
         return
     webhook_secret = _ensure_telegram_webhook_secret(settings)
     webhook_url = f"{public_base_url}/webhook/telegram"
-    payload = {"url": webhook_url, "secret_token": webhook_secret}
+    payload = {
+        "url": webhook_url,
+        "secret_token": webhook_secret,
+        "allowed_updates": json.dumps(TELEGRAM_WEBHOOK_ALLOWED_UPDATES),
+    }
     try:
         import httpx
 
@@ -218,7 +234,10 @@ def _auto_configure_telegram_webhook(settings: Any) -> None:
             return
         data = response.json() if response.content else {}
         if bool(data.get("ok")):
-            print(f"Telegram webhook configured: {webhook_url}")
+            print(
+                "Telegram webhook configured: "
+                f"{webhook_url} allowed_updates={','.join(TELEGRAM_WEBHOOK_ALLOWED_UPDATES)}"
+            )
         else:
             print(
                 f"Telegram webhook auto-config failed: {data.get('description', 'unknown error')}",
