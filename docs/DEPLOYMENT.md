@@ -221,6 +221,8 @@ If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml
 - `PUBLIC_BASE_URL` should be set so webhook registration is explicit; when unset on Railway, OpenTulpa falls back to `RAILWAY_PUBLIC_DOMAIN`
 - the same deployed bot and webhook handle both ordinary Telegram chat and Telegram Business updates
 - OpenTulpa persists Telegram Business inbox state locally, so use persistent storage
+- connected Telegram Business accounts are not env vars; Telegram sends `business_connection` updates and OpenTulpa stores the resulting `business_connection_id` under a `customer_id`
+- Telegram Business intake workflows bind to that stored `business_connection_id`; if a Business account is not visible, inspect `getWebhookInfo`, `/debug_logs`, and `.opentulpa/telegram_business.db` instead of adding account ids to Railway variables
 
 ## Telegram owner and support access
 

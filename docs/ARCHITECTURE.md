@@ -81,6 +81,28 @@ This is the flow behind "brief and equip the employee."
 
 The runtime should not treat a large spreadsheet, PDF, or policy dump as permanent raw prompt context. The setup phase prepares the operational subset the worker needs, and the intake phase uses that durable prepared knowledge.
 
+### Telegram Business identity and scoping
+
+Telegram Business has three separate identity layers:
+
+1. The deployed bot and webhook are runtime configuration. `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, and `PUBLIC_BASE_URL` identify the bot process and public webhook endpoint. A connected Telegram Business account is not configured in env vars.
+2. The OpenTulpa tenant is the durable owner/customer scope, represented by `customer_id`. Normal owner chats default to `telegram_<owner_user_id>` unless support act-as binds an operator to an existing customer tenant.
+3. The connected Telegram Business inbox is runtime state discovered from Telegram. Telegram sends a `business_connection` update, OpenTulpa stores its `business_connection_id` under the active `customer_id`, and future `business_message` updates refer back to that connection id.
+
+An intake workflow is scoped by `customer_id` and, for Telegram Business sources, by `source_config.business_connection_id`. If the owner has exactly one connected Business account, setup can resolve that connection automatically. If one tenant has multiple connected Business accounts, the workflow must bind the intended `business_connection_id` explicitly.
+
+Lead/customer conversations inside the connected Business inbox are scoped below the Business connection by Telegram chat id. That chat id is not the owner chat and is not an env var; it identifies the external conversation being handled by the workflow. Intake state, booking cursors, and idempotency are stored per workflow and per external conversation.
+
+This keeps these concerns separate:
+
+- owner/operator chat history: the private OpenTulpa setup/debug conversation
+- support chat history: a support-specific thread that may act on a bound customer tenant
+- customer tenant state: workflows, files, skills, memory, and Business connections keyed by `customer_id`
+- Telegram Business inbox state: stored `business_connection_id` plus external lead chat/message state
+- bot runtime config: token, webhook secret, and public URL used to receive Telegram updates
+
+If a Business account is not visible after setup, inspect webhook delivery and stored connection state instead of adding the Business account to env vars. The useful checks are Telegram `getWebhookInfo`, `/debug_logs` webhook diagnostics, `.opentulpa/telegram_business.db`, and the workflow `source_config.business_connection_id`.
+
 ### Support act-as flow
 
 Support operators are trusted operators configured by `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`.
