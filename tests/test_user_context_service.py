@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from opentulpa.business_knowledge.service import BusinessKnowledgeService
+from opentulpa.context.file_vault import FileVaultService
+from opentulpa.context.user_context import USER_CONTEXT_SCOPE_TYPE, UserContextService
+
+
+class _Oracle:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def extract_intent(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "mode": "specific_fact",
+            "target_terms": [str(kwargs.get("query", ""))],
+            "qualifier_terms": [],
+            "ignore_terms": [],
+        }
+
+    def answer(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "Grounded answer from user context."
+
+
+def _services(tmp_path: Path) -> tuple[FileVaultService, _Oracle, UserContextService]:
+    vault = FileVaultService(
+        root_dir=tmp_path / "vault",
+        db_path=tmp_path / "vault.db",
+    )
+    oracle = _Oracle()
+    knowledge = BusinessKnowledgeService(
+        root_dir=tmp_path / "knowledge",
+        db_path=tmp_path / "knowledge.db",
+        file_vault=vault,
+        oracle_client=oracle,  # type: ignore[arg-type]
+    )
+    service = UserContextService(
+        db_path=tmp_path / "user_context.db",
+        knowledge_service=knowledge,
+        file_vault=vault,
+    )
+    return vault, oracle, service
+
+
+def test_user_context_add_files_indexes_user_context_scope(tmp_path: Path) -> None:
+    vault, _oracle, service = _services(tmp_path)
+    record = vault.ingest_file(
+        customer_id="cust_1",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="blog.md",
+        mime_type="text/markdown",
+        caption=None,
+        raw_bytes=b"# Voice\nShort punchy hooks.",
+    )
+
+    result = service.add_files(customer_id="cust_1", file_ids=[record["id"]])
+
+    assert result["scope_type"] == USER_CONTEXT_SCOPE_TYPE
+    assert result["scope_id"] == "cust_1"
+    assert result["indexed"]["scope_type"] == USER_CONTEXT_SCOPE_TYPE
+    assert result["sources"][0]["file_id"] == record["id"]
+    assert result["sources"][0]["status"] == "indexed"
+
+
+def test_user_context_archive_excludes_source_from_queries(tmp_path: Path) -> None:
+    vault, oracle, service = _services(tmp_path)
+    keep = vault.ingest_file(
+        customer_id="cust_1",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="keep.md",
+        mime_type="text/markdown",
+        caption=None,
+        raw_bytes=b"Keep this source.",
+    )
+    archived = vault.ingest_file(
+        customer_id="cust_1",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="old.md",
+        mime_type="text/markdown",
+        caption=None,
+        raw_bytes=b"Do not use this old source.",
+    )
+    service.add_files(customer_id="cust_1", file_ids=[keep["id"], archived["id"]])
+    service.archive_sources(customer_id="cust_1", file_ids=[archived["id"]])
+
+    result = service.query(customer_id="cust_1", query="what should I use?")
+
+    assert result["ok"] is True
+    assert result["answer_extract"] == "Grounded answer from user context."
+    source_pack = oracle.calls[-1]["source_pack"]
+    assert "keep.md" in source_pack
+    assert "old.md" not in source_pack

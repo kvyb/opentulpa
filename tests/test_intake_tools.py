@@ -333,6 +333,50 @@ async def test_business_knowledge_query_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_context_tools_post_expected_payloads() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "scope_type": "user_context",
+                    "scope_id": "telegram_123",
+                    "sources": [{"file_id": "file_1", "status": "indexed"}],
+                },
+            ),
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "query": "brand voice",
+                    "answer_extract": "Short hooks and direct CTAs.",
+                    "sources": [{"file_id": "file_1"}],
+                },
+            ),
+        ]
+    )
+    tools = register_runtime_tools(runtime)
+
+    add_result = await tools["user_context_add_files"].ainvoke({"file_ids": ["file_1"]})
+    query_result = await tools["user_context_query"].ainvoke({"query": "brand voice"})
+
+    assert add_result["scope_type"] == "user_context"
+    assert query_result["answer_extract"] == "Short hooks and direct CTAs."
+    assert runtime.calls[0][1] == "/internal/user_context/add_files"
+    assert runtime.calls[0][2]["json_body"] == {
+        "customer_id": "telegram_123",
+        "file_ids": ["file_1"],
+    }
+    assert runtime.calls[1][1] == "/internal/user_context/query"
+    assert runtime.calls[1][2]["json_body"] == {
+        "customer_id": "telegram_123",
+        "query": "brand voice",
+        "max_extract_chars": 3000,
+    }
+
+
+@pytest.mark.asyncio
 async def test_business_knowledge_query_current_workflow_resolves_active_setup_scope() -> None:
     runtime = DummyRuntime(
         [

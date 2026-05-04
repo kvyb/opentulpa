@@ -212,7 +212,7 @@ class Settings(BaseSettings):
         ),
     )
     multimodal_llm: str = Field(
-        default="google/gemini-3-flash-preview",
+        default="google/gemini-3.1-flash-lite-preview",
         validation_alias=AliasChoices(
             "MULTIMODAL_LLM",
             "TELEGRAM_MEDIA_MODEL",
@@ -221,7 +221,7 @@ class Settings(BaseSettings):
             "Model used for multimodal understanding of non-text inputs such as Telegram "
             "attachments, browser screenshots, voice notes, and audio/video files before "
             "passing text summaries into the main chat model. "
-            "Recommended default is google/gemini-3-flash-preview."
+            "Recommended default is google/gemini-3.1-flash-lite-preview."
         ),
     )
     workflow_setup_input_classifier_model: str = Field(

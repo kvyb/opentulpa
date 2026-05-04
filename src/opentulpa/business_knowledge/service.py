@@ -40,7 +40,7 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
 from opentulpa.persistence.sqlite import connect_sqlite
 
-_VALID_SCOPE_TYPES = {"workflow_setup", "intake_workflow", "customer_business"}
+_VALID_SCOPE_TYPES = {"workflow_setup", "intake_workflow", "customer_business", "user_context"}
 _DEFAULT_SOURCE_PACK_CHAR_LIMIT = 800_000
 _DEFAULT_ORACLE_MODEL = "google/gemini-3.1-flash-lite-preview"
 _DEFAULT_ORACLE_MAX_OUTPUT_TOKENS = 1000
@@ -62,7 +62,9 @@ def _elapsed_ms(started: float) -> int:
 def _safe_scope_type(value: Any) -> str:
     scope_type = str(value or "").strip().lower()
     if scope_type not in _VALID_SCOPE_TYPES:
-        raise ValueError("scope_type must be workflow_setup|intake_workflow|customer_business")
+        raise ValueError(
+            "scope_type must be workflow_setup|intake_workflow|customer_business|user_context"
+        )
     return scope_type
 
 
@@ -615,6 +617,7 @@ class BusinessKnowledgeService:
         query: str,
         max_extract_chars: int = 3000,
         workflow_context: dict[str, Any] | None = None,
+        file_ids: list[str] | None = None,
     ) -> KnowledgeQueryResult:
         query_started = time.monotonic()
         timing_ms: dict[str, int] = {}
@@ -631,6 +634,9 @@ class BusinessKnowledgeService:
             scope_type=safe_scope_type,
             scope_id=safe_scope_id,
         )
+        safe_file_ids = set(_unique_strings(file_ids or []))
+        if safe_file_ids:
+            sections = [section for section in sections if str(section.metadata.get("file_id", "")) in safe_file_ids]
         warnings = self._scope_warnings(
             customer_id=cid,
             scope_type=safe_scope_type,
@@ -641,6 +647,8 @@ class BusinessKnowledgeService:
             scope_type=safe_scope_type,
             scope_id=safe_scope_id,
         )
+        if safe_file_ids:
+            source_count = len(safe_file_ids)
         timing_ms["load_scope"] = _elapsed_ms(load_started)
         if not sections:
             timing_ms["total"] = _elapsed_ms(query_started)
@@ -803,12 +811,18 @@ class BusinessKnowledgeService:
                 query=query,
                 category_terms=[*intent["target_terms"], *intent["qualifier_terms"]],
             )
+            source_pack, supplemental_section_count = _with_relevant_non_table_sections(
+                source_pack=source_pack,
+                sections=sections,
+                query=query,
+            )
             timing_ms["table_overview"] = _elapsed_ms(overview_started)
             timing_ms["source_pack_total"] = _elapsed_ms(started)
             return source_pack, {
                 "mode": intent["mode"],
                 "chars": len(source_pack),
                 "section_count": len(sections),
+                "supplemental_section_count": supplemental_section_count,
                 "fact_count": len(facts),
                 "intent": _safe_intent_diagnostics(intent),
                 "timing_ms": timing_ms,
@@ -835,12 +849,18 @@ class BusinessKnowledgeService:
                 query=query,
                 category_terms=[*intent["target_terms"], *intent["qualifier_terms"]],
             )
+            source_pack, supplemental_section_count = _with_relevant_non_table_sections(
+                source_pack=source_pack,
+                sections=sections,
+                query=query,
+            )
             timing_ms["table_overview"] = _elapsed_ms(overview_started)
             timing_ms["source_pack_total"] = _elapsed_ms(started)
             return source_pack, {
                 "mode": "fallback_overview",
                 "chars": len(source_pack),
                 "section_count": len(sections),
+                "supplemental_section_count": supplemental_section_count,
                 "fact_count": len(facts),
                 "selected_row_count": 0,
                 "intent": _safe_intent_diagnostics(intent),
@@ -852,6 +872,11 @@ class BusinessKnowledgeService:
             query=query,
             target_terms=intent["target_terms"],
             qualifier_terms=intent["qualifier_terms"],
+        )
+        source_pack, supplemental_section_count = _with_relevant_non_table_sections(
+            source_pack=source_pack,
+            sections=sections,
+            query=query,
         )
         timing_ms["table_evidence_pack"] = _elapsed_ms(evidence_started)
         timing_ms["source_pack_total"] = _elapsed_ms(started)
@@ -866,6 +891,7 @@ class BusinessKnowledgeService:
             "mode": intent["mode"],
             "chars": len(source_pack),
             "section_count": len(sections),
+            "supplemental_section_count": supplemental_section_count,
             "fact_count": len(facts),
             "selected_row_count": len(rows),
             "selection": selection_stats,
@@ -1393,6 +1419,60 @@ def _source_pack_for_sections(sections: list[KnowledgeSourceSection]) -> str:
             ).strip()
         )
     return "\n\n".join(parts).strip()
+
+
+def _with_relevant_non_table_sections(
+    *,
+    source_pack: str,
+    sections: list[KnowledgeSourceSection],
+    query: str,
+) -> tuple[str, int]:
+    selected = _select_relevant_non_table_sections(sections=sections, query=query)
+    if not selected:
+        return source_pack, 0
+    supplement = _source_pack_for_sections(selected)
+    if not supplement:
+        return source_pack, 0
+    return "\n\n## Supplemental non-table sources\n\n".join([source_pack, supplement]).strip(), len(selected)
+
+
+def _select_relevant_non_table_sections(
+    *,
+    sections: list[KnowledgeSourceSection],
+    query: str,
+    limit: int = 8,
+) -> list[KnowledgeSourceSection]:
+    candidates = [section for section in sections if section.source_kind != "structured_table"]
+    if not candidates:
+        return []
+    tokens = _query_tokens(query)
+    if not tokens:
+        return candidates[:limit]
+    scored: list[tuple[int, int, str, KnowledgeSourceSection]] = []
+    for section in candidates:
+        metadata = section.metadata if isinstance(section.metadata, dict) else {}
+        haystack = " ".join(
+            [
+                str(section.source_ref or ""),
+                str(section.source_kind or ""),
+                str(metadata.get("filename", "") or ""),
+                str(metadata.get("section_title", "") or ""),
+                str(section.content or ""),
+            ]
+        )
+        score = len(tokens & _query_tokens(haystack))
+        if score:
+            scored.append((score, int(section.sort_order or 0), str(section.source_ref), section))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [item[3] for item in scored[:limit]]
+
+
+def _query_tokens(value: str) -> set[str]:
+    return {
+        token.casefold()
+        for token in re.findall(r"[\w-]+", str(value or ""), flags=re.UNICODE)
+        if len(token.strip()) >= 2
+    }
 
 
 def _section_content_for_oracle(section: KnowledgeSourceSection) -> str:

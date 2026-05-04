@@ -226,9 +226,9 @@ async def _resolve_business_knowledge_scope(
 ) -> tuple[str, str] | dict[str, str]:
     requested_type = str(scope_type or "current_workflow").strip().lower() or "current_workflow"
     requested_id = str(scope_id or "").strip()
-    valid_types = {"workflow_setup", "intake_workflow", "customer_business"}
+    valid_types = {"workflow_setup", "intake_workflow", "customer_business", "user_context"}
     if requested_type in valid_types:
-        if requested_type == "customer_business" and not requested_id:
+        if requested_type in {"customer_business", "user_context"} and not requested_id:
             return requested_type, require_customer_id(runtime)
         if requested_id:
             return requested_type, requested_id
@@ -802,6 +802,151 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         return _compact_business_knowledge_query(r.json())
 
     @tool
+    async def user_context_add_files(file_ids: list[str]) -> Any:
+        """Add uploaded files to the durable interactive user context.
+
+        Use this only when the user's recent instructions clearly ask to add files
+        to their reusable context. If intent is unclear, ask what to do with the
+        files instead of guessing from filenames or content.
+        """
+        customer_id = require_customer_id(runtime)
+        safe_file_ids = [
+            str(item or "").strip()
+            for item in list(file_ids or [])
+            if str(item or "").strip()
+        ][:50]
+        if not safe_file_ids:
+            return {"error": "user_context_add_files failed: file_ids is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/add_files",
+            json_body={"customer_id": customer_id, "file_ids": safe_file_ids},
+            timeout=90.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_add_files", r)
+        return r.json()
+
+    @tool
+    async def user_context_query(query: str, max_extract_chars: int = 3000) -> Any:
+        """Query the durable interactive user context for grounded evidence."""
+        customer_id = require_customer_id(runtime)
+        safe_query = str(query or "").strip()
+        if not safe_query:
+            return {"error": "user_context_query failed: query is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/query",
+            json_body={
+                "customer_id": customer_id,
+                "query": safe_query,
+                "max_extract_chars": max(500, min(int(max_extract_chars), 5000)),
+            },
+            timeout=70.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_query", r)
+        return r.json()
+
+    @tool
+    async def user_context_list_sources(include_archived: bool = False) -> Any:
+        """List files that are currently registered in the interactive user context."""
+        customer_id = require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/list_sources",
+            json_body={"customer_id": customer_id, "include_archived": bool(include_archived)},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_list_sources", r)
+        return r.json().get("sources", [])
+
+    @tool
+    async def user_context_find_sources(query: str, limit: int = 10) -> Any:
+        """Find user-context sources by filename, summary, or extracted text preview."""
+        customer_id = require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/find_sources",
+            json_body={
+                "customer_id": customer_id,
+                "query": query,
+                "limit": max(1, min(int(limit), 50)),
+            },
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_find_sources", r)
+        return r.json().get("sources", [])
+
+    @tool
+    async def user_context_reindex(file_ids: list[str] | None = None) -> Any:
+        """Reindex selected user-context files, or every active source when omitted."""
+        customer_id = require_customer_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/reindex",
+            json_body={"customer_id": customer_id, "file_ids": file_ids or None},
+            timeout=90.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_reindex", r)
+        return r.json()
+
+    @tool
+    async def user_context_archive_sources(file_ids: list[str]) -> Any:
+        """Archive selected files so default user-context queries stop using them."""
+        customer_id = require_customer_id(runtime)
+        safe_file_ids = [
+            str(item or "").strip()
+            for item in list(file_ids or [])
+            if str(item or "").strip()
+        ][:50]
+        if not safe_file_ids:
+            return {"error": "user_context_archive_sources failed: file_ids is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/archive_sources",
+            json_body={"customer_id": customer_id, "file_ids": safe_file_ids},
+            timeout=20.0,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_archive_sources", r)
+        return r.json()
+
+    @tool
+    async def user_context_promote_to_intake(workflow_id: str, file_ids: list[str]) -> Any:
+        """Index selected user-context files into an existing intake workflow scope."""
+        customer_id = require_customer_id(runtime)
+        safe_file_ids = [
+            str(item or "").strip()
+            for item in list(file_ids or [])
+            if str(item or "").strip()
+        ][:50]
+        if not str(workflow_id or "").strip():
+            return {"error": "user_context_promote_to_intake failed: workflow_id is required"}
+        if not safe_file_ids:
+            return {"error": "user_context_promote_to_intake failed: file_ids is required"}
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/user_context/promote_to_intake",
+            json_body={
+                "customer_id": customer_id,
+                "workflow_id": str(workflow_id).strip(),
+                "file_ids": safe_file_ids,
+            },
+            timeout=90.0,
+            retries=1,
+        )
+        if r.status_code != 200:
+            return _tool_error_payload("user_context_promote_to_intake", r)
+        return r.json()
+
+    @tool
     async def directive_get() -> Any:
         """Get the active persistent directive profile for this user."""
         customer_id = require_customer_id(runtime)
@@ -1261,6 +1406,13 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         "uploaded_file_inspect_structure": uploaded_file_inspect_structure,
         "business_knowledge_index": business_knowledge_index,
         "business_knowledge_query": business_knowledge_query,
+        "user_context_add_files": user_context_add_files,
+        "user_context_query": user_context_query,
+        "user_context_list_sources": user_context_list_sources,
+        "user_context_find_sources": user_context_find_sources,
+        "user_context_reindex": user_context_reindex,
+        "user_context_archive_sources": user_context_archive_sources,
+        "user_context_promote_to_intake": user_context_promote_to_intake,
         "directive_get": directive_get,
         "directive_set": directive_set,
         "directive_clear": directive_clear,

@@ -155,6 +155,8 @@ async def test_telegram_interactive_inbox_merges_slow_media_then_followup_text(
     assert captured_turn_texts and len(captured_turn_texts) == 1
     merged = captured_turn_texts[0]
     assert "User uploaded one or more files without extra text." in merged
+    assert "If intent is unclear, ask what the user wants done" in merged
+    assert "Do not infer intent from filenames or content" in merged
     assert "orange cat sleeping on a chair" in merged
     assert "sleeping cat on the chair" in merged
     assert runtime.registered_thread_ids == ["chat-1"]

@@ -31,7 +31,7 @@ memory_llm_model: google/gemini-3-flash-preview
 llm_reasoning_effort: medium
 wake_classifier_model: null
 wake_execution_model: z-ai/glm-5.1
-multimodal_llm: google/gemini-3-flash-preview
+multimodal_llm: google/gemini-3.1-flash-lite-preview
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
 openai_compatible_embedding_model: openai/text-embedding-3-small
 agent_prompt_caching_enabled: true

@@ -682,6 +682,9 @@ _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "uploaded_file_inspect_structure": "Inspecting uploaded file",
     "business_knowledge_index": "Preparing business knowledge",
     "business_knowledge_query": "Querying business knowledge",
+    "user_context_add_files": "Adding files to user context",
+    "user_context_query": "Querying user context",
+    "user_context_reindex": "Reindexing user context",
     "browser_use_run": "Using the browser",
 }
 
@@ -697,6 +700,13 @@ CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
     "uploaded_file_inspect_structure",
     "business_knowledge_index",
     "business_knowledge_query",
+    "user_context_add_files",
+    "user_context_query",
+    "user_context_list_sources",
+    "user_context_find_sources",
+    "user_context_reindex",
+    "user_context_archive_sources",
+    "user_context_promote_to_intake",
     "skill_list",
     "skill_get",
     "skill_upsert",
@@ -1308,7 +1318,7 @@ class OpenTulpaLangGraphRuntime:
         self._telegram_media_model_name = (
             _normalize_model_name(telegram_media_model_name)
             if str(telegram_media_model_name or "").strip()
-            else "google/gemini-3-flash-preview"
+            else "google/gemini-3.1-flash-lite-preview"
         )
         workflow_setup_classifier_model = (
             str(workflow_setup_input_classifier_model_name).strip()

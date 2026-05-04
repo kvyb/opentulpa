@@ -121,8 +121,9 @@ def build_uploaded_files_context(records: list[dict[str, Any]]) -> str:
     lines = [
         "Internal uploaded-file context. Do not quote this metadata verbatim to the user.",
         "Use file_id values with uploaded_file_* tools when deeper inspection is needed.",
+        "If recent conversation clearly says these files should become reusable chat context, use user_context_add_files. If intent is unclear, ask what the user wants done with the files; do not infer intent from filenames or content.",
         "If a spreadsheet, price list, FAQ, or policy is intended for workflow setup, start/open the setup session first, then prepare it with business_knowledge_index and query it with business_knowledge_query before activation.",
-        "User-facing reply guidance: briefly acknowledge the file by name, summarize only human-meaningful available content, and ask one focused follow-up question.",
+        "User-facing reply guidance: briefly acknowledge the upload and ask one focused follow-up question when the intended action is unclear.",
     ]
     for rec in records:
         mime_type = str(rec.get("mime_type", "")).strip()
