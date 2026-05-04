@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -105,6 +106,64 @@ def _is_trusted_server_client(host: str) -> bool:
     except ValueError:
         return False
     return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
+
+
+def _csv_items(value: Any, *, normalize_username: bool = False) -> list[str]:
+    out: list[str] = []
+    for item in str(value or "").split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        if normalize_username:
+            candidate = candidate.removeprefix("@").lower()
+        out.append(candidate)
+    return out
+
+
+def _owner_customer_id_from_username(*, username: str, state_path: Path) -> str:
+    safe_username = str(username or "").strip().removeprefix("@").lower()
+    if not safe_username or not state_path.exists():
+        return ""
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    sessions = state.get("sessions")
+    if not isinstance(sessions, dict):
+        return ""
+    for slot in sessions.values():
+        if not isinstance(slot, dict):
+            continue
+        if str(slot.get("role") or "owner").strip().lower() != "owner":
+            continue
+        slot_username = str(slot.get("username") or "").strip().removeprefix("@").lower()
+        if slot_username != safe_username:
+            continue
+        customer_id = str(slot.get("customer_id") or "").strip()
+        if customer_id:
+            return customer_id
+        user_id = str(slot.get("user_id") or "").strip()
+        if user_id:
+            return f"telegram_{user_id}"
+    return ""
+
+
+def _telegram_business_owner_customer_id(
+    *,
+    allowed_usernames: Any,
+    allowed_user_ids: Any,
+    state_path: Path,
+) -> str:
+    for username in _csv_items(allowed_usernames, normalize_username=True):
+        customer_id = _owner_customer_id_from_username(username=username, state_path=state_path)
+        if customer_id:
+            return customer_id
+    for candidate in _csv_items(allowed_user_ids):
+        try:
+            return f"telegram_{int(candidate)}"
+        except Exception:
+            continue
+    return ""
 
 
 def _business_knowledge_oracle(
@@ -249,6 +308,11 @@ def create_app(
 
     telegram_business = TelegramBusinessService(
         db_path=PROJECT_ROOT / ".opentulpa" / "telegram_business.db",
+        owner_customer_id=_telegram_business_owner_customer_id(
+            allowed_usernames=settings.telegram_allowed_usernames,
+            allowed_user_ids=settings.telegram_allowed_user_ids,
+            state_path=PROJECT_ROOT / ".opentulpa" / "telegram_state.json",
+        ),
     )
     telegram_business.client = telegram_client
 

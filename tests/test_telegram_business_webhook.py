@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from opentulpa.api.app import _telegram_business_owner_customer_id
 from opentulpa.api.routes import telegram_webhook as telegram_webhook_module
 from opentulpa.api.routes.telegram_webhook import register_telegram_webhook_routes
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
@@ -74,6 +75,49 @@ class _FakeIntakeWorkflows:
             }
         )
         return {"ok": False, "summary": "send failed"}
+
+
+def test_telegram_business_owner_customer_id_uses_first_allowed_username(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "telegram_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "sessions": {
+                    "100": {
+                        "user_id": 83969136,
+                        "username": "kvybiral",
+                        "customer_id": "telegram_83969136",
+                        "role": "owner",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        _telegram_business_owner_customer_id(
+            allowed_usernames="kvybiral,nastyayanb",
+            allowed_user_ids="6907589464",
+            state_path=state_path,
+        )
+        == "telegram_83969136"
+    )
+
+
+def test_telegram_business_owner_customer_id_falls_back_to_first_allowed_id(
+    tmp_path: Path,
+) -> None:
+    assert (
+        _telegram_business_owner_customer_id(
+            allowed_usernames="missing",
+            allowed_user_ids="not-a-number, 83969136, 6907589464",
+            state_path=tmp_path / "missing.json",
+        )
+        == "telegram_83969136"
+    )
 
 
 def _wait_for_webhook_tasks(app: FastAPI, *, timeout: float = 2.0) -> None:

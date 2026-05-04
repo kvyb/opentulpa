@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from opentulpa.persistence.sqlite import connect_sqlite
 
 
 def _utc_now_iso() -> str:
@@ -45,10 +45,12 @@ def _message_text(message: dict[str, Any]) -> str:
 class TelegramBusinessService:
     """Persist Telegram Business connections and normalized message state."""
 
-    def __init__(self, *, db_path: Path) -> None:
+    def __init__(self, *, db_path: Path, owner_customer_id: str | None = None) -> None:
         self._db_path = db_path.resolve()
+        self._owner_customer_id = str(owner_customer_id or "").strip()
         self.client: Any | None = None
         self._init_db()
+        self._bind_existing_connections_to_owner()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self._db_path, wal=True)
@@ -93,13 +95,28 @@ class TelegramBusinessService:
                 """
             )
 
-    @staticmethod
-    def _customer_id_from_connection(connection: dict[str, Any]) -> str:
+    def _customer_id_from_connection(self, connection: dict[str, Any]) -> str:
+        if self._owner_customer_id:
+            return self._owner_customer_id
         user = _safe_dict(connection.get("user"))
         user_id = str(user.get("id", "") or "").strip()
         if not user_id:
             return ""
         return f"telegram_{user_id}"
+
+    def _bind_existing_connections_to_owner(self) -> None:
+        if not self._owner_customer_id:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE telegram_business_connections SET customer_id = ?",
+                (self._owner_customer_id,),
+            )
+            conn.execute(
+                "UPDATE telegram_business_messages SET customer_id = ?",
+                (self._owner_customer_id,),
+            )
+            conn.commit()
 
     @staticmethod
     def _connection_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
