@@ -138,6 +138,37 @@ def _telegram_video_message(
     }
 
 
+def _telegram_audio_message(
+    *,
+    chat_id: int,
+    user_id: int,
+    username: str,
+    file_id: str,
+    file_unique_id: str,
+    file_name: str,
+    mime_type: str,
+    file_size: int,
+    message_id: int,
+) -> dict[str, Any]:
+    return {
+        "update_id": int(time.time() * 1000) + message_id,
+        "message": {
+            "message_id": message_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": user_id, "is_bot": False, "username": username},
+            "audio": {
+                "file_id": file_id,
+                "file_unique_id": file_unique_id,
+                "file_name": file_name,
+                "mime_type": mime_type,
+                "file_size": int(file_size),
+                "duration": 3,
+            },
+        },
+    }
+
+
 def _xlsx_bytes() -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -220,6 +251,38 @@ def _write_video_fixture(path: Path) -> Path:
             str(path),
         ]
     )
+    return path
+
+
+def _write_pdf_fixture(path: Path) -> Path:
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+    except Exception:
+        pytest.skip("reportlab is required to generate real PDF fixtures")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(path), pagesize=letter)
+    pdf.setFont("Helvetica", 14)
+    pdf.drawString(72, 720, "PDF RETAINER FLOOR: $1200")
+    pdf.drawString(72, 700, "Scope: weekly blog scripts, idea bank refresh, and scenario review.")
+    pdf.save()
+    return path
+
+
+def _write_audio_fixture(path: Path) -> Path:
+    say = shutil.which("say")
+    if not say:
+        pytest.skip("macOS say is required to generate real audio fixtures")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    phrase = "Audio retainer code is blue lantern. Weekly script review is included."
+    result = subprocess.run(
+        [say, "-o", str(path), phrase],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-2000:])
     return path
 
 
@@ -372,6 +435,242 @@ def test_live_telegram_chat_uploads_real_files_then_queries_user_context(
 
     e2e_harness.recorder.add(
         "live_user_context_real_file_chat_e2e",
+        customer_id=customer_id,
+        add_file_call_count=len(add_file_calls()),
+        query_call_count=len(query_calls()),
+        sources=sources,
+        final_text=final_text,
+    )
+
+
+def test_live_telegram_chat_recalls_pdf_user_context(
+    e2e_harness: E2EHarness,
+    tmp_path: Path,
+) -> None:
+    owner_user_id = 8244
+    owner_chat_id = 18244
+    username = "pdf_context_owner"
+    customer_id = f"telegram_{owner_user_id}"
+    fixture_dir = tmp_path / "uploaded_pdf_context"
+    pdf_path = _write_pdf_fixture(fixture_dir / "retainer.pdf")
+    pdf_tg = e2e_harness.telegram_client.register_file(
+        file_id="tg_retainer_pdf",
+        path=pdf_path,
+        filename="retainer.pdf",
+        mime_type="application/pdf",
+    )
+    internal_start = e2e_harness.count_internal_api_calls()
+    message_start = len(e2e_harness.telegram_client.sent_messages)
+
+    intro_status = e2e_harness.post_telegram(
+        body=_telegram_text_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=3001,
+            text=(
+                "I am going to upload a PDF. Add the uploaded PDF to my reusable interactive "
+                "user context. Later answer from user_context_query."
+            ),
+        )
+    )
+    assert intro_status == 200
+    assert _wait_until(
+        lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=message_start)) >= 1,
+        timeout_seconds=180.0,
+    )
+
+    upload_status = e2e_harness.post_telegram(
+        body=_telegram_document_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=3002,
+            file_id="tg_retainer_pdf",
+            file_name="retainer.pdf",
+            mime_type=str(pdf_tg["mime_type"]),
+            file_size=int(pdf_tg["file_size"]),
+        )
+    )
+    assert upload_status == 200
+
+    def add_file_calls() -> list[dict[str, Any]]:
+        return [
+            item
+            for item in e2e_harness.internal_api_calls_since(internal_start)
+            if item.get("path") == "/internal/user_context/add_files"
+        ]
+
+    assert _wait_until(lambda: bool(add_file_calls()), timeout_seconds=240.0), add_file_calls()
+
+    list_response = e2e_harness.client.post(
+        "/internal/user_context/list_sources",
+        json={"customer_id": customer_id, "include_archived": False},
+    )
+    assert list_response.status_code == 200, list_response.text
+    sources = list_response.json()["sources"]
+    assert {source["filename"] for source in sources} == {"retainer.pdf"}
+    assert len(sources) == 1
+
+    question_start = len(e2e_harness.telegram_client.sent_messages)
+    question_status = e2e_harness.post_telegram(
+        body=_telegram_text_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=3003,
+            text=(
+                "Use user_context_query now. Based only on my uploaded PDF context, "
+                "what is the PDF retainer floor and what work is in scope?"
+            ),
+        )
+    )
+    assert question_status == 200
+
+    def query_calls() -> list[dict[str, Any]]:
+        return [
+            item
+            for item in e2e_harness.internal_api_calls_since(internal_start)
+            if item.get("path") == "/internal/user_context/query"
+        ]
+
+    assert _wait_until(lambda: bool(query_calls()), timeout_seconds=240.0), query_calls()
+    assert _wait_until(
+        lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)) >= 1,
+        timeout_seconds=180.0,
+    )
+    final_text = str(
+        _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)[-1].get("text", "")
+        or ""
+    )
+    query_response_text = str(query_calls()[-1].get("response_text", "") or "")
+    combined = f"{query_response_text}\n{final_text}".lower()
+
+    assert "$1200" in combined or "$1,200" in combined or "1200" in combined
+    assert "weekly" in combined
+    assert "idea bank" in combined
+    assert "scenario" in combined
+
+    e2e_harness.recorder.add(
+        "live_user_context_pdf_recall_e2e",
+        customer_id=customer_id,
+        add_file_call_count=len(add_file_calls()),
+        query_call_count=len(query_calls()),
+        sources=sources,
+        final_text=final_text,
+    )
+
+
+def test_live_telegram_chat_recalls_audio_user_context(
+    e2e_harness: E2EHarness,
+    tmp_path: Path,
+) -> None:
+    owner_user_id = 8245
+    owner_chat_id = 18245
+    username = "audio_context_owner"
+    customer_id = f"telegram_{owner_user_id}"
+    fixture_dir = tmp_path / "uploaded_audio_context"
+    audio_path = _write_audio_fixture(fixture_dir / "audio_context.aiff")
+    audio_tg = e2e_harness.telegram_client.register_file(
+        file_id="tg_audio_context",
+        path=audio_path,
+        filename="audio_context.aiff",
+        mime_type="audio/aiff",
+    )
+    internal_start = e2e_harness.count_internal_api_calls()
+    message_start = len(e2e_harness.telegram_client.sent_messages)
+
+    intro_status = e2e_harness.post_telegram(
+        body=_telegram_text_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=4001,
+            text=(
+                "I am going to upload an audio file. Add the uploaded audio to my reusable "
+                "interactive user context. Later answer from user_context_query."
+            ),
+        )
+    )
+    assert intro_status == 200
+    assert _wait_until(
+        lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=message_start)) >= 1,
+        timeout_seconds=180.0,
+    )
+
+    upload_status = e2e_harness.post_telegram(
+        body=_telegram_audio_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=4002,
+            file_id="tg_audio_context",
+            file_unique_id="audio_context_unique",
+            file_name="audio_context.aiff",
+            mime_type=str(audio_tg["mime_type"]),
+            file_size=int(audio_tg["file_size"]),
+        )
+    )
+    assert upload_status == 200
+
+    def add_file_calls() -> list[dict[str, Any]]:
+        return [
+            item
+            for item in e2e_harness.internal_api_calls_since(internal_start)
+            if item.get("path") == "/internal/user_context/add_files"
+        ]
+
+    assert _wait_until(lambda: bool(add_file_calls()), timeout_seconds=300.0), add_file_calls()
+
+    list_response = e2e_harness.client.post(
+        "/internal/user_context/list_sources",
+        json={"customer_id": customer_id, "include_archived": False},
+    )
+    assert list_response.status_code == 200, list_response.text
+    sources = list_response.json()["sources"]
+    assert {source["source_kind"] for source in sources} == {"derived_from_media"}
+    assert {source["filename"] for source in sources} == {"audio_context.aiff"}
+
+    question_start = len(e2e_harness.telegram_client.sent_messages)
+    question_status = e2e_harness.post_telegram(
+        body=_telegram_text_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=4003,
+            text=(
+                "Use user_context_query now. Based only on my uploaded audio context, "
+                "what is the audio retainer code and what review is included?"
+            ),
+        )
+    )
+    assert question_status == 200
+
+    def query_calls() -> list[dict[str, Any]]:
+        return [
+            item
+            for item in e2e_harness.internal_api_calls_since(internal_start)
+            if item.get("path") == "/internal/user_context/query"
+        ]
+
+    assert _wait_until(lambda: bool(query_calls()), timeout_seconds=240.0), query_calls()
+    assert _wait_until(
+        lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)) >= 1,
+        timeout_seconds=180.0,
+    )
+    final_text = str(
+        _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)[-1].get("text", "")
+        or ""
+    )
+    query_response_text = str(query_calls()[-1].get("response_text", "") or "")
+    combined = f"{query_response_text}\n{final_text}".lower()
+
+    assert "blue lantern" in combined
+    assert "weekly" in combined
+    assert "script review" in combined
+
+    e2e_harness.recorder.add(
+        "live_user_context_audio_recall_e2e",
         customer_id=customer_id,
         add_file_call_count=len(add_file_calls()),
         query_call_count=len(query_calls()),
