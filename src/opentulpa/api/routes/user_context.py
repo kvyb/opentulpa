@@ -1,4 +1,16 @@
-"""Internal interactive user-context routes."""
+"""Internal interactive user-context routes.
+
+These endpoints expose the agent-facing user-context workflow for any uploaded
+content type. Documents and spreadsheets can be indexed through local extraction;
+PDFs, images, audio, and video are first prepared with the runtime multimodal
+summarizer so visible text, speech, visual facts, layout details, and other
+retrieval facts become text evidence. The routes then delegate to
+``UserContextService`` to index, query, list, reindex, archive, or explicitly
+promote selected sources into intake workflow knowledge.
+
+No upload intent is inferred here. If a chat turn does not clearly say what to do
+with uploaded files, the agent prompt policy is responsible for asking the user.
+"""
 
 from __future__ import annotations
 

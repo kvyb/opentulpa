@@ -1,4 +1,17 @@
-"""Interactive user-context source management over the knowledge engine."""
+"""Interactive user-context source management over the knowledge engine.
+
+User context is the durable, customer-scoped knowledge shelf for interactive chat.
+It can manage any uploaded content type that OpenTulpa can preserve in the file
+vault: text, documents, spreadsheets, PDFs, images, audio, and video. The service
+does not make multimodal files directly queryable; upstream preparation turns
+each file into normalized text evidence first. Local parsers handle text-like
+documents and structured sheets, while multimodal processors attach derived
+summaries/transcripts/visual notes to media records before indexing.
+
+The resulting evidence is indexed under ``user_context:<customer_id>`` and queried
+through the same business-knowledge engine used by intake. Intake scopes remain
+separate unless selected sources are explicitly promoted into a workflow.
+"""
 
 from __future__ import annotations
 
@@ -61,7 +74,14 @@ def _compact_source_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 class UserContextService:
-    """Customer-scoped interactive context backed by BusinessKnowledgeService."""
+    """Manage durable interactive sources for one customer.
+
+    This layer tracks which uploaded file records belong to the customer's
+    reusable chat context, archives or reindexes them, and delegates evidence
+    extraction/querying to ``BusinessKnowledgeService``. It intentionally stores
+    source membership, not user intent; agents decide from the current
+    conversation whether to add, query, archive, or promote files.
+    """
 
     def __init__(self, *, db_path: Any, knowledge_service: Any, file_vault: Any) -> None:
         self.db_path = db_path.resolve()
