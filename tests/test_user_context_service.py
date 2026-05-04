@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from pypdf import PdfWriter
 
 from opentulpa.business_knowledge.service import BusinessKnowledgeService
 from opentulpa.context.file_vault import FileVaultService
@@ -68,6 +71,39 @@ def test_user_context_add_files_indexes_user_context_scope(tmp_path: Path) -> No
     assert result["source_refs"][0]["file_id"] == record["id"]
     assert result["source_refs"][0]["filename"] == "blog.md"
     assert result["source_refs"][0]["source_kind"] == "local_source"
+
+
+def test_user_context_indexes_prepared_summary_for_scanned_pdf(tmp_path: Path) -> None:
+    vault, _oracle, service = _services(tmp_path)
+    pdf = PdfWriter()
+    pdf.add_blank_page(width=200, height=200)
+    raw_pdf = BytesIO()
+    pdf.write(raw_pdf)
+    record = vault.ingest_file(
+        customer_id="cust_1",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="scan.pdf",
+        mime_type="application/pdf",
+        caption=None,
+        raw_bytes=raw_pdf.getvalue(),
+    )
+    vault.set_ai_summary(
+        "cust_1",
+        record["id"],
+        "Visible text: BLOG SPRINT CTA. Visual facts from scanned PDF.",
+    )
+
+    result = service.add_files(customer_id="cust_1", file_ids=[record["id"]])
+
+    source = result["indexed"]["sources"][0]
+    assert source["status"] == "indexed"
+    assert source["source_kind"] == "derived_from_media"
+    assert source["section_count"] == 1
+    assert result["source_refs"][0]["filename"] == "scan.pdf"
+    assert result["source_refs"][0]["source_kind"] == "derived_from_media"
+    assert result["source_refs"][0]["locator"] == "derived media summary"
 
 
 def test_user_context_archive_excludes_source_from_queries(tmp_path: Path) -> None:
