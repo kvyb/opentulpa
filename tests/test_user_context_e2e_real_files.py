@@ -46,6 +46,7 @@ class _Oracle:
 class _Runtime:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []
 
     async def summarize_uploaded_blob(self, **kwargs: Any) -> str:
         self.calls.append(kwargs)
@@ -55,6 +56,9 @@ class _Runtime:
         if filename.endswith(".mp4"):
             return "00:00-00:30 Transcript: creator says to reuse this clip as launch proof."
         return "Media summary unavailable."
+
+    def record_observability_event(self, *, event: str, **fields: Any) -> None:
+        self.events.append({"event": event, **fields})
 
 
 def _services(tmp_path: Path) -> tuple[FileVaultService, _Oracle, _Runtime, UserContextService]:
@@ -186,11 +190,22 @@ def test_user_context_routes_index_and_query_mixed_real_files(tmp_path: Path) ->
     assert query_response.json()["answer_extract"] == (
         "Use the launch package, retainer offer, and the visual CTA from the image."
     )
+    source_refs = query_response.json()["source_refs"]
+    assert {item["filename"] for item in source_refs} >= {"offers.xlsx", "positioning.docx", "cta.png"}
+    assert any(item.get("sheet") == "Offers" and item.get("locator") for item in source_refs)
+    assert any(item.get("locator") == "derived media summary" for item in source_refs)
     source_pack = oracle.calls[-1]["source_pack"]
     assert "Launch package" in source_pack
     assert "Retainer offer" in source_pack
     assert "Visual CTA" in source_pack
     assert query_response.json()["diagnostics"]["source_pack"]["supplemental_section_count"] == 2
+    assert [item["event"] for item in runtime.events] == [
+        "user_context.media_prepare_succeeded",
+        "user_context.add_files",
+        "user_context.query",
+    ]
+    assert runtime.events[1]["file_count"] == 3
+    assert runtime.events[1]["prepared_count"] == 1
 
 
 def test_user_context_promotes_real_files_to_intake_scope(tmp_path: Path) -> None:
@@ -215,6 +230,11 @@ def test_user_context_promotes_real_files_to_intake_scope(tmp_path: Path) -> Non
 
     assert promote_response.status_code == 200
     assert promote_response.json()["indexed"]["scope_type"] == "intake_workflow"
+    assert {item["filename"] for item in promote_response.json()["source_refs"]} == {
+        "offers.xlsx",
+        "positioning.docx",
+        "cta.png",
+    }
     assert query_result.ok is True
     assert "Launch package" in oracle.calls[-1]["source_pack"]
     assert "Retainer offer" in oracle.calls[-1]["source_pack"]

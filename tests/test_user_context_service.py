@@ -65,6 +65,9 @@ def test_user_context_add_files_indexes_user_context_scope(tmp_path: Path) -> No
     assert result["indexed"]["scope_type"] == USER_CONTEXT_SCOPE_TYPE
     assert result["sources"][0]["file_id"] == record["id"]
     assert result["sources"][0]["status"] == "indexed"
+    assert result["source_refs"][0]["file_id"] == record["id"]
+    assert result["source_refs"][0]["filename"] == "blog.md"
+    assert result["source_refs"][0]["source_kind"] == "local_source"
 
 
 def test_user_context_archive_excludes_source_from_queries(tmp_path: Path) -> None:
@@ -96,6 +99,7 @@ def test_user_context_archive_excludes_source_from_queries(tmp_path: Path) -> No
 
     assert result["ok"] is True
     assert result["answer_extract"] == "Grounded answer from user context."
+    assert result["source_refs"][0]["filename"] == "keep.md"
     source_pack = oracle.calls[-1]["source_pack"]
     assert "keep.md" in source_pack
     assert "old.md" not in source_pack

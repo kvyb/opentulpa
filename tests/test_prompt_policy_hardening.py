@@ -126,6 +126,9 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "recent instructions clearly say to manage or use durable context" in base_policy
     assert "For intake workflows over source docs" in base_policy
     assert "business_knowledge_index and query them with business_knowledge_query" in base_policy
+    assert "reuse existing user context during workflow setup" in base_policy
+    assert "business_knowledge_index those file_ids into the current setup scope" in base_policy
+    assert "after a workflow exists, user_context_promote_to_intake" in base_policy
     assert "scheduled routine execution" in routine_wake
     assert "execute autonomously using tools and skills as needed" in routine_wake.lower()
     assert "Return the user-visible routine notification" in routine_wake

@@ -381,7 +381,7 @@ def test_live_telegram_chat_uploads_real_files_then_queries_user_context(
         for call in add_file_calls()
         for file_id in call.get("json_body", {}).get("file_ids", [])
     ]
-    assert len(set(added_file_ids())) == 2, add_file_calls()
+    assert len(set(added_file_ids)) == 2, add_file_calls()
     upload_messages = _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=upload_start)
     assert upload_messages
 
@@ -676,6 +676,109 @@ def test_live_telegram_chat_recalls_audio_user_context(
         query_call_count=len(query_calls()),
         sources=sources,
         final_text=final_text,
+    )
+
+
+def test_live_telegram_workflow_setup_reuses_existing_user_context_source(
+    e2e_harness: E2EHarness,
+    tmp_path: Path,
+) -> None:
+    owner_user_id = 8246
+    owner_chat_id = 18246
+    username = "reuse_context_owner"
+    customer_id = f"telegram_{owner_user_id}"
+    fixture_dir = tmp_path / "reuse_context"
+    offers_path = _write_fixture(fixture_dir / "offers.xlsx", _xlsx_bytes())
+    offers_tg = e2e_harness.telegram_client.register_file(
+        file_id="tg_reuse_offers_xlsx",
+        path=offers_path,
+        filename="offers.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    internal_start = e2e_harness.count_internal_api_calls()
+    message_start = len(e2e_harness.telegram_client.sent_messages)
+
+    intro_status = e2e_harness.post_telegram(
+        body=_telegram_text_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=5001,
+            text="I will upload a source file. Add it to my reusable interactive user context.",
+        )
+    )
+    assert intro_status == 200
+    assert _wait_until(
+        lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=message_start)) >= 1,
+        timeout_seconds=180.0,
+    )
+
+    upload_status = e2e_harness.post_telegram(
+        body=_telegram_document_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=5002,
+            file_id="tg_reuse_offers_xlsx",
+            file_name="offers.xlsx",
+            mime_type=str(offers_tg["mime_type"]),
+            file_size=int(offers_tg["file_size"]),
+        )
+    )
+    assert upload_status == 200
+
+    def calls(path: str) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in e2e_harness.internal_api_calls_since(internal_start)
+            if item.get("path") == path
+        ]
+
+    assert _wait_until(lambda: bool(calls("/internal/user_context/add_files")), timeout_seconds=240.0)
+
+    setup_start = len(e2e_harness.telegram_client.sent_messages)
+    setup_status = e2e_harness.post_telegram(
+        body=_telegram_text_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=5003,
+            text=(
+                "Start an intake workflow setup for collecting blog consultation leads into a local CSV. "
+                "Reuse my existing user context source offers.xlsx for this workflow setup. "
+                "First list or find user context sources, then call business_knowledge_index on the selected "
+                "file id for the current workflow setup scope. Do not promote to a final workflow yet."
+            ),
+        )
+    )
+    assert setup_status == 200
+
+    def workflow_setup_index_calls() -> list[dict[str, Any]]:
+        return [
+            item
+            for item in e2e_harness.internal_api_calls_since(internal_start)
+            if item.get("path") == "/internal/knowledge/index_sources"
+            and item.get("json_body", {}).get("scope_type") == "workflow_setup"
+        ]
+
+    assert _wait_until(lambda: bool(calls("/internal/user_context/list_sources")) or bool(calls("/internal/user_context/find_sources")), timeout_seconds=240.0)
+    assert _wait_until(lambda: bool(workflow_setup_index_calls()), timeout_seconds=240.0), e2e_harness.internal_api_calls_since(internal_start)
+    assert _wait_until(
+        lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=setup_start)) >= 1,
+        timeout_seconds=180.0,
+    )
+
+    setup_calls = workflow_setup_index_calls()
+    assert setup_calls[-1]["json_body"]["customer_id"] == customer_id
+    assert setup_calls[-1]["json_body"]["file_ids"]
+    assert not calls("/internal/user_context/promote_to_intake")
+
+    e2e_harness.recorder.add(
+        "live_user_context_reuse_for_workflow_setup_e2e",
+        customer_id=customer_id,
+        user_context_list_calls=len(calls("/internal/user_context/list_sources")),
+        user_context_find_calls=len(calls("/internal/user_context/find_sources")),
+        workflow_setup_index_calls=setup_calls,
     )
 
 

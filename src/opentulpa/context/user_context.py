@@ -73,6 +73,27 @@ def _compact_source_record(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_source_ref(section: Any) -> dict[str, Any]:
+    metadata = getattr(section, "metadata", {}) if section is not None else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        key: value
+        for key, value in {
+            "file_id": str(metadata.get("file_id", "") or "").strip(),
+            "filename": str(metadata.get("filename", "") or "").strip(),
+            "source_ref": str(getattr(section, "source_ref", "") or "").strip(),
+            "source_kind": str(getattr(section, "source_kind", "") or "").strip(),
+            "locator": str(metadata.get("locator", "") or "").strip(),
+            "sheet": str(metadata.get("sheet", "") or "").strip(),
+            "row_start": int(metadata["row_start"]) if metadata.get("row_start") is not None else None,
+            "row_end": int(metadata["row_end"]) if metadata.get("row_end") is not None else None,
+            "section_title": str(metadata.get("section_title", "") or "").strip(),
+        }.items()
+        if value not in ("", [], None)
+    }
+
+
 class UserContextService:
     """Manage durable interactive sources for one customer.
 
@@ -189,6 +210,39 @@ class UserContextService:
             )
         return out
 
+    def _source_refs(self, customer_id: str, *, file_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        cid = self.scope_id(customer_id)
+        if not cid:
+            return []
+        wanted = set(_unique_strings(file_ids or []))
+        if not wanted:
+            wanted = set(self._active_file_ids(cid))
+        if not wanted:
+            return []
+        sections = self.knowledge_service._load_sections(
+            customer_id=cid,
+            scope_type=USER_CONTEXT_SCOPE_TYPE,
+            scope_id=cid,
+        )
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for section in sections:
+            metadata = getattr(section, "metadata", {}) if section is not None else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            file_id = str(metadata.get("file_id", "") or "").strip()
+            if file_id not in wanted:
+                continue
+            source_ref = str(getattr(section, "source_ref", "") or "").strip()
+            key = (file_id, source_ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(_compact_source_ref(section))
+            if len(refs) >= 24:
+                break
+        return refs
+
     def add_files(self, *, customer_id: str, file_ids: list[Any]) -> dict[str, Any]:
         cid = self.scope_id(customer_id)
         ids = _unique_strings(file_ids)
@@ -222,6 +276,7 @@ class UserContextService:
             "scope_id": cid,
             "indexed": indexed,
             "sources": self.list_sources(customer_id=cid, include_archived=False)["sources"],
+            "source_refs": self._source_refs(cid, file_ids=ids),
         }
 
     def list_sources(self, *, customer_id: str, include_archived: bool = False) -> dict[str, Any]:
@@ -232,6 +287,7 @@ class UserContextService:
             "scope_type": USER_CONTEXT_SCOPE_TYPE,
             "scope_id": cid,
             "sources": [_compact_source_record(row) for row in rows],
+            "source_refs": self._source_refs(cid),
         }
 
     def find_sources(self, *, customer_id: str, query: str, limit: int = 10) -> dict[str, Any]:
@@ -256,13 +312,25 @@ class UserContextService:
             "ok": True,
             "query": str(query or "").strip(),
             "sources": [_compact_source_record(row) for _, row in scored[: max(1, min(int(limit), 50))]],
+            "source_refs": self._source_refs(
+                cid,
+                file_ids=[str(row.get("file_id", "") or "") for _, row in scored[: max(1, min(int(limit), 50))]],
+            )
+            if scored
+            else [],
         }
 
     def reindex(self, *, customer_id: str, file_ids: list[Any] | None = None) -> dict[str, Any]:
         cid = self.scope_id(customer_id)
         ids = _unique_strings(file_ids or []) or self._active_file_ids(cid)
         if not ids:
-            return {"ok": True, "scope_type": USER_CONTEXT_SCOPE_TYPE, "scope_id": cid, "sources": []}
+            return {
+                "ok": True,
+                "scope_type": USER_CONTEXT_SCOPE_TYPE,
+                "scope_id": cid,
+                "sources": [],
+                "source_refs": [],
+            }
         indexed = self.knowledge_service.index_sources(
             customer_id=cid,
             scope_type=USER_CONTEXT_SCOPE_TYPE,
@@ -277,7 +345,7 @@ class UserContextService:
                     (now, cid, file_id),
                 )
             conn.commit()
-        return {"ok": True, "indexed": indexed}
+        return {"ok": True, "indexed": indexed, "source_refs": self._source_refs(cid, file_ids=ids)}
 
     def archive_sources(self, *, customer_id: str, file_ids: list[Any]) -> dict[str, Any]:
         cid = self.scope_id(customer_id)
@@ -325,6 +393,7 @@ class UserContextService:
         )
         answer = getattr(result, "answer", None)
         answer_text = str(getattr(answer, "answer_extract", "") or "").strip()
+        relevant_sources = self.find_sources(customer_id=cid, query=safe_query, limit=8)
         return {
             "ok": bool(getattr(result, "ok", False)),
             "query": safe_query,
@@ -332,7 +401,8 @@ class UserContextService:
             "warnings": list(getattr(result, "warnings", []) or []),
             "source_count": int(getattr(result, "source_count", 0) or 0),
             "section_count": int(getattr(result, "section_count", 0) or 0),
-            "sources": self.find_sources(customer_id=cid, query=safe_query, limit=8)["sources"],
+            "sources": relevant_sources["sources"],
+            "source_refs": self._source_refs(cid, file_ids=active_ids),
             "diagnostics": getattr(result, "diagnostics", {}) or {},
         }
 
@@ -363,4 +433,9 @@ class UserContextService:
             scope_id=wid,
             file_ids=ids,
         )
-        return {"ok": True, "workflow_id": wid, "indexed": indexed}
+        return {
+            "ok": True,
+            "workflow_id": wid,
+            "indexed": indexed,
+            "source_refs": self._source_refs(cid, file_ids=ids),
+        }
