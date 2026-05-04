@@ -202,7 +202,7 @@ exit 22
     assert result.returncode == 0
     assert "https://provider.example/v1/models did not list configured model(s)" in result.stdout
     assert "memory_llm_model=google/gemini-3-flash-preview" in result.stdout
-    assert "multimodal_llm=google/gemini-3-flash-preview" in result.stdout
+    assert "multimodal_llm=google/gemini-3.1-flash-lite-preview" in result.stdout
     assert "openai_compatible_embedding_model=openai/text-embedding-3-small" in result.stdout
 
 

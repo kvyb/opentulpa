@@ -29,6 +29,7 @@ from opentulpa.api.routes import (
     register_telegram_business_routes,
     register_telegram_webhook_routes,
     register_tulpa_routes,
+    register_user_context_routes,
     register_wake_and_search_routes,
 )
 from opentulpa.api.tulpa_loader import TulpaRouterLoader
@@ -43,6 +44,7 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
+from opentulpa.context.user_context import UserContextService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
 from opentulpa.intake import (
     IntakeWorkflowService,
@@ -230,6 +232,11 @@ def create_app(
         ),
         langfuse_tracer=langfuse_tracer,
     )
+    user_context_service = UserContextService(
+        db_path=PROJECT_ROOT / ".opentulpa" / "user_context.db",
+        knowledge_service=knowledge,
+        file_vault=vault_service,
+    )
     link_alias_db = Path(settings.link_alias_db_path)
     if not link_alias_db.is_absolute():
         link_alias_db = (PROJECT_ROOT / link_alias_db).resolve()
@@ -287,6 +294,9 @@ def create_app(
 
     def get_knowledge_service() -> BusinessKnowledgeService:
         return _require(knowledge, "BusinessKnowledgeService")
+
+    def get_user_context_service() -> UserContextService:
+        return user_context_service
 
     def get_skill_store() -> SkillStoreService:
         return _require(skill_service, "SkillStoreService")
@@ -497,6 +507,7 @@ def create_app(
     app.state.intake_workflows = intake_service
     app.state.intake_workflow_setup = workflow_setup_service
     app.state.knowledge_service = knowledge
+    app.state.user_context_service = user_context_service
     app.state.telegram_business = telegram_business
 
     @app.middleware("http")
@@ -547,6 +558,12 @@ def create_app(
         telegram_enabled=bool(settings.telegram_bot_token),
     )
     register_knowledge_routes(app, get_knowledge_service=get_knowledge_service)
+    register_user_context_routes(
+        app,
+        get_user_context_service=get_user_context_service,
+        get_file_vault=get_file_vault,
+        get_agent_runtime=get_agent_runtime,
+    )
     register_profile_routes(
         app,
         get_profiles=get_profiles,

@@ -63,7 +63,30 @@ def extract_source_sections(
     if _is_csv_like(lower_name=lower_name, mime_type=mime_type):
         return _extract_delimited_sections(file_id=file_id, filename=filename, raw_bytes=raw_bytes)
     if mime_type == "application/pdf" or lower_name.endswith(".pdf"):
-        return _extract_pdf_sections(file_id=file_id, filename=filename, raw_bytes=raw_bytes)
+        sections, warnings, source_kind = _extract_pdf_sections(
+            file_id=file_id,
+            filename=filename,
+            raw_bytes=raw_bytes,
+        )
+        derived = _derived_media_text(record)
+        if sections and derived:
+            derived_sections, derived_warnings, _derived_source_kind = _derived_media_sections(
+                record=record,
+                file_id=file_id,
+                filename=filename,
+                mime_type=mime_type,
+                base_sort_order=len(sections),
+            )
+            return sections + derived_sections, warnings + derived_warnings, source_kind
+        if sections or not derived:
+            return sections, warnings, source_kind
+        derived_sections, derived_warnings, derived_source_kind = _derived_media_sections(
+            record=record,
+            file_id=file_id,
+            filename=filename,
+            mime_type=mime_type,
+        )
+        return derived_sections, warnings + derived_warnings, derived_source_kind
     if mime_type == DOCX_MIME_TYPE or lower_name.endswith(".docx"):
         return _extract_docx_sections(file_id=file_id, filename=filename, raw_bytes=raw_bytes)
     if mime_type.startswith("text/") or any(lower_name.endswith(ext) for ext in _TEXT_EXTENSIONS):
@@ -82,37 +105,8 @@ def extract_source_sections(
         )
         return sections, [], "local_source"
 
-    derived = _derived_media_text(record)
-    if derived:
-        return (
-            [
-                KnowledgeSourceSection(
-                    content=(
-                        f"Document: {filename}\n"
-                        "Derived media analysis. Treat this as non-authoritative for exact "
-                        "prices, policies, and service menus unless confirmed elsewhere.\n"
-                        f"{derived}"
-                    ),
-                    source_ref=f"{file_id}:derived_media_summary",
-                    source_kind="derived_from_media",
-                    metadata={
-                        "file_id": file_id,
-                        "filename": filename,
-                        "document_title": filename,
-                        "section_title": filename,
-                        "heading_path": [filename],
-                        "source_label": f"{filename} derived media summary",
-                        "locator": "derived media summary",
-                        "mime_type": mime_type,
-                        "derived": True,
-                    },
-                )
-            ],
-            [
-                "prepared existing media analysis as derived evidence; exact prices, policies, and service menus need owner confirmation"
-            ],
-            "derived_from_media",
-        )
+    if _derived_media_text(record):
+        return _derived_media_sections(record=record, file_id=file_id, filename=filename, mime_type=mime_type)
 
     return [], [f"unsupported business-knowledge file type: {filename}"], "unsupported_for_business_knowledge"
 
@@ -130,6 +124,47 @@ def _derived_media_text(record: dict[str, Any]) -> str:
         return summary.split("ai_summary=", 1)[1].strip()[:6000]
     text_excerpt = str(record.get("text_excerpt", "") or "").strip()
     return text_excerpt[:6000] if text_excerpt else ""
+
+
+def _derived_media_sections(
+    *,
+    record: dict[str, Any],
+    file_id: str,
+    filename: str,
+    mime_type: str,
+    base_sort_order: int = 0,
+) -> tuple[list[KnowledgeSourceSection], list[str], str]:
+    derived = _derived_media_text(record)
+    return (
+        [
+            KnowledgeSourceSection(
+                content=(
+                    f"Document: {filename}\n"
+                    "Derived media analysis. Treat this as non-authoritative for exact "
+                    "prices, policies, and service menus unless confirmed elsewhere.\n"
+                    f"{derived}"
+                ),
+                source_ref=f"{file_id}:derived_media_summary",
+                source_kind="derived_from_media",
+                sort_order=base_sort_order + 1,
+                metadata={
+                    "file_id": file_id,
+                    "filename": filename,
+                    "document_title": filename,
+                    "section_title": filename,
+                    "heading_path": [filename],
+                    "source_label": f"{filename} derived media summary",
+                    "locator": "derived media summary",
+                    "mime_type": mime_type,
+                    "derived": True,
+                },
+            )
+        ],
+        [
+            "prepared existing media analysis as derived evidence; exact prices, policies, and service menus need owner confirmation"
+        ],
+        "derived_from_media",
+    )
 
 
 def _extract_xlsx_sections(

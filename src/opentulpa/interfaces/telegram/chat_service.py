@@ -758,8 +758,10 @@ def _build_effective_telegram_text(
             effective_text = (
                 "User uploaded one or more files without extra text.\n"
                 "Use the internal file context below, but do not echo raw metadata. "
-                "Acknowledge the upload, summarize only meaningful available content, "
-                "and ask a focused follow-up question.\n\n"
+                "If recent conversation clearly says what to do with these files, do that. "
+                "If intent is unclear, ask what the user wants done with them and mention options "
+                "such as adding to user context, summarizing, analyzing, attaching to an intake workflow, "
+                "using later, or archiving. Do not infer intent from filenames or content.\n\n"
                 f"{context_blob}"
             )
     if effective_text:

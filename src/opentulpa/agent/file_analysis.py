@@ -31,6 +31,7 @@ _VIDEO_SEGMENT_SECONDS = 30
 _VIDEO_MAX_SEGMENTS = 12
 _VIDEO_INLINE_MAX_BYTES = 20_000_000
 _VIDEO_FALLBACK_DURATION_SECONDS = 120
+_MEDIA_ANALYSIS_RETRIES = 2
 
 
 async def _ainvoke_runtime_model(runtime: Any, messages: list[Any]) -> Any:
@@ -360,8 +361,37 @@ async def _analyze_video_segment(
     )
     text = _content_to_text(getattr(response, "content", "")).strip()
     if not text:
-        return f"{start_label}-{end_label}: no details returned."
+        raise ValueError("empty video segment analysis")
     return f"{start_label}-{end_label}\n{text[:1800]}"
+
+
+async def _analyze_video_segment_with_retries(
+    runtime: Any,
+    *,
+    video_data_url: str,
+    start_seconds: int,
+    end_seconds: int,
+    caption: str,
+    question: str,
+) -> str:
+    last_error = ""
+    for attempt in range(_MEDIA_ANALYSIS_RETRIES + 1):
+        try:
+            return await _analyze_video_segment(
+                runtime,
+                video_data_url=video_data_url,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+                caption=caption,
+                question=question,
+            )
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < _MEDIA_ANALYSIS_RETRIES:
+                await asyncio.sleep(0.4 * (attempt + 1))
+    start_label = _seconds_to_mmss(start_seconds)
+    end_label = _seconds_to_mmss(end_seconds)
+    return f"{start_label}-{end_label}: segment analysis failed after retries ({last_error})."
 
 
 async def _synthesize_video_segments(
@@ -443,7 +473,7 @@ async def _summarize_video_blob(
 
     segments = _build_30s_segments(duration_seconds=estimated_duration, max_segments=_VIDEO_MAX_SEGMENTS)
     tasks = [
-        _analyze_video_segment(
+        _analyze_video_segment_with_retries(
             runtime,
             video_data_url=video_data_url,
             start_seconds=start,
