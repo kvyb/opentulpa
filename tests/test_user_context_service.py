@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import pytest
 from pypdf import PdfWriter
 
 from opentulpa.business_knowledge.service import BusinessKnowledgeService
@@ -104,6 +105,47 @@ def test_user_context_indexes_prepared_summary_for_scanned_pdf(tmp_path: Path) -
     assert result["source_refs"][0]["filename"] == "scan.pdf"
     assert result["source_refs"][0]["source_kind"] == "derived_from_media"
     assert result["source_refs"][0]["locator"] == "derived media summary"
+
+
+def test_user_context_indexes_pdf_text_and_prepared_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Page:
+        def extract_text(self) -> str:
+            return "Local PDF text: retainer floor is $1200."
+
+    class _Reader:
+        def __init__(self, _raw: Any) -> None:
+            self.pages = [_Page()]
+
+    monkeypatch.setattr("pypdf.PdfReader", _Reader)
+    vault, _oracle, service = _services(tmp_path)
+    record = vault.ingest_file(
+        customer_id="cust_1",
+        chat_id=None,
+        kind="document",
+        telegram_file_id=None,
+        original_filename="deck.pdf",
+        mime_type="application/pdf",
+        caption=None,
+        raw_bytes=b"%PDF fake enough for monkeypatched reader",
+    )
+    vault.set_ai_summary(
+        "cust_1",
+        record["id"],
+        "Visible slide note: BLOG SPRINT CTA appears in the hero chart.",
+    )
+
+    result = service.add_files(customer_id="cust_1", file_ids=[record["id"]])
+
+    source = result["indexed"]["sources"][0]
+    assert source["status"] == "indexed"
+    assert source["source_kind"] == "local_source"
+    assert source["section_count"] == 2
+    source_kinds = {ref["source_kind"] for ref in result["source_refs"]}
+    assert source_kinds == {"local_source", "derived_from_media"}
+    assert {ref["locator"] for ref in result["source_refs"]} == {"page 1", "derived media summary"}
 
 
 def test_user_context_archive_excludes_source_from_queries(tmp_path: Path) -> None:

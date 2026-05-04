@@ -68,9 +68,25 @@ def extract_source_sections(
             filename=filename,
             raw_bytes=raw_bytes,
         )
-        if sections or not _derived_media_text(record):
+        derived = _derived_media_text(record)
+        if sections and derived:
+            derived_sections, derived_warnings, _derived_source_kind = _derived_media_sections(
+                record=record,
+                file_id=file_id,
+                filename=filename,
+                mime_type=mime_type,
+                base_sort_order=len(sections),
+            )
+            return sections + derived_sections, warnings + derived_warnings, source_kind
+        if sections or not derived:
             return sections, warnings, source_kind
-        return _derived_media_sections(record=record, file_id=file_id, filename=filename, mime_type=mime_type)
+        derived_sections, derived_warnings, derived_source_kind = _derived_media_sections(
+            record=record,
+            file_id=file_id,
+            filename=filename,
+            mime_type=mime_type,
+        )
+        return derived_sections, warnings + derived_warnings, derived_source_kind
     if mime_type == DOCX_MIME_TYPE or lower_name.endswith(".docx"):
         return _extract_docx_sections(file_id=file_id, filename=filename, raw_bytes=raw_bytes)
     if mime_type.startswith("text/") or any(lower_name.endswith(ext) for ext in _TEXT_EXTENSIONS):
@@ -116,6 +132,7 @@ def _derived_media_sections(
     file_id: str,
     filename: str,
     mime_type: str,
+    base_sort_order: int = 0,
 ) -> tuple[list[KnowledgeSourceSection], list[str], str]:
     derived = _derived_media_text(record)
     return (
@@ -129,6 +146,7 @@ def _derived_media_sections(
                 ),
                 source_ref=f"{file_id}:derived_media_summary",
                 source_kind="derived_from_media",
+                sort_order=base_sort_order + 1,
                 metadata={
                     "file_id": file_id,
                     "filename": filename,
