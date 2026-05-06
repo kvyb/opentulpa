@@ -19,6 +19,20 @@ from opentulpa.tasks.sandbox import TULPA_STUFF_DIR, is_within
 MAX_LOCAL_SEND_BYTES = 45_000_000
 
 
+def _telegram_delivery_payload(**fields: Any) -> dict[str, Any]:
+    payload = {
+        "ok": True,
+        "delivered_to_chat": True,
+        "model_instruction": (
+            "DELIVERED_TO_CHAT: The file has been sent to Telegram. "
+            "Do not call the file-send tool again for this file. "
+            "Continue with a short final confirmation only."
+        ),
+    }
+    payload.update(fields)
+    return payload
+
+
 def register_file_routes(
     app: FastAPI,
     *,
@@ -104,7 +118,7 @@ def register_file_routes(
         )
         if not sent:
             return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
-        return {"ok": True, "file_id": file_id, "chat_id": chat_id}
+        return _telegram_delivery_payload(file_id=file_id, chat_id=chat_id)
 
     @app.post("/internal/files/send_local")
     async def internal_files_send_local(request: Request) -> Any:
@@ -166,7 +180,7 @@ def register_file_routes(
         )
         if not sent:
             return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
-        return {"ok": True, "path": local_path, "chat_id": chat_id}
+        return _telegram_delivery_payload(path=local_path, chat_id=chat_id)
 
     @app.post("/internal/files/send_web_image")
     async def internal_files_send_web_image(request: Request) -> Any:
@@ -215,13 +229,12 @@ def register_file_routes(
         )
         if not sent:
             return JSONResponse(status_code=502, content={"detail": "telegram send failed"})
-        return {
-            "ok": True,
-            "chat_id": chat_id,
-            "url": str(downloaded["final_url"]),
-            "mime_type": str(downloaded["content_type"]),
-            "size_bytes": int(downloaded["size_bytes"]),
-        }
+        return _telegram_delivery_payload(
+            chat_id=chat_id,
+            url=str(downloaded["final_url"]),
+            mime_type=str(downloaded["content_type"]),
+            size_bytes=int(downloaded["size_bytes"]),
+        )
 
     @app.post("/internal/files/analyze")
     async def internal_files_analyze(request: Request) -> Any:

@@ -72,6 +72,24 @@ def _decorate_python_dependency_failure(payload: Any) -> Any:
     return safe_payload
 
 
+def _with_delivery_instruction(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    if payload.get("delivered_to_chat") is not True:
+        return payload
+    safe_payload = dict(payload)
+    safe_payload["delivery_status"] = "delivered_to_telegram_chat"
+    safe_payload.setdefault(
+        "model_instruction",
+        (
+            "DELIVERED_TO_CHAT: The file has been sent to Telegram. "
+            "Do not call the file-send tool again for this file. "
+            "Continue with a short final confirmation only."
+        ),
+    )
+    return safe_payload
+
+
 def _trim_tool_text(value: Any, *, limit: int = 160) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -610,7 +628,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"uploaded_file_send failed: {r.text}"}
-        return r.json()
+        return _with_delivery_instruction(r.json())
 
     @tool
     async def tulpa_file_send(
@@ -631,7 +649,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"tulpa_file_send failed: {r.text}"}
-        return r.json()
+        return _with_delivery_instruction(r.json())
 
     @tool
     async def web_image_send(
@@ -656,7 +674,7 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
         )
         if r.status_code != 200:
             return {"error": f"web_image_send failed: {r.text}"}
-        return r.json()
+        return _with_delivery_instruction(r.json())
 
     @tool
     async def uploaded_file_analyze(
