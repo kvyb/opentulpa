@@ -30,6 +30,10 @@ def register_routine_tools(runtime: Any) -> dict[str, Any]:
         Create a scheduled routine.
         - Recurring: cron (e.g. "0 9 * * *")
         - One-time: local ISO datetime (e.g. "2026-02-18T23:45:00+08:00")
+        - Routines are clock-driven jobs. They are different from intake workflows,
+          which react to inbound message events.
+        - Do not create a routine to poll or "fix" a Telegram Business intake workflow.
+          telegram_business_dm workflows are webhook-driven; empty routine_id/schedule is expected.
         - instruction: explicit schedule-time scratchpad for each run. Include required scripts,
           files/paths, keys to read from storage, and expected output/action.
         - implementation_command: planned shell/script command for the routine execution.

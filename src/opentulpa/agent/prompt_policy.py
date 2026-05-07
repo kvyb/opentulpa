@@ -44,6 +44,8 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("B06", "Never present concrete fetched data unless it exists in this turn's tool outputs."),
             ("B07", "To stop/cancel schedules: call routine_list, then routine_delete by routine_id, and claim success only after verified removal."),
             ("B08", "If user provides timezone/UTC offset, call time_profile_set."),
+            ("B09", "Keep scheduled routines distinct from intake workflows. Routines are clock-driven jobs; intake workflows are message-driven lead handling. Do not infer that an intake workflow is broken just because routine_id or schedule is empty."),
+            ("B10", "Telegram Business intake workflows use Telegram webhook events, not polling routines. For channel=telegram_business_dm, an empty routine_id/schedule is expected; debug webhook/business connection/intake state instead of creating routine_create."),
         ],
     ),
     (

@@ -41,6 +41,28 @@ class _RoutineIntentRuntime:
         return self.decision
 
 
+class _RoutineWorkflowRuntime(_RoutineIntentRuntime):
+    def __init__(self, workflow: dict[str, object]) -> None:
+        super().__init__({"ok": True, "allow_create": True, "reason": "authorized"})
+        self.workflow = workflow
+        self.request_calls: list[tuple[str, str, dict[str, object]]] = []
+        self._active_customer_id = "telegram_83969136"
+
+    async def _request_with_backoff(self, method: str, path: str, **kwargs: object) -> object:
+        self.request_calls.append((method, path, dict(kwargs)))
+
+        class _Response:
+            status_code = 200
+
+            def __init__(self, workflow: dict[str, object]) -> None:
+                self._workflow = workflow
+
+            def json(self) -> dict[str, object]:
+                return {"workflow": self._workflow}
+
+        return _Response(self.workflow)
+
+
 def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     message = _build_system_prompt_message()
     text = str(message.content or "")
@@ -73,6 +95,9 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "never execute API calls, filesystem writes, network calls, or long-running work at module import time" in text
     assert "Put executable work inside a function such as main() or run()" in text
     assert 'if __name__ == "__main__"' in text
+    assert "Keep scheduled routines distinct from intake workflows" in text
+    assert "Telegram Business intake workflows use Telegram webhook events" in text
+    assert "empty routine_id/schedule is expected" in text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
@@ -324,6 +349,83 @@ async def test_routine_intent_classifier_rejects_ambiguous_routine_create_reques
     )
     assert intent_err is not None
     assert "ACTION_CLARIFICATION_REQUIRED" in intent_err
+
+
+@pytest.mark.asyncio
+async def test_routine_create_rejects_telegram_business_intake_workflow_schedule() -> None:
+    runtime = _RoutineWorkflowRuntime(
+        {
+            "workflow_id": "iwf_fa2uqd",
+            "channel": "telegram_business_dm",
+            "provider": "telegram_bot_api",
+            "routine_id": "",
+            "schedule": "",
+        }
+    )
+    args = {
+        "name": "OpenTulpa Sales — Вика (intake каждые 2 мин)",
+        "schedule": "*/2 * * * *",
+        "implementation_command": "python3 -m opentulpa.intake_runner --workflow-id iwf_fa2uqd",
+        "instruction": (
+            "Запустить intake workflow iwf_fa2uqd. Проверить входящие сообщения "
+            "в Telegram Business DM."
+        ),
+    }
+
+    err = _validate_model_tool_call(
+        call_name="routine_create",
+        args=args,
+        latest_user_text="да",
+        turn_mode="interactive",
+        required_args={"routine_create": ("name", "schedule", "instruction", "implementation_command")},
+        forbidden_tool_args={"routine_create": {"customer_id", "message"}},
+    )
+    assert err is None
+
+    intent_err = await _routine_create_intent_validation_error(
+        runtime,
+        args=args,
+        latest_user_text="да",
+        prior_assistant_text="Создать рутину — да или нет?",
+        turn_mode="interactive",
+    )
+
+    assert intent_err is not None
+    assert "EVENT_DRIVEN_INTAKE_WORKFLOW" in intent_err
+    assert "telegram_business_dm" in intent_err
+    assert "empty routine_id/schedule is expected" in intent_err
+    assert runtime.calls == []
+    assert runtime.request_calls[0][1] == "/internal/intake/workflows/get"
+
+
+@pytest.mark.asyncio
+async def test_routine_create_allows_scheduled_instagram_intake_workflow() -> None:
+    runtime = _RoutineWorkflowRuntime(
+        {
+            "workflow_id": "iwf_insta",
+            "channel": "instagram_dm",
+            "provider": "composio",
+            "routine_id": "",
+            "schedule": "*/5 * * * *",
+        }
+    )
+    args = {
+        "name": "Instagram intake poller",
+        "schedule": "*/5 * * * *",
+        "implementation_command": "python3 -m opentulpa.intake_runner --workflow-id iwf_insta",
+        "instruction": "Run intake workflow iwf_insta.",
+    }
+
+    intent_err = await _routine_create_intent_validation_error(
+        runtime,
+        args=args,
+        latest_user_text="да",
+        prior_assistant_text="Создать рутину — да или нет?",
+        turn_mode="interactive",
+    )
+
+    assert intent_err is None
+    assert runtime.calls
 
 
 def test_summarize_tool_validation_errors_keeps_distinct_error_text() -> None:

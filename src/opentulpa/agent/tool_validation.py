@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 from datetime import datetime
 from typing import Any
@@ -23,6 +24,8 @@ from opentulpa.agent.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_INTAKE_WORKFLOW_ID_RE = re.compile(r"\biwf_[A-Za-z0-9_]+\b")
 
 _WORKING_DIR_PREFIXES: dict[str, str] = {
     "tulpa_stuff": "tulpa_stuff",
@@ -77,6 +80,70 @@ def _has_duplicate_allowed_root_prefix(path: str) -> str | None:
         normalized = str(prefix or "").strip("/")
         if normalized and text.startswith(f"{normalized}/{normalized}/"):
             return normalized
+    return None
+
+
+def _extract_referenced_intake_workflow_id(args: Any) -> str:
+    if not isinstance(args, dict):
+        return ""
+    for key in ("workflow_id", "implementation_command", "instruction", "name"):
+        text = str(args.get(key, "") or "")
+        match = _INTAKE_WORKFLOW_ID_RE.search(text)
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _runtime_customer_id(runtime: Any) -> str:
+    getter = getattr(runtime, "get_active_customer_id", None)
+    if callable(getter):
+        return str(getter() or "").strip()
+    return str(getattr(runtime, "_active_customer_id", "") or "").strip()
+
+
+async def _routine_create_event_driven_intake_error(runtime: Any, args: Any) -> str | None:
+    workflow_id = _extract_referenced_intake_workflow_id(args)
+    if not workflow_id:
+        return None
+    request = getattr(runtime, "_request_with_backoff", None)
+    if not callable(request):
+        return None
+    customer_id = _runtime_customer_id(runtime)
+    if not customer_id:
+        return None
+    try:
+        response = await request(
+            "POST",
+            "/internal/intake/workflows/get",
+            json_body={"customer_id": customer_id, "workflow_id": workflow_id},
+            timeout=10.0,
+        )
+    except Exception as exc:
+        logger.warning(
+            "routine_create intake workflow lookup failed for %s; allowing normal validation: %s",
+            workflow_id,
+            exc,
+        )
+        return None
+    if int(getattr(response, "status_code", 0) or 0) != 200:
+        return None
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    workflow = payload.get("workflow", payload) if isinstance(payload, dict) else {}
+    if not isinstance(workflow, dict):
+        return None
+    channel = str(workflow.get("channel", "") or "").strip().lower()
+    provider = str(workflow.get("provider", "") or "").strip().lower()
+    if channel == "telegram_business_dm":
+        return (
+            "EVENT_DRIVEN_INTAKE_WORKFLOW: do not create routine_create for "
+            f"intake workflow {workflow_id}. channel=telegram_business_dm provider="
+            f"{provider or 'unknown'} is Telegram webhook-driven, so empty routine_id/schedule "
+            "is expected. Explain that this is an intake workflow, not a scheduled routine; "
+            "debug Telegram webhook delivery, business_connection_id, and intake workflow state instead."
+        )
     return None
 
 
@@ -223,6 +290,9 @@ async def _routine_create_intent_validation_error(
     turn_mode_error = _routine_create_turn_mode_error(turn_mode=turn_mode)
     if turn_mode_error:
         return turn_mode_error
+    event_driven_error = await _routine_create_event_driven_intake_error(runtime, args)
+    if event_driven_error:
+        return event_driven_error
     if _normalize_turn_mode(turn_mode) == "routine_wake":
         return None
 
@@ -283,6 +353,14 @@ def _build_tool_validation_repair_message(messages: list[ToolMessage]) -> str:
         marker in summary
         for marker in ("ACTION_CLARIFICATION_REQUIRED", "CHAT_MODE_LOCKED", "TURN_MODE_MISMATCH")
     )
+    event_driven_intake = "EVENT_DRIVEN_INTAKE_WORKFLOW" in summary
+    if is_routine_create_error and event_driven_intake:
+        return (
+            "VALIDATION_REPAIR_REQUIRED: The scheduled action was not created because the target "
+            "intake workflow is event-driven. Do not ask for confirmation to create the routine. "
+            "Explain the difference between scheduled routines and intake workflows, and debug webhook, "
+            f"business connection, or intake state instead. Reason={summary}"
+        )
     if is_routine_create_error and needs_clarification:
         return (
             "VALIDATION_REPAIR_REQUIRED: The scheduled action was not created. Do not say it was scheduled. "
