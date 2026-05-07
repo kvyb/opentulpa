@@ -73,9 +73,16 @@ def _instagram_conversation(
 
 
 class _FakeRuntime:
-    def __init__(self, decisions: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        decisions: list[dict[str, Any]],
+        *,
+        status_messages: list[Any] | None = None,
+    ) -> None:
         self.decisions = list(decisions)
+        self.status_messages = list(status_messages or [])
         self.calls: list[dict[str, Any]] = []
+        self.status_calls: list[dict[str, Any]] = []
         self.behavior_events: list[dict[str, Any]] = []
 
     async def decide_intake_workflow(self, **kwargs: Any) -> dict[str, Any]:
@@ -83,6 +90,15 @@ class _FakeRuntime:
         if not self.decisions:
             raise RuntimeError("unexpected intake decision call")
         return self.decisions.pop(0)
+
+    async def generate_status_message(self, **kwargs: Any) -> Any:
+        self.status_calls.append(kwargs)
+        if not self.status_messages:
+            return None
+        result = self.status_messages.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     def log_behavior_event(self, *, event: str, **fields: Any) -> None:
         self.behavior_events.append({"event": event, **fields})
@@ -2211,6 +2227,175 @@ async def test_telegram_business_workflow_suppresses_stale_reply_and_requeues(
     sent = telegram_business.client.sent_messages[0]
     assert sent["reply_to_message_id"] == 11
     assert "Rolls-Royce Cullinan" in sent["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_pending_run_sends_one_llm_generated_interim_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_TELEGRAM_BUSINESS_INTERIM_STATUS_DELAY_SECONDS",
+        0.01,
+    )
+    runtime = _DelayedRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.9,
+                "conversation_summary": "Customer asks for wash pricing.",
+                "extracted_fields": {"telegram_username": "alice"},
+                "missing_fields": ["car_model"],
+                "reply_action": "send_reply",
+                "reply_text": "Какая у вас машина?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need car model.",
+            }
+        ],
+        delay_seconds=0.05,
+    )
+    runtime.status_messages.append({"ok": True, "text": "Уточняю детали и скоро отвечу."})
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio({}, {}),
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Сколько стоит мойка?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["telegram_username", "car_model"],
+        assistant_instructions="Ask for car model.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+    service._queue_pending_run(  # noqa: SLF001
+        workflow=workflow,
+        conversation_id="555",
+        event_type="telegram_business_webhook_settled",
+        delay_seconds=0.0,
+    )
+
+    drained = await service.drain_due_pending_runs()
+
+    assert drained == 1
+    assert len(runtime.status_calls) == 1
+    assert [item["text"] for item in telegram_business.client.sent_messages] == [
+        "Уточняю детали и скоро отвечу.",
+        "Какая у вас машина?",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_pending_run_sends_no_hardcoded_interim_on_generation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_TELEGRAM_BUSINESS_INTERIM_STATUS_DELAY_SECONDS",
+        0.01,
+    )
+    runtime = _DelayedRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.9,
+                "conversation_summary": "Customer asks for wash pricing.",
+                "extracted_fields": {"telegram_username": "alice"},
+                "missing_fields": ["car_model"],
+                "reply_action": "send_reply",
+                "reply_text": "Какая у вас машина?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need car model.",
+            }
+        ],
+        delay_seconds=0.05,
+    )
+    runtime.status_messages.append({"ok": False, "text": ""})
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio({}, {}),
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Сколько стоит мойка?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["telegram_username", "car_model"],
+        assistant_instructions="Ask for car model.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+    service._queue_pending_run(  # noqa: SLF001
+        workflow=workflow,
+        conversation_id="555",
+        event_type="telegram_business_webhook_settled",
+        delay_seconds=0.0,
+    )
+
+    drained = await service.drain_due_pending_runs()
+
+    assert drained == 1
+    assert len(runtime.status_calls) == 1
+    assert [item["text"] for item in telegram_business.client.sent_messages] == [
+        "Какая у вас машина?",
+    ]
 
 
 @pytest.mark.asyncio

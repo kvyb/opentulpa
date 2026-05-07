@@ -22,6 +22,7 @@ from opentulpa.agent.turn_policy import normalize_turn_mode
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
+from opentulpa.interfaces.telegram.status_generation import generate_llm_status_message
 
 logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
@@ -346,6 +347,8 @@ async def stream_langgraph_reply_to_telegram(
     stream_idle_retry_timeout_s = 240.0
     consecutive_timeouts = 0
     max_consecutive_timeouts = 2
+    timeout_failed_without_reply = False
+    interim_status_sent = False
     stream_started_at = time.monotonic()
     final_only = normalize_turn_mode(turn_mode) == "workflow_setup"
     next_chunk_task: asyncio.Task[Any] | None = None
@@ -451,6 +454,48 @@ async def stream_langgraph_reply_to_telegram(
         delivered_any = True
         live_delivery_text = current
         live_delivery_at = now
+
+    async def _send_llm_status_update(*, stage: str) -> None:
+        nonlocal delivered_any, interim_status_sent
+        if interim_status_sent or last_streamed:
+            return
+        status_text = await generate_llm_status_message(
+            runtime=agent_runtime,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            context={
+                "event": "telegram_owner_stream_waiting",
+                "stage": stage,
+                "turn_mode": normalize_turn_mode(turn_mode),
+                "latest_user_message": str(text or "").strip()[:1000],
+            },
+            language="Russian",
+        )
+        if not status_text:
+            logger.warning(
+                "telegram.stream status_generation_skipped chat_id=%s thread_id=%s customer_id=%s stage=%s",
+                chat_id,
+                thread_id,
+                customer_id,
+                stage,
+            )
+            return
+        sent = await client.send_message(
+            chat_id=chat_id,
+            text=status_text,
+            parse_mode="HTML",
+        )
+        if sent:
+            delivered_any = True
+            interim_status_sent = True
+            logger.info(
+                "telegram.stream status_generation_sent chat_id=%s thread_id=%s customer_id=%s stage=%s chars=%s",
+                chat_id,
+                thread_id,
+                customer_id,
+                stage,
+                len(status_text),
+            )
 
     try:
         if final_only:
@@ -608,13 +653,16 @@ async def stream_langgraph_reply_to_telegram(
                 except TimeoutError:
                     consecutive_timeouts += 1
                     if consecutive_timeouts < max_consecutive_timeouts:
+                        stage = "first_token" if not last_streamed else "idle"
                         logger.warning(
                             "telegram.stream timeout_retry chat_id=%s thread_id=%s customer_id=%s stage=%s",
                             chat_id,
                             thread_id,
                             customer_id,
-                            "first_token" if not last_streamed else "idle",
+                            stage,
                         )
+                        if not last_streamed:
+                            await _send_llm_status_update(stage=stage)
                         continue
                     if next_chunk_task is not None and not next_chunk_task.done():
                         next_chunk_task.cancel()
@@ -633,9 +681,7 @@ async def stream_langgraph_reply_to_telegram(
                         )
                         final_reply = recovered_text
                         break
-                    timeout_text = (
-                        "Still working, but the model response timed out. Please retry in a moment."
-                    )
+                    timeout_failed_without_reply = True
                     logger.error(
                         "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
                         chat_id,
@@ -643,7 +689,6 @@ async def stream_langgraph_reply_to_telegram(
                         customer_id,
                         "first_token" if not last_streamed else "idle",
                     )
-                    final_reply = timeout_text
                     break
                 if stream_status == "done":
                     next_chunk_task = None
@@ -706,6 +751,8 @@ async def stream_langgraph_reply_to_telegram(
         typing_stop.set()
     with suppress(Exception):
         await typing_task
+    if not suppressed and not final_reply and timeout_failed_without_reply:
+        suppressed = True
     if not suppressed and not final_reply:
         logger.error(
             "telegram.stream no_final_reply chat_id=%s thread_id=%s customer_id=%s",
