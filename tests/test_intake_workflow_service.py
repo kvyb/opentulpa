@@ -1035,6 +1035,84 @@ async def test_intake_workflow_ignores_latest_inbound_older_than_one_minute(
 
 
 @pytest.mark.asyncio
+async def test_telegram_business_settled_run_handles_delayed_inbound_after_one_minute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: datetime(2026, 4, 7, 8, 5, 0, tzinfo=UTC),
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer provided booking details.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Могу записать вас сегодня в 17:00.",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Fresh webhook work can be delayed behind slow model calls.",
+            }
+        ]
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio({}, {}),
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message={
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": int(datetime(2026, 4, 7, 8, 0, 0, tzinfo=UTC).timestamp()),
+            "chat": {"id": 555, "type": "private", "username": "alice"},
+            "from": {"id": 999, "is_bot": False, "username": "alice"},
+            "text": "Можно сегодня в 17:00?",
+        },
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="АвтоSpa — консультация и запись",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Помогать с услугами, ценами и записью в автоцентр.",
+        required_fields=["name", "time"],
+        assistant_instructions="Reply in Russian.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook_settled",
+    )
+
+    assert result["processed_conversations"] == 1
+    assert len(runtime.calls) == 1
+    assert telegram_business.client.sent_messages[0]["text"] == "Могу записать вас сегодня в 17:00."
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_workflow_uses_bound_files_and_replies_via_business_connection(
     tmp_path: Path,
 ) -> None:
@@ -3017,6 +3095,8 @@ async def test_intake_workflow_retries_with_execution_feedback_after_reply_failu
     assert feedback
     assert feedback[0]["phase"] == "reply_execution"
     assert "Following fields are missing" in feedback[0]["error"]
+    assert feedback[0]["prior_decision"]["extracted_fields"] == {"time": "4pm"}
+    assert feedback[0]["prior_decision"]["save_payload"] == {}
     assert len(composio.execute_calls) == 2
     bookings = service.list_bookings(
         customer_id="telegram_123",
@@ -4455,6 +4535,134 @@ async def test_telegram_business_completed_booking_without_model_reply_sends_con
     assert "2х-фазная мойка кузова" in sent[0]["text"]
     assert "10:00" in sent[0]["text"]
     assert "1200" in sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_ready_save_allows_empty_note_field(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.97,
+                "conversation_summary": "Клиент выбрал свободного мастера.",
+                "extracted_fields": {
+                    "lead_name": "Кристиан",
+                    "phone": "+35799889577",
+                    "car_model": "Mercedes SLS кабриолет",
+                    "car_class": "C-Class",
+                    "service_name": "3х-фазная детейлинг-мойка",
+                    "service_price": "3100",
+                    "add_ons": "нет",
+                    "appointment_date": "2026-05-07",
+                    "appointment_time": "17:00",
+                    "master": "свободный мастер",
+                    "note": "",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Записал к свободному мастеру на сегодня в 17:00.",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {
+                    "lead_name": "Кристиан",
+                    "phone": "+35799889577",
+                    "car_model": "Mercedes SLS кабриолет",
+                    "car_class": "C-Class",
+                    "service_name": "3х-фазная детейлинг-мойка",
+                    "service_price": "3100",
+                    "add_ons": "нет",
+                    "appointment_date": "2026-05-07",
+                    "appointment_time": "17:00",
+                    "master": "свободный мастер",
+                    "note": "",
+                },
+                "reason": "No extra note was provided.",
+            }
+        ]
+    )
+    composio = _FakeComposio({}, {})
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    customer_id = "telegram_123"
+    business_connection_id = "bc_autospa"
+    telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    workflow = service.upsert_workflow(
+        customer_id=customer_id,
+        name="AutoSpa Мойка",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": business_connection_id},
+        intent_description="Записывать клиентов на мойку.",
+        required_fields=[
+            "lead_name",
+            "phone",
+            "car_model",
+            "car_class",
+            "service_name",
+            "service_price",
+            "add_ons",
+            "appointment_date",
+            "appointment_time",
+            "master",
+            "note",
+        ],
+        assistant_instructions="Отвечай клиенту на русском языке.",
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "lead_name": "Lead Name",
+                "phone": "Phone",
+                "car_model": "Car",
+                "car_class": "Class",
+                "service_name": "Service",
+                "service_price": "Price",
+                "add_ons": "Add-ons",
+                "appointment_date": "Date",
+                "appointment_time": "Time",
+                "master": "Master",
+                "note": "Note",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_autospa_test",
+                "sheetName": "Bookings",
+            },
+        },
+    )
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=5101,
+            user_id=9101,
+            username="wash_lead",
+            message_id=1,
+            text="Запишите к свободному",
+            date=1_775_552_400,
+        ),
+    )
+
+    result = await service.run_workflow(customer_id=customer_id, workflow_id=workflow["workflow_id"])
+
+    assert result["ok"] is True
+    assert len(runtime.calls) == 1
+    assert len(composio.execute_calls) == 1
+    assert telegram_business.client.sent_messages[0]["text"] == "Записал к свободному мастеру на сегодня в 17:00."
 
 
 @pytest.mark.asyncio

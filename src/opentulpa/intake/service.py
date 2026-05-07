@@ -28,6 +28,7 @@ _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_
 _DEFAULT_SCHEDULE = "*/5 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
 _MAX_LATEST_INBOUND_AGE = timedelta(minutes=1)
+_MAX_TELEGRAM_BUSINESS_WEBHOOK_INBOUND_AGE = timedelta(hours=24)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
 _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 _TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS = 5.0
@@ -290,6 +291,25 @@ def _unique_string_list(values: Any) -> list[str]:
     return out
 
 
+def _required_field_is_present(payload: dict[str, Any], field: str) -> bool:
+    value = payload.get(field, "")
+    if str(value or "").strip():
+        return True
+    normalized = re.sub(r"[\s_-]+", "", str(field or "").strip().casefold())
+    if normalized in {
+        "note",
+        "notes",
+        "comment",
+        "comments",
+        "примечание",
+        "примечания",
+        "комментарий",
+        "комментарии",
+    }:
+        return field in payload
+    return False
+
+
 def _looks_like_cyrillic(*values: Any) -> bool:
     text = " ".join(str(value or "") for value in values)
     return any("\u0400" <= char <= "\u04ff" for char in text)
@@ -484,6 +504,12 @@ class IntakeWorkflowService:
             "telegram_business_webhook",
             _TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
         }
+
+    @classmethod
+    def _latest_inbound_max_age_for_event(cls, event_type: str) -> timedelta:
+        if cls._is_telegram_business_webhook_event(event_type):
+            return _MAX_TELEGRAM_BUSINESS_WEBHOOK_INBOUND_AGE
+        return _MAX_LATEST_INBOUND_AGE
 
     @staticmethod
     def _uses_telegram_business_stale_guard(
@@ -2849,7 +2875,7 @@ class IntakeWorkflowService:
                     continue
                 if not force and _is_older_than(
                     conversation_summary.get("latest_inbound_message_created_time"),
-                    max_age=_MAX_LATEST_INBOUND_AGE,
+                    max_age=self._latest_inbound_max_age_for_event(event_type),
                 ):
                     self._set_cursor(
                         workflow_id=str(workflow["workflow_id"]),
@@ -3568,7 +3594,7 @@ class IntakeWorkflowService:
             missing = [
                 field
                 for field in _unique_string_list(workflow.get("required_fields"))
-                if not str(save_payload.get(field, "") or "").strip()
+                if not _required_field_is_present(save_payload, field)
             ]
             if missing and not is_cancellation_save:
                 error = (
@@ -3839,6 +3865,8 @@ class IntakeWorkflowService:
                 "reply_action": str(decision.get("reply_action", "") or "").strip().lower(),
                 "ready_to_save": bool(decision.get("ready_to_save")),
                 "missing_fields": _unique_string_list(decision.get("missing_fields")),
+                "extracted_fields": _safe_dict(decision.get("extracted_fields")),
+                "save_payload": _safe_dict(decision.get("save_payload")),
                 "sink_arguments": _safe_dict(decision.get("sink_arguments")),
             },
         }
