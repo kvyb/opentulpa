@@ -230,11 +230,9 @@ def _telegram_reply_to_context(message: dict[str, Any]) -> str:
 def _inject_telegram_reply_context(text: str, reply_context: str) -> str:
     clean_text = str(text or "").strip()
     clean_context = str(reply_context or "").strip()
-    if not clean_context:
+    if not clean_context or not clean_text:
         return clean_text
-    if clean_text:
-        return f"{clean_context}\n\nCurrent user message:\n{clean_text}"
-    return clean_context
+    return f"{clean_context}\n\nCurrent user message:\n{clean_text}"
 
 
 def support_bot_commands() -> list[dict[str, str]]:

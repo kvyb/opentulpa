@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -150,6 +151,49 @@ async def test_telegram_interactive_owner_reply_to_bot_photo_adds_reply_context(
     assert "Generated hero image for the car wash workflow." in turn_text
     assert "type=photo file_unique_id=large_unique size=1024x768" in turn_text
     assert "Current user message:\nUse this image for the landing screen." in turn_text
+
+
+@pytest.mark.asyncio
+async def test_telegram_interactive_failed_voice_reply_does_not_stream_reply_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = chat_module.InteractiveSession(
+        chat_id=1,
+        customer_id="telegram_100",
+        thread_id="chat-1",
+    )
+    submission, _ = await session.enqueue()
+
+    async def _fake_ingest_attachments_with_typing(**kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        return []
+
+    monkeypatch.setattr(chat_module, "_ingest_attachments_with_typing", _fake_ingest_attachments_with_typing)
+
+    await chat_module._materialize_interactive_submission(
+        session=session,
+        submission=submission,
+        text="",
+        reply_context=(
+            "Context: the user replied to one of OpenTulpa's earlier messages.\n"
+            "- replied_message_id: 44"
+        ),
+        caption=None,
+        attachments=[SimpleNamespace(kind="voice")],
+        bot_token="123:abc",
+        file_vault=object(),
+        memory=None,
+        agent_runtime=object(),
+        customer_id="telegram_100",
+        chat_id=1,
+    )
+
+    [result] = await session.consume_ready_batch()
+    assert result.fragment is None
+    assert result.direct_reply == (
+        "I received your voice message but couldn't transcribe it. "
+        "Please resend a shorter/clearer voice note or send text."
+    )
 
 
 @pytest.mark.asyncio
