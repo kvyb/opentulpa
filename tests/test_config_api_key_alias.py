@@ -91,6 +91,14 @@ def test_settings_accepts_capsolver_api_key_env(monkeypatch) -> None:
     assert settings.capsolver_api_key == "cap-key"
 
 
+def test_settings_accepts_browser_use_user_data_dir_env(monkeypatch) -> None:
+    monkeypatch.setenv("BROWSER_USE_USER_DATA_DIR", "/tmp/opentulpa-browser-profiles")
+
+    settings = Settings()
+
+    assert settings.browser_use_user_data_dir == "/tmp/opentulpa-browser-profiles"
+
+
 def test_settings_accepts_langfuse_base_url_or_host_alias(monkeypatch) -> None:
     monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")

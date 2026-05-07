@@ -175,7 +175,7 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     assert payload["steps"]
     state = manager._tasks[task_id]
     assert state.agent.llm.kwargs["reasoning_effort"] == "medium"
-    assert state.agent.controller is None
+    assert state.agent.controller is not None
     assert "solve_captcha_with_capsolver" not in state.agent.task
 
 
@@ -202,7 +202,130 @@ async def test_local_manager_reuses_session_id(monkeypatch: pytest.MonkeyPatch) 
         await asyncio.sleep(0.01)
     await manager.start_task(task="second", max_steps=2, llm="", session_id="sess_shared")
     assert len(manager._sessions) == 1
-    assert manager._sessions["sess_shared"].session.kwargs["keep_alive"] is True
+    assert manager._sessions["default/sess_shared"].session.kwargs["keep_alive"] is True
+
+
+@pytest.mark.asyncio
+async def test_local_manager_uses_default_persistent_session_without_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path / "browser_profiles",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    first = await manager.start_task(task="first", max_steps=2, llm="")
+    first_task_id = str(first["id"])
+    for _ in range(50):
+        payload = await manager.get_task(first_task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+
+    second = await manager.start_task(task="second", max_steps=2, llm="")
+
+    assert first["sessionId"] == "default"
+    assert second["sessionId"] == "default"
+    assert len(manager._sessions) == 1
+    assert manager._sessions["default/default"].session.kwargs["user_data_dir"] == str(
+        tmp_path / "browser_profiles" / "default" / "default"
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_manager_uses_persistent_profile_dir_per_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path / "browser_profiles",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    created = await manager.start_task(
+        task="first",
+        max_steps=2,
+        llm="",
+        session_id="owner/google login",
+    )
+    task_id = str(created["id"])
+    assert created["sessionId"] == "owner_google_login"
+    for _ in range(50):
+        payload = await manager.get_task(task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+
+    session = manager._sessions["default/owner_google_login"].session
+    profile_path = Path(session.kwargs["user_data_dir"])
+    assert profile_path == tmp_path / "browser_profiles" / "default" / "owner_google_login"
+    assert profile_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_local_manager_lists_persisted_profile_dirs(tmp_path: Path) -> None:
+    profile_root = tmp_path / "browser_profiles"
+    (profile_root / "u_1" / "default").mkdir(parents=True)
+    (profile_root / "u_1" / "owner_google").mkdir()
+    (profile_root / "u_2" / "other").mkdir(parents=True)
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=profile_root,
+    )
+
+    sessions = await manager.list_sessions(customer_id="u_1")
+
+    by_id = {item["session_id"]: item for item in sessions}
+    assert by_id["default"]["persisted"] is True
+    assert by_id["default"]["reusable"] is True
+    assert by_id["owner_google"]["persisted"] is True
+    assert by_id["owner_google"]["active_task_ids"] == []
+    assert "other" not in by_id
+
+
+@pytest.mark.asyncio
+async def test_local_manager_deletes_profiles_unused_over_fourteen_days(tmp_path: Path) -> None:
+    profile_root = tmp_path / "browser_profiles"
+    stale = profile_root / "u_1" / "stale"
+    fresh = profile_root / "u_1" / "fresh"
+    stale.mkdir(parents=True)
+    fresh.mkdir(parents=True)
+    stale_metadata = stale / "profile.json"
+    stale_metadata.write_text('{"lastUsedAt":"2020-01-01T00:00:00+00:00"}', encoding="utf-8")
+    fresh_metadata = fresh / "profile.json"
+    fresh_metadata.write_text('{"lastUsedAt":"2999-01-01T00:00:00+00:00"}', encoding="utf-8")
+
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=profile_root,
+    )
+
+    async with manager._lock:
+        manager._cleanup_locked()
+
+    assert not stale.exists()
+    assert fresh.exists()
 
 
 @pytest.mark.asyncio
@@ -310,6 +433,48 @@ async def test_local_manager_capture_screenshot_writes_file(
 
 
 @pytest.mark.asyncio
+async def test_local_manager_waits_for_owner_input_and_resumes_same_task() -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    state = _BrowserUseTaskState(
+        task_id="task_mfa",
+        session_id="sess_mfa",
+        task="log in",
+        llm="model",
+        status="running",
+    )
+    manager._tasks[state.task_id] = state
+
+    waiter = asyncio.create_task(
+        manager.request_owner_input(
+            task_id="task_mfa",
+            prompt="Enter the email code.",
+            input_type="email_code",
+        )
+    )
+    for _ in range(50):
+        payload = await manager.get_task("task_mfa")
+        if payload and payload.get("status") == "waiting_for_owner":
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not start waiting for owner input")
+
+    assert payload["ownerInputPrompt"] == "Enter the email code."
+    submitted = await manager.submit_owner_input(task_id="task_mfa", owner_input="123456")
+    assert submitted["status"] == "running"
+    assert await waiter == "123456"
+
+    payload = await manager.get_task("task_mfa")
+    assert payload is not None
+    assert payload["status"] == "running"
+    assert payload["ownerInputPrompt"] is None
+
+
+@pytest.mark.asyncio
 async def test_local_manager_lists_sessions_and_expires_idle_ones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -336,12 +501,12 @@ async def test_local_manager_lists_sessions_and_expires_idle_ones(
     assert sessions[0]["session_id"] == "sess_idle"
     assert sessions[0]["reusable"] is True
 
-    session = manager._sessions["sess_idle"].session
-    manager._sessions["sess_idle"].updated_monotonic = time.monotonic() - 3700
+    session = manager._sessions["default/sess_idle"].session
+    manager._sessions["default/sess_idle"].updated_monotonic = time.monotonic() - 3700
     async with manager._lock:
         manager._cleanup_locked()
     await asyncio.sleep(0)
-    assert "sess_idle" not in manager._sessions
+    assert "default/sess_idle" not in manager._sessions
     assert session.stopped is True
 
 
@@ -359,14 +524,18 @@ async def test_local_manager_background_cleanup_expires_idle_session(
     monkeypatch.setattr(browser_use_local, "_SESSION_CLEANUP_POLL_SECONDS", 0.01)
 
     session = _FakeBrowserSession()
-    manager._sessions["sess_bg"] = browser_use_local._BrowserUseSessionState(session=session)
-    manager._sessions["sess_bg"].updated_monotonic = time.monotonic() - 3700
+    manager._sessions["default/sess_bg"] = browser_use_local._BrowserUseSessionState(
+        session=session,
+        customer_id="default",
+        session_id="sess_bg",
+    )
+    manager._sessions["default/sess_bg"].updated_monotonic = time.monotonic() - 3700
 
     async with manager._lock:
         manager._ensure_cleanup_task_locked()
 
     for _ in range(50):
-        if "sess_bg" not in manager._sessions:
+        if "default/sess_bg" not in manager._sessions:
             break
         await asyncio.sleep(0.01)
     else:  # pragma: no cover
@@ -377,7 +546,7 @@ async def test_local_manager_background_cleanup_expires_idle_session(
 
 
 @pytest.mark.asyncio
-async def test_local_manager_reuses_idle_session_when_at_session_limit(
+async def test_local_manager_allows_twenty_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = BrowserUseLocalManager(
@@ -392,8 +561,10 @@ async def test_local_manager_reuses_idle_session_when_at_session_limit(
         lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
     )
 
-    for session_id in ("sess_1", "sess_2"):
+    for idx in range(20):
+        session_id = f"sess_{idx}"
         created = await manager.start_task(task=session_id, max_steps=2, llm="", session_id=session_id)
+        assert created.get("sessionId") == session_id
         task_id = str(created["id"])
         for _ in range(50):
             payload = await manager.get_task(task_id)
@@ -401,13 +572,21 @@ async def test_local_manager_reuses_idle_session_when_at_session_limit(
                 break
             await asyncio.sleep(0.01)
 
-    created = await manager.start_task(task="third", max_steps=2, llm="")
-    assert created.get("sessionId") in {"sess_1", "sess_2"}
-    assert len(manager._sessions) == 2
+    assert len(manager._sessions) == 20
+
+    other_customer = await manager.start_task(
+        task="other customer",
+        max_steps=2,
+        llm="",
+        session_id="sess_0",
+        customer_id="u_2",
+    )
+    assert other_customer.get("sessionId") == "sess_0"
+    assert len(manager._sessions) == 21
 
 
 @pytest.mark.asyncio
-async def test_local_manager_rejects_third_explicit_session_at_capacity(
+async def test_local_manager_rejects_twenty_first_explicit_session_at_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = BrowserUseLocalManager(
@@ -422,7 +601,8 @@ async def test_local_manager_rejects_third_explicit_session_at_capacity(
         lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
     )
 
-    for session_id in ("sess_1", "sess_2"):
+    for idx in range(20):
+        session_id = f"sess_{idx}"
         created = await manager.start_task(task=session_id, max_steps=2, llm="", session_id=session_id)
         task_id = str(created["id"])
         for _ in range(50):
@@ -431,11 +611,11 @@ async def test_local_manager_rejects_third_explicit_session_at_capacity(
                 break
             await asyncio.sleep(0.01)
 
-    blocked = await manager.start_task(task="third", max_steps=2, llm="", session_id="sess_3")
+    blocked = await manager.start_task(task="extra", max_steps=2, llm="", session_id="sess_extra")
     assert "error" in blocked
     assert "session capacity reached" in str(blocked["error"])
-    assert blocked["sessionLimit"] == 2
-    assert len(manager._sessions) == 2
+    assert blocked["sessionLimit"] == 20
+    assert len(manager._sessions) == 20
 
 
 @pytest.mark.asyncio
@@ -457,7 +637,11 @@ async def test_local_manager_attaches_capsolver_controller_when_key_is_set(
         "_import_browser_use_components",
         lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
     )
-    monkeypatch.setattr(captcha_module, "build_capsolver_controller", lambda client: controller)
+    monkeypatch.setattr(
+        captcha_module,
+        "register_capsolver_action",
+        lambda base_controller, client: controller,
+    )
 
     created = await manager.start_task(task="blocked by captcha", max_steps=2, llm="", session_id="sess_cap")
     task_id = str(created["id"])

@@ -523,6 +523,32 @@ def test_validate_model_tool_call_rejects_owner_update_during_routine_wake() -> 
     assert "routine_wake" in err
 
 
+def test_validate_model_tool_call_rejects_browser_owner_input_during_routine_wake() -> None:
+    err = _validate_model_tool_call(
+        call_name="browser_use_owner_input_submit",
+        args={"task_id": "task_1", "owner_input": "123456"},
+        latest_user_text="System update: a scheduled routine fired.",
+        turn_mode="routine_wake",
+        required_args={"browser_use_owner_input_submit": ("task_id", "owner_input")},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+    assert "browser_use_owner_input_submit is only for live owner/support chat turns" in err
+    assert "routine_wake" in err
+
+
+def test_validate_model_tool_call_allows_browser_owner_input_during_interactive_turn() -> None:
+    err = _validate_model_tool_call(
+        call_name="browser_use_owner_input_submit",
+        args={"task_id": "task_1", "owner_input": "123456"},
+        latest_user_text="123456",
+        turn_mode="interactive",
+        required_args={"browser_use_owner_input_submit": ("task_id", "owner_input")},
+        forbidden_tool_args={},
+    )
+    assert err is None
+
+
 def test_validate_model_tool_call_allows_owner_update_during_workflow_setup() -> None:
     err = _validate_model_tool_call(
         call_name="send_owner_update",
