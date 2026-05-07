@@ -50,6 +50,13 @@ from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 STATE_STORE = TelegramStateStore(STATE_PATH)
 logger = logging.getLogger(__name__)
 
+_UPLOAD_WITHOUT_TEXT_PREFIX = "User uploaded one or more files without extra text."
+_UPLOAD_CONTEXT_MARKER = "Internal uploaded-file context."
+_UNCLEAR_UPLOAD_GUIDANCE_SNIPPETS = (
+    "If intent is unclear, ask what the user wants done",
+    "User-facing reply guidance: briefly acknowledge the upload",
+)
+
 
 def _clean_thread_id(value: Any) -> str:
     text = str(value or "").strip()
@@ -818,8 +825,11 @@ def _build_effective_telegram_text(
     non_voice_files = [
         item for item in ingested_files if str(item.get("kind", "")).strip() != "voice"
     ]
-    context_blob = build_uploaded_files_context(non_voice_files)
     effective_text = _inject_voice_message_context(user_text, voice_transcripts)
+    context_blob = build_uploaded_files_context(
+        non_voice_files,
+        include_unclear_intent_guidance=not bool(effective_text.strip()),
+    )
     if context_blob:
         if effective_text:
             effective_text = f"{effective_text}\n\n{context_blob}"
@@ -842,6 +852,22 @@ def _build_effective_telegram_text(
             "Please resend a shorter/clearer voice note or send text."
         )
     return "", None
+
+
+def _drop_upload_without_text_guidance(fragment: str) -> str:
+    text = str(fragment or "").strip()
+    if not text.startswith(_UPLOAD_WITHOUT_TEXT_PREFIX):
+        return text
+    marker_index = text.find(_UPLOAD_CONTEXT_MARKER)
+    if marker_index < 0:
+        return text
+    context = text[marker_index:].strip()
+    lines = [
+        line
+        for line in context.splitlines()
+        if not any(snippet in line for snippet in _UNCLEAR_UPLOAD_GUIDANCE_SNIPPETS)
+    ]
+    return "\n".join(lines).strip()
 
 
 async def _send_direct_telegram_reply(
@@ -946,6 +972,10 @@ async def _run_interactive_session(
             if await session.finish_runner_if_idle():
                 return
             continue
+        if len(fragments) > 1 and any(
+            not fragment.startswith(_UPLOAD_WITHOUT_TEXT_PREFIX) for fragment in fragments
+        ):
+            fragments = [_drop_upload_without_text_guidance(fragment) for fragment in fragments]
         effective_text = "\n\n".join(fragments).strip()
         if not effective_text:
             if await session.finish_runner_if_idle():

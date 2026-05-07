@@ -265,14 +265,35 @@ async def test_telegram_interactive_inbox_merges_slow_media_then_followup_text(
     assert text_result is None
     assert captured_turn_texts and len(captured_turn_texts) == 1
     merged = captured_turn_texts[0]
-    assert "User uploaded one or more files without extra text." in merged
-    assert "If intent is unclear, ask what the user wants done" in merged
-    assert "Do not infer intent from filenames or content" in merged
+    assert "User uploaded one or more files without extra text." not in merged
+    assert "If intent is unclear, ask what the user wants done" not in merged
+    assert "Do not infer intent from filenames or content" not in merged
     assert "orange cat sleeping on a chair" in merged
     assert "sleeping cat on the chair" in merged
     assert runtime.registered_thread_ids == ["chat-1"]
     assert runtime.cleared_thread_ids == ["chat-1"]
     assert fake_store.assistant_touches == [1]
+
+
+def test_build_effective_telegram_text_keeps_captioned_media_instruction_clean() -> None:
+    effective_text, direct_reply = chat_module._build_effective_telegram_text(
+        user_text="What is the best team for my available heroes?",
+        attachments=[],
+        ingested_files=[
+            {
+                "id": "file_1",
+                "original_filename": "roster.jpg",
+                "kind": "photo",
+                "summary": "Roster: Diana, Rin, Cassius, Nia.",
+            }
+        ],
+    )
+
+    assert direct_reply is None
+    assert "What is the best team for my available heroes?" in effective_text
+    assert "Roster: Diana, Rin, Cassius, Nia." in effective_text
+    assert "User uploaded one or more files without extra text." not in effective_text
+    assert "If intent is unclear, ask what the user wants done" not in effective_text
 
 
 @pytest.mark.asyncio
