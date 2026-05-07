@@ -240,6 +240,42 @@ async def test_uploaded_file_inspect_structure_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tulpa_file_send_marks_delivered_file_for_agent() -> None:
+    runtime = DummyRuntime(
+        [
+            Response(
+                200,
+                {
+                    "ok": True,
+                    "path": "tulpa_stuff/sample_delivery_report.txt",
+                    "chat_id": 12345,
+                    "delivered_to_chat": True,
+                },
+            )
+        ]
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["tulpa_file_send"].ainvoke(
+        {
+            "path": "tulpa_stuff/sample_delivery_report.txt",
+            "caption": "Sample delivery report",
+        }
+    )
+
+    assert result["delivered_to_chat"] is True
+    assert result["delivery_status"] == "delivered_to_telegram_chat"
+    assert "DELIVERED_TO_CHAT" in result["model_instruction"]
+    assert "Do not call the file-send tool again" in result["model_instruction"]
+    assert runtime.calls[0][1] == "/internal/files/send_local"
+    assert runtime.calls[0][2]["json_body"] == {
+        "path": "tulpa_stuff/sample_delivery_report.txt",
+        "customer_id": "telegram_123",
+        "caption": "Sample delivery report",
+    }
+
+
+@pytest.mark.asyncio
 async def test_business_knowledge_index_posts_expected_payload() -> None:
     runtime = DummyRuntime(
         [

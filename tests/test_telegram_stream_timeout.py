@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -8,10 +9,20 @@ from opentulpa.interfaces.telegram import relay as relay_module
 
 
 class _NeverYieldsRuntime:
+    def __init__(self, status: str | None = None) -> None:
+        self.status = status
+        self.status_calls = 0
+
     async def astream_text(self, **kwargs):
         while True:
             await asyncio.sleep(10.0)
             yield ""
+
+    async def generate_status_message(self, **kwargs):
+        self.status_calls += 1
+        if not self.status:
+            return None
+        return {"ok": True, "text": self.status}
 
 
 class _NeverYieldsWithFallbackRuntime:
@@ -69,6 +80,7 @@ class _FakeTelegramClient:
 async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_client = _FakeTelegramClient("dummy")
     monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    runtime = _NeverYieldsRuntime(status="Уточняю детали и скоро отвечу.")
 
     # Force timeout path quickly.
     original_wait_for = relay_module.asyncio.wait_for
@@ -81,13 +93,14 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
             code = getattr(awaitable, "cr_code", None)
             if getattr(code, "co_name", "") == "wait":
                 return await original_wait_for(awaitable, timeout)
+            awaitable.close()
         calls["count"] += 1
         raise TimeoutError()
 
     monkeypatch.setattr(relay_module.asyncio, "wait_for", _fast_timeout)
     try:
         final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
-            agent_runtime=_NeverYieldsRuntime(),
+            agent_runtime=runtime,
             thread_id="chat-1",
             customer_id="telegram_1",
             text="hello",
@@ -97,15 +110,63 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     finally:
         monkeypatch.setattr(relay_module.asyncio, "wait_for", original_wait_for)
 
-    assert suppressed is False
-    assert isinstance(final, str)
-    assert "timed out" in final.lower()
+    assert suppressed is True
+    assert final is None
+    assert runtime.status_calls == 1
     # One automatic retry is attempted before surfacing timeout.
     assert calls["count"] >= 2
-    assert any("timed out" in text.lower() for _, _, text, _, _ in fake_client.draft_calls) or any(
-        "timed out" in text.lower() for _, text, _ in fake_client.message_calls
-    )
+    assert ("Уточняю детали и скоро отвечу." in [text for _, text, _ in fake_client.message_calls])
     assert fake_client.chat_actions
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_logs_silent_suppression_when_status_generation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    runtime = _NeverYieldsRuntime(status=None)
+    caplog.set_level(logging.WARNING, logger=relay_module.__name__)
+
+    original_wait_for = relay_module.asyncio.wait_for
+    calls = {"count": 0}
+
+    async def _fast_timeout(awaitable, timeout):
+        if asyncio.iscoroutine(awaitable):
+            code = getattr(awaitable, "cr_code", None)
+            if getattr(code, "co_name", "") == "wait":
+                return await original_wait_for(awaitable, timeout)
+            awaitable.close()
+        calls["count"] += 1
+        raise TimeoutError()
+
+    monkeypatch.setattr(relay_module.asyncio, "wait_for", _fast_timeout)
+    try:
+        final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+            agent_runtime=runtime,
+            thread_id="chat-1",
+            customer_id="telegram_1",
+            text="hello",
+            bot_token="dummy",
+            chat_id=1,
+        )
+    finally:
+        monkeypatch.setattr(relay_module.asyncio, "wait_for", original_wait_for)
+
+    assert suppressed is True
+    assert final is None
+    assert runtime.status_calls == 1
+    assert fake_client.message_calls == []
+    assert calls["count"] >= 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("telegram.stream status_generation_skipped" in message for message in messages)
+    assert any(
+        "telegram.stream silent_timeout_suppressed" in message
+        and "interim_status_sent=False" in message
+        and "delivered_any=False" in message
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
@@ -125,6 +186,8 @@ async def test_stream_timeout_uses_non_stream_recovery_when_available(
                 return await original_wait_for(awaitable, timeout)
         calls["count"] += 1
         if calls["count"] <= 2:
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
             raise TimeoutError()
         return await original_wait_for(awaitable, timeout)
 
