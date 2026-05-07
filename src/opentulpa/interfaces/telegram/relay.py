@@ -348,6 +348,7 @@ async def stream_langgraph_reply_to_telegram(
     consecutive_timeouts = 0
     max_consecutive_timeouts = 2
     timeout_failed_without_reply = False
+    timeout_failure_stage = ""
     interim_status_sent = False
     stream_started_at = time.monotonic()
     final_only = normalize_turn_mode(turn_mode) == "workflow_setup"
@@ -682,12 +683,13 @@ async def stream_langgraph_reply_to_telegram(
                         final_reply = recovered_text
                         break
                     timeout_failed_without_reply = True
+                    timeout_failure_stage = "first_token" if not last_streamed else "idle"
                     logger.error(
                         "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
                         chat_id,
                         thread_id,
                         customer_id,
-                        "first_token" if not last_streamed else "idle",
+                        timeout_failure_stage,
                     )
                     break
                 if stream_status == "done":
@@ -752,6 +754,16 @@ async def stream_langgraph_reply_to_telegram(
     with suppress(Exception):
         await typing_task
     if not suppressed and not final_reply and timeout_failed_without_reply:
+        logger.error(
+            "telegram.stream silent_timeout_suppressed chat_id=%s thread_id=%s customer_id=%s stage=%s "
+            "interim_status_sent=%s delivered_any=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+            timeout_failure_stage,
+            interim_status_sent,
+            delivered_any,
+        )
         suppressed = True
     if not suppressed and not final_reply:
         logger.error(

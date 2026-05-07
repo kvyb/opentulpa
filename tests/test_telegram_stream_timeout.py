@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -116,6 +117,56 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     assert calls["count"] >= 2
     assert ("Уточняю детали и скоро отвечу." in [text for _, text, _ in fake_client.message_calls])
     assert fake_client.chat_actions
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_logs_silent_suppression_when_status_generation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy")
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+    runtime = _NeverYieldsRuntime(status=None)
+    caplog.set_level(logging.WARNING, logger=relay_module.__name__)
+
+    original_wait_for = relay_module.asyncio.wait_for
+    calls = {"count": 0}
+
+    async def _fast_timeout(awaitable, timeout):
+        if asyncio.iscoroutine(awaitable):
+            code = getattr(awaitable, "cr_code", None)
+            if getattr(code, "co_name", "") == "wait":
+                return await original_wait_for(awaitable, timeout)
+            awaitable.close()
+        calls["count"] += 1
+        raise TimeoutError()
+
+    monkeypatch.setattr(relay_module.asyncio, "wait_for", _fast_timeout)
+    try:
+        final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+            agent_runtime=runtime,
+            thread_id="chat-1",
+            customer_id="telegram_1",
+            text="hello",
+            bot_token="dummy",
+            chat_id=1,
+        )
+    finally:
+        monkeypatch.setattr(relay_module.asyncio, "wait_for", original_wait_for)
+
+    assert suppressed is True
+    assert final is None
+    assert runtime.status_calls == 1
+    assert fake_client.message_calls == []
+    assert calls["count"] >= 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("telegram.stream status_generation_skipped" in message for message in messages)
+    assert any(
+        "telegram.stream silent_timeout_suppressed" in message
+        and "interim_status_sent=False" in message
+        and "delivered_any=False" in message
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
