@@ -1,4 +1,8 @@
-"""Uploaded file extraction and analysis helpers for the runtime."""
+"""Uploaded file extraction and analysis helpers for the runtime.
+
+Boundary decision: keep this module as the compatibility surface for runtime
+file analysis until a split is needed. See docs/file-analysis-boundary.md.
+"""
 
 from __future__ import annotations
 
