@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -191,7 +192,7 @@ class BrowserUseLocalManager:
 
         explicit_session_id = str(session_id or "").strip()
         safe_session_id = self._safe_profile_name(explicit_session_id) if explicit_session_id else _DEFAULT_SESSION_ID
-        safe_customer_id = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer_id = self._normalize_customer_id(customer_id)
         session_key = self._session_key(safe_customer_id, safe_session_id)
         safe_max_steps = max(1, min(int(max_steps), 120))
         safe_start_url = str(start_url or "").strip()
@@ -295,7 +296,7 @@ class BrowserUseLocalManager:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return None
-        safe_customer_id = self._safe_optional_customer_id(customer_id)
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
@@ -308,7 +309,7 @@ class BrowserUseLocalManager:
             return self._state_to_payload(state)
 
     async def list_sessions(self, *, customer_id: str | None = None) -> list[dict[str, Any]]:
-        safe_customer_id = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer_id = self._normalize_customer_id(customer_id)
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
@@ -389,7 +390,7 @@ class BrowserUseLocalManager:
         safe_action = str(action or "").strip().lower()
         if not safe_task_id:
             return {"error": "browser_use_task_control requires task_id"}
-        safe_customer_id = self._safe_optional_customer_id(customer_id)
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
 
         session_to_close: Any | None = None
         async with self._lock:
@@ -460,7 +461,7 @@ class BrowserUseLocalManager:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_screenshot requires task_id"}
-        safe_customer_id = self._safe_optional_customer_id(customer_id)
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
 
         async with self._lock:
             self._ensure_cleanup_task_locked()
@@ -587,7 +588,7 @@ class BrowserUseLocalManager:
             return {"error": "browser_use_owner_input_submit requires task_id"}
         if not safe_owner_input:
             return {"error": "browser_use_owner_input_submit requires owner_input"}
-        safe_customer_id = self._safe_optional_customer_id(customer_id)
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
 
         async with self._lock:
             self._ensure_cleanup_task_locked()
@@ -608,6 +609,10 @@ class BrowserUseLocalManager:
             if future is None or future.done():
                 return {"error": "browser_use_owner_input_submit has no pending owner input request"}
             future.set_result(safe_owner_input)
+            state.owner_input_future = None
+            state.owner_input_prompt = None
+            state.owner_input_type = None
+            state.owner_input_requested_at = None
             state.status = "running"
             state.updated_monotonic = time.monotonic()
             self._touch_session_locked(state.customer_id, state.session_id)
@@ -987,21 +992,37 @@ class BrowserUseLocalManager:
         return value[:80] or "default"
 
     @classmethod
-    def _safe_optional_customer_id(cls, customer_id: str | None) -> str | None:
+    def _normalize_customer_id(cls, customer_id: str | None) -> str:
+        raw = str(customer_id or "").strip()
+        return raw or _DEFAULT_CUSTOMER_ID
+
+    @classmethod
+    def _normalize_optional_customer_id(cls, customer_id: str | None) -> str | None:
         raw = str(customer_id or "").strip()
         if not raw:
             return None
-        return cls._safe_profile_name(raw)
+        return raw
 
     @staticmethod
     def _session_key(customer_id: str, session_id: str) -> str:
-        return f"{BrowserUseLocalManager._safe_profile_name(customer_id)}/{BrowserUseLocalManager._safe_profile_name(session_id)}"
+        customer = BrowserUseLocalManager._normalize_customer_id(customer_id)
+        session = BrowserUseLocalManager._safe_profile_name(session_id)
+        return f"{customer}\0{session}"
+
+    @classmethod
+    def _profile_customer_dir_name(cls, customer_id: str) -> str:
+        raw = cls._normalize_customer_id(customer_id)
+        safe = cls._safe_profile_name(raw)
+        if safe == raw:
+            return safe
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return f"{safe}-{digest}"
 
     def _profile_dir(self, customer_id: str, session_id: str) -> Path:
         assert self._user_data_dir is not None
         return (
             self._user_data_dir
-            / self._safe_profile_name(customer_id)
+            / self._profile_customer_dir_name(customer_id)
             / self._safe_profile_name(session_id)
         )
 
@@ -1013,7 +1034,7 @@ class BrowserUseLocalManager:
     def _persisted_profile_dirs(self, customer_id: str) -> list[tuple[str, Path, dict[str, Any]]]:
         if self._user_data_dir is None or not self._user_data_dir.is_dir():
             return []
-        customer_dir = self._user_data_dir / self._safe_profile_name(customer_id)
+        customer_dir = self._user_data_dir / self._profile_customer_dir_name(customer_id)
         if not customer_dir.is_dir():
             return []
         out: list[tuple[str, Path, dict[str, Any]]] = []
@@ -1057,6 +1078,7 @@ class BrowserUseLocalManager:
         metadata.update(
             {
                 "customerId": self._safe_profile_name(customer_id),
+                "rawCustomerId": self._normalize_customer_id(customer_id),
                 "profileId": self._safe_profile_name(session_id),
                 "label": metadata.get("label") or self._safe_profile_name(session_id),
                 "createdAt": metadata.get("createdAt") or now,
@@ -1213,19 +1235,17 @@ class BrowserUseLocalManager:
         if self._user_data_dir is None or not self._user_data_dir.is_dir():
             return
         cutoff = time.time() - _PROFILE_RETENTION_SECONDS
-        live_keys = {
-            self._session_key(item.customer_id, item.session_id)
+        live_profile_dirs = {
+            self._profile_dir(item.customer_id, item.session_id).resolve()
             for item in self._sessions.values()
         }
         for customer_dir in self._user_data_dir.iterdir():
             if not customer_dir.is_dir():
                 continue
-            customer_id = customer_dir.name
             for profile_dir in customer_dir.iterdir():
                 if not profile_dir.is_dir():
                     continue
-                session_id = profile_dir.name
-                if self._session_key(customer_id, session_id) in live_keys:
+                if profile_dir.resolve() in live_profile_dirs:
                     continue
                 metadata = self._read_profile_metadata(profile_dir)
                 if self._profile_last_used_timestamp(profile_dir, metadata) >= cutoff:
@@ -1236,7 +1256,7 @@ class BrowserUseLocalManager:
     def _detach_session_if_unused_locked(
         self, customer_id: str, session_id: str | None
     ) -> Any | None:
-        safe_customer = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return None
@@ -1256,7 +1276,7 @@ class BrowserUseLocalManager:
         return session_state.session if session_state is not None else None
 
     def _touch_session_locked(self, customer_id: str, session_id: str | None) -> None:
-        safe_customer = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return
@@ -1281,11 +1301,11 @@ class BrowserUseLocalManager:
         return reusable[0][1]
 
     def _live_session_count_for_customer_locked(self, customer_id: str) -> int:
-        safe_customer = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer = self._normalize_customer_id(customer_id)
         return sum(1 for item in self._sessions.values() if item.customer_id == safe_customer)
 
     def _session_summaries_locked(self, customer_id: str | None = None) -> list[dict[str, Any]]:
-        safe_customer = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer = self._normalize_customer_id(customer_id)
         out: list[dict[str, Any]] = []
         for _, session_state in self._sessions.items():
             if session_state.customer_id != safe_customer:
@@ -1306,7 +1326,7 @@ class BrowserUseLocalManager:
         return out
 
     def _session_has_active_tasks_locked(self, customer_id: str, session_id: str) -> bool:
-        safe_customer = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return False
@@ -1322,7 +1342,7 @@ class BrowserUseLocalManager:
     def _active_task_for_session_locked(
         self, customer_id: str, session_id: str
     ) -> _BrowserUseTaskState | None:
-        safe_customer = self._safe_profile_name(customer_id or _DEFAULT_CUSTOMER_ID)
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return None
