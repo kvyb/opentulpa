@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import pytest
 
+from opentulpa.agent.tools.intake_setup_tools import register_intake_setup_tools
 from opentulpa.agent.tools_registry import register_runtime_tools
 from tests.tool_test_helpers import DummyRuntime, Response
+
+
+def test_intake_setup_tools_can_be_registered_directly() -> None:
+    runtime = DummyRuntime([])
+    tools = register_intake_setup_tools(runtime)
+
+    assert "intake_workflow_setup_begin" in tools
+    assert "intake_workflow_setup_update" in tools
+    assert "intake_workflow_upsert" not in tools
 
 
 @pytest.mark.asyncio
