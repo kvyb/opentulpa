@@ -128,7 +128,8 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
     async def browser_use_session_list() -> Any:
         """
         List known Browser Use sessions so the agent can reuse an idle session_id
-        instead of spawning a fresh browser session.
+        instead of spawning a fresh browser session. Sessions can include persisted
+        browser profile state such as cookies; use this before repeat account work.
         """
         customer_id = require_customer_id(runtime)
         manager, manager_error = _get_browser_use_local_manager(runtime)
@@ -149,8 +150,13 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
     ) -> Any:
         """
         Run a local Browser Use task and wait for completion.
-        Use for dynamic web tasks that need real browser interactions.
-        Reuse a prior session_id when continuing the same browsing workflow.
+        Use for dynamic web tasks that need real browser interactions, including
+        owner-authorized login flows. Browser sessions are kept alive and may use
+        persisted profile state when configured; reuse a prior session_id when
+        continuing the same account/site workflow. If the task hits CAPTCHA or
+        MFA, the browser backend can use its registered solver/owner-input actions
+        when available. Do not ask the owner to paste credentials into durable
+        memory; use current-turn credentials only for the intended browser login.
         """
         task_text = str(task or "").strip()
         if not task_text:

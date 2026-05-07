@@ -154,6 +154,19 @@ def test_normalize_allowed_domains_filters_invalid_values() -> None:
     assert values == ["example.com", "docs.python.org"]
 
 
+def test_browser_use_tool_descriptions_include_login_session_and_secret_boundaries() -> None:
+    tools = register_runtime_tools(_DummyRuntime(_DummyBrowserManager()))
+
+    session_description = str(getattr(tools["browser_use_session_list"], "description", ""))
+    run_description = str(getattr(tools["browser_use_run"], "description", ""))
+    normalized_run_description = " ".join(run_description.split())
+
+    assert "persisted\nbrowser profile state" in session_description
+    assert "owner-authorized login flows" in normalized_run_description
+    assert "CAPTCHA or MFA" in normalized_run_description
+    assert "Do not ask the owner to paste credentials into durable memory" in normalized_run_description
+
+
 @pytest.mark.asyncio
 async def test_browser_use_run_uses_local_manager() -> None:
     manager = _DummyBrowserManager()
