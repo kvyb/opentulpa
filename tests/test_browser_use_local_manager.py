@@ -475,6 +475,78 @@ async def test_local_manager_waits_for_owner_input_and_resumes_same_task() -> No
 
 
 @pytest.mark.asyncio
+async def test_local_manager_rejects_task_access_for_wrong_customer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+    monkeypatch.setattr(
+        "opentulpa.integrations.browser_use_local.TULPA_STUFF_DIR",
+        tmp_path / "tulpa_stuff",
+    )
+
+    created = await manager.start_task(
+        task="owner login",
+        max_steps=2,
+        llm="",
+        session_id="sess_mfa",
+        customer_id="u_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id, customer_id="u_1")
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert await manager.get_task(task_id, customer_id="u_2") is None
+
+    control = await manager.control_task(
+        task_id=task_id,
+        action="stop",
+        customer_id="u_2",
+    )
+    assert "task not found" in str(control.get("error"))
+    assert manager._tasks[task_id].status == "finished"
+
+    screenshot = await manager.capture_screenshot(
+        task_id=task_id,
+        customer_id="u_2",
+    )
+    assert "task not found" in str(screenshot.get("error"))
+    assert not (tmp_path / "tulpa_stuff").exists()
+
+    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    manager._tasks[task_id].status = "waiting_for_owner"
+    manager._tasks[task_id].owner_input_future = future
+    submit = await manager.submit_owner_input(
+        task_id=task_id,
+        owner_input="123456",
+        customer_id="u_2",
+    )
+    assert "task not found" in str(submit.get("error"))
+    assert not future.done()
+
+    submit = await manager.submit_owner_input(
+        task_id=task_id,
+        owner_input="123456",
+        customer_id="u_1",
+    )
+    assert submit["status"] == "running"
+    assert await future == "123456"
+
+
+@pytest.mark.asyncio
 async def test_local_manager_lists_sessions_and_expires_idle_ones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

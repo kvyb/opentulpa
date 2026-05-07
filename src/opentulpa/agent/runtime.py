@@ -721,6 +721,9 @@ CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
     "routine_create",
     "routine_delete",
     "browser_use_run",
+    "browser_use_task_get",
+    "browser_use_task_screenshot",
+    "browser_use_task_control",
     "browser_use_owner_input_submit",
     "tulpa_run_terminal",
 }

@@ -256,12 +256,13 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_get requires task_id"}
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
             return {"error": manager_error or "browser_use_task_get unavailable"}
 
-        payload = await manager.get_task(safe_task_id)
+        payload = await manager.get_task(safe_task_id, customer_id=customer_id)
         if not isinstance(payload, dict):
             return {"error": f"browser_use_task_get failed: task not found ({safe_task_id})"}
         return _compact_browser_use_task_view(
@@ -282,6 +283,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_screenshot requires task_id"}
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
@@ -290,6 +292,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         payload = await manager.capture_screenshot(
             task_id=safe_task_id,
             full_page=bool(full_page),
+            customer_id=customer_id,
         )
         if isinstance(payload, dict) and payload.get("error"):
             return {"error": str(payload.get("error"))}
@@ -310,12 +313,17 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                     "Use one of: stop, pause, resume, stop_task_and_session"
                 )
             }
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
             return {"error": manager_error or "browser_use_task_control unavailable"}
 
-        payload = await manager.control_task(task_id=safe_task_id, action=safe_action)
+        payload = await manager.control_task(
+            task_id=safe_task_id,
+            action=safe_action,
+            customer_id=customer_id,
+        )
         if isinstance(payload, dict) and payload.get("error"):
             return {"error": str(payload.get("error"))}
         return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
@@ -332,7 +340,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         safe_owner_input = str(owner_input or "").strip()
         if not safe_owner_input:
             return {"error": "browser_use_owner_input_submit requires owner_input"}
-        require_customer_id(runtime)
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
@@ -341,6 +349,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         payload = await manager.submit_owner_input(
             task_id=safe_task_id,
             owner_input=safe_owner_input,
+            customer_id=customer_id,
         )
         if isinstance(payload, dict) and payload.get("error"):
             return {"error": str(payload.get("error"))}

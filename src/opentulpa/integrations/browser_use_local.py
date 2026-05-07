@@ -286,15 +286,23 @@ class BrowserUseLocalManager:
             await self._close_session(session_to_close)
         return payload
 
-    async def get_task(self, task_id: str) -> dict[str, Any] | None:
+    async def get_task(
+        self,
+        task_id: str,
+        *,
+        customer_id: str | None = None,
+    ) -> dict[str, Any] | None:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return None
+        safe_customer_id = self._safe_optional_customer_id(customer_id)
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
+                return None
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return None
             self._touch_session_locked(state.customer_id, state.session_id)
             return self._state_to_payload(state)
@@ -370,11 +378,18 @@ class BrowserUseLocalManager:
             out.sort(key=lambda item: (item["last_used_seconds"], item["session_id"]))
             return out
 
-    async def control_task(self, *, task_id: str, action: str) -> dict[str, Any]:
+    async def control_task(
+        self,
+        *,
+        task_id: str,
+        action: str,
+        customer_id: str | None = None,
+    ) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         safe_action = str(action or "").strip().lower()
         if not safe_task_id:
             return {"error": "browser_use_task_control requires task_id"}
+        safe_customer_id = self._safe_optional_customer_id(customer_id)
 
         session_to_close: Any | None = None
         async with self._lock:
@@ -382,6 +397,8 @@ class BrowserUseLocalManager:
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
+                return {"error": f"browser_use_task_control task not found: {safe_task_id}"}
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return {"error": f"browser_use_task_control task not found: {safe_task_id}"}
 
             agent = state.agent
@@ -438,16 +455,20 @@ class BrowserUseLocalManager:
         *,
         task_id: str,
         full_page: bool = True,
+        customer_id: str | None = None,
     ) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_screenshot requires task_id"}
+        safe_customer_id = self._safe_optional_customer_id(customer_id)
 
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
+                return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
             browser_session = state.browser_session
             session_id = str(state.session_id or "").strip() or None
@@ -482,7 +503,10 @@ class BrowserUseLocalManager:
         }
         async with self._lock:
             state = self._tasks.get(safe_task_id)
-            if state is not None:
+            if (
+                state is not None
+                and (safe_customer_id is None or state.customer_id == safe_customer_id)
+            ):
                 state.output_files = [
                     item
                     for item in state.output_files
@@ -555,6 +579,7 @@ class BrowserUseLocalManager:
         *,
         task_id: str,
         owner_input: str,
+        customer_id: str | None = None,
     ) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         safe_owner_input = str(owner_input or "").strip()
@@ -562,12 +587,15 @@ class BrowserUseLocalManager:
             return {"error": "browser_use_owner_input_submit requires task_id"}
         if not safe_owner_input:
             return {"error": "browser_use_owner_input_submit requires owner_input"}
+        safe_customer_id = self._safe_optional_customer_id(customer_id)
 
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
+                return {"error": f"browser_use_owner_input_submit task not found: {safe_task_id}"}
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return {"error": f"browser_use_owner_input_submit task not found: {safe_task_id}"}
             if state.status != _OWNER_WAITING_STATUS:
                 return {
@@ -957,6 +985,13 @@ class BrowserUseLocalManager:
         value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
         value = value.strip("._-")
         return value[:80] or "default"
+
+    @classmethod
+    def _safe_optional_customer_id(cls, customer_id: str | None) -> str | None:
+        raw = str(customer_id or "").strip()
+        if not raw:
+            return None
+        return cls._safe_profile_name(raw)
 
     @staticmethod
     def _session_key(customer_id: str, session_id: str) -> str:
