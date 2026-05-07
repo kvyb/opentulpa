@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import shlex
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -17,6 +16,7 @@ from opentulpa.agent.context_engineer import (
 from opentulpa.agent.context_engineer import (
     trim_text_to_token_budget as _trim_text_to_token_budget,
 )
+from opentulpa.agent.graph_nodes.tool_validation import build_validate_tool_calls_node
 from opentulpa.agent.lc_messages import (
     AIMessage,
     AnyMessage,
@@ -66,9 +66,6 @@ from opentulpa.agent.utils import (
 )
 from opentulpa.agent.utils import (
     latest_user_text as _latest_user_text,
-)
-from opentulpa.agent.utils import (
-    looks_like_shell_command as _looks_like_shell_command,
 )
 from opentulpa.agent.utils import (
     safe_json as _safe_json,
@@ -280,240 +277,6 @@ def _select_optional_prompt_entries(
         used_tokens += msg_tokens
     return kept, used_tokens
 
-_WORKING_DIR_PREFIXES: dict[str, str] = {
-    "tulpa_stuff": "tulpa_stuff",
-    "integrations": "src/opentulpa/integrations",
-    "interfaces": "src/opentulpa/interfaces",
-    "tools": "src/opentulpa/tools",
-    "skills": "src/opentulpa/skills",
-    "opentulpa": "src/opentulpa",
-}
-
-def _is_iso_datetime_schedule(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return False
-    try:
-        datetime.fromisoformat(text)
-    except Exception:
-        return False
-    return True
-
-
-def _has_redundant_working_dir_prefix(command: str, working_dir: str) -> bool:
-    prefix = _WORKING_DIR_PREFIXES.get(str(working_dir or "").strip())
-    text = str(command or "").strip()
-    if not prefix or not text:
-        return False
-    try:
-        parts = shlex.split(text)
-    except Exception:
-        return False
-    if len(parts) <= 1:
-        return False
-    markers = (f"{prefix}/", f"./{prefix}/")
-    for token in parts[1:]:
-        raw = str(token)
-        candidates = [raw]
-        if raw.startswith("--") and "=" in raw:
-            _, value = raw.split("=", 1)
-            candidates.append(value)
-        for candidate in candidates:
-            if any(candidate.startswith(marker) for marker in markers):
-                return True
-    return False
-
-
-def _has_duplicate_allowed_root_prefix(path: str) -> str | None:
-    text = str(path or "").strip()
-    if not text:
-        return None
-    for prefix in _WORKING_DIR_PREFIXES.values():
-        normalized = str(prefix or "").strip("/")
-        if normalized and text.startswith(f"{normalized}/{normalized}/"):
-            return normalized
-    return None
-
-
-def _routine_create_turn_mode_error(*, turn_mode: str) -> str | None:
-    normalized_turn_mode = _normalize_turn_mode(turn_mode)
-    if normalized_turn_mode == "routine_wake":
-        return None
-    if normalized_turn_mode == "event_notification":
-        return (
-            "TURN_MODE_MISMATCH: this is a background event-notification turn, not a fresh "
-            "user scheduling request. Do not call routine_create here unless the event "
-            "explicitly instructs schedule management."
-        )
-    return None
-
-
-def _validate_model_tool_call(
-    *,
-    call_name: str,
-    args: Any,
-    latest_user_text: str,
-    turn_mode: str,
-    required_args: dict[str, tuple[str, ...]],
-    forbidden_tool_args: dict[str, set[str]],
-) -> str | None:
-    if not isinstance(args, dict):
-        return f"TOOL_VALIDATION_ERROR: arguments for {call_name} must be an object"
-
-    blocked_args = sorted(arg for arg in args if arg in forbidden_tool_args.get(call_name, set()))
-    if blocked_args:
-        return (
-            f"TOOL_VALIDATION_ERROR: {call_name} must not include argument(s): "
-            f"{', '.join(blocked_args)}. These are runtime-managed."
-        )
-
-    missing = [arg for arg in required_args.get(call_name, ()) if not args.get(arg)]
-    if missing:
-        if call_name == "routine_create" and "implementation_command" in missing:
-            return (
-                "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create needs "
-                "implementation_command (a concrete shell/script command like "
-                "`python3 scripts/digest.py`) describing what will run "
-                "on each scheduled execution (the command runs with working_dir=tulpa_stuff "
-                "by default, so no tulpa_stuff/ prefix needed). Repair the call and retry."
-            )
-        return (
-            f"TOOL_VALIDATION_ERROR: missing required argument(s) for "
-            f"{call_name}: {', '.join(missing)}"
-        )
-
-    if call_name == "tulpa_run_terminal":
-        command = str(args.get("command", "")).strip()
-        if not _looks_like_shell_command(command):
-            return (
-                "TOOL_VALIDATION_ERROR: command must be a concrete shell command "
-                "with executable + args."
-            )
-        working_dir = str(args.get("working_dir", "tulpa_stuff") or "").strip() or "tulpa_stuff"
-        if _has_redundant_working_dir_prefix(command, working_dir):
-            return (
-                "TOOL_VALIDATION_ERROR: command includes a redundant working-dir path prefix. "
-                "When working_dir is set, use paths relative to that directory "
-                "(example: use `python3 tg_login.py`, not `python3 tulpa_stuff/tg_login.py`)."
-            )
-
-    if call_name == "send_owner_update" and _normalize_turn_mode(turn_mode) in {
-        "routine_wake",
-        "event_notification",
-    }:
-        normalized_turn_mode = _normalize_turn_mode(turn_mode)
-        return (
-            "TOOL_VALIDATION_ERROR: send_owner_update is only for live owner/support turns. "
-            f"For {normalized_turn_mode}, put the user-visible notification, proposal, or blocker "
-            "summary in the final assistant response so the owning orchestrator can deliver it."
-        )
-
-    if call_name == "browser_use_owner_input_submit" and _normalize_turn_mode(turn_mode) not in {
-        "interactive",
-        "workflow_setup",
-    }:
-        normalized_turn_mode = _normalize_turn_mode(turn_mode)
-        return (
-            "TOOL_VALIDATION_ERROR: browser_use_owner_input_submit is only for live "
-            "owner/support chat turns. For "
-            f"{normalized_turn_mode}, do not submit owner authentication input."
-        )
-
-    if call_name in {"tulpa_read_file", "tulpa_write_file", "tulpa_validate_file", "tulpa_file_send"}:
-        path_arg = str(args.get("path", "")).strip()
-        duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
-        if duplicate_prefix:
-            return (
-                "TOOL_VALIDATION_ERROR: path includes a duplicated allowed-root prefix. "
-                f"Use `{duplicate_prefix}/...`, not `{duplicate_prefix}/{duplicate_prefix}/...`."
-            )
-
-    if call_name == "routine_create":
-        schedule = str(args.get("schedule", "")).strip()
-        implementation_command = str(args.get("implementation_command", "")).strip()
-        turn_mode_error = _routine_create_turn_mode_error(turn_mode=turn_mode)
-        if turn_mode_error:
-            return turn_mode_error
-        if not (_is_cron_like_schedule(schedule) or _is_iso_datetime_schedule(schedule)):
-            return (
-                "TOOL_VALIDATION_ERROR: routine_create schedule must be either cron "
-                "(five-part expression) or local ISO datetime."
-            )
-        if not implementation_command:
-            return (
-                "ROUTINE_IMPLEMENTATION_COMMAND_REQUIRED: routine_create must include "
-                "a non-empty implementation_command (shell/script command) so scheduled "
-                "runs execute a concrete implementation."
-            )
-        if not _looks_like_shell_command(implementation_command):
-            return (
-                "ROUTINE_IMPLEMENTATION_COMMAND_INVALID: implementation_command must "
-                "be a concrete shell command (executable + args), not natural language."
-            )
-        if _has_redundant_working_dir_prefix(implementation_command, "tulpa_stuff"):
-            return (
-                "ROUTINE_IMPLEMENTATION_COMMAND_INVALID: implementation_command should be relative "
-                "to working_dir=tulpa_stuff (example: `python3 tg_login.py`, "
-                "not `python3 tulpa_stuff/tg_login.py`)."
-            )
-        delay_minutes = _extract_relative_delay_minutes(latest_user_text)
-        if delay_minutes is not None and _is_cron_like_schedule(schedule):
-            return (
-                "TOOL_VALIDATION_ERROR: for one-time relative reminders, "
-                "use a local ISO datetime schedule (not cron)."
-            )
-
-    return None
-
-
-async def _routine_create_intent_validation_error(
-    runtime: Any,
-    *,
-    args: Any,
-    latest_user_text: str,
-    prior_assistant_text: str,
-    turn_mode: str,
-) -> str | None:
-    """Use the runtime classifier to decide whether routine_create is user-authorized."""
-    turn_mode_error = _routine_create_turn_mode_error(turn_mode=turn_mode)
-    if turn_mode_error:
-        return turn_mode_error
-    if _normalize_turn_mode(turn_mode) == "routine_wake":
-        return None
-
-    classifier = getattr(runtime, "classify_routine_create_intent", None)
-    if not callable(classifier):
-        logger.warning("routine_create intent classifier unavailable; allowing structural validation result")
-        return None
-    try:
-        decision = await classifier(
-            latest_user_text=latest_user_text,
-            prior_assistant_text=prior_assistant_text,
-            routine_args=args if isinstance(args, dict) else {},
-            turn_mode=_normalize_turn_mode(turn_mode),
-        )
-    except Exception as exc:
-        logger.warning("routine_create intent classifier failed; allowing structural validation result: %s", exc)
-        return None
-
-    if not isinstance(decision, dict):
-        return None
-    if not bool(decision.get("ok", True)):
-        logger.warning(
-            "routine_create intent classifier returned non-ok; allowing structural validation result: %s",
-            str(decision.get("error", "unknown"))[:200],
-        )
-        return None
-    if bool(decision.get("allow_create", False)):
-        return None
-
-    reason = str(decision.get("reason", "")).strip()[:300] or "classifier did not find user authorization"
-    return (
-        "ACTION_CLARIFICATION_REQUIRED: routine_create was not clearly authorized by the "
-        f"current conversation. Ask one concise clarifying question. Reason={reason}"
-    )
-
-
 def _build_relevant_skill_discovery_context(
     *,
     available_skills: Any,
@@ -574,55 +337,6 @@ def _extract_invoked_skill_snapshot(result: Any, *, requested_name: str) -> tupl
         header.append(f"Description: {description}")
     content = "\n".join(header) + f"\n\nSKILL.md:\n{skill_markdown[:3500]}"
     return name, content
-
-
-def _summarize_tool_validation_errors(messages: list[ToolMessage]) -> str:
-    seen: set[str] = set()
-    parts: list[str] = []
-    for message in messages:
-        text = _content_to_text(getattr(message, "content", "")).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        parts.append(text)
-    return " | ".join(parts[:3])
-
-
-def _build_tool_validation_repair_message(messages: list[ToolMessage]) -> str:
-    summary = _summarize_tool_validation_errors(messages)
-    if not summary:
-        return (
-            "VALIDATION_REPAIR_REQUIRED: Your previous tool call was blocked. Do not claim success. "
-            "Repair the tool call or clearly state that the action was not completed yet."
-        )
-    is_routine_create_error = "routine_create" in summary or "ROUTINE_" in summary
-    needs_clarification = any(
-        marker in summary
-        for marker in ("ACTION_CLARIFICATION_REQUIRED", "CHAT_MODE_LOCKED", "TURN_MODE_MISMATCH")
-    )
-    if is_routine_create_error and needs_clarification:
-        return (
-            "VALIDATION_REPAIR_REQUIRED: The scheduled action was not created. Do not say it was scheduled. "
-            "Ask one concise clarifying question or continue in chat if automation is not explicit. "
-            f"Reason={summary}"
-        )
-    if needs_clarification:
-        return (
-            "VALIDATION_REPAIR_REQUIRED: Your previous tool call was blocked. Do not claim success. "
-            "Ask one concise clarifying question or continue in chat if the requested action is not explicit. "
-            f"Reason={summary}"
-        )
-    if is_routine_create_error:
-        return (
-            "VALIDATION_REPAIR_REQUIRED: The scheduled action was not created yet. Do not claim success. "
-            "Repair the tool call arguments and retry only if you can satisfy the validation error exactly. "
-            f"Reason={summary}"
-        )
-    return (
-        "VALIDATION_REPAIR_REQUIRED: The requested tool action was not completed yet. Do not claim success. "
-        "Repair the tool call arguments and retry only if you can satisfy the validation error exactly. "
-        f"Reason={summary}"
-    )
 
 
 def build_runtime_graph(runtime: Any):
@@ -1620,112 +1334,15 @@ def build_runtime_graph(runtime: Any):
                 return Command(update=update, goto="agent")
         return Command(update=update, goto=goto)
 
-    async def validate_tool_calls_node(
-        state: AgentState,
-    ) -> Command[Literal["tools", "agent", "finalize_turn"]]:
-        messages = state.get("messages", [])
-        if not messages:
-            return Command(update={"tool_validation_passed": True}, goto="tools")
-        last = messages[-1]
-        if not isinstance(last, AIMessage) or not last.tool_calls:
-            return Command(update={"tool_validation_passed": True}, goto="tools")
-        _log(
-            state,
-            "graph.validate_tools.start",
-            tool_call_count=len(last.tool_calls),
-            turn_mode=_normalize_turn_mode(state.get("turn_mode")),
-        )
-
-        validation_errors: list[ToolMessage] = []
-        latest_user = _latest_user_text(messages)
-        prior_assistant = ""
-        turn_mode = _normalize_turn_mode(state.get("turn_mode"))
-        if _loop_limit_near(state):
-            _log(
-                state,
-                "graph.loop_limit_tool_call_blocked",
-                tool_call_count=len(last.tool_calls),
-                remaining_steps=_remaining_steps(state),
-                turn_mode=turn_mode,
-            )
-            return Command(
-                update={
-                    "messages": [AIMessage(content=LOOP_LIMIT_FINAL_STATUS_TEXT)],
-                    "tool_validation_passed": False,
-                    "turn_status": "running",
-                    "loop_limit_status_update_sent": True,
-                },
-                goto="finalize_turn",
-            )
-        for msg in reversed(messages[:-1]):
-            if isinstance(msg, AIMessage):
-                candidate = _content_to_text(getattr(msg, "content", "")).strip()
-                if candidate:
-                    prior_assistant = candidate
-                    break
-        for call in last.tool_calls:
-            call_name = str(call.get("name", ""))
-            call_id = str(call.get("id", ""))
-            args = call.get("args", {}) or {}
-            validation_error = _validate_model_tool_call(
-                call_name=call_name,
-                args=args,
-                latest_user_text=latest_user,
-                turn_mode=turn_mode,
-                required_args=required_args,
-                forbidden_tool_args=forbidden_tool_args,
-            )
-            if validation_error:
-                validation_errors.append(ToolMessage(content=validation_error, tool_call_id=call_id))
-                continue
-            if call_name == "routine_create":
-                intent_error = await _routine_create_intent_validation_error(
-                    runtime,
-                    args=args,
-                    latest_user_text=latest_user,
-                    prior_assistant_text=prior_assistant,
-                    turn_mode=turn_mode,
-                )
-                if intent_error:
-                    validation_errors.append(ToolMessage(content=intent_error, tool_call_id=call_id))
-                    continue
-        if validation_errors:
-            error_summary = _summarize_tool_validation_errors(validation_errors)
-            repair_message = _build_tool_validation_repair_message(validation_errors)
-            _log(
-                state,
-                "graph.validate_tools.failed",
-                error_count=len(validation_errors),
-                error_summary=error_summary,
-                repair_message=repair_message,
-                turn_mode=turn_mode,
-            )
-            logger.warning(
-                "graph.validate_tools.failed thread_id=%s customer_id=%s errors=%s",
-                str(state.get("thread_id", "")).strip(),
-                str(state.get("customer_id", "")).strip(),
-                error_summary or len(validation_errors),
-            )
-            return Command(
-                update={
-                    "messages": [
-                        *validation_errors,
-                        SystemMessage(content=repair_message),
-                    ],
-                    "tool_validation_passed": False,
-                    "tool_error_count": int(state.get("tool_error_count", 0)) + 1,
-                    "last_tool_error": error_summary or "tool validation failed",
-                    "turn_status": "running",
-                },
-                goto="agent",
-            )
-        _log(
-            state,
-            "graph.validate_tools.passed",
-            tool_call_count=len(last.tool_calls),
-            turn_mode=turn_mode,
-        )
-        return Command(update={"tool_validation_passed": True}, goto="tools")
+    validate_tool_calls_node = build_validate_tool_calls_node(
+        runtime=runtime,
+        required_args=required_args,
+        forbidden_tool_args=forbidden_tool_args,
+        log=_log,
+        loop_limit_near=_loop_limit_near,
+        remaining_steps=_remaining_steps,
+        loop_limit_final_status_text=LOOP_LIMIT_FINAL_STATUS_TEXT,
+    )
 
     async def tools_node(state: AgentState) -> Command[Literal["agent", "__end__"]]:
         messages = state.get("messages", [])

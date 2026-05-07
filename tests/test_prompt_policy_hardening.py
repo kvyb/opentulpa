@@ -4,14 +4,11 @@ import pytest
 
 from opentulpa.agent.graph_builder import (
     _build_relevant_skill_discovery_context,
-    _build_tool_validation_repair_message,
     _enforce_tool_message_protocol,
     _extract_invoked_skill_snapshot,
-    _routine_create_intent_validation_error,
     _sanitize_history_messages_for_model,
-    _summarize_tool_validation_errors,
-    _validate_model_tool_call,
 )
+from opentulpa.agent.graph_nodes.tool_validation import build_validate_tool_calls_node
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.prompt_classifier import classify_prompt_mode
 from opentulpa.agent.prompt_policy import (
@@ -19,6 +16,12 @@ from opentulpa.agent.prompt_policy import (
 )
 from opentulpa.agent.prompt_sections import (
     build_prompt_mode_message,
+)
+from opentulpa.agent.tool_validation import (
+    _build_tool_validation_repair_message,
+    _routine_create_intent_validation_error,
+    _summarize_tool_validation_errors,
+    _validate_model_tool_call,
 )
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message,
@@ -84,6 +87,15 @@ def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
     assert "Use skill_get(name) before relying on a skill's actual instructions." in text
     assert "browser-use-operator" in text
     assert "routine-schedule-composer" not in text
+
+
+def test_tool_validation_helpers_live_in_dedicated_module() -> None:
+    assert _validate_model_tool_call.__module__ == "opentulpa.agent.tool_validation"
+    assert _build_tool_validation_repair_message.__module__ == "opentulpa.agent.tool_validation"
+    assert (
+        build_validate_tool_calls_node.__module__
+        == "opentulpa.agent.graph_nodes.tool_validation"
+    )
 
 
 def test_extract_invoked_skill_snapshot_prefers_skill_markdown() -> None:
