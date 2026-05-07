@@ -686,6 +686,7 @@ _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "user_context_query": "Querying user context",
     "user_context_reindex": "Reindexing user context",
     "browser_use_run": "Using the browser",
+    "browser_use_owner_input_submit": "Continuing browser verification",
 }
 
 CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
@@ -720,6 +721,10 @@ CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
     "routine_create",
     "routine_delete",
     "browser_use_run",
+    "browser_use_task_get",
+    "browser_use_task_screenshot",
+    "browser_use_task_control",
+    "browser_use_owner_input_submit",
     "tulpa_run_terminal",
 }
 
@@ -1291,6 +1296,7 @@ class OpenTulpaLangGraphRuntime:
         browser_use_model_override: str | None = None,
         browser_use_max_concurrent_tasks: int = 2,
         browser_use_task_retention_seconds: int = 1800,
+        browser_use_user_data_dir: str | None = ".opentulpa/browser_use_profiles",
         capsolver_api_key: str | None = None,
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
@@ -1370,6 +1376,7 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_model_override = str(browser_use_model_override or "").strip()
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
+        self._browser_use_user_data_dir = str(browser_use_user_data_dir or "").strip()
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
@@ -1386,7 +1393,12 @@ class OpenTulpaLangGraphRuntime:
             "opentulpa_active_customer_id",
             default="",
         )
+        self._active_turn_mode_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "opentulpa_active_turn_mode",
+            default="interactive",
+        )
         self._active_customer_id = ""
+        self._active_turn_mode = "interactive"
         self._active_thread_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_thread_id",
             default="",
@@ -1583,6 +1595,8 @@ class OpenTulpaLangGraphRuntime:
         blocked_tools: set[str] = set()
         if normalized_turn_mode == "routine_wake":
             blocked_tools.add("send_owner_update")
+        if normalized_turn_mode not in {"interactive", "workflow_setup"}:
+            blocked_tools.add("browser_use_owner_input_submit")
         return [
             tool
             for name, tool in self._tools.items()
@@ -1760,6 +1774,7 @@ class OpenTulpaLangGraphRuntime:
                 headless=self._browser_use_headless,
                 max_concurrent_tasks=self._browser_use_max_concurrent_tasks,
                 task_retention_seconds=self._browser_use_task_retention_seconds,
+                user_data_dir=self._browser_use_user_data_dir,
                 capsolver_api_key=self._capsolver_api_key,
             )
         return self._browser_use_local_manager
@@ -3486,6 +3501,7 @@ class OpenTulpaLangGraphRuntime:
             return ""
         customer_scope_token = self.set_active_customer_id(customer_id)
         thread_scope_token = self.set_active_thread_id(thread_id)
+        turn_mode_scope_token = self.set_active_turn_mode(normalized_turn_mode)
         trace_context = self._observability_trace_context(
             name=f"opentulpa.turn.{normalized_turn_mode}",
             trace_id=turn_trace_id,
@@ -3627,6 +3643,7 @@ class OpenTulpaLangGraphRuntime:
         finally:
             with suppress(Exception):
                 trace_context.__exit__(None, None, None)
+            self.reset_active_turn_mode(turn_mode_scope_token)
             self.reset_active_thread_id(thread_scope_token)
             self.reset_active_customer_id(customer_scope_token)
             self._thread_inputs.end_turn(turn_state)
@@ -3681,6 +3698,7 @@ class OpenTulpaLangGraphRuntime:
             raise MergedInputSuppressedError("input merged into previous in-flight turn")
         customer_scope_token = self.set_active_customer_id(customer_id)
         thread_scope_token = self.set_active_thread_id(thread_id)
+        turn_mode_scope_token = self.set_active_turn_mode(normalized_turn_mode)
         trace_context = self._observability_trace_context(
             name=f"opentulpa.turn.{normalized_turn_mode}",
             trace_id=turn_trace_id,
@@ -4153,6 +4171,7 @@ class OpenTulpaLangGraphRuntime:
         finally:
             with suppress(Exception):
                 trace_context.__exit__(None, None, None)
+            self.reset_active_turn_mode(turn_mode_scope_token)
             self.reset_active_thread_id(thread_scope_token)
             self.reset_active_customer_id(customer_scope_token)
             self._thread_inputs.end_turn(turn_state)
@@ -4722,6 +4741,38 @@ class OpenTulpaLangGraphRuntime:
             return ctx
         ctx = contextvars.ContextVar("opentulpa_active_thread_id", default="")
         self._active_thread_id_ctx = ctx
+        return ctx
+
+    def set_active_turn_mode(self, turn_mode: str):
+        mode = _normalize_turn_mode(turn_mode)
+        ctx = self._ensure_active_turn_mode_ctx()
+        previous = str(ctx.get() or "").strip()
+        token = ctx.set(mode)
+        self._active_turn_mode = mode
+        return (token, previous)
+
+    def reset_active_turn_mode(self, token: object) -> None:
+        ctx = self._ensure_active_turn_mode_ctx()
+        previous = "interactive"
+        raw_token = token
+        if isinstance(token, tuple) and len(token) == 2:
+            raw_token, previous = token
+            previous = str(previous or "").strip() or "interactive"
+        try:
+            ctx.reset(raw_token)
+        except ValueError:
+            ctx.set(previous)
+        self._active_turn_mode = _normalize_turn_mode(str(ctx.get() or "interactive"))
+
+    def get_active_turn_mode(self) -> str:
+        return _normalize_turn_mode(str(self._ensure_active_turn_mode_ctx().get() or "interactive"))
+
+    def _ensure_active_turn_mode_ctx(self) -> contextvars.ContextVar[str]:
+        ctx = getattr(self, "_active_turn_mode_ctx", None)
+        if isinstance(ctx, contextvars.ContextVar):
+            return ctx
+        ctx = contextvars.ContextVar("opentulpa_active_turn_mode", default="interactive")
+        self._active_turn_mode_ctx = ctx
         return ctx
 
     async def execute_tool(

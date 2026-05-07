@@ -194,11 +194,9 @@ _INJECT_CAPTCHA_TOKEN_SCRIPT = """(captchaType, token) => {
 }"""
 
 
-def build_capsolver_controller(capsolver: CapSolverClient) -> Controller:
-    """Build a Browser Use controller with a CapSolver action."""
-    from browser_use import ActionResult, Controller
-
-    controller = Controller()
+def register_capsolver_action(controller: Controller, capsolver: CapSolverClient) -> Controller:
+    """Register the CapSolver action on an existing Browser Use controller."""
+    from browser_use import ActionResult
 
     @controller.action(
         "Solve a reCAPTCHA v2, reCAPTCHA v3, or Cloudflare Turnstile challenge using CapSolver. "
@@ -255,6 +253,13 @@ def build_capsolver_controller(capsolver: CapSolverClient) -> Controller:
             return ActionResult(success=False, error=str(exc))
 
     return controller
+
+
+def build_capsolver_controller(capsolver: CapSolverClient) -> Controller:
+    """Build a Browser Use controller with a CapSolver action."""
+    from browser_use import Controller
+
+    return register_capsolver_action(Controller(), capsolver)
 
 
 async def detect_browser_captcha(page: Any) -> BrowserCaptchaChallenge | None:

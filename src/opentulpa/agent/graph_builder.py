@@ -408,6 +408,17 @@ def _validate_model_tool_call(
             "summary in the final assistant response so the owning orchestrator can deliver it."
         )
 
+    if call_name == "browser_use_owner_input_submit" and _normalize_turn_mode(turn_mode) not in {
+        "interactive",
+        "workflow_setup",
+    }:
+        normalized_turn_mode = _normalize_turn_mode(turn_mode)
+        return (
+            "TOOL_VALIDATION_ERROR: browser_use_owner_input_submit is only for live "
+            "owner/support chat turns. For "
+            f"{normalized_turn_mode}, do not submit owner authentication input."
+        )
+
     if call_name in {"tulpa_read_file", "tulpa_write_file", "tulpa_validate_file", "tulpa_file_send"}:
         path_arg = str(args.get("path", "")).strip()
         duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
@@ -686,6 +697,7 @@ def build_runtime_graph(runtime: Any):
         "browser_use_task_get": ("task_id",),
         "browser_use_task_screenshot": ("task_id",),
         "browser_use_task_control": ("task_id",),
+        "browser_use_owner_input_submit": ("task_id", "owner_input"),
         "routine_list": (),
         "routine_create": (
             "name",
@@ -754,6 +766,10 @@ def build_runtime_graph(runtime: Any):
         "routine_create",
         "routine_delete",
         "browser_use_run",
+        "browser_use_task_get",
+        "browser_use_task_screenshot",
+        "browser_use_task_control",
+        "browser_use_owner_input_submit",
     }
     forbidden_tool_args: dict[str, set[str]] = {name: {"customer_id"} for name in customer_scoped_tools}
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}

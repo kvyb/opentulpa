@@ -290,6 +290,14 @@ class Settings(BaseSettings):
         le=86400,
         description="How long completed local Browser Use task records remain queryable in memory.",
     )
+    browser_use_user_data_dir: str = Field(
+        default=".opentulpa/browser_use_profiles",
+        description=(
+            "Directory for persistent Browser Use profile storage. Each Browser Use "
+            "session_id gets its own subdirectory here so cookies/localStorage can "
+            "survive process restarts when local/container storage persists."
+        ),
+    )
     capsolver_api_key: str | None = Field(
         default=None,
         description=(

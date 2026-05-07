@@ -96,6 +96,9 @@ def _compact_browser_use_task_view(
         "output_truncated": truncated_output,
         "output_files": output_files,
         "steps_count": len(steps_list),
+        "owner_input_prompt": data.get("ownerInputPrompt"),
+        "owner_input_type": data.get("ownerInputType"),
+        "owner_input_requested_at": data.get("ownerInputRequestedAt"),
     }
 
     if include_steps:
@@ -127,10 +130,11 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         List known Browser Use sessions so the agent can reuse an idle session_id
         instead of spawning a fresh browser session.
         """
+        customer_id = require_customer_id(runtime)
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
             return {"error": manager_error or "browser_use_session_list unavailable"}
-        return {"sessions": await manager.list_sessions()}
+        return {"sessions": await manager.list_sessions(customer_id=customer_id)}
 
     @tool
     async def browser_use_run(
@@ -151,7 +155,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         task_text = str(task or "").strip()
         if not task_text:
             return {"error": "browser_use_run requires a non-empty task"}
-        require_customer_id(runtime)
+        customer_id = require_customer_id(runtime)
 
         safe_max_steps = max(1, min(int(max_steps), 80))
         safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
@@ -164,6 +168,13 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
             return {"error": manager_error or "browser_use_run unavailable"}
+        turn_mode_getter = getattr(runtime, "get_active_turn_mode", None)
+        active_turn_mode = (
+            str(turn_mode_getter() or "").strip().lower()
+            if callable(turn_mode_getter)
+            else "interactive"
+        )
+        allow_owner_input = active_turn_mode in {"interactive", "workflow_setup", ""}
 
         created = await manager.start_task(
             task=task_text,
@@ -172,6 +183,8 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
             allowed_domains=safe_domains,
             start_url=safe_start_url or None,
             session_id=safe_session_id or None,
+            customer_id=customer_id,
+            allow_owner_input=allow_owner_input,
         )
         if isinstance(created, dict) and created.get("error"):
             return {
@@ -200,6 +213,17 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                 }
 
             status = str(task_data.get("status") or "").strip().lower()
+            if status == "waiting_for_owner":
+                compact = _compact_browser_use_task_view(task_data)
+                compact["task_id"] = task_id
+                compact["session_id"] = result_session_id or compact.get("session_id")
+                compact["status"] = "waiting_for_owner"
+                compact["message"] = (
+                    "Browser task is waiting for owner input. Ask the owner for "
+                    "owner_input_prompt, then call browser_use_owner_input_submit."
+                )
+                return compact
+
             if status in {"finished", "stopped", "failed"}:
                 compact = _compact_browser_use_task_view(task_data)
                 compact["task_id"] = task_id
@@ -232,12 +256,13 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_get requires task_id"}
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
             return {"error": manager_error or "browser_use_task_get unavailable"}
 
-        payload = await manager.get_task(safe_task_id)
+        payload = await manager.get_task(safe_task_id, customer_id=customer_id)
         if not isinstance(payload, dict):
             return {"error": f"browser_use_task_get failed: task not found ({safe_task_id})"}
         return _compact_browser_use_task_view(
@@ -258,6 +283,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_screenshot requires task_id"}
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
@@ -266,6 +292,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         payload = await manager.capture_screenshot(
             task_id=safe_task_id,
             full_page=bool(full_page),
+            customer_id=customer_id,
         )
         if isinstance(payload, dict) and payload.get("error"):
             return {"error": str(payload.get("error"))}
@@ -286,12 +313,44 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                     "Use one of: stop, pause, resume, stop_task_and_session"
                 )
             }
+        customer_id = require_customer_id(runtime)
 
         manager, manager_error = _get_browser_use_local_manager(runtime)
         if manager is None:
             return {"error": manager_error or "browser_use_task_control unavailable"}
 
-        payload = await manager.control_task(task_id=safe_task_id, action=safe_action)
+        payload = await manager.control_task(
+            task_id=safe_task_id,
+            action=safe_action,
+            customer_id=customer_id,
+        )
+        if isinstance(payload, dict) and payload.get("error"):
+            return {"error": str(payload.get("error"))}
+        return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
+
+    @tool
+    async def browser_use_owner_input_submit(task_id: str, owner_input: str) -> Any:
+        """
+        Submit owner-provided MFA/email/SMS/authenticator/account-choice input to a
+        Browser Use task that is waiting_for_owner. This resumes the same live browser session.
+        """
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_owner_input_submit requires task_id"}
+        safe_owner_input = str(owner_input or "").strip()
+        if not safe_owner_input:
+            return {"error": "browser_use_owner_input_submit requires owner_input"}
+        customer_id = require_customer_id(runtime)
+
+        manager, manager_error = _get_browser_use_local_manager(runtime)
+        if manager is None:
+            return {"error": manager_error or "browser_use_owner_input_submit unavailable"}
+
+        payload = await manager.submit_owner_input(
+            task_id=safe_task_id,
+            owner_input=safe_owner_input,
+            customer_id=customer_id,
+        )
         if isinstance(payload, dict) and payload.get("error"):
             return {"error": str(payload.get("error"))}
         return _compact_browser_use_task_view(payload if isinstance(payload, dict) else {})
@@ -302,4 +361,5 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         "browser_use_task_get": browser_use_task_get,
         "browser_use_task_screenshot": browser_use_task_screenshot,
         "browser_use_task_control": browser_use_task_control,
+        "browser_use_owner_input_submit": browser_use_owner_input_submit,
     }

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import re
+import shutil
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -17,9 +21,15 @@ from opentulpa.tasks.sandbox import TULPA_STUFF_DIR
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = {"finished", "stopped", "failed"}
+_OWNER_WAITING_STATUS = "waiting_for_owner"
+_OWNER_INPUT_TIMEOUT_SECONDS = 24 * 60 * 60
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
 _SESSION_CLEANUP_POLL_SECONDS = 60.0
-_MAX_BROWSER_USE_SESSIONS = 2
+_MAX_BROWSER_USE_SESSIONS = 20
+_DEFAULT_SESSION_ID = "default"
+_DEFAULT_CUSTOMER_ID = "default"
+_PROFILE_RETENTION_SECONDS = 14 * 24 * 60 * 60
+_PROFILE_METADATA_FILE = "profile.json"
 
 
 def _utc_now_iso() -> str:
@@ -32,6 +42,7 @@ class _BrowserUseTaskState:
     session_id: str | None
     task: str
     llm: str
+    customer_id: str = _DEFAULT_CUSTOMER_ID
     status: str = "queued"
     is_success: bool | None = None
     started_at: str | None = None
@@ -45,6 +56,11 @@ class _BrowserUseTaskState:
     runner: asyncio.Task[Any] | None = None
     agent: Any = None
     browser_session: Any = None
+    allow_owner_input: bool = True
+    owner_input_prompt: str | None = None
+    owner_input_type: str | None = None
+    owner_input_requested_at: str | None = None
+    owner_input_future: asyncio.Future[str] | None = None
     stop_requested: bool = False
     close_session_when_done: bool = False
 
@@ -52,6 +68,8 @@ class _BrowserUseTaskState:
 @dataclass(slots=True)
 class _BrowserUseSessionState:
     session: Any
+    customer_id: str
+    session_id: str
     updated_monotonic: float = field(default_factory=time.monotonic)
 
 
@@ -69,6 +87,7 @@ class BrowserUseLocalManager:
         headless: bool = True,
         max_concurrent_tasks: int = 2,
         task_retention_seconds: int = 1800,
+        user_data_dir: str | Path | None = None,
         capsolver_api_key: str | None = None,
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
@@ -78,6 +97,7 @@ class BrowserUseLocalManager:
         self._reasoning_effort = str(reasoning_effort or "").strip() or None
         self._headless = bool(headless)
         self._task_retention_seconds = max(60, int(task_retention_seconds))
+        self._user_data_dir = self._resolve_user_data_dir(user_data_dir)
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
@@ -143,6 +163,8 @@ class BrowserUseLocalManager:
         allowed_domains: list[str] | None = None,
         start_url: str | None = None,
         session_id: str | None = None,
+        customer_id: str | None = None,
+        allow_owner_input: bool = True,
     ) -> dict[str, Any]:
         preflight_error = await self.preflight()
         if preflight_error:
@@ -169,7 +191,13 @@ class BrowserUseLocalManager:
             }
 
         explicit_session_id = str(session_id or "").strip()
-        safe_session_id = explicit_session_id or new_short_id("bses")
+        has_explicit_session_id = bool(explicit_session_id)
+        safe_session_id = (
+            self._safe_profile_name(explicit_session_id)
+            if has_explicit_session_id
+            else _DEFAULT_SESSION_ID
+        )
+        safe_customer_id = self._normalize_customer_id(customer_id)
         safe_max_steps = max(1, min(int(max_steps), 120))
         safe_start_url = str(start_url or "").strip()
         safe_domains = self._sanitize_domains(allowed_domains)
@@ -178,7 +206,11 @@ class BrowserUseLocalManager:
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
-            active_task = self._active_task_for_session_locked(safe_session_id)
+            active_task = self._active_task_for_session_locked(safe_customer_id, safe_session_id)
+            if active_task is not None and not has_explicit_session_id:
+                reusable_session_id = self._pick_reusable_session_id_locked(safe_customer_id)
+                safe_session_id = reusable_session_id or new_short_id("bses")
+                active_task = self._active_task_for_session_locked(safe_customer_id, safe_session_id)
             if active_task is not None:
                 return {
                     "error": (
@@ -186,45 +218,60 @@ class BrowserUseLocalManager:
                         f"active task {active_task.task_id} is still {active_task.status}"
                     ),
                     "sessionId": safe_session_id,
+                    "customerId": safe_customer_id,
                     "activeTaskId": active_task.task_id,
                 }
-            session_state = self._sessions.get(safe_session_id)
-            if session_state is None:
-                reusable_session_id = None
-                if not explicit_session_id:
-                    reusable_session_id = self._pick_reusable_session_id_locked()
-                if reusable_session_id is not None:
-                    safe_session_id = reusable_session_id
-                    session_state = self._sessions.get(safe_session_id)
-                    if session_state is not None:
-                        session_state.updated_monotonic = time.monotonic()
-                elif len(self._sessions) >= _MAX_BROWSER_USE_SESSIONS:
-                    return {
-                        "error": (
-                            "browser_use_run session capacity reached: "
-                            f"maximum {_MAX_BROWSER_USE_SESSIONS} sessions. "
-                            "Reuse an existing session or stop one first."
-                        ),
-                        "sessionLimit": _MAX_BROWSER_USE_SESSIONS,
-                        "sessions": self._session_summaries_locked(),
-                    }
+            session_key = self._session_key(safe_customer_id, safe_session_id)
+            session_state = self._sessions.get(session_key)
+            if (
+                session_state is None
+                and self._live_session_count_for_customer_locked(safe_customer_id)
+                >= _MAX_BROWSER_USE_SESSIONS
+            ):
+                return {
+                    "error": (
+                        "browser_use_run session capacity reached: "
+                        f"maximum {_MAX_BROWSER_USE_SESSIONS} sessions. "
+                        "Reuse an existing profile for this user or stop one first."
+                    ),
+                    "sessionLimit": _MAX_BROWSER_USE_SESSIONS,
+                        "sessions": self._session_summaries_locked(safe_customer_id),
+                }
             if session_state is None:
                 browser_session = self._new_browser_session(
                     allowed_domains=safe_domains,
+                    customer_id=safe_customer_id,
+                    session_id=safe_session_id,
                 )
-                session_state = _BrowserUseSessionState(session=browser_session)
-                self._sessions[safe_session_id] = session_state
+                session_state = _BrowserUseSessionState(
+                    session=browser_session,
+                    customer_id=safe_customer_id,
+                    session_id=safe_session_id,
+                )
+                self._sessions[session_key] = session_state
+                self._write_profile_metadata(
+                    customer_id=safe_customer_id,
+                    session_id=safe_session_id,
+                    status="idle",
+                )
             else:
                 session_state.updated_monotonic = time.monotonic()
+                self._write_profile_metadata(
+                    customer_id=safe_customer_id,
+                    session_id=safe_session_id,
+                    status="idle",
+                )
 
             task_id = new_short_id("task")
             state = _BrowserUseTaskState(
                 task_id=task_id,
+                customer_id=safe_customer_id,
                 session_id=safe_session_id,
                 task=task_text,
                 llm=resolved_model,
                 status="queued",
                 browser_session=session_state.session,
+                allow_owner_input=bool(allow_owner_input),
             )
             runner = asyncio.create_task(
                 self._run_task(
@@ -237,36 +284,54 @@ class BrowserUseLocalManager:
             )
             state.runner = runner
             self._tasks[task_id] = state
+            self._write_profile_metadata(
+                customer_id=safe_customer_id,
+                session_id=safe_session_id,
+                status="running",
+                task_id=task_id,
+            )
             payload = self._state_to_payload(state)
 
         if session_to_close is not None:
             await self._close_session(session_to_close)
         return payload
 
-    async def get_task(self, task_id: str) -> dict[str, Any] | None:
+    async def get_task(
+        self,
+        task_id: str,
+        *,
+        customer_id: str | None = None,
+    ) -> dict[str, Any] | None:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return None
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
                 return None
-            self._touch_session_locked(state.session_id)
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
+                return None
+            self._touch_session_locked(state.customer_id, state.session_id)
             return self._state_to_payload(state)
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
+    async def list_sessions(self, *, customer_id: str | None = None) -> list[dict[str, Any]]:
+        safe_customer_id = self._normalize_customer_id(customer_id)
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             now = time.monotonic()
             out: list[dict[str, Any]] = []
-            for session_id, session_state in self._sessions.items():
+            for _, session_state in self._sessions.items():
+                if session_state.customer_id != safe_customer_id:
+                    continue
                 related_tasks = [
                     state
                     for state in self._tasks.values()
-                    if str(state.session_id or "").strip() == session_id
+                    if state.customer_id == safe_customer_id
+                    and str(state.session_id or "").strip() == session_state.session_id
                 ]
                 related_tasks.sort(
                     key=lambda item: float(item.updated_monotonic or item.created_monotonic),
@@ -281,11 +346,14 @@ class BrowserUseLocalManager:
                     last_url = str(latest.steps[-1].get("url", "")).strip() or None
                 out.append(
                     {
-                        "session_id": session_id,
+                        "session_id": session_state.session_id,
+                        "customer_id": safe_customer_id,
                         "reusable": not active_task_ids,
+                        "persisted": self._profile_dir_exists(safe_customer_id, session_state.session_id),
                         "active_task_ids": active_task_ids,
                         "latest_task_id": latest.task_id if latest is not None else None,
                         "latest_status": latest.status if latest is not None else None,
+                        "owner_input_prompt": latest.owner_input_prompt if latest is not None else None,
                         "last_url": last_url,
                         "last_used_seconds": max(
                             0,
@@ -293,14 +361,45 @@ class BrowserUseLocalManager:
                         ),
                     }
                 )
+            seen = {str(item.get("session_id", "")).strip() for item in out}
+            for session_id, profile_dir, metadata in self._persisted_profile_dirs(safe_customer_id):
+                if session_id in seen:
+                    continue
+                out.append(
+                    {
+                        "session_id": session_id,
+                        "customer_id": safe_customer_id,
+                        "reusable": (
+                            self._live_session_count_for_customer_locked(safe_customer_id)
+                            < _MAX_BROWSER_USE_SESSIONS
+                        ),
+                        "persisted": True,
+                        "active_task_ids": [],
+                        "latest_task_id": None,
+                        "latest_status": None,
+                        "owner_input_prompt": None,
+                        "last_url": metadata.get("lastUrl") or None,
+                        "last_used_seconds": max(
+                            0,
+                            int(now - self._profile_last_used_timestamp(profile_dir, metadata)),
+                        ),
+                    }
+                )
             out.sort(key=lambda item: (item["last_used_seconds"], item["session_id"]))
             return out
 
-    async def control_task(self, *, task_id: str, action: str) -> dict[str, Any]:
+    async def control_task(
+        self,
+        *,
+        task_id: str,
+        action: str,
+        customer_id: str | None = None,
+    ) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         safe_action = str(action or "").strip().lower()
         if not safe_task_id:
             return {"error": "browser_use_task_control requires task_id"}
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
 
         session_to_close: Any | None = None
         async with self._lock:
@@ -308,6 +407,8 @@ class BrowserUseLocalManager:
             self._cleanup_locked()
             state = self._tasks.get(safe_task_id)
             if state is None:
+                return {"error": f"browser_use_task_control task not found: {safe_task_id}"}
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return {"error": f"browser_use_task_control task not found: {safe_task_id}"}
 
             agent = state.agent
@@ -318,7 +419,7 @@ class BrowserUseLocalManager:
                 if state.status == "running":
                     state.status = "paused"
                     state.updated_monotonic = time.monotonic()
-                    self._touch_session_locked(state.session_id)
+                    self._touch_session_locked(state.customer_id, state.session_id)
             elif safe_action == "resume":
                 if agent is not None and hasattr(agent, "resume"):
                     with suppress(Exception):
@@ -326,9 +427,11 @@ class BrowserUseLocalManager:
                 if state.status in {"paused", "queued"}:
                     state.status = "running"
                     state.updated_monotonic = time.monotonic()
-                    self._touch_session_locked(state.session_id)
+                    self._touch_session_locked(state.customer_id, state.session_id)
             elif safe_action in {"stop", "stop_task_and_session"}:
                 state.stop_requested = True
+                if state.owner_input_future is not None and not state.owner_input_future.done():
+                    state.owner_input_future.cancel()
                 if agent is not None and hasattr(agent, "stop"):
                     with suppress(Exception):
                         agent.stop()
@@ -340,7 +443,9 @@ class BrowserUseLocalManager:
                 if safe_action == "stop_task_and_session":
                     state.close_session_when_done = True
                     if state.runner is None or state.runner.done():
-                        session_to_close = self._detach_session_if_unused_locked(state.session_id)
+                        session_to_close = self._detach_session_if_unused_locked(
+                            state.customer_id, state.session_id
+                        )
             else:
                 return {
                     "error": (
@@ -360,10 +465,12 @@ class BrowserUseLocalManager:
         *,
         task_id: str,
         full_page: bool = True,
+        customer_id: str | None = None,
     ) -> dict[str, Any]:
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_screenshot requires task_id"}
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
 
         async with self._lock:
             self._ensure_cleanup_task_locked()
@@ -371,9 +478,11 @@ class BrowserUseLocalManager:
             state = self._tasks.get(safe_task_id)
             if state is None:
                 return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
+                return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
             browser_session = state.browser_session
             session_id = str(state.session_id or "").strip() or None
-            self._touch_session_locked(state.session_id)
+            self._touch_session_locked(state.customer_id, state.session_id)
 
         if browser_session is None or not hasattr(browser_session, "take_screenshot"):
             return {"error": "browser_use_task_screenshot unavailable: browser session missing"}
@@ -404,7 +513,10 @@ class BrowserUseLocalManager:
         }
         async with self._lock:
             state = self._tasks.get(safe_task_id)
-            if state is not None:
+            if (
+                state is not None
+                and (safe_customer_id is None or state.customer_id == safe_customer_id)
+            ):
                 state.output_files = [
                     item
                     for item in state.output_files
@@ -414,7 +526,7 @@ class BrowserUseLocalManager:
                 if state.steps:
                     state.steps[-1]["screenshotUrl"] = rel_path
                 state.updated_monotonic = time.monotonic()
-                self._touch_session_locked(state.session_id)
+                self._touch_session_locked(state.customer_id, state.session_id)
         return {
             "ok": True,
             "task_id": safe_task_id,
@@ -422,6 +534,98 @@ class BrowserUseLocalManager:
             "path": rel_path,
             "file_name": target.name,
         }
+
+    async def request_owner_input(
+        self,
+        *,
+        task_id: str,
+        prompt: str,
+        input_type: str = "text",
+    ) -> str:
+        safe_task_id = str(task_id or "").strip()
+        safe_prompt = str(prompt or "").strip()
+        safe_input_type = str(input_type or "").strip() or "text"
+        if not safe_task_id:
+            raise ValueError("request_owner_input requires task_id")
+        if not safe_prompt:
+            safe_prompt = "Owner input is required to continue the browser task."
+
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            state = self._tasks.get(safe_task_id)
+            if state is None:
+                raise ValueError(f"request_owner_input task not found: {safe_task_id}")
+            if state.status in _TERMINAL_STATUSES:
+                raise ValueError(f"request_owner_input task is already {state.status}")
+            if state.owner_input_future is not None and not state.owner_input_future.done():
+                raise ValueError("request_owner_input is already waiting for owner input")
+
+            future: asyncio.Future[str] = loop.create_future()
+            state.owner_input_future = future
+            state.owner_input_prompt = safe_prompt
+            state.owner_input_type = safe_input_type
+            state.owner_input_requested_at = _utc_now_iso()
+            state.status = _OWNER_WAITING_STATUS
+            state.updated_monotonic = time.monotonic()
+            self._touch_session_locked(state.customer_id, state.session_id)
+
+        try:
+            return await asyncio.wait_for(future, timeout=_OWNER_INPUT_TIMEOUT_SECONDS)
+        finally:
+            async with self._lock:
+                state = self._tasks.get(safe_task_id)
+                if state is not None and state.owner_input_future is future:
+                    state.owner_input_future = None
+                    state.owner_input_prompt = None
+                    state.owner_input_type = None
+                    state.owner_input_requested_at = None
+                    if state.status == _OWNER_WAITING_STATUS:
+                        state.status = "running"
+                    state.updated_monotonic = time.monotonic()
+                    self._touch_session_locked(state.customer_id, state.session_id)
+
+    async def submit_owner_input(
+        self,
+        *,
+        task_id: str,
+        owner_input: str,
+        customer_id: str | None = None,
+    ) -> dict[str, Any]:
+        safe_task_id = str(task_id or "").strip()
+        safe_owner_input = str(owner_input or "").strip()
+        if not safe_task_id:
+            return {"error": "browser_use_owner_input_submit requires task_id"}
+        if not safe_owner_input:
+            return {"error": "browser_use_owner_input_submit requires owner_input"}
+        safe_customer_id = self._normalize_optional_customer_id(customer_id)
+
+        async with self._lock:
+            self._ensure_cleanup_task_locked()
+            self._cleanup_locked()
+            state = self._tasks.get(safe_task_id)
+            if state is None:
+                return {"error": f"browser_use_owner_input_submit task not found: {safe_task_id}"}
+            if safe_customer_id is not None and state.customer_id != safe_customer_id:
+                return {"error": f"browser_use_owner_input_submit task not found: {safe_task_id}"}
+            if state.status != _OWNER_WAITING_STATUS:
+                return {
+                    "error": (
+                        "browser_use_owner_input_submit requires a task waiting for owner input; "
+                        f"current status is {state.status}"
+                    )
+                }
+            future = state.owner_input_future
+            if future is None or future.done():
+                return {"error": "browser_use_owner_input_submit has no pending owner input request"}
+            future.set_result(safe_owner_input)
+            state.owner_input_future = None
+            state.owner_input_prompt = None
+            state.owner_input_type = None
+            state.owner_input_requested_at = None
+            state.status = "running"
+            state.updated_monotonic = time.monotonic()
+            self._touch_session_locked(state.customer_id, state.session_id)
+            return self._state_to_payload(state)
 
     async def shutdown(self) -> None:
         async with self._lock:
@@ -471,7 +675,7 @@ class BrowserUseLocalManager:
                 state.status = "running"
                 state.started_at = state.started_at or _utc_now_iso()
                 state.updated_monotonic = time.monotonic()
-                self._touch_session_locked(state.session_id)
+                self._touch_session_locked(state.customer_id, state.session_id)
                 model_name = state.llm
                 task_text = state.task
                 browser_session = state.browser_session
@@ -503,9 +707,10 @@ class BrowserUseLocalManager:
                 "register_new_step_callback": self._step_callback(task_id),
                 "directly_open_url": True,
             }
-            captcha_controller = self._new_captcha_controller()
-            if captcha_controller is not None:
-                agent_kwargs["controller"] = captcha_controller
+            allow_owner_input = bool(state.allow_owner_input) if state is not None else True
+            controller = self._new_controller(task_id=task_id, allow_owner_input=allow_owner_input)
+            if controller is not None:
+                agent_kwargs["controller"] = controller
             agent = agent_cls(**agent_kwargs)
             async with self._lock:
                 state = self._tasks.get(task_id)
@@ -527,6 +732,9 @@ class BrowserUseLocalManager:
                 state.finished_at = _utc_now_iso()
                 state.updated_monotonic = time.monotonic()
 
+                if state.status == _OWNER_WAITING_STATUS and not state.stop_requested:
+                    state.finished_at = None
+                    return
                 if state.stop_requested:
                     state.status = "stopped"
                     state.is_success = False
@@ -540,9 +748,18 @@ class BrowserUseLocalManager:
                     state.status = "finished"
                     if state.is_success is None:
                         state.is_success = not bool(state.error)
+                self._write_profile_metadata(
+                    customer_id=state.customer_id,
+                    session_id=str(state.session_id or ""),
+                    status=state.status,
+                    task_id=state.task_id,
+                    last_url=self._latest_step_url(state),
+                )
 
                 if state.close_session_when_done:
-                    session_to_close = self._detach_session_if_unused_locked(state.session_id)
+                    session_to_close = self._detach_session_if_unused_locked(
+                        state.customer_id, state.session_id
+                    )
 
             if session_to_close is not None:
                 await self._close_session(session_to_close)
@@ -556,8 +773,17 @@ class BrowserUseLocalManager:
                     state.error = str(exc)[:2000]
                     state.finished_at = _utc_now_iso()
                     state.updated_monotonic = time.monotonic()
+                    self._write_profile_metadata(
+                        customer_id=state.customer_id,
+                        session_id=str(state.session_id or ""),
+                        status="failed",
+                        task_id=state.task_id,
+                        last_url=self._latest_step_url(state),
+                    )
                     if state.close_session_when_done:
-                        session_to_close = self._detach_session_if_unused_locked(state.session_id)
+                        session_to_close = self._detach_session_if_unused_locked(
+                            state.customer_id, state.session_id
+                        )
             if session_to_close is not None:
                 await self._close_session(session_to_close)
         finally:
@@ -589,7 +815,14 @@ class BrowserUseLocalManager:
                     state.steps.append(step)
                     state.steps.sort(key=lambda item: int(item.get("number", 0) or 0))
                 state.updated_monotonic = time.monotonic()
-                self._touch_session_locked(state.session_id)
+                self._touch_session_locked(state.customer_id, state.session_id)
+                self._write_profile_metadata(
+                    customer_id=state.customer_id,
+                    session_id=str(state.session_id or ""),
+                    status=state.status,
+                    task_id=state.task_id,
+                    last_url=url,
+                )
 
         return _callback
 
@@ -700,6 +933,16 @@ class BrowserUseLocalManager:
                     out.append(name)
         return out
 
+    @staticmethod
+    def _latest_step_url(state: _BrowserUseTaskState) -> str | None:
+        for step in reversed(state.steps):
+            if not isinstance(step, dict):
+                continue
+            url = str(step.get("url", "") or "").strip()
+            if url:
+                return url
+        return None
+
     def _resolve_model(self, *, llm: str) -> str:
         candidate = str(llm or "").strip()
         if candidate and candidate.lower() not in {"browser-use-llm", "default"}:
@@ -722,20 +965,192 @@ class BrowserUseLocalManager:
             out.append(value)
         return out
 
-    def _new_browser_session(self, *, allowed_domains: list[str]) -> Any:
+    def _new_browser_session(
+        self,
+        *,
+        allowed_domains: list[str],
+        customer_id: str,
+        session_id: str,
+    ) -> Any:
         _, _, browser_session_cls = self._import_browser_use_components()
         session_kwargs: dict[str, Any] = {"headless": self._headless, "keep_alive": True}
         if allowed_domains:
             session_kwargs["allowed_domains"] = allowed_domains
+        if self._user_data_dir is not None:
+            session_profile_dir = self._profile_dir(customer_id, session_id)
+            session_profile_dir.mkdir(parents=True, exist_ok=True)
+            session_kwargs["user_data_dir"] = str(session_profile_dir)
         return browser_session_cls(**session_kwargs)
 
-    def _new_captcha_controller(self) -> Any | None:
-        if not self._capsolver_api_key:
+    @staticmethod
+    def _resolve_user_data_dir(value: str | Path | None) -> Path | None:
+        text = str(value or "").strip()
+        if not text:
             return None
-        from opentulpa.integrations.browser_use_captcha import build_capsolver_controller
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        resolved = path.resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    @staticmethod
+    def _safe_profile_name(session_id: str) -> str:
+        value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
+        value = value.strip("._-")
+        return value[:80] or "default"
+
+    @classmethod
+    def _normalize_customer_id(cls, customer_id: str | None) -> str:
+        raw = str(customer_id or "").strip()
+        return raw or _DEFAULT_CUSTOMER_ID
+
+    @classmethod
+    def _normalize_optional_customer_id(cls, customer_id: str | None) -> str | None:
+        raw = str(customer_id or "").strip()
+        if not raw:
+            return None
+        return raw
+
+    @staticmethod
+    def _session_key(customer_id: str, session_id: str) -> str:
+        customer = BrowserUseLocalManager._normalize_customer_id(customer_id)
+        session = BrowserUseLocalManager._safe_profile_name(session_id)
+        return f"{customer}\0{session}"
+
+    @classmethod
+    def _profile_customer_dir_name(cls, customer_id: str) -> str:
+        raw = cls._normalize_customer_id(customer_id)
+        safe = cls._safe_profile_name(raw)
+        if safe == raw:
+            return safe
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return f"{safe}-{digest}"
+
+    def _profile_dir(self, customer_id: str, session_id: str) -> Path:
+        assert self._user_data_dir is not None
+        return (
+            self._user_data_dir
+            / self._profile_customer_dir_name(customer_id)
+            / self._safe_profile_name(session_id)
+        )
+
+    def _profile_dir_exists(self, customer_id: str, session_id: str) -> bool:
+        if self._user_data_dir is None:
+            return False
+        return self._profile_dir(customer_id, session_id).is_dir()
+
+    def _persisted_profile_dirs(self, customer_id: str) -> list[tuple[str, Path, dict[str, Any]]]:
+        if self._user_data_dir is None or not self._user_data_dir.is_dir():
+            return []
+        customer_dir = self._user_data_dir / self._profile_customer_dir_name(customer_id)
+        if not customer_dir.is_dir():
+            return []
+        out: list[tuple[str, Path, dict[str, Any]]] = []
+        for child in customer_dir.iterdir():
+            if not child.is_dir():
+                continue
+            session_id = child.name.strip()
+            if not session_id:
+                continue
+            metadata = self._read_profile_metadata(child)
+            out.append((session_id, child, metadata))
+        out.sort(key=lambda item: self._profile_last_used_timestamp(item[1], item[2]), reverse=True)
+        return out
+
+    @staticmethod
+    def _read_profile_metadata(profile_dir: Path) -> dict[str, Any]:
+        metadata_path = profile_dir / _PROFILE_METADATA_FILE
+        if not metadata_path.exists():
+            return {}
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_profile_metadata(
+        self,
+        *,
+        customer_id: str,
+        session_id: str,
+        status: str,
+        task_id: str | None = None,
+        last_url: str | None = None,
+    ) -> None:
+        if self._user_data_dir is None:
+            return
+        profile_dir = self._profile_dir(customer_id, session_id)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        metadata = self._read_profile_metadata(profile_dir)
+        now = _utc_now_iso()
+        metadata.update(
+            {
+                "customerId": self._safe_profile_name(customer_id),
+                "rawCustomerId": self._normalize_customer_id(customer_id),
+                "profileId": self._safe_profile_name(session_id),
+                "label": metadata.get("label") or self._safe_profile_name(session_id),
+                "createdAt": metadata.get("createdAt") or now,
+                "lastUsedAt": now,
+                "status": status,
+            }
+        )
+        if task_id:
+            metadata["lastTaskId"] = task_id
+        if last_url:
+            metadata["lastUrl"] = last_url
+        (profile_dir / _PROFILE_METADATA_FILE).write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _profile_last_used_timestamp(profile_dir: Path, metadata: dict[str, Any]) -> float:
+        raw = str(metadata.get("lastUsedAt", "") or "").strip()
+        if raw:
+            with suppress(Exception):
+                return datetime.fromisoformat(raw).timestamp()
+        return profile_dir.stat().st_mtime
+
+    def _new_controller(self, *, task_id: str, allow_owner_input: bool = True) -> Any | None:
+        from browser_use import ActionResult, Controller
+
+        controller = Controller()
+
+        if allow_owner_input:
+            @controller.action(
+                "Ask the OpenTulpa owner for input needed to continue the current browser task. "
+                "Use when login or verification is blocked by an email code, SMS code, authenticator code, "
+                "MFA approval, account choice, or owner-only decision. Keep the current browser page open.",
+                domains=["*"],
+            )
+            async def request_owner_input(prompt: str, input_type: str = "text") -> ActionResult:
+                try:
+                    owner_value = await self.request_owner_input(
+                        task_id=task_id,
+                        prompt=prompt,
+                        input_type=input_type,
+                    )
+                except TimeoutError:
+                    return ActionResult(
+                        success=False,
+                        error="Owner input timed out after 24 hours.",
+                    )
+                return ActionResult(
+                    extracted_content=(
+                        "Owner provided input for the current browser challenge. "
+                        f"Input type: {input_type}. Value: {owner_value}"
+                    ),
+                    include_extracted_content_only_once=True,
+                )
+
+        if not self._capsolver_api_key:
+            return controller
+        from opentulpa.integrations.browser_use_captcha import register_capsolver_action
         from opentulpa.integrations.capsolver import CapSolverClient
 
-        return build_capsolver_controller(
+        return register_capsolver_action(
+            controller,
             CapSolverClient(api_key=self._capsolver_api_key),
         )
 
@@ -749,6 +1164,7 @@ class BrowserUseLocalManager:
     def _state_to_payload(self, state: _BrowserUseTaskState) -> dict[str, Any]:
         return {
             "id": state.task_id,
+            "customerId": state.customer_id,
             "sessionId": state.session_id,
             "status": state.status,
             "isSuccess": state.is_success,
@@ -760,6 +1176,9 @@ class BrowserUseLocalManager:
             "outputFiles": state.output_files,
             "steps": state.steps,
             "error": state.error,
+            "ownerInputPrompt": state.owner_input_prompt,
+            "ownerInputType": state.owner_input_type,
+            "ownerInputRequestedAt": state.owner_input_requested_at,
         }
 
     async def _close_session(self, session: Any) -> None:
@@ -803,55 +1222,113 @@ class BrowserUseLocalManager:
             self._tasks.pop(task_id, None)
 
         expired_sessions: list[str] = []
-        for session_id, session_state in self._sessions.items():
-            if self._session_has_active_tasks_locked(session_id):
+        for session_key, session_state in self._sessions.items():
+            if self._session_has_active_tasks_locked(session_state.customer_id, session_state.session_id):
                 continue
             age = now - float(session_state.updated_monotonic or now)
             if age >= _SESSION_IDLE_TIMEOUT_SECONDS:
-                expired_sessions.append(session_id)
-        for session_id in expired_sessions:
-            session_state = self._sessions.pop(session_id, None)
+                expired_sessions.append(session_key)
+        for session_key in expired_sessions:
+            session_state = self._sessions.pop(session_key, None)
             if session_state is not None:
+                self._write_profile_metadata(
+                    customer_id=session_state.customer_id,
+                    session_id=session_state.session_id,
+                    status="idle",
+                )
                 asyncio.create_task(self._close_session(session_state.session))
 
-    def _detach_session_if_unused_locked(self, session_id: str | None) -> Any | None:
+        self._delete_stale_profiles_locked()
+
+    def _delete_stale_profiles_locked(self) -> None:
+        if self._user_data_dir is None or not self._user_data_dir.is_dir():
+            return
+        cutoff = time.time() - _PROFILE_RETENTION_SECONDS
+        live_profile_dirs = {
+            self._profile_dir(item.customer_id, item.session_id).resolve()
+            for item in self._sessions.values()
+        }
+        for customer_dir in self._user_data_dir.iterdir():
+            if not customer_dir.is_dir():
+                continue
+            for profile_dir in customer_dir.iterdir():
+                if not profile_dir.is_dir():
+                    continue
+                if profile_dir.resolve() in live_profile_dirs:
+                    continue
+                metadata = self._read_profile_metadata(profile_dir)
+                if self._profile_last_used_timestamp(profile_dir, metadata) >= cutoff:
+                    continue
+                with suppress(Exception):
+                    shutil.rmtree(profile_dir)
+
+    def _detach_session_if_unused_locked(
+        self, customer_id: str, session_id: str | None
+    ) -> Any | None:
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return None
         for state in self._tasks.values():
+            if state.customer_id != safe_customer:
+                continue
             if str(state.session_id or "").strip() != safe_session:
                 continue
             if state.status not in _TERMINAL_STATUSES:
                 return None
-        session_state = self._sessions.pop(safe_session, None)
+        session_state = self._sessions.pop(self._session_key(safe_customer, safe_session), None)
+        self._write_profile_metadata(
+            customer_id=safe_customer,
+            session_id=safe_session,
+            status="idle",
+        )
         return session_state.session if session_state is not None else None
 
-    def _touch_session_locked(self, session_id: str | None) -> None:
+    def _touch_session_locked(self, customer_id: str, session_id: str | None) -> None:
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return
-        session_state = self._sessions.get(safe_session)
+        session_state = self._sessions.get(self._session_key(safe_customer, safe_session))
         if session_state is not None:
             session_state.updated_monotonic = time.monotonic()
+        self._write_profile_metadata(
+            customer_id=safe_customer,
+            session_id=safe_session,
+            status="running" if self._session_has_active_tasks_locked(safe_customer, safe_session) else "idle",
+        )
 
-    def _pick_reusable_session_id_locked(self) -> str | None:
+    def _pick_reusable_session_id_locked(self, customer_id: str) -> str | None:
+        safe_customer = self._normalize_customer_id(customer_id)
         reusable: list[tuple[float, str]] = []
-        for session_id, session_state in self._sessions.items():
-            if self._session_has_active_tasks_locked(session_id):
+        for _, session_state in self._sessions.items():
+            if session_state.customer_id != safe_customer:
                 continue
-            reusable.append((float(session_state.updated_monotonic or 0.0), session_id))
+            if self._session_has_active_tasks_locked(session_state.customer_id, session_state.session_id):
+                continue
+            reusable.append((float(session_state.updated_monotonic or 0.0), session_state.session_id))
         if not reusable:
             return None
         reusable.sort(reverse=True)
         return reusable[0][1]
 
-    def _session_summaries_locked(self) -> list[dict[str, Any]]:
+    def _live_session_count_for_customer_locked(self, customer_id: str) -> int:
+        safe_customer = self._normalize_customer_id(customer_id)
+        return sum(1 for item in self._sessions.values() if item.customer_id == safe_customer)
+
+    def _session_summaries_locked(self, customer_id: str | None = None) -> list[dict[str, Any]]:
+        safe_customer = self._normalize_customer_id(customer_id)
         out: list[dict[str, Any]] = []
-        for session_id, session_state in self._sessions.items():
-            active_task = self._active_task_for_session_locked(session_id)
+        for _, session_state in self._sessions.items():
+            if session_state.customer_id != safe_customer:
+                continue
+            active_task = self._active_task_for_session_locked(
+                session_state.customer_id, session_state.session_id
+            )
             out.append(
                 {
-                    "session_id": session_id,
+                    "session_id": session_state.session_id,
+                    "customer_id": session_state.customer_id,
                     "reusable": active_task is None,
                     "active_task_id": active_task.task_id if active_task is not None else None,
                     "last_used_monotonic": float(session_state.updated_monotonic or 0.0),
@@ -860,23 +1337,31 @@ class BrowserUseLocalManager:
         out.sort(key=lambda item: item["last_used_monotonic"], reverse=True)
         return out
 
-    def _session_has_active_tasks_locked(self, session_id: str) -> bool:
+    def _session_has_active_tasks_locked(self, customer_id: str, session_id: str) -> bool:
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return False
         for state in self._tasks.values():
+            if state.customer_id != safe_customer:
+                continue
             if str(state.session_id or "").strip() != safe_session:
                 continue
             if state.status not in _TERMINAL_STATUSES:
                 return True
         return False
 
-    def _active_task_for_session_locked(self, session_id: str) -> _BrowserUseTaskState | None:
+    def _active_task_for_session_locked(
+        self, customer_id: str, session_id: str
+    ) -> _BrowserUseTaskState | None:
+        safe_customer = self._normalize_customer_id(customer_id)
         safe_session = str(session_id or "").strip()
         if not safe_session:
             return None
         active: list[_BrowserUseTaskState] = []
         for state in self._tasks.values():
+            if state.customer_id != safe_customer:
+                continue
             if str(state.session_id or "").strip() != safe_session:
                 continue
             if state.status in _TERMINAL_STATUSES:
