@@ -2308,15 +2308,9 @@ async def test_telegram_business_workflow_suppresses_stale_reply_and_requeues(
 
 
 @pytest.mark.asyncio
-async def test_telegram_business_pending_run_sends_one_llm_generated_interim_status(
+async def test_telegram_business_pending_run_sends_only_final_reply(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        intake_service_module,
-        "_TELEGRAM_BUSINESS_INTERIM_STATUS_DELAY_SECONDS",
-        0.01,
-    )
     runtime = _DelayedRuntime(
         [
             {
@@ -2385,23 +2379,14 @@ async def test_telegram_business_pending_run_sends_one_llm_generated_interim_sta
     drained = await service.drain_due_pending_runs()
 
     assert drained == 1
-    assert len(runtime.status_calls) == 1
+    assert runtime.status_calls == []
     assert [item["text"] for item in telegram_business.client.sent_messages] == [
-        "Уточняю детали и скоро отвечу.",
         "Какая у вас машина?",
     ]
 
 
 @pytest.mark.asyncio
-async def test_telegram_business_pending_run_sends_no_hardcoded_interim_on_generation_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        intake_service_module,
-        "_TELEGRAM_BUSINESS_INTERIM_STATUS_DELAY_SECONDS",
-        0.01,
-    )
+async def test_telegram_business_pending_run_ignores_status_generation_failure(tmp_path: Path) -> None:
     runtime = _DelayedRuntime(
         [
             {
@@ -2470,7 +2455,7 @@ async def test_telegram_business_pending_run_sends_no_hardcoded_interim_on_gener
     drained = await service.drain_due_pending_runs()
 
     assert drained == 1
-    assert len(runtime.status_calls) == 1
+    assert runtime.status_calls == []
     assert [item["text"] for item in telegram_business.client.sent_messages] == [
         "Какая у вас машина?",
     ]

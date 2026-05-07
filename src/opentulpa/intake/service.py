@@ -18,7 +18,6 @@ from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
 from opentulpa.intake.workflow_skill import build_intake_workflow_skill, workflow_skill_name
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
-from opentulpa.interfaces.telegram.status_generation import generate_llm_status_message
 from opentulpa.persistence.sqlite import connect_sqlite
 from opentulpa.scheduler.models import Routine
 
@@ -34,8 +33,6 @@ _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 _TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS = 5.0
 _TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS = 3.0
 _TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE = "telegram_business_webhook_settled"
-_TELEGRAM_BUSINESS_INTERIM_STATUS_DELAY_SECONDS = 20.0
-_TELEGRAM_BUSINESS_INTERIM_STATUS_TIMEOUT_SECONDS = 8.0
 _PENDING_RUN_POLL_SECONDS = 0.2
 _PENDING_RUN_MAX_CONCURRENCY = 4
 _BUSINESS_FACTS_MAX_KEYS = 32
@@ -800,15 +797,6 @@ class IntakeWorkflowService:
         owner_chat_id = str(row.get("owner_chat_id", "") or "").strip()
         generation = int(row.get("generation") or 0)
         result: dict[str, Any]
-        interim_task = asyncio.create_task(
-            self._send_pending_run_interim_status_after_delay(
-                workflow_id=workflow_id,
-                conversation_id=conversation_id,
-                customer_id=customer_id,
-                generation=generation,
-            ),
-            name=f"opentulpa-intake-interim-status-{workflow_id}-{conversation_id}",
-        )
         try:
             result = await self.run_workflow(
                 customer_id=customer_id,
@@ -821,10 +809,6 @@ class IntakeWorkflowService:
                 "workflow_id": workflow_id,
                 "summary": f"Intake workflow {workflow_id} failed: {exc}",
             }
-        finally:
-            interim_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await interim_task
         if (
             not bool(result.get("ok", False))
             and owner_chat_id
@@ -862,89 +846,6 @@ class IntakeWorkflowService:
         return (
             str(row["status"] or "").strip() == "running"
             and int(row["running_generation"] or 0) == int(generation or 0)
-        )
-
-    async def _send_pending_run_interim_status_after_delay(
-        self,
-        *,
-        workflow_id: str,
-        conversation_id: str,
-        customer_id: str,
-        generation: int,
-    ) -> None:
-        await asyncio.sleep(max(0.0, float(_TELEGRAM_BUSINESS_INTERIM_STATUS_DELAY_SECONDS)))
-        if not self._pending_run_is_still_running(
-            workflow_id=workflow_id,
-            conversation_id=conversation_id,
-            generation=generation,
-        ):
-            return
-        workflow = self.get_workflow(customer_id=customer_id, workflow_id=workflow_id)
-        if workflow is None:
-            return
-        summary, refresh_error = self._reload_conversation_summary(
-            workflow=workflow,
-            conversation_id=conversation_id,
-            fallback={},
-        )
-        if refresh_error:
-            self._emit_observability(
-                event="intake.interim_status.error",
-                workflow=workflow,
-                conversation_summary={"conversation_id": conversation_id},
-                phase="conversation_refresh",
-                error=refresh_error,
-            )
-            return
-        runtime = self._runtime_for_observability()
-        if runtime is None:
-            return
-        text = await generate_llm_status_message(
-            runtime=runtime,
-            customer_id=customer_id,
-            thread_id=self._intake_thread_id(workflow=workflow, conversation_summary=summary),
-            context={
-                "event": "telegram_business_intake_processing",
-                "workflow_name": str(workflow.get("name", "") or "").strip(),
-                "latest_customer_message": str(
-                    summary.get("latest_inbound_message_text_preview", "") or ""
-                ).strip()[:1000],
-            },
-            language="Russian",
-            timeout_seconds=_TELEGRAM_BUSINESS_INTERIM_STATUS_TIMEOUT_SECONDS,
-        )
-        if not text:
-            self._emit_observability(
-                event="intake.interim_status.skipped",
-                workflow=workflow,
-                conversation_summary=summary,
-                reason="llm_status_generation_failed",
-            )
-            return
-        if not self._pending_run_is_still_running(
-            workflow_id=workflow_id,
-            conversation_id=conversation_id,
-            generation=generation,
-        ):
-            return
-        reply_error = await self._send_source_reply(
-            workflow=workflow,
-            conversation_summary=summary,
-            reply_text=text,
-        )
-        if reply_error:
-            self._emit_observability(
-                event="intake.interim_status.error",
-                workflow=workflow,
-                conversation_summary=summary,
-                phase="reply_execution",
-                error=reply_error,
-            )
-            return
-        self._emit_observability(
-            event="intake.interim_status.sent",
-            workflow=workflow,
-            conversation_summary=summary,
         )
 
     async def _notify_pending_run_owner(self, *, owner_chat_id: str, summary: str) -> None:
