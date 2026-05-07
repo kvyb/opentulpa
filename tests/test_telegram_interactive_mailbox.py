@@ -86,6 +86,73 @@ class _FakeTelegramClient:
 
 
 @pytest.mark.asyncio
+async def test_telegram_interactive_owner_reply_to_bot_photo_adds_reply_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
+    runtime = _InteractiveRuntime()
+    service = chat_module.TelegramChatService(
+        bot_token="123:abc",
+        file_vault=object(),
+        memory=None,
+    )
+    captured_turn_texts: list[str] = []
+
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+    monkeypatch.setattr(chat_module, "get_openai_compatible_api_key_from_env", lambda: "key")
+    monkeypatch.setattr(chat_module, "is_user_allowed", lambda **kwargs: True)
+
+    async def _fake_stream_langgraph_reply_to_telegram(**kwargs: Any) -> tuple[str | None, bool]:
+        captured_turn_texts.append(str(kwargs.get("text", "")))
+        return "done", False
+
+    monkeypatch.setattr(
+        chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram
+    )
+
+    result = await service.handle_update(
+        body={
+            "message": {
+                "chat": {"id": 1},
+                "from": {"id": 100},
+                "text": "Use this image for the landing screen.",
+                "reply_to_message": {
+                    "message_id": 44,
+                    "from": {"id": 200, "is_bot": True, "username": "OpenTulpaBot"},
+                    "caption": "Generated hero image for the car wash workflow.",
+                    "photo": [
+                        {
+                            "file_id": "small",
+                            "file_unique_id": "small_unique",
+                            "width": 90,
+                            "height": 90,
+                            "file_size": 100,
+                        },
+                        {
+                            "file_id": "large",
+                            "file_unique_id": "large_unique",
+                            "width": 1024,
+                            "height": 768,
+                            "file_size": 500,
+                        },
+                    ],
+                },
+            }
+        },
+        agent_runtime=runtime,
+    )
+
+    assert result is None
+    assert captured_turn_texts and len(captured_turn_texts) == 1
+    turn_text = captured_turn_texts[0]
+    assert "the user replied to one of OpenTulpa's earlier messages" in turn_text
+    assert "- replied_message_id: 44" in turn_text
+    assert "Generated hero image for the car wash workflow." in turn_text
+    assert "type=photo file_unique_id=large_unique size=1024x768" in turn_text
+    assert "Current user message:\nUse this image for the landing screen." in turn_text
+
+
+@pytest.mark.asyncio
 async def test_telegram_interactive_inbox_merges_slow_media_then_followup_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -166,6 +166,77 @@ def _telegram_command_name(text: str) -> str:
     return head.split("@", 1)[0]
 
 
+def _telegram_reply_to_context(message: dict[str, Any]) -> str:
+    reply = message.get("reply_to_message")
+    if not isinstance(reply, dict):
+        return ""
+    author = reply.get("from")
+    if isinstance(author, dict) and author.get("is_bot") is not True:
+        return ""
+
+    message_id = reply.get("message_id")
+    lines = [
+        "Telegram reply context: the user replied to one of OpenTulpa's earlier messages.",
+    ]
+    if isinstance(message_id, int) and message_id > 0:
+        lines.append(f"- replied_message_id: {message_id}")
+
+    text = str(reply.get("text") or reply.get("caption") or "").strip()
+    if text:
+        lines.append(f"- replied_message_text_or_caption: {text[:2000]}")
+
+    photos = reply.get("photo")
+    if isinstance(photos, list) and photos:
+        chosen = None
+        for item in photos:
+            if isinstance(item, dict) and (
+                chosen is None
+                or int(item.get("file_size") or 0) >= int(chosen.get("file_size") or 0)
+            ):
+                chosen = item
+        if isinstance(chosen, dict):
+            file_unique_id = str(chosen.get("file_unique_id", "")).strip()
+            width = chosen.get("width")
+            height = chosen.get("height")
+            details = ["type=photo"]
+            if file_unique_id:
+                details.append(f"file_unique_id={file_unique_id}")
+            if isinstance(width, int) and isinstance(height, int):
+                details.append(f"size={width}x{height}")
+            lines.append(f"- replied_message_media: {' '.join(details)}")
+
+    document = reply.get("document")
+    if isinstance(document, dict):
+        name = str(document.get("file_name", "")).strip()
+        mime_type = str(document.get("mime_type", "")).strip()
+        file_unique_id = str(document.get("file_unique_id", "")).strip()
+        details = ["type=document"]
+        if name:
+            details.append(f"name={name}")
+        if mime_type:
+            details.append(f"mime_type={mime_type}")
+        if file_unique_id:
+            details.append(f"file_unique_id={file_unique_id}")
+        lines.append(f"- replied_message_media: {' '.join(details)}")
+
+    if len(lines) == 1:
+        lines.append("- replied_message_text_or_caption: unavailable")
+    lines.append(
+        "Use this as context for the user's current message; do not quote metadata verbatim."
+    )
+    return "\n".join(lines)
+
+
+def _inject_telegram_reply_context(text: str, reply_context: str) -> str:
+    clean_text = str(text or "").strip()
+    clean_context = str(reply_context or "").strip()
+    if not clean_context:
+        return clean_text
+    if clean_text:
+        return f"{clean_context}\n\nCurrent user message:\n{clean_text}"
+    return clean_context
+
+
 def support_bot_commands() -> list[dict[str, str]]:
     return [
         {"command": "support_customers", "description": "List customer tenants for support"},
@@ -795,6 +866,7 @@ async def _materialize_interactive_submission(
     session: InteractiveSession,
     submission: Any,
     text: str,
+    reply_context: str,
     caption: str | None,
     attachments: list[Any],
     bot_token: str,
@@ -822,6 +894,7 @@ async def _materialize_interactive_submission(
             attachments=attachments,
             ingested_files=ingested_files,
         )
+        fragment = _inject_telegram_reply_context(fragment, reply_context)
     except Exception as exc:
         logger.exception(
             "Telegram interactive materialization failed (chat_id=%s, thread_id=%s): %s",
@@ -1007,6 +1080,7 @@ async def handle_telegram_text(
 
     message = body.get("message") or body.get("edited_message") or {}
     caption = str(message.get("caption", "")).strip() or None
+    reply_context = _telegram_reply_to_context(message)
     attachments = extract_attachments(message)
     username = (message.get("from", {}) or {}).get("username")
     username = username.strip() or None if isinstance(username, str) else None
@@ -1212,6 +1286,7 @@ async def handle_telegram_text(
                 session=session,
                 submission=submission,
                 text=ctx.text,
+                reply_context=reply_context,
                 caption=caption,
                 attachments=attachments,
                 bot_token=bot_token,
@@ -1258,6 +1333,7 @@ async def handle_telegram_text(
         attachments=attachments,
         ingested_files=ingested_files,
     )
+    effective_text = _inject_telegram_reply_context(effective_text, reply_context)
     if direct_reply:
         return direct_reply
     if not effective_text:
