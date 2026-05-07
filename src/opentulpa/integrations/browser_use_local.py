@@ -191,9 +191,13 @@ class BrowserUseLocalManager:
             }
 
         explicit_session_id = str(session_id or "").strip()
-        safe_session_id = self._safe_profile_name(explicit_session_id) if explicit_session_id else _DEFAULT_SESSION_ID
+        has_explicit_session_id = bool(explicit_session_id)
+        safe_session_id = (
+            self._safe_profile_name(explicit_session_id)
+            if has_explicit_session_id
+            else _DEFAULT_SESSION_ID
+        )
         safe_customer_id = self._normalize_customer_id(customer_id)
-        session_key = self._session_key(safe_customer_id, safe_session_id)
         safe_max_steps = max(1, min(int(max_steps), 120))
         safe_start_url = str(start_url or "").strip()
         safe_domains = self._sanitize_domains(allowed_domains)
@@ -203,6 +207,10 @@ class BrowserUseLocalManager:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
             active_task = self._active_task_for_session_locked(safe_customer_id, safe_session_id)
+            if active_task is not None and not has_explicit_session_id:
+                reusable_session_id = self._pick_reusable_session_id_locked(safe_customer_id)
+                safe_session_id = reusable_session_id or new_short_id("bses")
+                active_task = self._active_task_for_session_locked(safe_customer_id, safe_session_id)
             if active_task is not None:
                 return {
                     "error": (
@@ -213,6 +221,7 @@ class BrowserUseLocalManager:
                     "customerId": safe_customer_id,
                     "activeTaskId": active_task.task_id,
                 }
+            session_key = self._session_key(safe_customer_id, safe_session_id)
             session_state = self._sessions.get(session_key)
             if (
                 session_state is None
@@ -1289,9 +1298,12 @@ class BrowserUseLocalManager:
             status="running" if self._session_has_active_tasks_locked(safe_customer, safe_session) else "idle",
         )
 
-    def _pick_reusable_session_id_locked(self) -> str | None:
+    def _pick_reusable_session_id_locked(self, customer_id: str) -> str | None:
+        safe_customer = self._normalize_customer_id(customer_id)
         reusable: list[tuple[float, str]] = []
         for _, session_state in self._sessions.items():
+            if session_state.customer_id != safe_customer:
+                continue
             if self._session_has_active_tasks_locked(session_state.customer_id, session_state.session_id):
                 continue
             reusable.append((float(session_state.updated_monotonic or 0.0), session_state.session_id))

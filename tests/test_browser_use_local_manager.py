@@ -242,6 +242,48 @@ async def test_local_manager_uses_default_persistent_session_without_session_id(
 
 
 @pytest.mark.asyncio
+async def test_local_manager_implicit_run_uses_fallback_profile_when_default_busy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path / "browser_profiles",
+    )
+    _FakeAgent.run_delay_seconds = 0.2
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    try:
+        first = await manager.start_task(task="first slow task", max_steps=2, llm="")
+        first_task_id = str(first["id"])
+        for _ in range(50):
+            payload = await manager.get_task(first_task_id)
+            if payload and str(payload.get("status")) == "running":
+                break
+            await asyncio.sleep(0.01)
+        else:  # pragma: no cover
+            raise AssertionError("first task did not start running in time")
+
+        second = await manager.start_task(task="second unrelated task", max_steps=2, llm="")
+
+        assert first["sessionId"] == "default"
+        assert not second.get("error")
+        assert str(second["sessionId"]).startswith("bses_")
+        assert second["sessionId"] != "default"
+        assert len(manager._sessions) == 2
+    finally:
+        _FakeAgent.run_delay_seconds = 0.0
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_local_manager_uses_persistent_profile_dir_per_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
