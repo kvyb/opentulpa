@@ -5,6 +5,48 @@ import pytest
 from opentulpa.agent.tools_registry import register_runtime_tools
 from tests.tool_test_helpers import DummyRuntime, Response
 
+CORE_TOOL_NAMES = {
+    "send_owner_update",
+    "memory_search",
+    "memory_add",
+    "uploaded_file_search",
+    "uploaded_file_get",
+    "uploaded_file_send",
+    "tulpa_file_send",
+    "web_image_send",
+    "uploaded_file_analyze",
+    "uploaded_file_inspect_structure",
+    "business_knowledge_index",
+    "business_knowledge_query",
+    "user_context_add_files",
+    "user_context_query",
+    "user_context_list_sources",
+    "user_context_find_sources",
+    "user_context_reindex",
+    "user_context_archive_sources",
+    "user_context_promote_to_intake",
+    "directive_get",
+    "directive_set",
+    "directive_clear",
+    "time_profile_get",
+    "time_profile_set",
+    "web_search",
+    "fetch_url_content",
+    "fetch_file_content",
+    "tulpa_write_file",
+    "tulpa_validate_file",
+    "tulpa_reload",
+    "tulpa_run_terminal",
+    "tulpa_read_file",
+    "tulpa_catalog",
+    "task_status",
+    "task_events",
+    "task_artifacts",
+    "task_relaunch",
+    "task_cancel",
+    "server_time",
+}
+
 
 class _UpdateRuntime(DummyRuntime):
     def __init__(self) -> None:
@@ -14,6 +56,12 @@ class _UpdateRuntime(DummyRuntime):
     async def emit_interactive_update(self, *, text: str, dedupe_key: str = "") -> dict[str, bool]:
         self.updates.append({"text": text, "dedupe_key": dedupe_key})
         return {"ok": True, "sent": True}
+
+
+def test_register_runtime_tools_keeps_core_tool_names() -> None:
+    tools = register_runtime_tools(DummyRuntime([]))
+
+    assert set(tools) >= CORE_TOOL_NAMES
 
 
 @pytest.mark.asyncio
