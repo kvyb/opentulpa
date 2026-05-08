@@ -508,6 +508,8 @@ class _IntakeWorkflowDecision(BaseModel):
     ready_to_save: bool = False
     booking_action: str = "ignore"
     save_payload: dict[str, Any] = Field(default_factory=dict)
+    sink_action: str = "none"
+    sink_payload: dict[str, Any] = Field(default_factory=dict)
     sink_arguments: dict[str, Any] = Field(default_factory=dict)
     needs_business_knowledge: bool = False
     business_knowledge_query: str = ""
@@ -534,7 +536,8 @@ def _build_intake_workflow_system_prompt() -> str:
         "matches_workflow (bool), confidence (0..1), conversation_summary (string), "
         "extracted_fields (object), missing_fields (string array), reply_action (string), "
         "reply_text (string), ready_to_save (bool), booking_action (string), "
-        "save_payload (object), sink_arguments (object), needs_business_knowledge (bool), "
+        "save_payload (object), sink_action (string), sink_payload (object), "
+        "sink_arguments (object), needs_business_knowledge (bool), "
         "business_knowledge_query (string), knowledge_source_refs (string array), "
         "grounding_status (string), reason (string).\n\n"
         "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
@@ -558,6 +561,10 @@ def _build_intake_workflow_system_prompt() -> str:
         "- If customer messages conflict, prefer the latest customer-provided value unless the newer message is too vague to override the earlier one.\n"
         "- Do not ask for a field that is already reliably known unless the value is conflicting or unclear.\n"
         "- missing_fields must list only fields that are truly still needed before save.\n\n"
+        "Source identity policy:\n"
+        "- conversation.summary.incoming_user_id, latest_inbound_sender_id, username, and platform are backend-provided source metadata.\n"
+        "- Treat source identity values as factual when present. Do not invent them if missing.\n"
+        "- If workflow instructions ask to record the inbound user id, Telegram id, Instagram id, username, or similar source identity, use these conversation summary fields.\n\n"
         "Booking-state fast path:\n"
         "- If the latest customer message clearly cancels, reschedules, corrects, or otherwise updates an active "
         "booking or a recent completed booking, treat it as a booking-state operation. Reuse the saved booking "
@@ -602,11 +609,16 @@ def _build_intake_workflow_system_prompt() -> str:
         "- When ready_to_save=true, save_payload must contain the merged final field set that should be persisted now.\n"
         "- When ready_to_save=true, reply_text must describe the completed action. Never ask the customer to confirm "
         "a booking or change that you are saving now. If confirmation is still needed, set ready_to_save=false.\n"
+        "- When workflow instructions explicitly require writing fields before all required fields are collected, set "
+        "sink_action=upsert_partial and put only those interim fields in sink_payload. Use this for cases like "
+        "recording incoming_user_id or username on the first inbound message. Otherwise use sink_action=none and sink_payload={}. "
+        "Do not use upsert_partial for ignored conversations.\n"
         "- When needs_business_knowledge=true and workflow.knowledge_file_ids is non-empty, set ready_to_save=false, "
         'reply_action=none, reply_text="", and business_knowledge_query to the exact missing source-backed fact.\n'
         "- sink_arguments may contain sink-tool arguments or overrides discovered via tools or context "
         "(for example sheetName for Google Sheets). These are merged into the final sink write.\n"
         "- When ready_to_save=false, save_payload should usually be empty.\n"
+        "- When ready_to_save=true, leave sink_action=none; the service will perform the final save using save_payload.\n"
         "- When no sink overrides are needed, sink_arguments should usually be empty.\n"
         "- conversation_summary should be a short operational summary of what the customer currently wants.\n"
         "- reason should briefly explain the match decision and booking_action.\n\n"
@@ -743,6 +755,7 @@ def _compact_recent_messages(messages: Any) -> list[dict[str, str]]:
                 "id": _trim_text_chars(item.get("id", ""), limit=80),
                 "created_time": _trim_text_chars(item.get("created_time", ""), limit=64),
                 "sender_role": _trim_text_chars(item.get("sender_role", ""), limit=24),
+                "sender_id": _trim_text_chars(item.get("sender_id", ""), limit=80),
                 "sender_username": _trim_text_chars(item.get("sender_username", ""), limit=48),
                 "text": _trim_text_chars(item.get("text", ""), limit=300),
             }
@@ -790,8 +803,11 @@ def _compact_conversation_for_prompt(conversation: dict[str, Any]) -> dict[str, 
     summary = safe_conversation.get("summary")
     safe_summary = summary if isinstance(summary, dict) else {}
     compact_summary = {
+        "platform": _trim_text_chars(safe_summary.get("platform", ""), limit=64),
         "conversation_id": _trim_text_chars(safe_summary.get("conversation_id", ""), limit=120),
         "recipient_id": _trim_text_chars(safe_summary.get("recipient_id", ""), limit=120),
+        "incoming_user_id": _trim_text_chars(safe_summary.get("incoming_user_id", ""), limit=120),
+        "username": _trim_text_chars(safe_summary.get("username", ""), limit=64),
         "latest_inbound_message_id": _trim_text_chars(
             safe_summary.get("latest_inbound_message_id", ""),
             limit=120,
@@ -803,6 +819,10 @@ def _compact_conversation_for_prompt(conversation: dict[str, Any]) -> dict[str, 
         "latest_inbound_sender_username": _trim_text_chars(
             safe_summary.get("latest_inbound_sender_username", ""),
             limit=64,
+        ),
+        "latest_inbound_sender_id": _trim_text_chars(
+            safe_summary.get("latest_inbound_sender_id", ""),
+            limit=120,
         ),
         "latest_inbound_message_text_preview": _trim_text_chars(
             safe_summary.get("latest_inbound_message_text_preview", ""),
@@ -880,14 +900,20 @@ def _build_intake_workflow_agent_prompt(
         "Final answer contract:\n"
         "- Return strict JSON only with keys:\n"
         "  matches_workflow, confidence, conversation_summary, extracted_fields, missing_fields, "
-        "reply_action, reply_text, ready_to_save, booking_action, save_payload, sink_arguments, "
-        "needs_business_knowledge, business_knowledge_query, knowledge_source_refs, grounding_status, reason.\n"
+        "reply_action, reply_text, ready_to_save, booking_action, save_payload, sink_action, "
+        "sink_payload, sink_arguments, needs_business_knowledge, business_knowledge_query, "
+        "knowledge_source_refs, grounding_status, reason.\n"
         "- booking_action must be one of: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "- reply_action must be one of: none, send_reply, mark_cancelled.\n"
         "- If availability is blocked or conflicting, do not set ready_to_save=true.\n"
         "- If details are missing, ask one concise follow-up question in reply_text.\n"
         "- If ready_to_save=true, reply_text must be a final saved/updated/cancelled confirmation and must not ask "
         "for confirmation. If you still need confirmation from the customer, use ready_to_save=false.\n"
+        "- conversation.summary contains backend-provided source identity fields such as platform, incoming_user_id, "
+        "latest_inbound_sender_id, and username. Use them when workflow instructions ask you to record Telegram, "
+        "Instagram, user, or username metadata. Do not invent missing ids.\n"
+        "- If workflow instructions explicitly require writing fields before all required fields are collected, set "
+        "sink_action=upsert_partial and put only those interim fields in sink_payload. Otherwise use sink_action=none.\n"
         "- If needs_business_knowledge=true and workflow.knowledge_file_ids is non-empty, set ready_to_save=false, "
         'reply_action=none, reply_text="", and business_knowledge_query to the exact missing source-backed fact.\n'
         "- If the customer asks a business/service/pricing/booking question that is close to the workflow but outside its configured scope, return matches_workflow=false, booking_action=ignore, reply_action=send_reply with a concise redirect based on workflow instructions.\n"
@@ -4018,6 +4044,8 @@ class OpenTulpaLangGraphRuntime:
             "ready_to_save": bool(decision.ready_to_save),
             "booking_action": str(decision.booking_action).strip().lower() or "ignore",
             "save_payload": dict(decision.save_payload),
+            "sink_action": str(decision.sink_action).strip().lower() or "none",
+            "sink_payload": dict(decision.sink_payload),
             "sink_arguments": dict(decision.sink_arguments),
             "needs_business_knowledge": bool(decision.needs_business_knowledge),
             "business_knowledge_query": str(decision.business_knowledge_query).strip()[:500],

@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from harness.runner import E2EHarness
 
+from opentulpa.intake import service as intake_service_module
 from tests.test_intake_workflow_service import (
     _FakeComposio,
     _FakeRuntime,
@@ -15,6 +17,75 @@ from tests.test_intake_workflow_service import (
 )
 
 pytestmark = [pytest.mark.e2e, pytest.mark.telegram]
+
+
+def _wait_until(predicate: Any, timeout_seconds: float = 45.0) -> bool:
+    import time
+
+    deadline = time.time() + max(0.1, float(timeout_seconds))
+    while time.time() < deadline:
+        if bool(predicate()):
+            return True
+        time.sleep(0.2)
+    return bool(predicate())
+
+
+def _business_message(
+    *,
+    business_connection_id: str,
+    lead_chat_id: int,
+    lead_user_id: int,
+    username: str,
+    message_id: int,
+    text: str,
+) -> dict[str, Any]:
+    return {
+        "update_id": int(datetime.now(UTC).timestamp() * 1000) + int(message_id),
+        "business_message": {
+            "business_connection_id": business_connection_id,
+            "message_id": message_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "chat": {"id": lead_chat_id, "type": "private", "username": username},
+            "from": {"id": lead_user_id, "is_bot": False, "username": username},
+            "text": text,
+        },
+    }
+
+
+def _telegram_message(*, chat_id: int, user_id: int, text: str, message_id: int) -> dict[str, Any]:
+    return {
+        "update_id": int(datetime.now(UTC).timestamp() * 1000) + int(message_id),
+        "message": {
+            "message_id": message_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": user_id, "is_bot": False, "username": f"user_{user_id}"},
+            "text": text,
+        },
+    }
+
+
+def _list_workflows(harness: E2EHarness, *, customer_id: str) -> list[dict[str, Any]]:
+    response = harness.client.post(
+        "/internal/intake/workflows/list",
+        json={"customer_id": customer_id, "include_disabled": True},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    workflows = payload.get("workflows") or []
+    return workflows if isinstance(workflows, list) else []
+
+
+def _first_sheet_row(write: dict[str, Any]) -> dict[str, Any]:
+    normalized = write.get("normalized_rows")
+    if isinstance(normalized, list) and normalized and isinstance(normalized[0], dict):
+        return dict(normalized[0])
+    args = write.get("arguments") if isinstance(write.get("arguments"), dict) else {}
+    headers = args.get("headers")
+    rows = args.get("rows")
+    if isinstance(headers, list) and isinstance(rows, list) and rows and isinstance(rows[0], list):
+        return dict(zip([str(item) for item in headers], rows[0], strict=False))
+    return {}
 
 
 @pytest.mark.asyncio
@@ -143,6 +214,162 @@ async def test_google_sheets_sink_resolves_single_tab_for_telegram_business_inta
     )
     assert written["тип услуги"] == "Мойка"
     assert written["время записи"] == "завтра 10:00"
+
+
+@pytest.mark.live_llm
+def test_live_llm_telegram_business_intake_upserts_partial_identity_then_final_row(
+    e2e_harness: E2EHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(intake_service_module, "_TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(intake_service_module, "_PENDING_RUN_POLL_SECONDS", 0.02)
+
+    owner_user_id = 321
+    owner_chat_id = 654
+    customer_id = f"telegram_{owner_user_id}"
+    business_connection_id = "bc_e2e_partial_identity"
+    lead_chat_id = 7001
+    lead_user_id = 9001
+    lead_username = "partial_lead_9001"
+
+    e2e_harness.client.app.state.telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": owner_chat_id,
+            "is_enabled": True,
+            "user": {"id": owner_user_id, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    assert (
+        e2e_harness.post_telegram(
+            body=_telegram_message(chat_id=owner_chat_id, user_id=owner_user_id, text="/fresh", message_id=100)
+        )
+        == 200
+    )
+    assert _wait_until(
+        lambda: any(
+            int(item.get("chat_id", 0)) == owner_chat_id
+            and "fresh chat context" in str(item.get("text", "")).lower()
+            for item in e2e_harness.telegram_client.sent_messages
+        ),
+        timeout_seconds=45.0,
+    )
+
+    owner_message_count = len(e2e_harness.telegram_client.sent_messages)
+    assert (
+        e2e_harness.post_telegram(
+            body=_telegram_message(
+                chat_id=owner_chat_id,
+                user_id=owner_user_id,
+                message_id=101,
+                text=(
+                    "Create a Telegram Business DM intake workflow named 'Live Partial Identity Intake'. "
+                    "Use the already connected Telegram Business account. "
+                    "The workflow handles car wash booking leads. Required fields are exactly: service, name, phone, time. "
+                    "Critical behavior: on the first inbound message from a new intake user, before all required fields are collected, "
+                    "record the backend-provided incoming_user_id, username, and conversation_id in Google Sheets by using "
+                    "sink_action=upsert_partial with those exact fields in sink_payload. Then ask for missing booking details. "
+                    "When the lead later provides service, name, phone, and time, save the final booking normally. "
+                    "Do not invent ids; use conversation.summary source identity fields. "
+                    "Save to Google Sheets with sink_type google_sheets_composio, toolkit googlesheets, "
+                    "spreadsheetId=sheet_partial_identity, sheetName=Bookings, and field_mapping: "
+                    "incoming_user_id -> Telegram ID, username -> Username, conversation_id -> Conversation ID, "
+                    "service -> Service, name -> Name, phone -> Phone, time -> Time. "
+                    "Prepare the exact configuration and wait for my confirmation before saving."
+                ),
+            )
+        )
+        == 200
+    )
+    assert _wait_until(
+        lambda: len(e2e_harness.telegram_client.sent_messages) > owner_message_count,
+        timeout_seconds=90.0,
+    )
+    assert _list_workflows(e2e_harness, customer_id=customer_id) == []
+    assert (
+        e2e_harness.post_telegram(
+            body=_telegram_message(
+                chat_id=owner_chat_id,
+                user_id=owner_user_id,
+                message_id=102,
+                text="Looks correct. Save and activate this workflow now exactly as proposed.",
+            )
+        )
+        == 200
+    )
+    assert _wait_until(
+        lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 1,
+        timeout_seconds=90.0,
+    )
+    workflow = _list_workflows(e2e_harness, customer_id=customer_id)[0]
+    assert workflow["name"] == "Live Partial Identity Intake"
+    assert workflow["channel"] == "telegram_business_dm"
+    assert workflow["provider"] == "telegram_bot_api"
+    assert workflow["enabled"] is True
+    assert workflow["source_config"] == {"business_connection_id": business_connection_id}
+
+    assert (
+        e2e_harness.post_telegram(
+            body=_business_message(
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                lead_user_id=lead_user_id,
+                username=lead_username,
+                message_id=1,
+                text="Hi, I want to book a wash.",
+            )
+        )
+        == 200
+    )
+    assert _wait_until(
+        lambda: len(getattr(e2e_harness.composio_service, "sheet_writes", [])) >= 1,
+        timeout_seconds=90.0,
+    )
+    first_write = _first_sheet_row(e2e_harness.composio_service.sheet_writes[0])
+    assert first_write["Telegram ID"] == str(lead_user_id)
+    assert first_write["Username"] == lead_username
+    assert first_write["Conversation ID"] == str(lead_chat_id)
+    bookings = e2e_harness.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        conversation_id=str(lead_chat_id),
+    )
+    assert bookings and bookings[0]["status"] == "active"
+
+    assert (
+        e2e_harness.post_telegram(
+            body=_business_message(
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                lead_user_id=lead_user_id,
+                username=lead_username,
+                message_id=2,
+                text="Express wash, name Alice, phone +79990000001, tomorrow 10am.",
+            )
+        )
+        == 200
+    )
+    assert _wait_until(
+        lambda: any(
+            str(item.get("status", "")).strip() == "completed"
+            for item in e2e_harness.list_bookings(
+                customer_id=customer_id,
+                workflow_id=workflow["workflow_id"],
+                conversation_id=str(lead_chat_id),
+            )
+        )
+        and len(getattr(e2e_harness.composio_service, "sheet_writes", [])) >= 2,
+        timeout_seconds=90.0,
+    )
+    second_write = _first_sheet_row(e2e_harness.composio_service.sheet_writes[-1])
+    assert second_write["Booking ID"] == first_write["Booking ID"]
+    assert second_write["Telegram ID"] == str(lead_user_id)
+    assert second_write["Username"] == lead_username
+    assert second_write["Service"]
+    assert second_write["Name"]
+    assert second_write["Phone"]
+    assert second_write["Time"]
 
 
 def test_google_sheets_sink_setup_rejects_ambiguous_multi_tab_target(tmp_path: Path) -> None:

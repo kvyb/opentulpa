@@ -154,6 +154,15 @@ def _normalize_optional_id(value: Any) -> str:
     return text
 
 
+def _incoming_user_id(conversation_summary: dict[str, Any]) -> str:
+    return str(
+        conversation_summary.get("incoming_user_id")
+        or conversation_summary.get("latest_inbound_sender_id")
+        or conversation_summary.get("latest_inbound_sender_user_id")
+        or ""
+    ).strip()
+
+
 def _clean_mapping(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -442,6 +451,7 @@ class IntakeWorkflowService:
             "latest_inbound_message_id": str(
                 conversation_summary.get("latest_inbound_message_id", "") or ""
             ).strip(),
+            "latest_inbound_sender_id": _incoming_user_id(conversation_summary),
             "latest_inbound_sender_username": str(
                 conversation_summary.get("latest_inbound_sender_username", "") or ""
             ).strip(),
@@ -478,6 +488,36 @@ class IntakeWorkflowService:
         log_event = getattr(runtime, "log_behavior_event", None)
         if callable(log_event):
             log_event(event=event, **fields)
+
+    @staticmethod
+    def _source_platform(workflow: dict[str, Any]) -> str:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        if channel == "telegram_business_dm" and provider == "telegram_bot_api":
+            return "telegram_business"
+        if channel == "instagram_dm" and provider == "composio":
+            return "instagram"
+        return channel or provider or "unknown"
+
+    def _enrich_conversation_summary(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        summary = dict(_safe_dict(conversation_summary))
+        incoming_user_id = _incoming_user_id(summary)
+        username = str(
+            summary.get("username")
+            or summary.get("latest_inbound_sender_username")
+            or ""
+        ).strip()
+        if incoming_user_id:
+            summary["incoming_user_id"] = incoming_user_id
+        if username:
+            summary["username"] = username
+        summary.setdefault("platform", self._source_platform(workflow))
+        return summary
 
     def _conversation_lock(self, *, workflow_id: str, conversation_id: str) -> asyncio.Lock:
         key = f"{workflow_id}:{conversation_id}"
@@ -1689,6 +1729,8 @@ class IntakeWorkflowService:
             "workflow_id": str(workflow.get("workflow_id", "") or "sample_workflow_id"),
             "conversation_id": "sample_conversation_id",
             "customer_id": str(workflow.get("customer_id", "") or "sample_customer_id"),
+            "incoming_user_id": "sample_incoming_user_id",
+            "latest_inbound_sender_id": "sample_incoming_user_id",
         }
         static_arguments = _safe_dict(sink_config.get("static_arguments"))
         field_mapping = _clean_mapping(sink_config.get("field_mapping"))
@@ -2722,7 +2764,10 @@ class IntakeWorkflowService:
         errors: list[str] = []
         result_items: list[dict[str, Any]] = []
         for item in items:
-            conversation_summary = _safe_dict(item)
+            conversation_summary = self._enrich_conversation_summary(
+                workflow=workflow,
+                conversation_summary=_safe_dict(item),
+            )
             conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip()
             if not conversation_id:
                 continue
@@ -2740,6 +2785,10 @@ class IntakeWorkflowService:
                         workflow=workflow,
                         conversation_id=conversation_id,
                         fallback=conversation_summary,
+                    )
+                    conversation_summary = self._enrich_conversation_summary(
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
                     )
                     if refresh_error:
                         errors.append(f"{conversation_id}: {refresh_error}")
@@ -2822,7 +2871,10 @@ class IntakeWorkflowService:
                     )
                     continue
 
-                cursor_summary = detailed_summary or conversation_summary
+                cursor_summary = self._enrich_conversation_summary(
+                    workflow=workflow,
+                    conversation_summary=detailed_summary or conversation_summary,
+                )
                 latest_inbound_id = str(cursor_summary.get("latest_inbound_message_id", "") or "").strip()
                 latest_inbound_time = str(
                     cursor_summary.get("latest_inbound_message_created_time", "") or ""
@@ -3307,6 +3359,8 @@ class IntakeWorkflowService:
             missing_fields=_unique_string_list(decision.get("missing_fields")),
             extracted_fields=_safe_dict(decision.get("extracted_fields")),
             save_payload=_safe_dict(decision.get("save_payload")),
+            sink_action=str(decision.get("sink_action", "") or "").strip().lower(),
+            sink_payload=_safe_dict(decision.get("sink_payload")),
             reason=str(decision.get("reason", "") or "").strip(),
         )
         return decision, None
@@ -3326,6 +3380,8 @@ class IntakeWorkflowService:
         ready_to_save = bool(decision.get("ready_to_save"))
         reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
         reply_text = str(decision.get("reply_text", "") or "").strip()
+        sink_action = str(decision.get("sink_action", "none") or "none").strip().lower()
+        sink_payload = _safe_dict(decision.get("sink_payload"))
         self._emit_observability(
             event="intake.apply.start",
             workflow=workflow,
@@ -3333,7 +3389,23 @@ class IntakeWorkflowService:
             booking_action=booking_action,
             reply_action=reply_action,
             ready_to_save=ready_to_save,
+            sink_action=sink_action,
         )
+        if sink_action not in {"none", "upsert_partial"}:
+            error = f"unsupported sink_action={sink_action}"
+            self._emit_observability(
+                event="intake.apply.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                phase="decision_validation",
+                error=error,
+                sink_action=sink_action,
+            )
+            return {}, error, self._build_recovery_feedback(
+                phase="decision_validation",
+                error=error,
+                decision=decision,
+            )
         if booking_action not in {
             "ignore",
             "update_active",
@@ -3348,6 +3420,22 @@ class IntakeWorkflowService:
                 phase="decision_validation",
                 error=error,
                 booking_action=booking_action,
+            )
+            return {}, error, self._build_recovery_feedback(
+                phase="decision_validation",
+                error=error,
+                decision=decision,
+            )
+        if booking_action == "ignore" and sink_action != "none":
+            error = "sink_action requires an active booking action"
+            self._emit_observability(
+                event="intake.apply.error",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                phase="decision_validation",
+                error=error,
+                booking_action=booking_action,
+                sink_action=sink_action,
             )
             return {}, error, self._build_recovery_feedback(
                 phase="decision_validation",
@@ -3472,6 +3560,8 @@ class IntakeWorkflowService:
 
         extracted_fields = dict(_safe_dict(target_booking.get("extracted_fields")))
         extracted_fields.update(_safe_dict(decision.get("extracted_fields")))
+        if not ready_to_save and sink_action == "upsert_partial":
+            extracted_fields.update(sink_payload)
         conversation_summary_text = str(decision.get("conversation_summary", "") or "").strip()
         if not conversation_summary_text:
             conversation_summary_text = str(
@@ -3578,6 +3668,7 @@ class IntakeWorkflowService:
                 sink_result, sink_error = self._write_to_sink(
                     workflow=workflow,
                     booking=target_booking,
+                    conversation_summary=conversation_summary,
                     payload=save_payload,
                     sink_arguments=sink_arguments,
                 )
@@ -3679,6 +3770,67 @@ class IntakeWorkflowService:
             target_booking["sink_write_status"] = sink_status
             target_booking["sink_record_ref"] = sink_ref
             target_booking["updated_at"] = _utc_now_iso()
+            if sink_action == "upsert_partial" and sink_payload:
+                sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
+                if sink_type not in {"google_sheets_composio", "generic_composio_write"}:
+                    error = "sink_action=upsert_partial requires a Composio upsert sink"
+                    self._emit_observability(
+                        event="intake.apply.error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        phase="decision_validation",
+                        error=error,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        sink_type=sink_type,
+                    )
+                    return {}, error, self._build_recovery_feedback(
+                        phase="decision_validation",
+                        error=error,
+                        decision=decision,
+                    )
+                self._emit_observability(
+                    event="intake.sink_write.partial_start",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                    payload=sink_payload,
+                )
+                sink_result, sink_error = self._write_to_sink(
+                    workflow=workflow,
+                    booking=target_booking,
+                    conversation_summary=conversation_summary,
+                    payload=sink_payload,
+                    sink_arguments=sink_arguments,
+                )
+                if sink_error is not None:
+                    target_booking["sink_write_status"] = "failed"
+                    self._upsert_booking(target_booking)
+                    self._emit_observability(
+                        event="intake.sink_write.partial_error",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                        error=sink_error,
+                    )
+                    return {}, sink_error, self._build_recovery_feedback(
+                        phase="sink_execution",
+                        error=sink_error,
+                        decision=decision,
+                    )
+                sink_status = "partial_succeeded"
+                sink_ref = _safe_dict(sink_result)
+                target_booking["sink_write_status"] = sink_status
+                target_booking["sink_record_ref"] = sink_ref
+                self._emit_observability(
+                    event="intake.sink_write.partial_ok",
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                    sink_type=str(workflow.get("sink_type", "") or "").strip(),
+                    sink_result=sink_ref,
+                )
             self._upsert_booking(target_booking)
 
         if reply_action == "send_reply":
@@ -3768,6 +3920,8 @@ class IntakeWorkflowService:
                 "missing_fields": _unique_string_list(decision.get("missing_fields")),
                 "extracted_fields": _safe_dict(decision.get("extracted_fields")),
                 "save_payload": _safe_dict(decision.get("save_payload")),
+                "sink_action": str(decision.get("sink_action", "") or "").strip().lower(),
+                "sink_payload": _safe_dict(decision.get("sink_payload")),
                 "sink_arguments": _safe_dict(decision.get("sink_arguments")),
             },
         }
@@ -3872,6 +4026,7 @@ class IntakeWorkflowService:
         *,
         workflow: dict[str, Any],
         booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
@@ -3880,12 +4035,14 @@ class IntakeWorkflowService:
             return self._write_to_local_csv(
                 workflow=workflow,
                 booking=booking,
+                conversation_summary=conversation_summary,
                 payload=payload,
             )
         if sink_type in {"google_sheets_composio", "generic_composio_write"}:
             return self._write_to_composio_sink(
                 workflow=workflow,
                 booking=booking,
+                conversation_summary=conversation_summary,
                 payload=payload,
                 sink_arguments=sink_arguments,
             )
@@ -3896,6 +4053,7 @@ class IntakeWorkflowService:
         *,
         workflow: dict[str, Any],
         booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
         payload: dict[str, Any],
     ) -> tuple[dict[str, Any], str | None]:
         sink_config = _safe_dict(workflow.get("sink_config"))
@@ -3954,6 +4112,7 @@ class IntakeWorkflowService:
         *,
         workflow: dict[str, Any],
         booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
@@ -3998,6 +4157,8 @@ class IntakeWorkflowService:
             "workflow_id": str(workflow["workflow_id"]),
             "conversation_id": str(booking["conversation_id"]),
             "customer_id": str(workflow["customer_id"]),
+            "incoming_user_id": _incoming_user_id(conversation_summary),
+            "latest_inbound_sender_id": _incoming_user_id(conversation_summary),
         }
         toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
         tool_slug = self._resolve_composio_sink_tool_slug(
