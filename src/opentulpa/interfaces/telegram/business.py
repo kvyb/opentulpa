@@ -440,6 +440,7 @@ class TelegramBusinessService:
                     "latest_inbound_message_id": str((latest_inbound or {}).get("message_id", "") or ""),
                     "latest_inbound_message_created_time": str((latest_inbound or {}).get("date_iso", "") or ""),
                     "latest_inbound_message_text_preview": str((latest_inbound or {}).get("text", "") or "")[:280],
+                    "latest_inbound_sender_id": str((latest_inbound or {}).get("from_user_id", "") or ""),
                     "latest_inbound_sender_username": str((latest_inbound or {}).get("from_username", "") or ""),
                     "latest_outbound_message_id": str((latest_outbound or {}).get("message_id", "") or ""),
                     "latest_outbound_message_created_time": str((latest_outbound or {}).get("date_iso", "") or ""),

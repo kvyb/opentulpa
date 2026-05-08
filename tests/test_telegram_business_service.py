@@ -43,6 +43,7 @@ def test_telegram_business_service_persists_connection_and_message_state(tmp_pat
     )
     assert conversations["items"][0]["conversation_id"] == "555"
     assert conversations["items"][0]["latest_inbound_message_id"] == "10"
+    assert conversations["items"][0]["latest_inbound_sender_id"] == "999"
 
 
 def test_telegram_business_service_can_bind_connection_to_configured_owner(

@@ -3757,6 +3757,198 @@ async def test_google_sheets_sink_auto_resolves_single_unknown_sheet_name_at_set
     assert written["Телефон"] == "+79990000001"
 
 
+@pytest.mark.asyncio
+async def test_telegram_business_intake_can_upsert_partial_google_sheets_row(
+    tmp_path: Path,
+) -> None:
+    customer_id = "telegram_123"
+    business_connection_id = "bc_partial"
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.96,
+                "conversation_summary": "Customer opened a booking.",
+                "extracted_fields": {"service": "wash"},
+                "missing_fields": ["name", "phone", "time"],
+                "reply_action": "send_reply",
+                "reply_text": "What name, phone, and time should I use?",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "sink_action": "upsert_partial",
+                "sink_payload": {
+                    "incoming_user_id": "999",
+                    "service": "wash",
+                },
+                "reason": "Workflow asks to record source identity on first contact.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.98,
+                "conversation_summary": "Customer provided all booking details.",
+                "extracted_fields": {
+                    "name": "Alice",
+                    "phone": "+79990000001",
+                    "time": "tomorrow 10am",
+                },
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Booked for tomorrow at 10am.",
+                "ready_to_save": True,
+                "booking_action": "update_active",
+                "save_payload": {
+                    "name": "Alice",
+                    "phone": "+79990000001",
+                    "time": "tomorrow 10am",
+                },
+                "sink_action": "none",
+                "sink_payload": {},
+                "reason": "All required fields are present.",
+            },
+        ]
+    )
+    composio = _FakeComposio(
+        {
+            "conversation_id": "unused",
+            "recipient_id": "unused",
+            "latest_inbound_message_id": "unused",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        },
+        _instagram_conversation(
+            conversation_id="unused",
+            latest_message_id="unused",
+            latest_message_text="unused",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": business_connection_id,
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    workflow = service.upsert_workflow(
+        customer_id=customer_id,
+        name="Partial Row Intake",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": business_connection_id},
+        intent_description="Collect booking details and record lead identity immediately.",
+        required_fields=["name", "phone", "time"],
+        assistant_instructions="Record incoming_user_id and username on first contact before all fields are collected.",
+        sink_type="google_sheets_composio",
+        sink_config={
+            "toolkit": "googlesheets",
+            "field_mapping": {
+                "incoming_user_id": "Telegram ID",
+                "username": "Username",
+                "service": "Service",
+                "name": "Name",
+                "phone": "Phone",
+                "time": "Time",
+            },
+            "static_arguments": {
+                "spreadsheetId": "sheet_123",
+                "sheetName": "Bookings",
+            },
+        },
+    )
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=555,
+            user_id=999,
+            username="alice",
+            message_id=10,
+            text="Hi, I need a wash.",
+            date=int(datetime.now(UTC).timestamp()),
+        ),
+    )
+
+    first = await service.run_workflow(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert first["ok"] is True
+    assert len(composio.execute_calls) == 1
+    first_write = dict(
+        zip(
+            composio.execute_calls[0]["arguments"]["headers"],
+            composio.execute_calls[0]["arguments"]["rows"][0],
+            strict=False,
+        )
+    )
+    assert first_write["Telegram ID"] == "999"
+    assert first_write["Username"] == "alice"
+    assert first_write["Service"] == "wash"
+    bookings = service.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    )
+    assert bookings[0]["status"] == "active"
+    assert bookings[0]["sink_write_status"] == "partial_succeeded"
+    assert bookings[0]["extracted_fields"]["incoming_user_id"] == "999"
+
+    telegram_business.upsert_message(
+        business_connection_id=business_connection_id,
+        customer_id=customer_id,
+        message=_telegram_business_inbound(
+            business_connection_id=business_connection_id,
+            chat_id=555,
+            user_id=999,
+            username="alice",
+            message_id=11,
+            text="Alice, +79990000001, tomorrow 10am.",
+            date=int(datetime.now(UTC).timestamp()),
+        ),
+    )
+
+    second = await service.run_workflow(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert second["ok"] is True
+    assert len(composio.execute_calls) == 2
+    second_write = dict(
+        zip(
+            composio.execute_calls[1]["arguments"]["headers"],
+            composio.execute_calls[1]["arguments"]["rows"][0],
+            strict=False,
+        )
+    )
+    assert second_write["Booking ID"] == first_write["Booking ID"]
+    assert second_write["Telegram ID"] == "999"
+    assert second_write["Name"] == "Alice"
+    assert second_write["Phone"] == "+79990000001"
+    assert second_write["Time"] == "tomorrow 10am"
+    bookings = service.list_bookings(
+        customer_id=customer_id,
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    )
+    assert bookings[0]["status"] == "completed"
+    assert bookings[0]["sink_write_status"] == "succeeded"
+
+
 def test_google_sheets_sink_requires_explicit_sheet_name_when_target_has_multiple_tabs(
     tmp_path: Path,
 ) -> None:
