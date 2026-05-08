@@ -163,6 +163,14 @@ def _incoming_user_id(conversation_summary: dict[str, Any]) -> str:
     ).strip()
 
 
+def _incoming_username(conversation_summary: dict[str, Any]) -> str:
+    return str(
+        conversation_summary.get("username")
+        or conversation_summary.get("latest_inbound_sender_username")
+        or ""
+    ).strip()
+
+
 def _clean_mapping(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -507,11 +515,7 @@ class IntakeWorkflowService:
     ) -> dict[str, Any]:
         summary = dict(_safe_dict(conversation_summary))
         incoming_user_id = _incoming_user_id(summary)
-        username = str(
-            summary.get("username")
-            or summary.get("latest_inbound_sender_username")
-            or ""
-        ).strip()
+        username = _incoming_username(summary)
         if incoming_user_id:
             summary["incoming_user_id"] = incoming_user_id
         if username:
@@ -4159,6 +4163,8 @@ class IntakeWorkflowService:
             "customer_id": str(workflow["customer_id"]),
             "incoming_user_id": _incoming_user_id(conversation_summary),
             "latest_inbound_sender_id": _incoming_user_id(conversation_summary),
+            "username": _incoming_username(conversation_summary),
+            "latest_inbound_sender_username": _incoming_username(conversation_summary),
         }
         toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
         tool_slug = self._resolve_composio_sink_tool_slug(

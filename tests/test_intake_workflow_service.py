@@ -3780,7 +3780,6 @@ async def test_telegram_business_intake_can_upsert_partial_google_sheets_row(
                 "sink_action": "upsert_partial",
                 "sink_payload": {
                     "incoming_user_id": "999",
-                    "username": "alice",
                     "service": "wash",
                 },
                 "reason": "Workflow asks to record source identity on first contact.",
