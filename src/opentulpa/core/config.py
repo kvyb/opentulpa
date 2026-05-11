@@ -313,6 +313,18 @@ class Settings(BaseSettings):
         default="https://api.browserbase.com",
         description="Browserbase API base URL.",
     )
+    browserbase_proxy_country_code: str | None = Field(
+        default=None,
+        description="Optional Browserbase managed proxy country code for browser sessions.",
+    )
+    browserbase_solve_captchas: bool | None = Field(
+        default=None,
+        description="Optional Browserbase CAPTCHA solving flag for browser sessions.",
+    )
+    browserbase_advanced_stealth: bool | None = Field(
+        default=None,
+        description="Optional Browserbase advanced stealth flag for browser sessions.",
+    )
     capsolver_api_key: str | None = Field(
         default=None,
         description=(

@@ -84,6 +84,9 @@ async def test_browserbase_client_creates_context_session_and_live_url() -> None
             context_id=context_id,
             customer_id="cust_1",
             profile_id="github",
+            proxy_country_code="US",
+            solve_captchas=True,
+            advanced_stealth=True,
         )
         live = await client.get_live_urls(session.id)
 
@@ -96,6 +99,11 @@ async def test_browserbase_client_creates_context_session_and_live_url() -> None
         "id": "ctx_123",
         "persist": True,
     }
+    assert requests[1][2]["browserSettings"]["solveCaptchas"] is True
+    assert requests[1][2]["browserSettings"]["advancedStealth"] is True
+    assert requests[1][2]["proxies"] == [
+        {"type": "browserbase", "geolocation": {"country": "us"}}
+    ]
     assert requests[1][2]["userMetadata"]["opentulpaProfileId"] == "github"
 
 
@@ -114,6 +122,9 @@ async def test_browserbase_client_uses_sdk_client_when_available() -> None:
         context_id=context_id,
         customer_id="cust_1",
         profile_id="github",
+        proxy_country_code="US",
+        solve_captchas=True,
+        advanced_stealth=True,
     )
     live = await client.get_live_urls(session.id)
 
@@ -128,6 +139,11 @@ async def test_browserbase_client_uses_sdk_client_when_available() -> None:
         "id": "ctx_sdk",
         "persist": True,
     }
+    assert sdk_client.sessions.created[0]["browser_settings"]["solve_captchas"] is True
+    assert sdk_client.sessions.created[0]["browser_settings"]["advanced_stealth"] is True
+    assert sdk_client.sessions.created[0]["proxies"] == [
+        {"type": "browserbase", "geolocation": {"country": "us"}}
+    ]
     assert sdk_client.sessions.created[0]["keep_alive"] is True
     assert sdk_client.sessions.created[0]["user_metadata"]["opentulpaProfileId"] == "github"
     assert sdk_client.sessions.debugged == ["ses_sdk"]

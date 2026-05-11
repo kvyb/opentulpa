@@ -97,6 +97,9 @@ class BrowserUseLocalManager:
         browserbase_api_key: str | None = None,
         browserbase_project_id: str | None = None,
         browserbase_base_url: str = "https://api.browserbase.com",
+        browserbase_proxy_country_code: str | None = None,
+        browserbase_solve_captchas: bool | None = None,
+        browserbase_advanced_stealth: bool | None = None,
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")
@@ -110,6 +113,9 @@ class BrowserUseLocalManager:
         self._browserbase_api_key = str(browserbase_api_key or "").strip()
         self._browserbase_project_id = str(browserbase_project_id or "").strip()
         self._browserbase_base_url = str(browserbase_base_url or "").strip().rstrip("/") or "https://api.browserbase.com"
+        self._browserbase_proxy_country_code = str(browserbase_proxy_country_code or "").strip()
+        self._browserbase_solve_captchas = browserbase_solve_captchas
+        self._browserbase_advanced_stealth = browserbase_advanced_stealth
         self._browserbase_client: Any | None = None
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
@@ -1063,6 +1069,9 @@ class BrowserUseLocalManager:
             profile_id=session_id,
             persist=True,
             keep_alive=True,
+            proxy_country_code=self._browserbase_proxy_country_code or None,
+            solve_captchas=self._browserbase_solve_captchas,
+            advanced_stealth=self._browserbase_advanced_stealth,
         )
         live_url = None
         debugger_url = None

@@ -142,6 +142,18 @@ cookies and localStorage. Returned task payloads include a `live_url` when
 Browserbase exposes one, which can be sent to the owner for login, MFA, or other
 interactive account steps.
 
+Non-secret Browserbase browser settings live in `opentulpa.config.yaml`:
+
+```yaml
+browserbase_proxy_country_code: us
+browserbase_solve_captchas: true
+browserbase_advanced_stealth: true
+```
+
+Use a stable country matching the user/account. For logged-in workflows, prefer
+one persistent context and stable proxy region over rotating identity between
+runs.
+
 ## Useful startup commands
 
 | Command | Meaning |

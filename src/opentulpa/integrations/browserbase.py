@@ -74,10 +74,14 @@ class BrowserbaseClient:
         profile_id: str,
         persist: bool = True,
         keep_alive: bool = True,
+        proxy_country_code: str | None = None,
+        solve_captchas: bool | None = None,
+        advanced_stealth: bool | None = None,
     ) -> BrowserbaseSession:
         safe_context_id = str(context_id or "").strip()
         if not safe_context_id:
             raise BrowserbaseError("Browserbase session requires a context id")
+        safe_proxy_country_code = str(proxy_country_code or "").strip().lower()
         sdk_client = self._get_sdk_client()
         if sdk_client is not None:
             return await self._create_session_with_sdk(
@@ -87,6 +91,9 @@ class BrowserbaseClient:
                 profile_id=profile_id,
                 persist=persist,
                 keep_alive=keep_alive,
+                proxy_country_code=safe_proxy_country_code or None,
+                solve_captchas=solve_captchas,
+                advanced_stealth=advanced_stealth,
             )
         body: dict[str, Any] = {
             "browserSettings": {
@@ -100,6 +107,13 @@ class BrowserbaseClient:
         }
         if self._project_id:
             body["projectId"] = self._project_id
+        self._apply_session_options(
+            body,
+            sdk_style=False,
+            proxy_country_code=safe_proxy_country_code or None,
+            solve_captchas=solve_captchas,
+            advanced_stealth=advanced_stealth,
+        )
         payload = await self._request("POST", "/v1/sessions", json=body)
         session_id = str(payload.get("id") or "").strip()
         connect_url = str(payload.get("connectUrl") or payload.get("connect_url") or "").strip()
@@ -132,6 +146,9 @@ class BrowserbaseClient:
         profile_id: str,
         persist: bool,
         keep_alive: bool,
+        proxy_country_code: str | None,
+        solve_captchas: bool | None,
+        advanced_stealth: bool | None,
     ) -> BrowserbaseSession:
         kwargs: dict[str, Any] = {
             "browser_settings": {"context": {"id": context_id, "persist": bool(persist)}},
@@ -143,6 +160,13 @@ class BrowserbaseClient:
         }
         if self._project_id:
             kwargs["project_id"] = self._project_id
+        self._apply_session_options(
+            kwargs,
+            sdk_style=True,
+            proxy_country_code=proxy_country_code,
+            solve_captchas=solve_captchas,
+            advanced_stealth=advanced_stealth,
+        )
         payload = await sdk_client.sessions.create(**kwargs)
         session_id = self._response_str(payload, "id")
         connect_url = self._response_str(payload, "connect_url") or self._response_str(
@@ -161,6 +185,33 @@ class BrowserbaseClient:
             context_id=response_context_id,
             recording_url=f"https://browserbase.com/sessions/{session_id}",
         )
+
+    @staticmethod
+    def _apply_session_options(
+        body: dict[str, Any],
+        *,
+        sdk_style: bool,
+        proxy_country_code: str | None,
+        solve_captchas: bool | None,
+        advanced_stealth: bool | None,
+    ) -> None:
+        settings_key = "browser_settings" if sdk_style else "browserSettings"
+        browser_settings = body.get(settings_key)
+        if not isinstance(browser_settings, dict):
+            raise BrowserbaseError("Browserbase session browser settings must be an object")
+        if solve_captchas is not None:
+            browser_settings["solve_captchas" if sdk_style else "solveCaptchas"] = bool(solve_captchas)
+        if advanced_stealth is not None:
+            browser_settings["advanced_stealth" if sdk_style else "advancedStealth"] = bool(
+                advanced_stealth
+            )
+        if proxy_country_code:
+            body["proxies"] = [
+                {
+                    "type": "browserbase",
+                    "geolocation": {"country": proxy_country_code},
+                }
+            ]
 
     def _get_sdk_client(self) -> Any | None:
         if self._http_client is not None:

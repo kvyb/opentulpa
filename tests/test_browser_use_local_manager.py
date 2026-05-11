@@ -58,6 +58,9 @@ class _FakeBrowserbaseClient:
         profile_id: str,
         persist: bool = True,
         keep_alive: bool = True,
+        proxy_country_code: str | None = None,
+        solve_captchas: bool | None = None,
+        advanced_stealth: bool | None = None,
     ) -> Any:
         self.created_sessions.append(
             {
@@ -66,6 +69,9 @@ class _FakeBrowserbaseClient:
                 "profile_id": profile_id,
                 "persist": persist,
                 "keep_alive": keep_alive,
+                "proxy_country_code": proxy_country_code,
+                "solve_captchas": solve_captchas,
+                "advanced_stealth": advanced_stealth,
             }
         )
 
@@ -238,6 +244,9 @@ async def test_local_manager_uses_browserbase_context_and_live_url(
         user_data_dir=tmp_path,
         browserbase_api_key="bb-key",
         browserbase_project_id="proj_123",
+        browserbase_proxy_country_code="us",
+        browserbase_solve_captchas=True,
+        browserbase_advanced_stealth=True,
     )
     fake_browserbase = _FakeBrowserbaseClient()
     monkeypatch.setattr(manager, "preflight", _no_preflight)
@@ -272,6 +281,9 @@ async def test_local_manager_uses_browserbase_context_and_live_url(
     assert fake_browserbase.created_contexts == 1
     assert fake_browserbase.created_sessions[0]["persist"] is True
     assert fake_browserbase.created_sessions[0]["customer_id"] == "cust_1"
+    assert fake_browserbase.created_sessions[0]["proxy_country_code"] == "us"
+    assert fake_browserbase.created_sessions[0]["solve_captchas"] is True
+    assert fake_browserbase.created_sessions[0]["advanced_stealth"] is True
     session = manager._tasks[task_id].browser_session
     assert session.kwargs["cdp_url"] == "wss://connect.browserbase.test/session"
 
