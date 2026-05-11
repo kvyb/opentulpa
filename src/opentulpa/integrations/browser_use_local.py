@@ -1200,6 +1200,7 @@ class BrowserUseLocalManager:
         cloud_browser_session_id: str | None = None,
         live_url: str | None = None,
         recording_url: str | None = None,
+        clear_live_session: bool = False,
     ) -> None:
         if self._user_data_dir is None:
             return
@@ -1232,6 +1233,9 @@ class BrowserUseLocalManager:
             metadata["liveUrl"] = live_url
         if recording_url:
             metadata["recordingUrl"] = recording_url
+        if clear_live_session:
+            metadata.pop("browserUseBrowserSessionId", None)
+            metadata.pop("liveUrl", None)
         (profile_dir / _PROFILE_METADATA_FILE).write_text(
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
@@ -1437,6 +1441,7 @@ class BrowserUseLocalManager:
                 customer_id=session_state.customer_id,
                 session_id=session_state.session_id,
                 status="idle",
+                clear_live_session=True,
             )
             asyncio.create_task(self._close_session(session_state.session))
 
@@ -1483,6 +1488,7 @@ class BrowserUseLocalManager:
             customer_id=safe_customer,
             session_id=safe_session,
             status="idle",
+            clear_live_session=True,
         )
         return session_state.session if session_state is not None else None
 

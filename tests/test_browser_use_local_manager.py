@@ -238,6 +238,7 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
         session_id="github",
         customer_id="cust_1",
     )
+    assert created["liveUrl"] == "https://browser-use.com/live/ses_123"
     task_id = str(created["id"])
     for _ in range(50):
         payload = await manager.get_task(task_id, customer_id="cust_1")
@@ -249,10 +250,10 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
 
     assert payload is not None
     assert payload["backend"] == "browser-use-cloud"
-    assert payload["liveUrl"] == "https://browser-use.com/live/ses_123"
+    assert payload["liveUrl"] is None
     assert payload["recordingUrl"] == "https://browser-use.com/sessions/ses_123"
     assert payload["browserUseProfileId"] == "prof_123"
-    assert payload["browserUseBrowserSessionId"] == "ses_123"
+    assert payload["browserUseBrowserSessionId"] is None
     assert fake_cloud.created_profiles == [{"name": "opentulpa-cust_1-github"}]
     assert fake_cloud.created_sessions == [{"profile_id": "prof_123"}]
     session = manager._tasks[task_id].browser_session
@@ -263,6 +264,11 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
         await asyncio.sleep(0.01)
     assert fake_cloud.stopped_sessions == ["ses_123"]
     assert manager._session_key("cust_1", "github") not in manager._sessions
+    after_close = await manager.get_task(task_id, customer_id="cust_1")
+    assert after_close is not None
+    assert after_close["liveUrl"] is None
+    assert after_close["browserUseBrowserSessionId"] is None
+    assert after_close["browserUseProfileId"] == "prof_123"
 
     second = await manager.start_task(
         task="Continue after login",
