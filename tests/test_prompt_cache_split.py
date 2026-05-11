@@ -110,6 +110,20 @@ def test_prompt_cache_profile_openai_is_automatic() -> None:
     assert profile["supports_breakpoints"] is False
 
 
+def test_prompt_cache_profile_zai_glm_is_automatic() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+    profile = rt.prompt_cache_profile()
+    assert profile["strategy"] == "automatic"
+    assert profile["supports_top_level"] is False
+    assert profile["supports_breakpoints"] is False
+
+
 def test_prepare_messages_for_prompt_cache_wraps_stable_system_message_for_gemini_by_default() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",

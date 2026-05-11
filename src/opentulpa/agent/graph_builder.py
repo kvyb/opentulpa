@@ -257,6 +257,10 @@ def _prompt_overhead_tokens(messages: list[AnyMessage]) -> int:
     )
 
 
+def _message_tokens(messages: list[AnyMessage]) -> int:
+    return sum(max(0, _approx_tokens(_content_to_text(getattr(msg, "content", "")))) for msg in messages)
+
+
 def _select_optional_prompt_entries(
     entries: list[dict[str, str]],
     *,
@@ -855,7 +859,7 @@ def build_runtime_graph(runtime: Any):
                     ),
                 )
                 if directive_entry is not None:
-                    stable_entries.append(directive_entry)
+                    late_entries.append(directive_entry)
             if thread_rollup:
                 rollup_text = _trim_text_to_token_budget(
                     thread_rollup,
@@ -1179,13 +1183,18 @@ def build_runtime_graph(runtime: Any):
                 cache_profile = cache_profile_fn()
             except Exception:
                 cache_profile = {}
-        stable_prefix_count = len(prefix_messages) + len(older_history_messages) + len(frozen_late_messages)
+        stable_prefix_count = len(prefix_messages)
         actual_history_messages = [*older_history_messages, *latest_turn_messages]
         raw_chat_history_count = sum(
             1 for msg in actual_history_messages if isinstance(msg, (HumanMessage, AIMessage))
         )
         raw_tool_history_count = sum(1 for msg in actual_history_messages if isinstance(msg, ToolMessage))
         protected_history_count = len(context_engineer._protected_suffix_indices(actual_history_messages))
+        stable_prefix_tokens = _message_tokens(prefix_messages)
+        frozen_late_tokens = _message_tokens(frozen_late_messages)
+        dynamic_late_tokens = _message_tokens(dynamic_late_messages)
+        older_history_tokens = _message_tokens(older_history_messages)
+        latest_turn_tokens = _message_tokens(latest_turn_messages)
         model_messages: list[AnyMessage] = [
             *prefix_messages,
             *older_history_messages,
@@ -1210,6 +1219,11 @@ def build_runtime_graph(runtime: Any):
             prompt_cache_breakpoints=bool(cache_profile.get("supports_breakpoints", False)),
             prompt_cache_top_level=bool(cache_profile.get("supports_top_level", False)),
             stable_prefix_count=stable_prefix_count,
+            stable_prefix_tokens=stable_prefix_tokens,
+            frozen_late_tokens=frozen_late_tokens,
+            dynamic_late_tokens=dynamic_late_tokens,
+            older_history_tokens=older_history_tokens,
+            latest_turn_tokens=latest_turn_tokens,
             turn_mode=turn_mode,
         )
         model_with_tools = runtime.model_with_tools_for_turn_mode(turn_mode)
@@ -1228,6 +1242,11 @@ def build_runtime_graph(runtime: Any):
                 ),
                 "prompt_sections": prompt_section_names,
                 "stable_prefix_count": stable_prefix_count,
+                "stable_prefix_tokens": stable_prefix_tokens,
+                "frozen_late_tokens": frozen_late_tokens,
+                "dynamic_late_tokens": dynamic_late_tokens,
+                "older_history_tokens": older_history_tokens,
+                "latest_turn_tokens": latest_turn_tokens,
                 "prompt_overhead_tokens": prompt_overhead_tokens,
                 "history_message_count": len(actual_history_messages),
                 "raw_chat_history_count": raw_chat_history_count,

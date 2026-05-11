@@ -774,7 +774,9 @@ def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:
     anth = runtime.prompt_cache_profile(model_name="anthropic/claude-sonnet-4.6")
     gemini = runtime.prompt_cache_profile(model_name="google/gemini-3-flash-preview")
     auto = runtime.prompt_cache_profile(model_name="openai/gpt-4.1")
+    zai = runtime.prompt_cache_profile(model_name="z-ai/glm-5.1")
 
     assert anth["strategy"] == "top_level"
     assert gemini["strategy"] == "breakpoint"
     assert auto["strategy"] == "automatic"
+    assert zai["strategy"] == "automatic"
