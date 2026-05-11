@@ -97,7 +97,7 @@ class BrowserUseLocalManager:
         capsolver_api_key: str | None = None,
         browser_use_api_key: str | None = None,
         browser_use_cloud_proxy_country_code: str | None = "us",
-        browser_use_cloud_timeout_minutes: int = 240,
+        browser_use_cloud_timeout_minutes: int = 15,
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")

@@ -1052,7 +1052,7 @@ class OpenTulpaLangGraphRuntime:
         capsolver_api_key: str | None = None,
         browser_use_api_key: str | None = None,
         browser_use_cloud_proxy_country_code: str | None = "us",
-        browser_use_cloud_timeout_minutes: int = 240,
+        browser_use_cloud_timeout_minutes: int = 15,
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
         langfuse_tracer: Any | None = None,

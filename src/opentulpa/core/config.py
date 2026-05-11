@@ -310,7 +310,7 @@ class Settings(BaseSettings):
         description="Browser Use Cloud residential proxy country code for browser sessions.",
     )
     browser_use_cloud_timeout_minutes: int = Field(
-        default=240,
+        default=15,
         ge=1,
         le=240,
         description="Browser Use Cloud browser session timeout in minutes.",

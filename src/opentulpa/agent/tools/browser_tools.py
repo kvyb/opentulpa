@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -286,12 +285,6 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
 
             if datetime.now(UTC).timestamp() >= deadline:
                 latest = _compact_browser_use_task_view(task_data)
-                with suppress(Exception):
-                    await manager.control_task(
-                        task_id=task_id,
-                        action="stop_task_and_session",
-                        customer_id=customer_id,
-                    )
                 latest.update(
                     {
                         "task_id": task_id,
@@ -299,9 +292,10 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                         "status": status or "started",
                         "timed_out": True,
                         "message": (
-                            "Browser task timed out and was stopped. "
-                            "If live_url is present, share it with the owner or retry with "
-                            "the same session_id after the page is ready."
+                            "Browser task exceeded the reply wait timeout and was left running. "
+                            "Do not start a fresh browser for this workflow. Use browser_use_task_get "
+                            "or browser_use_screenshot with this task_id, or continue with "
+                            "browser_use_run using the same session_id after the page is ready."
                         ),
                     }
                 )

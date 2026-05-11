@@ -27,7 +27,7 @@ class BrowserUseCloudClient:
         *,
         api_key: str,
         proxy_country_code: str | None = "us",
-        browser_timeout_minutes: int = 240,
+        browser_timeout_minutes: int = 15,
         sdk_client: Any | None = None,
     ) -> None:
         self._api_key = str(api_key or "").strip()

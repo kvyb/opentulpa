@@ -302,7 +302,7 @@ async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> No
 
 
 @pytest.mark.asyncio
-async def test_browser_use_run_timeout_stops_task_and_session() -> None:
+async def test_browser_use_run_timeout_leaves_task_running_for_reuse() -> None:
     manager = _DummyBrowserManager()
     tools = register_runtime_tools(_DummyRuntime(manager))
 
@@ -326,14 +326,9 @@ async def test_browser_use_run_timeout_stops_task_and_session() -> None:
     assert result.get("timed_out") is True
     assert result.get("status") == "running"
     assert result.get("live_url") == "https://browser-use.example/live/session"
-    assert "timed out and was stopped" in str(result.get("message"))
-    assert manager.control_calls == [
-        {
-            "task_id": "task_123",
-            "action": "stop_task_and_session",
-            "customer_id": "u_1",
-        }
-    ]
+    assert "left running" in str(result.get("message"))
+    assert "same session_id" in str(result.get("message"))
+    assert manager.control_calls == []
 
 
 @pytest.mark.asyncio

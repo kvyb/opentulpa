@@ -152,12 +152,14 @@ Non-secret Browser Use Cloud browser settings live in `opentulpa.config.yaml`:
 
 ```yaml
 browser_use_cloud_proxy_country_code: us
-browser_use_cloud_timeout_minutes: 240
+browser_use_cloud_timeout_minutes: 15
 ```
 
 Use a stable country matching the user/account. For logged-in workflows, prefer
 one persistent context and stable proxy region over rotating identity between
-runs.
+runs. The default 15-minute browser timeout keeps Browser Use's upfront cloud
+browser reservation bounded; increase it only when the owner needs a longer live
+login handoff window.
 
 ## Useful startup commands
 
