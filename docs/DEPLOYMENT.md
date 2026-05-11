@@ -134,19 +134,18 @@ Optional Browser Use Cloud sessions are enabled when this value is set:
 BROWSER_USE_API_KEY=...
 ```
 
-With Browser Use Cloud enabled, `browser_use_run` creates stealth cloud browser
-sessions instead of local Chromium sessions. OpenTulpa stores the Browser Use
-profile id under `BROWSER_USE_USER_DATA_DIR` per customer/session so repeat runs
-reuse persisted cookies and localStorage. Returned task payloads include a
-`live_url`, which can be sent to the owner for login, MFA, or other interactive
-account steps.
+When `BROWSER_USE_API_KEY` is set, `browser_use_run` uses the native Browser Use
+Cloud Agent API v3 by default instead of local Chromium/CDP control. OpenTulpa
+stores the Browser Use profile id under `BROWSER_USE_USER_DATA_DIR` per
+customer/session so repeat runs reuse persisted cookies and localStorage.
+Returned task payloads include a `live_url`, which can be sent to the owner for
+login, MFA, or other interactive account steps.
 
-OpenTulpa treats the Browser Use profile as the durable identity and the cloud
-browser session as disposable. It stops cloud browser sessions after terminal
-tasks and after owner-login inactivity so Browser Use persists cookies and
-localStorage back into the profile. To continue later, call `browser_use_run`
-again with the same `session_id`; OpenTulpa starts a fresh cloud browser session
-from the same saved profile.
+OpenTulpa treats the Browser Use profile as the durable identity. It keeps the
+Cloud Agent session alive between follow-up tasks so repeat work can continue in
+the same browser when it is still idle, and later runs with the same `session_id`
+reuse the same saved profile if Browser Use has already timed out the live
+session. Owner-login inactivity stops the live session and preserves the profile.
 
 Non-secret Browser Use Cloud browser settings live in `opentulpa.config.yaml`:
 
@@ -157,7 +156,9 @@ browser_use_cloud_timeout_minutes: 15
 
 Use a stable country matching the user/account. For logged-in workflows, prefer
 one persistent context and stable proxy region over rotating identity between
-runs. The default 15-minute browser timeout keeps Browser Use's upfront cloud
+runs. The configured Browser Use model is `google/gemini-3-flash-preview`;
+OpenTulpa sends Browser Use v3 the equivalent `gemini-3-flash` model id. The
+default 15-minute browser timeout keeps Browser Use's upfront cloud
 browser reservation bounded; increase it only when the owner needs a longer live
 login handoff window.
 

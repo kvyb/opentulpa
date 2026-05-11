@@ -52,6 +52,7 @@ class _BrowserUseTaskState:
     output_files: list[dict[str, Any]] = field(default_factory=list)
     steps: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    cloud_agent_session_id: str | None = None
     created_monotonic: float = field(default_factory=time.monotonic)
     updated_monotonic: float = field(default_factory=time.monotonic)
     runner: asyncio.Task[Any] | None = None
@@ -130,15 +131,6 @@ class BrowserUseLocalManager:
             return self._preflight_error
         self._preflight_checked = True
 
-        try:
-            self._import_browser_use_components()
-        except Exception as exc:
-            self._preflight_error = (
-                "browser_use local backend unavailable: package import failed "
-                f"({exc}). Install dependencies with `uv sync`."
-            )
-            return self._preflight_error
-
         if self._browser_use_cloud_enabled():
             if self._user_data_dir is None:
                 self._preflight_error = (
@@ -156,6 +148,15 @@ class BrowserUseLocalManager:
                 return self._preflight_error
             self._preflight_error = None
             return None
+
+        try:
+            self._import_browser_use_components()
+        except Exception as exc:
+            self._preflight_error = (
+                "browser_use local backend unavailable: package import failed "
+                f"({exc}). Install dependencies with `uv sync`."
+            )
+            return self._preflight_error
 
         try:
             from playwright.async_api import async_playwright
@@ -205,7 +206,7 @@ class BrowserUseLocalManager:
         preflight_error = await self.preflight()
         if preflight_error:
             return {"error": preflight_error}
-        if not self._openrouter_api_key:
+        if not self._openrouter_api_key and not self._browser_use_cloud_enabled():
             return {
                 "error": (
                     "browser_use_run unavailable: OPENAI_COMPATIBLE_API_KEY missing "
@@ -237,6 +238,19 @@ class BrowserUseLocalManager:
         safe_max_steps = max(1, min(int(max_steps), 120))
         safe_start_url = str(start_url or "").strip()
         safe_domains = self._sanitize_domains(allowed_domains)
+
+        if self._browser_use_cloud_enabled():
+            return await self._start_cloud_agent_task(
+                task_text=task_text,
+                resolved_model=resolved_model,
+                safe_max_steps=safe_max_steps,
+                safe_start_url=safe_start_url,
+                safe_domains=safe_domains,
+                safe_session_id=safe_session_id,
+                safe_customer_id=safe_customer_id,
+                has_explicit_session_id=has_explicit_session_id,
+                allow_owner_input=allow_owner_input,
+            )
 
         session_to_close: Any | None = None
         async with self._lock:
@@ -457,6 +471,7 @@ class BrowserUseLocalManager:
         safe_customer_id = self._normalize_optional_customer_id(customer_id)
 
         session_to_close: Any | None = None
+        cloud_task_session_id: str | None = None
         async with self._lock:
             self._ensure_cleanup_task_locked()
             self._cleanup_locked()
@@ -485,6 +500,8 @@ class BrowserUseLocalManager:
                     self._touch_session_locked(state.customer_id, state.session_id)
             elif safe_action in {"stop", "stop_task_and_session"}:
                 state.stop_requested = True
+                if self._session_is_cloud_locked(state.customer_id, state.session_id):
+                    cloud_task_session_id = state.cloud_agent_session_id
                 if state.owner_input_future is not None and not state.owner_input_future.done():
                     state.owner_input_future.cancel()
                 if agent is not None and hasattr(agent, "stop"):
@@ -511,6 +528,12 @@ class BrowserUseLocalManager:
 
             payload = self._state_to_payload(state)
 
+        if cloud_task_session_id and safe_action == "stop":
+            with suppress(Exception):
+                await self._get_browser_use_cloud_client().stop_agent_session(
+                    cloud_task_session_id,
+                    strategy="task",
+                )
         if session_to_close is not None:
             await self._close_session(session_to_close)
         return payload
@@ -535,6 +558,25 @@ class BrowserUseLocalManager:
                 return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
             if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return {"error": f"browser_use_task_screenshot task not found: {safe_task_id}"}
+            if self._session_is_cloud_locked(state.customer_id, state.session_id):
+                screenshot_url = None
+                for step in reversed(state.steps):
+                    screenshot_url = str(step.get("screenshotUrl") or "").strip()
+                    if screenshot_url:
+                        break
+                if screenshot_url:
+                    return {
+                        "ok": True,
+                        "task_id": safe_task_id,
+                        "session_id": state.session_id,
+                        "screenshot_url": screenshot_url,
+                    }
+                return {
+                    "error": (
+                        "browser_use_task_screenshot unavailable: Browser Use Cloud Agent "
+                        "has not returned a screenshot URL yet"
+                    )
+                }
             browser_session = state.browser_session
             session_id = str(state.session_id or "").strip() or None
             self._touch_session_locked(state.customer_id, state.session_id)
@@ -669,6 +711,31 @@ class BrowserUseLocalManager:
                         f"current status is {state.status}"
                     )
                 }
+            if self._session_is_cloud_locked(state.customer_id, state.session_id):
+                state.task = (
+                    f"{state.task}\n\n"
+                    f"The owner completed the requested live-browser handoff and replied: "
+                    f"{safe_owner_input}. Continue from the current browser state."
+                )
+                state.owner_input_future = None
+                state.owner_input_prompt = None
+                state.owner_input_type = None
+                state.owner_input_requested_at = None
+                state.status = "queued"
+                state.finished_at = None
+                state.updated_monotonic = time.monotonic()
+                runner = asyncio.create_task(
+                    self._run_cloud_agent_task(
+                        task_id=safe_task_id,
+                        max_steps=40,
+                        start_url="",
+                        allowed_domains=[],
+                    ),
+                    name=f"browser_use_cloud_agent:{safe_task_id}:resume",
+                )
+                state.runner = runner
+                self._touch_session_locked(state.customer_id, state.session_id)
+                return self._state_to_payload(state)
             future = state.owner_input_future
             if future is None or future.done():
                 return {"error": "browser_use_owner_input_submit has no pending owner input request"}
@@ -711,6 +778,190 @@ class BrowserUseLocalManager:
 
         for session in sessions:
             await self._close_session(session)
+
+    async def _start_cloud_agent_task(
+        self,
+        *,
+        task_text: str,
+        resolved_model: str,
+        safe_max_steps: int,
+        safe_start_url: str,
+        safe_domains: list[str],
+        safe_session_id: str,
+        safe_customer_id: str,
+        has_explicit_session_id: bool,
+        allow_owner_input: bool,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            self._ensure_cleanup_task_locked()
+            self._cleanup_locked()
+            active_task = self._active_task_for_session_locked(safe_customer_id, safe_session_id)
+            if active_task is not None and not has_explicit_session_id:
+                reusable_session_id = self._pick_reusable_session_id_locked(safe_customer_id)
+                safe_session_id = reusable_session_id or new_short_id("bses")
+                active_task = self._active_task_for_session_locked(safe_customer_id, safe_session_id)
+            if active_task is not None:
+                return {
+                    "error": (
+                        "browser_use_run session busy: "
+                        f"active task {active_task.task_id} is still {active_task.status}"
+                    ),
+                    "sessionId": safe_session_id,
+                    "customerId": safe_customer_id,
+                    "activeTaskId": active_task.task_id,
+                }
+            if (
+                self._sessions.get(self._session_key(safe_customer_id, safe_session_id)) is None
+                and self._live_session_count_for_customer_locked(safe_customer_id)
+                >= _MAX_BROWSER_USE_SESSIONS
+            ):
+                return {
+                    "error": (
+                        "browser_use_run session capacity reached: "
+                        f"maximum {_MAX_BROWSER_USE_SESSIONS} sessions. "
+                        "Reuse an existing profile for this user or stop one first."
+                    ),
+                    "sessionLimit": _MAX_BROWSER_USE_SESSIONS,
+                    "sessions": self._session_summaries_locked(safe_customer_id),
+                }
+
+            task_id = new_short_id("task")
+            state = _BrowserUseTaskState(
+                task_id=task_id,
+                customer_id=safe_customer_id,
+                session_id=safe_session_id,
+                task=task_text,
+                llm=resolved_model,
+                status="queued",
+                allow_owner_input=bool(allow_owner_input),
+            )
+            runner = asyncio.create_task(
+                self._run_cloud_agent_task(
+                    task_id=task_id,
+                    max_steps=safe_max_steps,
+                    start_url=safe_start_url,
+                    allowed_domains=safe_domains,
+                ),
+                name=f"browser_use_cloud_agent:{task_id}",
+            )
+            state.runner = runner
+            self._tasks[task_id] = state
+            self._write_profile_metadata(
+                customer_id=safe_customer_id,
+                session_id=safe_session_id,
+                status="running",
+                backend="browser-use-cloud-agent",
+                task_id=task_id,
+            )
+            return self._state_to_payload(state)
+
+    async def _run_cloud_agent_task(
+        self,
+        *,
+        task_id: str,
+        max_steps: int,
+        start_url: str,
+        allowed_domains: list[str],
+    ) -> None:
+        await self._semaphore.acquire()
+        try:
+            async with self._lock:
+                state = self._tasks.get(task_id)
+                if state is None:
+                    return
+                state.status = "running"
+                state.started_at = state.started_at or _utc_now_iso()
+                state.updated_monotonic = time.monotonic()
+                customer_id = state.customer_id
+                session_id = str(state.session_id or "")
+                model_name = state.llm
+                task_text = state.task
+                allow_owner_input = state.allow_owner_input
+
+            profile_id = self._browser_use_cloud_profile_id(customer_id, session_id)
+            if not profile_id:
+                profile_id = await self._get_browser_use_cloud_client().create_profile(
+                    name=self._browser_use_cloud_profile_name(customer_id, session_id)
+                )
+            composed_task = self._compose_cloud_agent_task(
+                task_text=task_text,
+                start_url=start_url,
+                max_steps=max_steps,
+                allowed_domains=allowed_domains,
+                allow_owner_input=allow_owner_input,
+            )
+            cloud_model = self._browser_use_cloud_model(model_name)
+            existing_session_id = await self._cloud_agent_session_id(customer_id, session_id)
+            cloud_session = await self._create_cloud_agent_session(
+                task=composed_task,
+                model=cloud_model,
+                profile_id=profile_id,
+                session_id=existing_session_id,
+            )
+            recording_url = (cloud_session.recording_urls or [None])[-1]
+            async with self._lock:
+                state = self._tasks.get(task_id)
+                if state is None:
+                    return
+                state.cloud_agent_session_id = cloud_session.id
+                state.browser_session = cloud_session.id
+                session_state = _BrowserUseSessionState(
+                    session=cloud_session.id,
+                    customer_id=customer_id,
+                    session_id=session_id,
+                    backend="browser-use-cloud-agent",
+                    cloud_profile_id=profile_id,
+                    cloud_browser_session_id=cloud_session.id,
+                    live_url=cloud_session.live_url,
+                    recording_url=recording_url,
+                )
+                self._sessions[self._session_key(customer_id, session_id)] = session_state
+                self._write_profile_metadata(
+                    customer_id=customer_id,
+                    session_id=session_id,
+                    status="running",
+                    backend="browser-use-cloud-agent",
+                    task_id=task_id,
+                    cloud_profile_id=profile_id,
+                    cloud_browser_session_id=cloud_session.id,
+                    live_url=cloud_session.live_url,
+                    recording_url=recording_url,
+                )
+
+            last_status = ""
+            for _ in range(max(1, int(self._browser_use_cloud_timeout_minutes * 30))):
+                async with self._lock:
+                    state = self._tasks.get(task_id)
+                    if state is None or state.stop_requested:
+                        break
+                cloud_session = await self._get_browser_use_cloud_client().get_agent_session(
+                    cloud_session.id
+                )
+                last_status = str(cloud_session.status or "").strip().lower()
+                await self._apply_cloud_agent_session(task_id, cloud_session)
+                if last_status in {"idle", "stopped", "timed_out", "error"}:
+                    break
+                await asyncio.sleep(2.0)
+
+            await self._finish_cloud_agent_task(task_id, last_status=last_status)
+        except Exception as exc:
+            async with self._lock:
+                state = self._tasks.get(task_id)
+                if state is not None:
+                    state.status = "failed"
+                    state.is_success = False
+                    state.error = str(exc)[:2000]
+                    state.finished_at = _utc_now_iso()
+                    state.updated_monotonic = time.monotonic()
+                    self._write_profile_metadata(
+                        customer_id=state.customer_id,
+                        session_id=str(state.session_id or ""),
+                        status="failed",
+                        backend="browser-use-cloud-agent",
+                        task_id=state.task_id,
+                    )
+        finally:
+            self._semaphore.release()
 
     async def _run_task(
         self,
@@ -1102,6 +1353,204 @@ class BrowserUseLocalManager:
             "recording_url": session.recording_url or "",
         }
 
+    async def _apply_cloud_agent_session(self, task_id: str, cloud_session: Any) -> None:
+        messages = await self._get_browser_use_cloud_client().list_agent_messages(
+            cloud_session.id,
+            limit=20,
+        )
+        steps: list[dict[str, Any]] = []
+        for idx, message in enumerate(messages, start=1):
+            summary = str(message.summary or message.data or "").strip()
+            if not summary:
+                continue
+            steps.append(
+                {
+                    "number": idx,
+                    "url": None,
+                    "nextGoal": summary[:500],
+                    "actions": [str(message.message_type or message.role or "message")],
+                    "screenshotUrl": message.screenshot_url,
+                }
+            )
+        output = self._stringify_cloud_output(getattr(cloud_session, "output", None))
+        async with self._lock:
+            state = self._tasks.get(task_id)
+            if state is None:
+                return
+            state.output = output or state.output
+            state.is_success = getattr(cloud_session, "is_task_successful", None)
+            if steps:
+                state.steps = steps
+            state.updated_monotonic = time.monotonic()
+            session_state = self._sessions.get(
+                self._session_key(state.customer_id, str(state.session_id or ""))
+            )
+            if session_state is not None:
+                session_state.live_url = getattr(cloud_session, "live_url", None) or session_state.live_url
+                recording_urls = getattr(cloud_session, "recording_urls", None) or []
+                if recording_urls:
+                    session_state.recording_url = str(recording_urls[-1])
+                session_state.updated_monotonic = time.monotonic()
+
+    async def _create_cloud_agent_session(
+        self,
+        *,
+        task: str,
+        model: str,
+        profile_id: str,
+        session_id: str | None,
+    ) -> Any:
+        client = self._get_browser_use_cloud_client()
+        try:
+            return await client.create_agent_session(
+                task=task,
+                model=model,
+                profile_id=profile_id,
+                session_id=session_id,
+                keep_alive=True,
+            )
+        except Exception:
+            if not session_id:
+                raise
+            return await client.create_agent_session(
+                task=task,
+                model=model,
+                profile_id=profile_id,
+                session_id=None,
+                keep_alive=True,
+            )
+
+    async def _finish_cloud_agent_task(self, task_id: str, *, last_status: str) -> None:
+        session_to_close: Any | None = None
+        async with self._lock:
+            state = self._tasks.get(task_id)
+            if state is None:
+                return
+            status = str(last_status or "").strip().lower()
+            handoff_prompt = self._extract_owner_handoff_prompt(state.output)
+            if state.stop_requested:
+                state.status = "stopped"
+                state.is_success = False
+                state.output = state.output or "Task stopped by user."
+            elif handoff_prompt and state.allow_owner_input:
+                state.status = _OWNER_WAITING_STATUS
+                state.owner_input_prompt = handoff_prompt
+                state.owner_input_type = "text"
+                state.owner_input_requested_at = _utc_now_iso()
+                state.finished_at = None
+                state.updated_monotonic = time.monotonic()
+                self._write_profile_metadata(
+                    customer_id=state.customer_id,
+                    session_id=str(state.session_id or ""),
+                    status="waiting_for_owner",
+                    task_id=state.task_id,
+                    backend="browser-use-cloud-agent",
+                    last_url=self._latest_step_url(state),
+                )
+                return
+            elif status in {"error", "timed_out"}:
+                state.status = "failed"
+                state.is_success = False
+                state.error = state.error or f"Browser Use Cloud session ended with status {status}"
+            elif status == "stopped":
+                state.status = "stopped"
+                state.is_success = False if state.is_success is None else state.is_success
+            else:
+                state.status = "finished"
+                if state.is_success is None:
+                    state.is_success = True
+            state.finished_at = _utc_now_iso()
+            state.updated_monotonic = time.monotonic()
+            self._write_profile_metadata(
+                customer_id=state.customer_id,
+                session_id=str(state.session_id or ""),
+                status=state.status,
+                task_id=state.task_id,
+                backend="browser-use-cloud-agent",
+                last_url=self._latest_step_url(state),
+            )
+            if state.close_session_when_done:
+                session_to_close = self._detach_session_if_unused_locked(
+                    state.customer_id,
+                    state.session_id,
+                )
+
+        if session_to_close is not None:
+            await self._close_session(session_to_close)
+
+    def _compose_cloud_agent_task(
+        self,
+        *,
+        task_text: str,
+        start_url: str,
+        max_steps: int,
+        allowed_domains: list[str],
+        allow_owner_input: bool,
+    ) -> str:
+        parts = []
+        if start_url:
+            parts.append(f"First navigate to this URL: {start_url}.")
+        parts.append(task_text)
+        parts.append(
+            "Use no more than "
+            f"{max(1, int(max_steps))} meaningful browser steps before reporting progress."
+        )
+        if allowed_domains:
+            parts.append(
+                "Stay within these domains unless the user explicitly asked otherwise: "
+                f"{', '.join(allowed_domains)}."
+            )
+        if allow_owner_input:
+            parts.append(
+                "Owner handoff rule: if login, sign-in, account selection, CAPTCHA, MFA, "
+                "email/SMS code, authenticator approval, credentials, payment approval, "
+                "or another owner-only step blocks progress, do not fail and do not start "
+                "a different browser. Stop at that page and make your final output start "
+                "with exactly 'OPENTULPA_OWNER_HANDOFF_REQUIRED:' followed by a concise "
+                "instruction telling the owner what to do in the live browser. After the "
+                "owner confirms, OpenTulpa will continue in this same Browser Use session."
+            )
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _browser_use_cloud_model(model_name: str) -> str:
+        safe_model = str(model_name or "").strip()
+        aliases = {
+            "google/gemini-3-flash-preview": "gemini-3-flash",
+            "gemini-3-flash-preview": "gemini-3-flash",
+        }
+        return aliases.get(safe_model, safe_model or "gemini-3-flash")
+
+    async def _cloud_agent_session_id(self, customer_id: str, session_id: str) -> str | None:
+        session_state = self._sessions.get(self._session_key(customer_id, session_id))
+        if session_state is not None and session_state.cloud_browser_session_id:
+            return session_state.cloud_browser_session_id
+        if self._user_data_dir is None:
+            return None
+        metadata = self._read_profile_metadata(self._profile_dir(customer_id, session_id))
+        value = str(metadata.get("browserUseBrowserSessionId") or "").strip()
+        return value or None
+
+    @staticmethod
+    def _stringify_cloud_output(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value.strip() or None
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)[:12000]
+        except Exception:
+            return str(value)[:12000]
+
+    @staticmethod
+    def _extract_owner_handoff_prompt(output: str | None) -> str | None:
+        text = str(output or "").strip()
+        marker = "OPENTULPA_OWNER_HANDOFF_REQUIRED:"
+        if not text.startswith(marker):
+            return None
+        prompt = text[len(marker):].strip()
+        return prompt or "Open the live browser link, complete the owner-only step, then reply done."
+
     @staticmethod
     def _resolve_user_data_dir(value: str | Path | None) -> Path | None:
         text = str(value or "").strip()
@@ -1358,6 +1807,13 @@ class BrowserUseLocalManager:
     async def _close_session(self, session: Any) -> None:
         if session is None:
             return
+        if isinstance(session, str):
+            with suppress(Exception):
+                await self._get_browser_use_cloud_client().stop_agent_session(
+                    session,
+                    strategy="session",
+                )
+            return
         cloud_session_id = self._cloud_session_ids_by_browser_session.pop(id(session), "")
         if cloud_session_id:
             with suppress(Exception):
@@ -1428,6 +1884,9 @@ class BrowserUseLocalManager:
                 task_id=state.task_id,
                 last_url=self._latest_step_url(state),
             )
+            detached = self._detach_session_if_unused_locked(state.customer_id, state.session_id)
+            if detached is not None:
+                asyncio.create_task(self._close_session(detached))
 
         expired_sessions: list[str] = []
         for session_key, session_state in self._sessions.items():
@@ -1607,7 +2066,7 @@ class BrowserUseLocalManager:
         return bool(
             session_state is not None
             and (
-                session_state.backend == "browser-use-cloud"
+                session_state.backend in {"browser-use-cloud", "browser-use-cloud-agent"}
                 or session_state.cloud_browser_session_id
             )
         )

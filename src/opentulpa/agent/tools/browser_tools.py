@@ -154,20 +154,20 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         session_id: str | None = None,
     ) -> Any:
         """
-        Run a local Browser Use task and wait for completion.
+        Run a Browser Use task and wait for completion.
         Use for dynamic web tasks that need real browser interactions, including
-        owner-authorized login flows. Browser sessions are kept alive and may use
-        persisted profile state when configured; reuse a prior session_id when
-        continuing the same account/site workflow. Login screens are expected
-        human handoff points: navigate to the login page, keep the same session,
-        share live_url when present so the owner can log in directly, or use
-        owner-input for MFA/email/SMS/account-choice prompts. If the task hits
-        CAPTCHA, the browser backend can use its registered solver action when
-        available. Do not ask the owner to paste credentials into durable
-        memory; use current-turn credentials only for the intended browser login.
-        The browser agent is responsible for calling request_owner_input before
-        failing login, MFA, CAPTCHA, or owner-only account steps; this wrapper
-        does not infer login handoff from failed task text after the fact.
+        owner-authorized login flows. When BROWSER_USE_API_KEY is set this uses
+        Browser Use Cloud Agent API v3 with persisted profiles and live_url
+        handoff; otherwise it falls back to the local Browser Use backend.
+        Reuse a prior session_id when continuing the same account/site workflow.
+        Login screens are expected human handoff points: navigate to the login
+        page, keep the same session, share live_url when present so the owner can
+        log in directly, or use owner-input for MFA/email/SMS/account-choice
+        prompts. Do not ask the owner to paste credentials into durable memory;
+        use current-turn credentials only for the intended browser login.
+        This wrapper does not infer login handoff from failed task text after
+        the fact; the browser task prompt must request handoff while the same
+        live session is still usable.
         """
         task_text = str(task or "").strip()
         if not task_text:

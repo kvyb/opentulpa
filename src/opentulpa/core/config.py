@@ -302,7 +302,7 @@ class Settings(BaseSettings):
         default=None,
         description=(
             "Optional Browser Use Cloud API key. When set, browser_use_run uses "
-            "Browser Use Cloud browser sessions with stealth, live view, proxies, and profiles."
+            "Browser Use Cloud Agent API v3 sessions with stealth, live view, proxies, and profiles."
         ),
     )
     browser_use_cloud_proxy_country_code: str | None = Field(
@@ -313,7 +313,7 @@ class Settings(BaseSettings):
         default=15,
         ge=1,
         le=240,
-        description="Browser Use Cloud browser session timeout in minutes.",
+        description="Browser Use Cloud agent session timeout in minutes.",
     )
     capsolver_api_key: str | None = Field(
         default=None,
