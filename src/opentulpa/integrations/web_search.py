@@ -5,6 +5,7 @@ The agent's general chat model remains separate. This integration is only used
 when the web_search tool is explicitly invoked.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_WEB_SEARCH_MODEL = "perplexity/sonar-pro-search"
+RETRYABLE_WEB_SEARCH_STATUSES = {408, 429, 500, 502, 503, 504}
 
 
 def _default_search_model() -> str:
@@ -150,24 +152,56 @@ async def web_search(query: str) -> dict[str, object] | str:
         "reasoning": {"effort": "medium"},
     }
 
+    max_attempts = 3
     async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            r = await client.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-        except httpx.HTTPStatusError as e:
-            logger.exception("OpenRouter web search HTTP error: %s", e)
-            return f"Web search request failed: {e.response.status_code}."
-        except Exception as e:
-            logger.exception("OpenRouter web search error: %s", e)
-            return f"Web search failed: {e!s}."
+        for attempt in range(max_attempts):
+            try:
+                r = await client.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                break
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                retryable = status_code in RETRYABLE_WEB_SEARCH_STATUSES
+                if retryable and attempt < max_attempts - 1:
+                    delay = 0.75 * (2**attempt)
+                    logger.warning(
+                        "OpenRouter web search HTTP error; retrying status=%s attempt=%s/%s delay=%.2fs",
+                        status_code,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.exception("OpenRouter web search HTTP error: %s", e)
+                return f"Web search request failed: {status_code}."
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                if attempt < max_attempts - 1:
+                    delay = 0.75 * (2**attempt)
+                    logger.warning(
+                        "OpenRouter web search transport error; retrying error=%s attempt=%s/%s delay=%.2fs",
+                        type(e).__name__,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.exception("OpenRouter web search error: %s", e)
+                return f"Web search failed: {e!s}."
+            except Exception as e:
+                logger.exception("OpenRouter web search error: %s", e)
+                return f"Web search failed: {e!s}."
+        else:  # pragma: no cover - loop always returns or breaks.
+            return "Web search failed after retries."
 
     choices = data.get("choices") or []
     if not choices:

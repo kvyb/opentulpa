@@ -60,6 +60,21 @@ class _FallbackModel:
         return _FallbackResponse(self._content)
 
 
+class _SequenceFallbackModel:
+    def __init__(self, contents: list[str]) -> None:
+        self._contents = list(contents)
+        self.calls: list[object] = []
+
+    def with_structured_output(self, _schema: type[BaseModel]) -> _StructuredRunner:
+        raise RuntimeError("structured_unavailable")
+
+    async def ainvoke(self, messages: object) -> _FallbackResponse:
+        self.calls.append(messages)
+        if not self._contents:
+            return _FallbackResponse("")
+        return _FallbackResponse(self._contents.pop(0))
+
+
 class _BrokenStructuredThenFallbackModel(_FallbackModel):
     def with_structured_output(self, _schema: type[BaseModel]) -> _StructuredRunner:
         raise RuntimeError("structured_unavailable")
@@ -162,6 +177,29 @@ async def test_invoke_structured_model_rejects_wrapped_non_json_text() -> None:
     assert parsed is None
     assert isinstance(error, str)
     assert "ValidationError" in error
+
+
+@pytest.mark.asyncio
+async def test_invoke_structured_model_repairs_invalid_json_fallback_once() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    model = _SequenceFallbackModel(
+        [
+            '{"ok": true, "reason": ',
+            '{"ok": true, "reason": "repaired"}',
+        ]
+    )
+
+    parsed, error = await runtime._invoke_structured_model(
+        model=model,
+        messages=[],
+        schema=_Schema,
+    )
+
+    assert isinstance(parsed, _Schema)
+    assert parsed.ok is True
+    assert parsed.reason == "repaired"
+    assert error is None
+    assert len(model.calls) == 2
 
 
 @pytest.mark.asyncio

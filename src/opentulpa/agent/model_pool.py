@@ -12,7 +12,7 @@ from langchain.chat_models import init_chat_model
 from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
-from opentulpa.agent.lc_messages import SystemMessage
+from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
@@ -650,7 +650,54 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
         )
         raw = _content_to_text(getattr(response, "content", response)).strip()
         if raw:
-            return schema.model_validate_json(clean_json_text_block(raw)), None
+            try:
+                return schema.model_validate_json(clean_json_text_block(raw)), None
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                repair_messages = list(messages) + [
+                    SystemMessage(
+                        content=(
+                            "Your previous structured output could not be parsed against the required schema. "
+                            "Return only one valid JSON object for that schema. Do not include markdown, prose, "
+                            "tool calls, or explanatory text."
+                        )
+                    ),
+                    HumanMessage(
+                        content=(
+                            f"Schema name: {schema.__name__}\n"
+                            f"Parse error: {last_error}\n"
+                            f"Previous output:\n{raw[:4000]}"
+                        )
+                    ),
+                ]
+                runtime.log_behavior_event(
+                    event="llm.invoke.structured_repair_retry",
+                    model_name=resolved_model_name,
+                    call_site=str((call_context or {}).get("call_site") or "structured_model_fallback"),
+                    trace_id=str((call_context or {}).get("trace_id") or ""),
+                    thread_id=str((call_context or {}).get("thread_id") or ""),
+                    customer_id=str((call_context or {}).get("customer_id") or ""),
+                    error=last_error,
+                )
+                repair_response = await runtime.ainvoke_model(
+                    model,
+                    repair_messages,
+                    model_name=resolved_model_name,
+                    stable_prefix_count=stable_prefix_count,
+                    call_context={
+                        **dict(call_context or {}),
+                        "call_site": str(
+                            (call_context or {}).get("call_site")
+                            or "structured_model_fallback"
+                        )
+                        + "_repair",
+                    },
+                )
+                repair_raw = _content_to_text(
+                    getattr(repair_response, "content", repair_response)
+                ).strip()
+                if repair_raw:
+                    return schema.model_validate_json(clean_json_text_block(repair_raw)), None
     except Exception as exc:
         last_error = f"{type(exc).__name__}: {exc}"
     return None, last_error

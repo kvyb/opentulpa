@@ -88,6 +88,10 @@ async def generate_llm_status_message(
                             f"Write text in {language}. One sentence, under 90 characters.\n"
                             "Do not answer the user's business question. Do not invent prices, availability, "
                             "booking facts, or completion. Only say that the answer is being checked or prepared.\n"
+                            "The context may include the user's latest message so you understand why the turn "
+                            "is taking time, but it is background-only.\n"
+                            "Do not mention the user's specific task, object names, message text, or table contents. "
+                            "Do not repeat, translate, summarize, or paraphrase the user's wording.\n"
                             "If a useful status update is not appropriate, set ok=false and text=\"\"."
                         )
                     ),

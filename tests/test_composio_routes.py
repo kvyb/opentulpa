@@ -265,6 +265,38 @@ class _FakeComposioService:
         return {"ok": True, "tool_slug": tool_slug, "successful": True, "data": {"items": []}}
 
 
+class _FakeComposioTransientError(Exception):
+    status_code = 500
+    body = {"error": {"status": 500, "message": "Bad Gateway"}}
+
+
+class _RetryOnceComposioService(_FakeComposioService):
+    def execute_tool(
+        self,
+        *,
+        customer_id: str,
+        tool_slug: str,
+        arguments: dict[str, Any] | None = None,
+        connected_account_id: str | None = None,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                "execute_tool",
+                {
+                    "customer_id": customer_id,
+                    "tool_slug": tool_slug,
+                    "arguments": arguments,
+                    "connected_account_id": connected_account_id,
+                    "text": text,
+                },
+            )
+        )
+        if len(self.calls) == 1:
+            raise _FakeComposioTransientError("temporary")
+        return {"ok": True, "tool_slug": tool_slug, "successful": True, "data": {"items": []}}
+
+
 def _mk_client(tmp_path: Path) -> tuple[TestClient, _FakeComposioService]:
     skills = SkillStoreService(
         db_path=tmp_path / "skills.db",
@@ -276,6 +308,18 @@ def _mk_client(tmp_path: Path) -> tuple[TestClient, _FakeComposioService]:
         composio_service=composio,
     )
     return TestClient(app), composio
+
+
+def _mk_client_with_composio(tmp_path: Path, composio: Any) -> TestClient:
+    skills = SkillStoreService(
+        db_path=tmp_path / "skills.db",
+        root_dir=tmp_path / "skills",
+    )
+    app = create_app(
+        skill_store_service=skills,
+        composio_service=composio,
+    )
+    return TestClient(app)
 
 
 def test_composio_status_route_exposes_callback_configuration(tmp_path: Path) -> None:
@@ -460,3 +504,22 @@ def test_composio_execute_route_passes_customer_and_arguments(tmp_path: Path) ->
             "text": "list the messages",
         },
     )
+
+
+def test_composio_execute_route_retries_transient_errors(tmp_path: Path) -> None:
+    composio = _RetryOnceComposioService()
+    client = _mk_client_with_composio(tmp_path, composio)
+
+    with client:
+        response = client.post(
+            "/internal/composio/tools/execute",
+            json={
+                "customer_id": "cust_123",
+                "tool_slug": "INSTAGRAM_LIST_ALL_MESSAGES",
+                "arguments": {"conversation_id": "conv_1"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["successful"] is True
+    assert [call[0] for call in composio.calls] == ["execute_tool", "execute_tool"]
