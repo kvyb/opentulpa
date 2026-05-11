@@ -25,8 +25,8 @@ _OWNER_WAITING_STATUS = "waiting_for_owner"
 _OWNER_INPUT_TIMEOUT_SECONDS = 24 * 60 * 60
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
 _CLOUD_SESSION_IDLE_TIMEOUT_SECONDS = 10 * 60
-_CLOUD_AGENT_POLL_SECONDS = 2.0
-_CLOUD_AGENT_STUCK_REPEAT_POLLS = 12
+_CLOUD_AGENT_POLL_SECONDS = 15.0
+_CLOUD_AGENT_STUCK_REPEAT_POLLS = 8
 _CLOUD_AGENT_MAX_STUCK_INTERVENTIONS = 2
 _SESSION_CLEANUP_POLL_SECONDS = 60.0
 _MAX_BROWSER_USE_SESSIONS = 20
@@ -1551,13 +1551,16 @@ class BrowserUseLocalManager:
             )
         if allow_owner_input:
             parts.append(
-                "Owner handoff rule: if login, sign-in, account selection, CAPTCHA, MFA, "
+                "Handoff rule: if login, sign-in, account selection, CAPTCHA, MFA, "
                 "email/SMS code, authenticator approval, credentials, payment approval, "
                 "or another owner-only step blocks progress, do not fail and do not start "
                 "a different browser. Stop at that page and make your final output start "
                 "with exactly 'OPENTULPA_OWNER_HANDOFF_REQUIRED:' followed by a concise "
-                "instruction telling the owner what to do in the live browser. After the "
-                "owner confirms, OpenTulpa will continue in this same Browser Use session."
+                "instruction telling the owner what to do in the live browser. If a "
+                "non-auth decision needs OpenTulpa or the owner to choose a strategy, "
+                "make your final output start with exactly 'OPENTULPA_DECISION_REQUIRED:' "
+                "followed by the concrete decision needed and the visible browser state. "
+                "After confirmation, OpenTulpa will continue in this same Browser Use session."
             )
         return "\n\n".join(parts)
 
@@ -1575,7 +1578,7 @@ class BrowserUseLocalManager:
             f"{repeated_signal[:500]}. Continue from the current browser state, but "
             "change strategy now. Do not repeat the same click, scroll, wait, or page "
             "analysis loop. If the page is blocking progress, report the concrete "
-            "blocker or request owner handoff using the required handoff format."
+            "blocker or request owner/decision handoff using the required handoff format."
         )
 
     @staticmethod
@@ -1621,11 +1624,18 @@ class BrowserUseLocalManager:
     @staticmethod
     def _extract_owner_handoff_prompt(output: str | None) -> str | None:
         text = str(output or "").strip()
-        marker = "OPENTULPA_OWNER_HANDOFF_REQUIRED:"
-        if not text.startswith(marker):
-            return None
-        prompt = text[len(marker):].strip()
-        return prompt or "Open the live browser link, complete the owner-only step, then reply done."
+        markers = (
+            "OPENTULPA_OWNER_HANDOFF_REQUIRED:",
+            "OPENTULPA_DECISION_REQUIRED:",
+        )
+        for marker in markers:
+            if text.startswith(marker):
+                prompt = text[len(marker):].strip()
+                return (
+                    prompt
+                    or "Open the live browser link, decide how to continue, then reply with direction."
+                )
+        return None
 
     @staticmethod
     def _resolve_user_data_dir(value: str | Path | None) -> Path | None:

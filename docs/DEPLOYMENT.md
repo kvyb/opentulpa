@@ -146,10 +146,13 @@ Cloud Agent session alive between follow-up tasks so repeat work can continue in
 the same browser when it is still idle, and later runs with the same `session_id`
 reuse the same saved profile if Browser Use has already timed out the live
 session. Owner-login inactivity stops the live session and preserves the profile.
-Cloud Agent runs are not given an artificial step cap; OpenTulpa polls progress
-messages and, if the same progress signal repeats, stops only the current task
-and relaunches in the same live session with corrective guidance. After bounded
-retries it stops the task instead of letting a loop run indefinitely.
+Cloud Agent runs are not given an artificial step cap; OpenTulpa checks progress
+on a slower watchdog cadence. If the same progress signal repeats for about two
+minutes, OpenTulpa stops only the current task and relaunches in the same live
+session with corrective guidance. After bounded retries it stops the task
+instead of letting a loop run indefinitely. The browser agent can also stop with
+an `OPENTULPA_DECISION_REQUIRED:` marker when it needs OpenTulpa or the owner to
+choose a strategy before continuing.
 
 Non-secret Browser Use Cloud browser settings live in `opentulpa.config.yaml`:
 

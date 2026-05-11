@@ -160,8 +160,9 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         Browser Use Cloud Agent API v3 with persisted profiles and live_url
         handoff; otherwise it falls back to the local Browser Use backend.
         Reuse a prior session_id when continuing the same account/site workflow.
-        Cloud Agent runs are not given a fixed step cap; OpenTulpa supervises
-        progress messages and intervenes if the browser repeats the same action.
+        Cloud Agent runs are not given a fixed step cap; OpenTulpa checks
+        progress on a slower watchdog cadence and intervenes if the browser
+        repeats the same action or returns a decision-handoff marker.
         Login screens are expected human handoff points: navigate to the login
         page, keep the same session, share live_url when present so the owner can
         log in directly, or use owner-input for MFA/email/SMS/account-choice

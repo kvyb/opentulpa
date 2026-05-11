@@ -445,6 +445,47 @@ async def test_cloud_agent_intervenes_when_progress_repeats(
 
 
 @pytest.mark.asyncio
+async def test_cloud_agent_decision_marker_waits_for_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path,
+        browser_use_api_key="bu-key",
+    )
+    fake_cloud = _FakeBrowserUseCloudClient()
+    fake_cloud.agent_output = (
+        "OPENTULPA_DECISION_REQUIRED: Choose whether to use Reddit search "
+        "or Google search for lead discovery."
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(manager, "_get_browser_use_cloud_client", lambda: fake_cloud)
+
+    created = await manager.start_task(
+        task="Find leads",
+        max_steps=5,
+        llm="browser-use-llm",
+        session_id="lead_search",
+        customer_id="cust_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id, customer_id="cust_1")
+        if payload and str(payload.get("status")) == "waiting_for_owner":
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not wait for owner")
+
+    assert payload is not None
+    assert payload["ownerInputPrompt"] == "Choose whether to use Reddit search or Google search for lead discovery."
+    assert "Choose whether to use Reddit search or Google search" in payload["ownerInputPrompt"]
+
+
+@pytest.mark.asyncio
 async def test_local_manager_reuses_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = BrowserUseLocalManager(
         openrouter_api_key="sk-test",
