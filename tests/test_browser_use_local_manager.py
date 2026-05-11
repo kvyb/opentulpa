@@ -10,6 +10,7 @@ import pytest
 
 from opentulpa.integrations.browser_use_local import (
     BrowserUseLocalManager,
+    _BrowserUseSessionState,
     _BrowserUseTaskState,
 )
 
@@ -45,6 +46,7 @@ class _FakeBrowserUseCloudClient:
     def __init__(self) -> None:
         self.created_profiles: list[dict[str, Any]] = []
         self.created_sessions: list[dict[str, Any]] = []
+        self.stopped_sessions: list[str] = []
 
     async def create_profile(self, *, name: str) -> str:
         self.created_profiles.append({"name": name})
@@ -62,6 +64,9 @@ class _FakeBrowserUseCloudClient:
             recording_url: str = "https://browser-use.com/sessions/ses_123"
 
         return _Session()
+
+    async def stop_browser_session(self, session_id: str) -> None:
+        self.stopped_sessions.append(session_id)
 
 
 @dataclass
@@ -252,6 +257,23 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
     assert fake_cloud.created_sessions == [{"profile_id": "prof_123"}]
     session = manager._tasks[task_id].browser_session
     assert session.kwargs["cdp_url"] == "wss://connect.browser-use.test/session"
+    for _ in range(50):
+        if fake_cloud.stopped_sessions == ["ses_123"]:
+            break
+        await asyncio.sleep(0.01)
+    assert fake_cloud.stopped_sessions == ["ses_123"]
+    assert manager._session_key("cust_1", "github") not in manager._sessions
+
+    second = await manager.start_task(
+        task="Continue after login",
+        max_steps=5,
+        llm="browser-use-llm",
+        session_id="github",
+        customer_id="cust_1",
+    )
+    assert second["browserUseProfileId"] == "prof_123"
+    assert fake_cloud.created_profiles == [{"name": "opentulpa-cust_1-github"}]
+    assert fake_cloud.created_sessions == [{"profile_id": "prof_123"}, {"profile_id": "prof_123"}]
 
 
 @pytest.mark.asyncio
@@ -631,6 +653,63 @@ async def test_local_manager_waits_for_owner_input_and_resumes_same_task() -> No
     assert payload is not None
     assert payload["status"] == "running"
     assert payload["ownerInputPrompt"] is None
+
+
+@pytest.mark.asyncio
+async def test_cloud_owner_waiting_session_stops_after_inactivity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import opentulpa.integrations.browser_use_local as browser_use_local
+
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path,
+        browser_use_api_key="bu-key",
+    )
+    fake_cloud = _FakeBrowserUseCloudClient()
+    monkeypatch.setattr(manager, "_get_browser_use_cloud_client", lambda: fake_cloud)
+    monkeypatch.setattr(browser_use_local, "_CLOUD_SESSION_IDLE_TIMEOUT_SECONDS", 1)
+
+    session = _FakeBrowserSession()
+    session_key = manager._session_key("u_1", "sess_login")
+    manager._sessions[session_key] = _BrowserUseSessionState(
+        session=session,
+        customer_id="u_1",
+        session_id="sess_login",
+        backend="browser-use-cloud",
+        cloud_profile_id="prof_123",
+        cloud_browser_session_id="ses_123",
+        live_url="https://browser-use.com/live/ses_123",
+    )
+    manager._cloud_session_ids_by_browser_session[id(session)] = "ses_123"
+    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    manager._tasks["task_login"] = _BrowserUseTaskState(
+        task_id="task_login",
+        session_id="sess_login",
+        task="log in",
+        llm="model",
+        customer_id="u_1",
+        status="waiting_for_owner",
+        owner_input_future=future,
+    )
+    manager._tasks["task_login"].updated_monotonic = time.monotonic() - 2
+    manager._sessions[session_key].updated_monotonic = time.monotonic() - 3700
+
+    async with manager._lock:
+        manager._cleanup_locked()
+    await asyncio.sleep(0)
+
+    payload = await manager.get_task("task_login", customer_id="u_1")
+    assert payload is not None
+    assert payload["status"] == "stopped"
+    assert "same session_id" in str(payload["output"])
+    assert session_key not in manager._sessions
+    assert fake_cloud.stopped_sessions == ["ses_123"]
+    assert session.stopped is True
+    assert future.cancelled()
 
 
 @pytest.mark.asyncio

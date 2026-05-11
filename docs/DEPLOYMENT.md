@@ -141,6 +141,13 @@ reuse persisted cookies and localStorage. Returned task payloads include a
 `live_url`, which can be sent to the owner for login, MFA, or other interactive
 account steps.
 
+OpenTulpa treats the Browser Use profile as the durable identity and the cloud
+browser session as disposable. It stops cloud browser sessions after terminal
+tasks and after owner-login inactivity so Browser Use persists cookies and
+localStorage back into the profile. To continue later, call `browser_use_run`
+again with the same `session_id`; OpenTulpa starts a fresh cloud browser session
+from the same saved profile.
+
 Non-secret Browser Use Cloud browser settings live in `opentulpa.config.yaml`:
 
 ```yaml

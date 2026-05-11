@@ -24,6 +24,7 @@ _TERMINAL_STATUSES = {"finished", "stopped", "failed"}
 _OWNER_WAITING_STATUS = "waiting_for_owner"
 _OWNER_INPUT_TIMEOUT_SECONDS = 24 * 60 * 60
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
+_CLOUD_SESSION_IDLE_TIMEOUT_SECONDS = 10 * 60
 _SESSION_CLEANUP_POLL_SECONDS = 60.0
 _MAX_BROWSER_USE_SESSIONS = 20
 _DEFAULT_SESSION_ID = "default"
@@ -819,7 +820,9 @@ class BrowserUseLocalManager:
                     last_url=self._latest_step_url(state),
                 )
 
-                if state.close_session_when_done:
+                if state.close_session_when_done or self._session_is_cloud_locked(
+                    state.customer_id, state.session_id
+                ):
                     completed_session_to_close = self._detach_session_if_unused_locked(
                         state.customer_id, state.session_id
                     )
@@ -843,7 +846,9 @@ class BrowserUseLocalManager:
                         task_id=state.task_id,
                         last_url=self._latest_step_url(state),
                     )
-                    if state.close_session_when_done:
+                    if state.close_session_when_done or self._session_is_cloud_locked(
+                        state.customer_id, state.session_id
+                    ):
                         failed_session_to_close = self._detach_session_if_unused_locked(
                             state.customer_id, state.session_id
                         )
@@ -1293,17 +1298,41 @@ class BrowserUseLocalManager:
         session_state = self._sessions.get(
             self._session_key(state.customer_id, str(state.session_id or ""))
         )
+        metadata = (
+            self._read_profile_metadata(
+                self._profile_dir(state.customer_id, str(state.session_id or ""))
+            )
+            if self._user_data_dir is not None
+            else {}
+        )
+        backend = (
+            session_state.backend
+            if session_state is not None
+            else str(metadata.get("backend") or "local")
+        )
+        live_url = session_state.live_url if session_state is not None else metadata.get("liveUrl")
+        recording_url = (
+            session_state.recording_url if session_state is not None else metadata.get("recordingUrl")
+        )
+        cloud_profile_id = (
+            session_state.cloud_profile_id
+            if session_state is not None
+            else metadata.get("browserUseProfileId")
+        )
+        cloud_browser_session_id = (
+            session_state.cloud_browser_session_id
+            if session_state is not None
+            else metadata.get("browserUseBrowserSessionId")
+        )
         return {
             "id": state.task_id,
             "customerId": state.customer_id,
             "sessionId": state.session_id,
-            "backend": session_state.backend if session_state is not None else "local",
-            "liveUrl": session_state.live_url if session_state is not None else None,
-            "recordingUrl": session_state.recording_url if session_state is not None else None,
-            "browserUseProfileId": session_state.cloud_profile_id if session_state is not None else None,
-            "browserUseBrowserSessionId": (
-                session_state.cloud_browser_session_id if session_state is not None else None
-            ),
+            "backend": backend,
+            "liveUrl": live_url or None,
+            "recordingUrl": recording_url or None,
+            "browserUseProfileId": cloud_profile_id or None,
+            "browserUseBrowserSessionId": cloud_browser_session_id or None,
             "status": state.status,
             "isSuccess": state.is_success,
             "startedAt": state.started_at,
@@ -1362,6 +1391,36 @@ class BrowserUseLocalManager:
                 expired.append(task_id)
         for task_id in expired:
             self._tasks.pop(task_id, None)
+
+        for state in self._tasks.values():
+            if state.status != _OWNER_WAITING_STATUS:
+                continue
+            session_state = self._sessions.get(
+                self._session_key(state.customer_id, str(state.session_id or ""))
+            )
+            if session_state is None or not self._session_state_is_cloud(session_state):
+                continue
+            age = now - float(state.updated_monotonic or state.created_monotonic)
+            if age < _CLOUD_SESSION_IDLE_TIMEOUT_SECONDS:
+                continue
+            state.status = "stopped"
+            state.is_success = False
+            state.finished_at = _utc_now_iso()
+            state.updated_monotonic = now
+            state.output = (
+                "Browser session stopped after owner login inactivity. "
+                "Run browser_use_run again with the same session_id to continue "
+                "from the persisted Browser Use profile."
+            )
+            if state.owner_input_future is not None and not state.owner_input_future.done():
+                state.owner_input_future.cancel()
+            self._write_profile_metadata(
+                customer_id=state.customer_id,
+                session_id=str(state.session_id or ""),
+                status="idle",
+                task_id=state.task_id,
+                last_url=self._latest_step_url(state),
+            )
 
         expired_sessions: list[str] = []
         for session_key, session_state in self._sessions.items():
@@ -1525,6 +1584,24 @@ class BrowserUseLocalManager:
             if state.status not in _TERMINAL_STATUSES:
                 return True
         return False
+
+    def _session_is_cloud_locked(self, customer_id: str, session_id: str | None) -> bool:
+        safe_customer = self._normalize_customer_id(customer_id)
+        safe_session = str(session_id or "").strip()
+        if not safe_session:
+            return False
+        session_state = self._sessions.get(self._session_key(safe_customer, safe_session))
+        return self._session_state_is_cloud(session_state)
+
+    @staticmethod
+    def _session_state_is_cloud(session_state: _BrowserUseSessionState | None) -> bool:
+        return bool(
+            session_state is not None
+            and (
+                session_state.backend == "browser-use-cloud"
+                or session_state.cloud_browser_session_id
+            )
+        )
 
     def _active_task_for_session_locked(
         self, customer_id: str, session_id: str
