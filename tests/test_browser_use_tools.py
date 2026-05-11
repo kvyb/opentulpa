@@ -170,6 +170,7 @@ def test_browser_use_tool_descriptions_include_login_session_and_secret_boundari
     assert "Login screens are expected human handoff points" in normalized_run_description
     assert "share live_url when present so the owner can log in directly" in normalized_run_description
     assert "Do not ask the owner to paste credentials into durable memory" in normalized_run_description
+    assert "does not infer login handoff from failed task text" in normalized_run_description
 
 
 @pytest.mark.asyncio
@@ -277,7 +278,7 @@ async def test_browser_use_run_returns_when_waiting_for_owner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> None:
+async def test_browser_use_run_does_not_infer_handoff_from_failed_task_text() -> None:
     manager = _DummyBrowserManager()
     tools = register_runtime_tools(_DummyRuntime(manager))
 
@@ -294,11 +295,10 @@ async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> No
 
     result = await tools["browser_use_run"].ainvoke({"task": "open reddit"})
 
-    assert result.get("status") == "waiting_for_owner"
-    assert result.get("handoff_required") is True
+    assert result.get("status") == "finished"
+    assert result.get("is_success") is False
     assert result.get("live_url") == "https://browser-use.example/live/session"
-    assert "Share live_url with the owner now" in str(result.get("message"))
-    assert "same session_id" in str(result.get("message"))
+    assert "handoff_required" not in result
 
 
 @pytest.mark.asyncio

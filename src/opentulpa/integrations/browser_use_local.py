@@ -757,11 +757,13 @@ class BrowserUseLocalManager:
             if state is not None and state.allow_owner_input:
                 composed_task = (
                     f"{composed_task}\n\n"
-                    "If progress is blocked by login, sign-in, account selection, MFA, email/SMS code, "
-                    "or a site message saying credentials/login/user verification are needed, do not "
-                    "finish the task as failed. Use the request_owner_input action and ask the owner to "
-                    "complete the required human step in the live browser session. After the owner "
-                    "confirms the step is done, continue in the same browser session."
+                    "Owner handoff rule: if progress requires login, sign-in, account selection, "
+                    "CAPTCHA that the registered solver cannot solve, MFA, email/SMS code, "
+                    "authenticator approval, credentials, or any other owner-only verification, "
+                    "use the request_owner_input action immediately before failing or trying a "
+                    "different browser/session. Tell the owner exactly what to do in the live browser "
+                    "session, for example: 'Open the live browser link and finish login, then reply "
+                    "done.' After the owner confirms, continue in this same browser session."
                 )
 
             agent_kwargs: dict[str, Any] = {
@@ -1256,9 +1258,10 @@ class BrowserUseLocalManager:
 
         if allow_owner_input:
             @controller.action(
-                "Ask the OpenTulpa owner for input needed to continue the current browser task. "
-                "Use when login or verification is blocked by an email code, SMS code, authenticator code, "
-                "MFA approval, account choice, or owner-only decision. Keep the current browser page open.",
+                "Hand off the current live browser session to the OpenTulpa owner and wait for them. "
+                "Use this immediately when login, sign-in, CAPTCHA, MFA, credentials, email/SMS code, "
+                "authenticator approval, account choice, or another owner-only step blocks progress. "
+                "Ask the owner to complete the step in the same live browser session, then reply when done.",
                 domains=["*"],
             )
             async def request_owner_input(prompt: str, input_type: str = "text") -> ActionResult:

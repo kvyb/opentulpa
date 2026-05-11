@@ -128,33 +128,6 @@ def _compact_browser_use_task_view(
     return result
 
 
-def _looks_like_browser_handoff_block(payload: dict[str, Any]) -> bool:
-    if bool(payload.get("isSuccess")):
-        return False
-    live_url = str(payload.get("liveUrl") or "").strip()
-    if not live_url:
-        return False
-    text = " ".join(
-        str(payload.get(key) or "")
-        for key in ("output", "error", "task")
-    ).lower()
-    markers = (
-        "login",
-        "log in",
-        "sign in",
-        "signin",
-        "credential",
-        "account",
-        "blocked",
-        "bot detection",
-        "network security",
-        "verification",
-        "mfa",
-        "captcha",
-    )
-    return any(marker in text for marker in markers)
-
-
 def register_browser_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def browser_use_session_list() -> Any:
@@ -192,6 +165,9 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         CAPTCHA, the browser backend can use its registered solver action when
         available. Do not ask the owner to paste credentials into durable
         memory; use current-turn credentials only for the intended browser login.
+        The browser agent is responsible for calling request_owner_input before
+        failing login, MFA, CAPTCHA, or owner-only account steps; this wrapper
+        does not infer login handoff from failed task text after the fact.
         """
         task_text = str(task or "").strip()
         if not task_text:
@@ -271,16 +247,6 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                 compact["task_id"] = task_id
                 compact["session_id"] = result_session_id or compact.get("session_id")
                 compact["status"] = status or str(compact.get("status") or "unknown")
-                if _looks_like_browser_handoff_block(task_data):
-                    compact["handoff_required"] = True
-                    compact["status"] = "waiting_for_owner"
-                    compact["message"] = (
-                        "Browser reached an account, verification, or bot/security block but a live_url "
-                        "is available. Share live_url with the owner now and ask them to complete the "
-                        "human step in that same browser. Do not ask whether to try login if the owner "
-                        "already requested browser access. After they confirm, call browser_use_run again "
-                        "with this same session_id to continue."
-                    )
                 return compact
 
             if datetime.now(UTC).timestamp() >= deadline:
