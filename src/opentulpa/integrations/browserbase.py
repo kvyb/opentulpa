@@ -25,8 +25,8 @@ class BrowserbaseSession:
 class BrowserbaseClient:
     """Small async Browserbase API client.
 
-    The SDK is intentionally not required here; OpenTulpa only needs contexts,
-    sessions, and live-view URLs.
+    OpenTulpa prefers Browserbase's SDK when available and keeps a REST path
+    for tests and environments where the SDK cannot be imported.
     """
 
     def __init__(
@@ -37,12 +37,14 @@ class BrowserbaseClient:
         base_url: str = "https://api.browserbase.com",
         timeout_seconds: float = 30.0,
         http_client: httpx.AsyncClient | None = None,
+        sdk_client: Any | None = None,
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._project_id = str(project_id or "").strip()
         self._base_url = str(base_url or "").strip().rstrip("/") or "https://api.browserbase.com"
         self._timeout_seconds = max(5.0, float(timeout_seconds))
         self._http_client = http_client
+        self._sdk_client = sdk_client
         assert self._base_url.startswith(("https://", "http://"))
         assert self._timeout_seconds > 0
 
@@ -51,6 +53,13 @@ class BrowserbaseClient:
             raise BrowserbaseError("BROWSERBASE_API_KEY is required")
         if not self._project_id:
             raise BrowserbaseError("BROWSERBASE_PROJECT_ID is required to create a persistent context")
+        sdk_client = self._get_sdk_client()
+        if sdk_client is not None:
+            payload = await sdk_client.contexts.create(project_id=self._project_id)
+            context_id = self._response_str(payload, "id")
+            if not context_id:
+                raise BrowserbaseError("Browserbase create context response did not include id")
+            return context_id
         payload = await self._request("POST", "/v1/contexts", json={"projectId": self._project_id})
         context_id = str(payload.get("id") or "").strip()
         if not context_id:
@@ -69,6 +78,16 @@ class BrowserbaseClient:
         safe_context_id = str(context_id or "").strip()
         if not safe_context_id:
             raise BrowserbaseError("Browserbase session requires a context id")
+        sdk_client = self._get_sdk_client()
+        if sdk_client is not None:
+            return await self._create_session_with_sdk(
+                sdk_client=sdk_client,
+                context_id=safe_context_id,
+                customer_id=customer_id,
+                profile_id=profile_id,
+                persist=persist,
+                keep_alive=keep_alive,
+            )
         body: dict[str, Any] = {
             "browserSettings": {
                 "context": {"id": safe_context_id, "persist": bool(persist)},
@@ -98,7 +117,91 @@ class BrowserbaseClient:
         safe_session_id = str(session_id or "").strip()
         if not safe_session_id:
             raise BrowserbaseError("Browserbase live view requires a session id")
+        sdk_client = self._get_sdk_client()
+        if sdk_client is not None:
+            payload = await sdk_client.sessions.debug(safe_session_id)
+            return self._response_dict(payload)
         return await self._request("GET", f"/v1/sessions/{safe_session_id}/debug")
+
+    async def _create_session_with_sdk(
+        self,
+        *,
+        sdk_client: Any,
+        context_id: str,
+        customer_id: str,
+        profile_id: str,
+        persist: bool,
+        keep_alive: bool,
+    ) -> BrowserbaseSession:
+        kwargs: dict[str, Any] = {
+            "browser_settings": {"context": {"id": context_id, "persist": bool(persist)}},
+            "keep_alive": bool(keep_alive),
+            "user_metadata": {
+                "opentulpaCustomerId": str(customer_id or "").strip(),
+                "opentulpaProfileId": str(profile_id or "").strip(),
+            },
+        }
+        if self._project_id:
+            kwargs["project_id"] = self._project_id
+        payload = await sdk_client.sessions.create(**kwargs)
+        session_id = self._response_str(payload, "id")
+        connect_url = self._response_str(payload, "connect_url") or self._response_str(
+            payload, "connectUrl"
+        )
+        response_context_id = (
+            self._response_str(payload, "context_id")
+            or self._response_str(payload, "contextId")
+            or context_id
+        )
+        if not session_id or not connect_url:
+            raise BrowserbaseError("Browserbase create session response missed id or connectUrl")
+        return BrowserbaseSession(
+            id=session_id,
+            connect_url=connect_url,
+            context_id=response_context_id,
+            recording_url=f"https://browserbase.com/sessions/{session_id}",
+        )
+
+    def _get_sdk_client(self) -> Any | None:
+        if self._http_client is not None:
+            return None
+        if self._sdk_client is not None:
+            return self._sdk_client
+        try:
+            from browserbase import AsyncBrowserbase
+        except ImportError:
+            return None
+        self._sdk_client = AsyncBrowserbase(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=self._timeout_seconds,
+        )
+        return self._sdk_client
+
+    @staticmethod
+    def _response_str(payload: Any, key: str) -> str:
+        if isinstance(payload, dict):
+            return str(payload.get(key) or "").strip()
+        return str(getattr(payload, key, "") or "").strip()
+
+    @staticmethod
+    def _response_dict(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        if hasattr(payload, "to_dict"):
+            data = payload.to_dict()
+            if isinstance(data, dict):
+                return data
+        if hasattr(payload, "model_dump"):
+            data = payload.model_dump(by_alias=True)
+            if isinstance(data, dict):
+                return data
+        out = {
+            key: value
+            for key in dir(payload)
+            if not key.startswith("_") and not callable(value := getattr(payload, key, None))
+        }
+        return out
 
     async def _request(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._api_key:

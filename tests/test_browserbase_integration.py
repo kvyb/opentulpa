@@ -9,6 +9,39 @@ import pytest
 from opentulpa.integrations.browserbase import BrowserbaseClient
 
 
+class _FakeSdkContexts:
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> dict[str, Any]:
+        self.created.append(kwargs)
+        return {"id": "ctx_sdk"}
+
+
+class _FakeSdkSessions:
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+        self.debugged: list[str] = []
+
+    async def create(self, **kwargs: Any) -> dict[str, Any]:
+        self.created.append(kwargs)
+        return {
+            "id": "ses_sdk",
+            "connect_url": "wss://connect.browserbase.sdk/session",
+            "context_id": "ctx_sdk",
+        }
+
+    async def debug(self, session_id: str) -> dict[str, Any]:
+        self.debugged.append(session_id)
+        return {"debuggerFullscreenUrl": "https://browserbase.com/live/ses_sdk"}
+
+
+class _FakeSdkClient:
+    def __init__(self) -> None:
+        self.contexts = _FakeSdkContexts()
+        self.sessions = _FakeSdkSessions()
+
+
 @pytest.mark.asyncio
 async def test_browserbase_client_creates_context_session_and_live_url() -> None:
     requests: list[tuple[str, str, dict[str, Any] | None]] = []
@@ -64,3 +97,37 @@ async def test_browserbase_client_creates_context_session_and_live_url() -> None
         "persist": True,
     }
     assert requests[1][2]["userMetadata"]["opentulpaProfileId"] == "github"
+
+
+@pytest.mark.asyncio
+async def test_browserbase_client_uses_sdk_client_when_available() -> None:
+    sdk_client = _FakeSdkClient()
+    client = BrowserbaseClient(
+        api_key="bb_test",
+        project_id="proj_123",
+        base_url="https://api.browserbase.test",
+        sdk_client=sdk_client,
+    )
+
+    context_id = await client.create_context()
+    session = await client.create_session(
+        context_id=context_id,
+        customer_id="cust_1",
+        profile_id="github",
+    )
+    live = await client.get_live_urls(session.id)
+
+    assert context_id == "ctx_sdk"
+    assert session.id == "ses_sdk"
+    assert session.connect_url == "wss://connect.browserbase.sdk/session"
+    assert session.context_id == "ctx_sdk"
+    assert live["debuggerFullscreenUrl"] == "https://browserbase.com/live/ses_sdk"
+    assert sdk_client.contexts.created == [{"project_id": "proj_123"}]
+    assert sdk_client.sessions.created[0]["project_id"] == "proj_123"
+    assert sdk_client.sessions.created[0]["browser_settings"]["context"] == {
+        "id": "ctx_sdk",
+        "persist": True,
+    }
+    assert sdk_client.sessions.created[0]["keep_alive"] is True
+    assert sdk_client.sessions.created[0]["user_metadata"]["opentulpaProfileId"] == "github"
+    assert sdk_client.sessions.debugged == ["ses_sdk"]
