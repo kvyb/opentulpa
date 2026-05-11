@@ -163,7 +163,8 @@ def test_browser_use_tool_descriptions_include_login_session_and_secret_boundari
 
     assert "persisted\nbrowser profile state" in session_description
     assert "owner-authorized login flows" in normalized_run_description
-    assert "CAPTCHA or MFA" in normalized_run_description
+    assert "Login screens are expected human handoff points" in normalized_run_description
+    assert "share live_url when present so the owner can log in directly" in normalized_run_description
     assert "Do not ask the owner to paste credentials into durable memory" in normalized_run_description
 
 

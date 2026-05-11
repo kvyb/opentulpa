@@ -167,6 +167,9 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "business_knowledge_index those file_ids into the current setup scope" in base_policy
     assert "after a workflow exists, user_context_promote_to_intake" in base_policy
     assert "do not refuse merely because login, CAPTCHA, MFA, or session persistence may be involved" in base_policy
+    assert "treat login/auth/MFA pages as normal human handoff points" in base_policy
+    assert "share live_url when present or ask for owner input" in base_policy
+    assert "Do not invent credentials or start a different session" in base_policy
     assert "unless the owner explicitly asks to use or persist those credentials" in base_policy
     assert "you may persist them to local files, memory, or directives" in base_policy
     assert "Do not echo or summarize secret values back to chat" in base_policy

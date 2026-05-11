@@ -128,6 +128,8 @@ def test_browser_use_operator_default_mentions_session_reuse(tmp_path: Path) -> 
     assert skill is not None
     assert "browser_use_session_list" in skill["skill_markdown"]
     assert "browser_use_task_screenshot" in skill["skill_markdown"]
+    assert "Treat login/auth pages as expected human handoff points" in skill["skill_markdown"]
+    assert "share `live_url` when present so the owner can log in directly" in skill["skill_markdown"]
 
 
 def test_composio_operator_default_mentions_auth_and_schema_flow(tmp_path: Path) -> None:

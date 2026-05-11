@@ -158,11 +158,12 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         Use for dynamic web tasks that need real browser interactions, including
         owner-authorized login flows. Browser sessions are kept alive and may use
         persisted profile state when configured; reuse a prior session_id when
-        continuing the same account/site workflow. If the task hits CAPTCHA or
-        MFA, the browser backend can use its registered solver/owner-input actions
-        when available. If the result includes live_url, share it with the owner
-        when they need to log in or control the live browser. Do not ask the owner
-        to paste credentials into durable
+        continuing the same account/site workflow. Login screens are expected
+        human handoff points: navigate to the login page, keep the same session,
+        share live_url when present so the owner can log in directly, or use
+        owner-input for MFA/email/SMS/account-choice prompts. If the task hits
+        CAPTCHA, the browser backend can use its registered solver action when
+        available. Do not ask the owner to paste credentials into durable
         memory; use current-turn credentials only for the intended browser login.
         """
         task_text = str(task or "").strip()
