@@ -1050,6 +1050,9 @@ class OpenTulpaLangGraphRuntime:
         browser_use_task_retention_seconds: int = 1800,
         browser_use_user_data_dir: str | None = ".opentulpa/browser_use_profiles",
         capsolver_api_key: str | None = None,
+        browserbase_api_key: str | None = None,
+        browserbase_project_id: str | None = None,
+        browserbase_base_url: str = "https://api.browserbase.com",
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
         langfuse_tracer: Any | None = None,
@@ -1130,6 +1133,11 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
         self._browser_use_user_data_dir = str(browser_use_user_data_dir or "").strip()
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
+        self._browserbase_api_key = str(browserbase_api_key or "").strip()
+        self._browserbase_project_id = str(browserbase_project_id or "").strip()
+        self._browserbase_base_url = (
+            str(browserbase_base_url or "").strip().rstrip("/") or "https://api.browserbase.com"
+        )
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
         self._langfuse_tracer = langfuse_tracer
@@ -1434,6 +1442,9 @@ class OpenTulpaLangGraphRuntime:
                 task_retention_seconds=self._browser_use_task_retention_seconds,
                 user_data_dir=self._browser_use_user_data_dir,
                 capsolver_api_key=self._capsolver_api_key,
+                browserbase_api_key=self._browserbase_api_key,
+                browserbase_project_id=self._browserbase_project_id,
+                browserbase_base_url=self._browserbase_base_url,
             )
         return self._browser_use_local_manager
 

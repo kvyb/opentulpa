@@ -298,6 +298,21 @@ class Settings(BaseSettings):
             "survive process restarts when local/container storage persists."
         ),
     )
+    browserbase_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional Browserbase API key. When set with BROWSERBASE_PROJECT_ID, "
+            "Browser Use runs use Browserbase cloud browser sessions with persisted contexts."
+        ),
+    )
+    browserbase_project_id: str | None = Field(
+        default=None,
+        description="Browserbase project id used for Browserbase context/session creation.",
+    )
+    browserbase_base_url: str = Field(
+        default="https://api.browserbase.com",
+        description="Browserbase API base URL.",
+    )
     capsolver_api_key: str | None = Field(
         default=None,
         description=(

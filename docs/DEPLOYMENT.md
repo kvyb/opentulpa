@@ -128,6 +128,20 @@ Use action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile pages. Without
 the key, the solver is not registered and normal Browser Use behavior is
 unchanged.
 
+Optional Browserbase cloud sessions are enabled when both values are set:
+
+```bash
+BROWSERBASE_API_KEY=...
+BROWSERBASE_PROJECT_ID=...
+```
+
+With Browserbase enabled, `browser_use_run` creates Browserbase sessions instead
+of local Chromium sessions. OpenTulpa stores the Browserbase context id under
+`BROWSER_USE_USER_DATA_DIR` per customer/session so repeat runs reuse persisted
+cookies and localStorage. Returned task payloads include a `live_url` when
+Browserbase exposes one, which can be sent to the owner for login, MFA, or other
+interactive account steps.
+
 ## Useful startup commands
 
 | Command | Meaning |

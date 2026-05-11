@@ -70,6 +70,11 @@ class _BrowserUseSessionState:
     session: Any
     customer_id: str
     session_id: str
+    backend: str = "local"
+    browserbase_context_id: str | None = None
+    browserbase_session_id: str | None = None
+    live_url: str | None = None
+    recording_url: str | None = None
     updated_monotonic: float = field(default_factory=time.monotonic)
 
 
@@ -89,6 +94,9 @@ class BrowserUseLocalManager:
         task_retention_seconds: int = 1800,
         user_data_dir: str | Path | None = None,
         capsolver_api_key: str | None = None,
+        browserbase_api_key: str | None = None,
+        browserbase_project_id: str | None = None,
+        browserbase_base_url: str = "https://api.browserbase.com",
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")
@@ -99,6 +107,10 @@ class BrowserUseLocalManager:
         self._task_retention_seconds = max(60, int(task_retention_seconds))
         self._user_data_dir = self._resolve_user_data_dir(user_data_dir)
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
+        self._browserbase_api_key = str(browserbase_api_key or "").strip()
+        self._browserbase_project_id = str(browserbase_project_id or "").strip()
+        self._browserbase_base_url = str(browserbase_base_url or "").strip().rstrip("/") or "https://api.browserbase.com"
+        self._browserbase_client: Any | None = None
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
         self._tasks: dict[str, _BrowserUseTaskState] = {}
@@ -120,6 +132,21 @@ class BrowserUseLocalManager:
                 f"({exc}). Install dependencies with `uv sync`."
             )
             return self._preflight_error
+
+        if self._browserbase_enabled():
+            if not self._browserbase_project_id:
+                self._preflight_error = (
+                    "browser_use Browserbase backend unavailable: BROWSERBASE_PROJECT_ID missing"
+                )
+                return self._preflight_error
+            if self._user_data_dir is None:
+                self._preflight_error = (
+                    "browser_use Browserbase backend unavailable: BROWSER_USE_USER_DATA_DIR "
+                    "is required to remember Browserbase context ids"
+                )
+                return self._preflight_error
+            self._preflight_error = None
+            return None
 
         try:
             from playwright.async_api import async_playwright
@@ -238,7 +265,7 @@ class BrowserUseLocalManager:
                         "sessions": self._session_summaries_locked(safe_customer_id),
                 }
             if session_state is None:
-                browser_session = self._new_browser_session(
+                browser_session, browserbase_info = await self._new_browser_session(
                     allowed_domains=safe_domains,
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
@@ -247,6 +274,11 @@ class BrowserUseLocalManager:
                     session=browser_session,
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
+                    backend=browserbase_info.get("backend", "local"),
+                    browserbase_context_id=browserbase_info.get("context_id"),
+                    browserbase_session_id=browserbase_info.get("session_id"),
+                    live_url=browserbase_info.get("live_url"),
+                    recording_url=browserbase_info.get("recording_url"),
                 )
                 self._sessions[session_key] = session_state
                 self._write_profile_metadata(
@@ -348,8 +380,13 @@ class BrowserUseLocalManager:
                     {
                         "session_id": session_state.session_id,
                         "customer_id": safe_customer_id,
+                        "backend": session_state.backend,
                         "reusable": not active_task_ids,
                         "persisted": self._profile_dir_exists(safe_customer_id, session_state.session_id),
+                        "live_url": session_state.live_url,
+                        "recording_url": session_state.recording_url,
+                        "browserbase_context_id": session_state.browserbase_context_id,
+                        "browserbase_session_id": session_state.browserbase_session_id,
                         "active_task_ids": active_task_ids,
                         "latest_task_id": latest.task_id if latest is not None else None,
                         "latest_status": latest.status if latest is not None else None,
@@ -369,11 +406,16 @@ class BrowserUseLocalManager:
                     {
                         "session_id": session_id,
                         "customer_id": safe_customer_id,
+                        "backend": metadata.get("backend") or "local",
                         "reusable": (
                             self._live_session_count_for_customer_locked(safe_customer_id)
                             < _MAX_BROWSER_USE_SESSIONS
                         ),
                         "persisted": True,
+                        "live_url": metadata.get("liveUrl") or None,
+                        "recording_url": metadata.get("recordingUrl") or None,
+                        "browserbase_context_id": metadata.get("browserbaseContextId") or None,
+                        "browserbase_session_id": metadata.get("browserbaseSessionId") or None,
                         "active_task_ids": [],
                         "latest_task_id": None,
                         "latest_status": None,
@@ -720,7 +762,7 @@ class BrowserUseLocalManager:
             history = await agent.run(max_steps=max_steps)
             history_payload = self._history_to_payload(history)
 
-            session_to_close: Any | None = None
+            completed_session_to_close: Any | None = None
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is None:
@@ -757,14 +799,14 @@ class BrowserUseLocalManager:
                 )
 
                 if state.close_session_when_done:
-                    session_to_close = self._detach_session_if_unused_locked(
+                    completed_session_to_close = self._detach_session_if_unused_locked(
                         state.customer_id, state.session_id
                     )
 
-            if session_to_close is not None:
-                await self._close_session(session_to_close)
+            if completed_session_to_close is not None:
+                await self._close_session(completed_session_to_close)
         except Exception as exc:
-            session_to_close: Any | None = None
+            failed_session_to_close: Any | None = None
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is not None:
@@ -781,11 +823,11 @@ class BrowserUseLocalManager:
                         last_url=self._latest_step_url(state),
                     )
                     if state.close_session_when_done:
-                        session_to_close = self._detach_session_if_unused_locked(
+                        failed_session_to_close = self._detach_session_if_unused_locked(
                             state.customer_id, state.session_id
                         )
-            if session_to_close is not None:
-                await self._close_session(session_to_close)
+            if failed_session_to_close is not None:
+                await self._close_session(failed_session_to_close)
         finally:
             self._semaphore.release()
 
@@ -965,14 +1007,27 @@ class BrowserUseLocalManager:
             out.append(value)
         return out
 
-    def _new_browser_session(
+    async def _new_browser_session(
         self,
         *,
         allowed_domains: list[str],
         customer_id: str,
         session_id: str,
-    ) -> Any:
+    ) -> tuple[Any, dict[str, str]]:
         _, _, browser_session_cls = self._import_browser_use_components()
+        if self._browserbase_enabled():
+            browserbase_session = await self._new_browserbase_session(
+                customer_id=customer_id,
+                session_id=session_id,
+            )
+            browserbase_session_kwargs: dict[str, Any] = {
+                "cdp_url": browserbase_session["connect_url"],
+                "keep_alive": True,
+            }
+            if allowed_domains:
+                browserbase_session_kwargs["allowed_domains"] = allowed_domains
+            return browser_session_cls(**browserbase_session_kwargs), browserbase_session
+
         session_kwargs: dict[str, Any] = {"headless": self._headless, "keep_alive": True}
         if allowed_domains:
             session_kwargs["allowed_domains"] = allowed_domains
@@ -980,7 +1035,55 @@ class BrowserUseLocalManager:
             session_profile_dir = self._profile_dir(customer_id, session_id)
             session_profile_dir.mkdir(parents=True, exist_ok=True)
             session_kwargs["user_data_dir"] = str(session_profile_dir)
-        return browser_session_cls(**session_kwargs)
+        return browser_session_cls(**session_kwargs), {"backend": "local"}
+
+    async def _new_browserbase_session(self, *, customer_id: str, session_id: str) -> dict[str, str]:
+        context_id = self._browserbase_context_id(customer_id, session_id)
+        if not context_id:
+            context_id = await self._get_browserbase_client().create_context()
+            self._write_profile_metadata(
+                customer_id=customer_id,
+                session_id=session_id,
+                status="idle",
+                backend="browserbase",
+                browserbase_context_id=context_id,
+            )
+        session = await self._get_browserbase_client().create_session(
+            context_id=context_id,
+            customer_id=customer_id,
+            profile_id=session_id,
+            persist=True,
+            keep_alive=True,
+        )
+        live_url = None
+        debugger_url = None
+        with suppress(Exception):
+            debug_payload = await self._get_browserbase_client().get_live_urls(session.id)
+            live_url = (
+                str(debug_payload.get("debuggerFullscreenUrl") or "").strip()
+                or str(debug_payload.get("debuggerUrl") or "").strip()
+                or None
+            )
+            debugger_url = str(debug_payload.get("debuggerUrl") or "").strip() or None
+        self._write_profile_metadata(
+            customer_id=customer_id,
+            session_id=session_id,
+            status="idle",
+            backend="browserbase",
+            browserbase_context_id=session.context_id,
+            browserbase_session_id=session.id,
+            live_url=live_url,
+            recording_url=session.recording_url,
+        )
+        return {
+            "backend": "browserbase",
+            "connect_url": session.connect_url,
+            "context_id": session.context_id,
+            "session_id": session.id,
+            "live_url": live_url or "",
+            "debugger_url": debugger_url or "",
+            "recording_url": session.recording_url,
+        }
 
     @staticmethod
     def _resolve_user_data_dir(value: str | Path | None) -> Path | None:
@@ -1077,6 +1180,11 @@ class BrowserUseLocalManager:
         status: str,
         task_id: str | None = None,
         last_url: str | None = None,
+        backend: str | None = None,
+        browserbase_context_id: str | None = None,
+        browserbase_session_id: str | None = None,
+        live_url: str | None = None,
+        recording_url: str | None = None,
     ) -> None:
         if self._user_data_dir is None:
             return
@@ -1099,6 +1207,16 @@ class BrowserUseLocalManager:
             metadata["lastTaskId"] = task_id
         if last_url:
             metadata["lastUrl"] = last_url
+        if backend:
+            metadata["backend"] = backend
+        if browserbase_context_id:
+            metadata["browserbaseContextId"] = browserbase_context_id
+        if browserbase_session_id:
+            metadata["browserbaseSessionId"] = browserbase_session_id
+        if live_url:
+            metadata["liveUrl"] = live_url
+        if recording_url:
+            metadata["recordingUrl"] = recording_url
         (profile_dir / _PROFILE_METADATA_FILE).write_text(
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
@@ -1115,7 +1233,7 @@ class BrowserUseLocalManager:
     def _new_controller(self, *, task_id: str, allow_owner_input: bool = True) -> Any | None:
         from browser_use import ActionResult, Controller
 
-        controller = Controller()
+        controller: Any = Controller()
 
         if allow_owner_input:
             @controller.action(
@@ -1162,10 +1280,22 @@ class BrowserUseLocalManager:
         return Agent, ChatOpenAI, BrowserSession
 
     def _state_to_payload(self, state: _BrowserUseTaskState) -> dict[str, Any]:
+        session_state = self._sessions.get(
+            self._session_key(state.customer_id, str(state.session_id or ""))
+        )
         return {
             "id": state.task_id,
             "customerId": state.customer_id,
             "sessionId": state.session_id,
+            "backend": session_state.backend if session_state is not None else "local",
+            "liveUrl": session_state.live_url if session_state is not None else None,
+            "recordingUrl": session_state.recording_url if session_state is not None else None,
+            "browserbaseContextId": (
+                session_state.browserbase_context_id if session_state is not None else None
+            ),
+            "browserbaseSessionId": (
+                session_state.browserbase_session_id if session_state is not None else None
+            ),
             "status": state.status,
             "isSuccess": state.is_success,
             "startedAt": state.started_at,
@@ -1229,14 +1359,15 @@ class BrowserUseLocalManager:
             if age >= _SESSION_IDLE_TIMEOUT_SECONDS:
                 expired_sessions.append(session_key)
         for session_key in expired_sessions:
-            session_state = self._sessions.pop(session_key, None)
-            if session_state is not None:
-                self._write_profile_metadata(
-                    customer_id=session_state.customer_id,
-                    session_id=session_state.session_id,
-                    status="idle",
-                )
-                asyncio.create_task(self._close_session(session_state.session))
+            if session_key not in self._sessions:
+                continue
+            session_state = self._sessions.pop(session_key)
+            self._write_profile_metadata(
+                customer_id=session_state.customer_id,
+                session_id=session_state.session_id,
+                status="idle",
+            )
+            asyncio.create_task(self._close_session(session_state.session))
 
         self._delete_stale_profiles_locked()
 
@@ -1329,13 +1460,39 @@ class BrowserUseLocalManager:
                 {
                     "session_id": session_state.session_id,
                     "customer_id": session_state.customer_id,
+                    "backend": session_state.backend,
                     "reusable": active_task is None,
                     "active_task_id": active_task.task_id if active_task is not None else None,
+                    "live_url": session_state.live_url,
+                    "recording_url": session_state.recording_url,
+                    "browserbase_context_id": session_state.browserbase_context_id,
+                    "browserbase_session_id": session_state.browserbase_session_id,
                     "last_used_monotonic": float(session_state.updated_monotonic or 0.0),
                 }
             )
         out.sort(key=lambda item: item["last_used_monotonic"], reverse=True)
         return out
+
+    def _browserbase_enabled(self) -> bool:
+        return bool(self._browserbase_api_key)
+
+    def _get_browserbase_client(self) -> Any:
+        if self._browserbase_client is None:
+            from opentulpa.integrations.browserbase import BrowserbaseClient
+
+            self._browserbase_client = BrowserbaseClient(
+                api_key=self._browserbase_api_key,
+                project_id=self._browserbase_project_id,
+                base_url=self._browserbase_base_url,
+            )
+        return self._browserbase_client
+
+    def _browserbase_context_id(self, customer_id: str, session_id: str) -> str | None:
+        if self._user_data_dir is None:
+            return None
+        metadata = self._read_profile_metadata(self._profile_dir(customer_id, session_id))
+        value = str(metadata.get("browserbaseContextId") or "").strip()
+        return value or None
 
     def _session_has_active_tasks_locked(self, customer_id: str, session_id: str) -> bool:
         safe_customer = self._normalize_customer_id(customer_id)

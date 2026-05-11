@@ -41,6 +41,51 @@ class _FakeBrowserSession:
         return raw
 
 
+class _FakeBrowserbaseClient:
+    def __init__(self) -> None:
+        self.created_contexts = 0
+        self.created_sessions: list[dict[str, Any]] = []
+
+    async def create_context(self) -> str:
+        self.created_contexts += 1
+        return "ctx_123"
+
+    async def create_session(
+        self,
+        *,
+        context_id: str,
+        customer_id: str,
+        profile_id: str,
+        persist: bool = True,
+        keep_alive: bool = True,
+    ) -> Any:
+        self.created_sessions.append(
+            {
+                "context_id": context_id,
+                "customer_id": customer_id,
+                "profile_id": profile_id,
+                "persist": persist,
+                "keep_alive": keep_alive,
+            }
+        )
+
+        @dataclass(frozen=True)
+        class _Session:
+            id: str = "ses_123"
+            connect_url: str = "wss://connect.browserbase.test/session"
+            context_id: str = "ctx_123"
+            recording_url: str = "https://browserbase.com/sessions/ses_123"
+
+        return _Session()
+
+    async def get_live_urls(self, session_id: str) -> dict[str, str]:
+        assert session_id == "ses_123"
+        return {
+            "debuggerFullscreenUrl": "https://browserbase.com/live/ses_123",
+            "debuggerUrl": "https://browserbase.com/debug/ses_123",
+        }
+
+
 @dataclass
 class _FakeModelAction:
     name: str
@@ -177,6 +222,56 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     assert state.agent.llm.kwargs["reasoning_effort"] == "medium"
     assert state.agent.controller is not None
     assert "solve_captcha_with_capsolver" not in state.agent.task
+
+
+@pytest.mark.asyncio
+async def test_local_manager_uses_browserbase_context_and_live_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path,
+        browserbase_api_key="bb-key",
+        browserbase_project_id="proj_123",
+    )
+    fake_browserbase = _FakeBrowserbaseClient()
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(manager, "_get_browserbase_client", lambda: fake_browserbase)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    created = await manager.start_task(
+        task="Log into a site",
+        max_steps=5,
+        llm="browser-use-llm",
+        session_id="github",
+        customer_id="cust_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id, customer_id="cust_1")
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["backend"] == "browserbase"
+    assert payload["liveUrl"] == "https://browserbase.com/live/ses_123"
+    assert payload["recordingUrl"] == "https://browserbase.com/sessions/ses_123"
+    assert payload["browserbaseContextId"] == "ctx_123"
+    assert fake_browserbase.created_contexts == 1
+    assert fake_browserbase.created_sessions[0]["persist"] is True
+    assert fake_browserbase.created_sessions[0]["customer_id"] == "cust_1"
+    session = manager._tasks[task_id].browser_session
+    assert session.kwargs["cdp_url"] == "wss://connect.browserbase.test/session"
 
 
 @pytest.mark.asyncio

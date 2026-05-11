@@ -86,6 +86,11 @@ def _compact_browser_use_task_view(
     result: dict[str, Any] = {
         "id": data.get("id"),
         "session_id": data.get("sessionId"),
+        "backend": data.get("backend"),
+        "live_url": data.get("liveUrl"),
+        "recording_url": data.get("recordingUrl"),
+        "browserbase_context_id": data.get("browserbaseContextId"),
+        "browserbase_session_id": data.get("browserbaseSessionId"),
         "status": data.get("status"),
         "is_success": data.get("isSuccess"),
         "started_at": data.get("startedAt"),
@@ -155,7 +160,9 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         persisted profile state when configured; reuse a prior session_id when
         continuing the same account/site workflow. If the task hits CAPTCHA or
         MFA, the browser backend can use its registered solver/owner-input actions
-        when available. Do not ask the owner to paste credentials into durable
+        when available. If the result includes live_url, share it with the owner
+        when they need to log in or control the live browser. Do not ask the owner
+        to paste credentials into durable
         memory; use current-turn credentials only for the intended browser login.
         """
         task_text = str(task or "").strip()
@@ -226,7 +233,8 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                 compact["status"] = "waiting_for_owner"
                 compact["message"] = (
                     "Browser task is waiting for owner input. Ask the owner for "
-                    "owner_input_prompt, then call browser_use_owner_input_submit."
+                    "owner_input_prompt, share live_url if present, then call "
+                    "browser_use_owner_input_submit."
                 )
                 return compact
 
@@ -235,7 +243,6 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                 compact["task_id"] = task_id
                 compact["session_id"] = result_session_id or compact.get("session_id")
                 compact["status"] = status or str(compact.get("status") or "unknown")
-                compact["live_url"] = None
                 return compact
 
             if datetime.now(UTC).timestamp() >= deadline:

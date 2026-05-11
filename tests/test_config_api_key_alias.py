@@ -99,6 +99,18 @@ def test_settings_accepts_browser_use_user_data_dir_env(monkeypatch) -> None:
     assert settings.browser_use_user_data_dir == "/tmp/opentulpa-browser-profiles"
 
 
+def test_settings_accepts_browserbase_env(monkeypatch) -> None:
+    monkeypatch.setenv("BROWSERBASE_API_KEY", "bb-key")
+    monkeypatch.setenv("BROWSERBASE_PROJECT_ID", "proj_123")
+    monkeypatch.setenv("BROWSERBASE_BASE_URL", "https://api.browserbase.test")
+
+    settings = Settings()
+
+    assert settings.browserbase_api_key == "bb-key"
+    assert settings.browserbase_project_id == "proj_123"
+    assert settings.browserbase_base_url == "https://api.browserbase.test"
+
+
 def test_settings_accepts_langfuse_base_url_or_host_alias(monkeypatch) -> None:
     monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
