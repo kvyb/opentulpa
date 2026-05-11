@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -13,9 +12,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from opentulpa.core.public_urls import build_public_composio_callback_path
 
 logger = logging.getLogger(__name__)
-RETRYABLE_COMPOSIO_STATUS_CODES = {408, 429, 500, 502, 503, 504}
-
-
 def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -26,62 +22,6 @@ def _error_response(exc: Exception, *, operation: str) -> JSONResponse:
     detail = body if isinstance(body, dict) else {"detail": str(exc)}
     logger.warning("Composio route %s failed: %s", operation, detail)
     return JSONResponse(status_code=status_code, content=detail)
-
-
-def _is_retryable_composio_error(exc: Exception) -> bool:
-    status_code = int(getattr(exc, "status_code", 0) or 0)
-    if status_code in RETRYABLE_COMPOSIO_STATUS_CODES:
-        return True
-    body = getattr(exc, "body", None)
-    if isinstance(body, dict):
-        error = body.get("error") if isinstance(body.get("error"), dict) else body
-        try:
-            nested_status = int(error.get("status", 0) or 0)
-        except Exception:
-            nested_status = 0
-        if nested_status in RETRYABLE_COMPOSIO_STATUS_CODES:
-            return True
-        code = str(error.get("code", "") or "").lower()
-        slug = str(error.get("slug", "") or "").lower()
-        message = str(error.get("message", "") or "").lower()
-        if any(marker in f"{code} {slug} {message}" for marker in ("timeout", "bad gateway")):
-            return True
-    return False
-
-
-async def _execute_composio_tool_with_retry(
-    service: Any,
-    *,
-    customer_id: str,
-    tool_slug: str,
-    arguments: dict[str, Any],
-    connected_account_id: str | None,
-    text: str | None,
-) -> Any:
-    attempts = 3
-    for attempt in range(attempts):
-        try:
-            return service.execute_tool(
-                customer_id=customer_id,
-                tool_slug=tool_slug,
-                arguments=arguments,
-                connected_account_id=connected_account_id,
-                text=text,
-            )
-        except Exception as exc:
-            if attempt + 1 >= attempts or not _is_retryable_composio_error(exc):
-                raise
-            delay = 0.4 * (2**attempt)
-            logger.warning(
-                "Composio tool execute transient failure; retrying tool_slug=%s attempt=%s/%s delay=%.2fs error=%s",
-                tool_slug,
-                attempt + 1,
-                attempts,
-                delay,
-                f"{type(exc).__name__}: {exc}",
-            )
-            await asyncio.sleep(delay)
-    raise RuntimeError("Composio tool execute retry loop exhausted")
 
 
 def register_composio_routes(
@@ -255,8 +195,7 @@ def register_composio_routes(
     async def internal_composio_tool_execute(request: Request) -> Any:
         body = await request.json()
         try:
-            return await _execute_composio_tool_with_retry(
-                get_composio(),
+            return get_composio().execute_tool(
                 customer_id=str(body.get("customer_id", "")).strip(),
                 tool_slug=str(body.get("tool_slug", "")).strip(),
                 arguments=body.get("arguments") if isinstance(body.get("arguments"), dict) else {},

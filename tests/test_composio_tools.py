@@ -57,6 +57,24 @@ async def test_composio_execute_preflights_tool_slug_and_returns_candidates() ->
 
 
 @pytest.mark.asyncio
+async def test_composio_execute_preflight_transient_error_is_retryable() -> None:
+    runtime = DummyRuntime([Response(503, {"error": {"message": "Bad Gateway"}})])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["composio_tool_execute"].ainvoke(
+        {"tool_slug": "GOOGLESHEETS_GET_ROWS", "arguments": {}}
+    )
+
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert result["candidate_tools"] == []
+    assert result["suggested_next_action"] == "Retry the same call later."
+    assert [call[1] for call in runtime.calls] == [
+        "/internal/composio/tools/GOOGLESHEETS_GET_ROWS/schema"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_composio_execute_returns_structured_nonretryable_account_error() -> None:
     runtime = DummyRuntime(
         [
@@ -74,3 +92,4 @@ async def test_composio_execute_returns_structured_nonretryable_account_error() 
     assert result["retryable"] is False
     assert "authorize" in result["suggested_next_action"]
     assert runtime.calls[-1][1] == "/internal/composio/tools/execute"
+    assert runtime.calls[-1][2]["retries"] == 0

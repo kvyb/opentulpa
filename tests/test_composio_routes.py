@@ -506,7 +506,7 @@ def test_composio_execute_route_passes_customer_and_arguments(tmp_path: Path) ->
     )
 
 
-def test_composio_execute_route_retries_transient_errors(tmp_path: Path) -> None:
+def test_composio_execute_route_does_not_retry_transient_errors(tmp_path: Path) -> None:
     composio = _RetryOnceComposioService()
     client = _mk_client_with_composio(tmp_path, composio)
 
@@ -520,6 +520,6 @@ def test_composio_execute_route_retries_transient_errors(tmp_path: Path) -> None
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["successful"] is True
-    assert [call[0] for call in composio.calls] == ["execute_tool", "execute_tool"]
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == "Bad Gateway"
+    assert [call[0] for call in composio.calls] == ["execute_tool"]

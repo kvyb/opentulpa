@@ -42,6 +42,10 @@ def _composio_failure_payload(
     return payload
 
 
+def _is_retryable_internal_status(status_code: int) -> bool:
+    return int(status_code or 0) in {408, 429, 500, 502, 503, 504}
+
+
 def register_composio_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def composio_status() -> Any:
@@ -249,9 +253,10 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             timeout=20.0,
         )
         if schema_response.status_code != 200:
+            retryable = _is_retryable_internal_status(schema_response.status_code)
             toolkit = _toolkit_from_slug(safe_tool_slug)
             candidates: Any = []
-            if toolkit:
+            if toolkit and not retryable:
                 search_response = await runtime._request_with_backoff(
                     "GET",
                     "/internal/composio/tools/search",
@@ -264,9 +269,11 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
                 operation="composio_tool_execute preflight",
                 status_code=schema_response.status_code,
                 response_text=schema_response.text,
-                retryable=False,
+                retryable=retryable,
                 suggested_next_action=(
-                    "The requested Composio tool slug is not available. Choose one of the "
+                    "Retry the same call later."
+                    if retryable
+                    else "The requested Composio tool slug is not available. Choose one of the "
                     "candidate tools from composio_tool_search, then retry with that exact slug."
                 ),
                 extra={
@@ -285,6 +292,7 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
                 "text": text,
             },
             timeout=120.0,
+            retries=0,
         )
         if r.status_code != 200:
             retryable = r.status_code in {408, 429, 500, 502, 503, 504}
