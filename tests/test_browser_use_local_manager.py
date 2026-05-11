@@ -222,6 +222,8 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     assert state.agent.llm.kwargs["reasoning_effort"] == "medium"
     assert state.agent.controller is not None
     assert "solve_captcha_with_capsolver" not in state.agent.task
+    assert "Use the request_owner_input action" in state.agent.task
+    assert "credentials/login/user verification" in state.agent.task
 
 
 @pytest.mark.asyncio

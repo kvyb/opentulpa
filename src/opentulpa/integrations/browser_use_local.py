@@ -741,6 +741,15 @@ class BrowserUseLocalManager:
                     "solve_captcha_with_capsolver action before continuing. "
                     "Supported challenges are reCAPTCHA v2, reCAPTCHA v3, and Cloudflare Turnstile."
                 )
+            if state is not None and state.allow_owner_input:
+                composed_task = (
+                    f"{composed_task}\n\n"
+                    "If progress is blocked by login, sign-in, account selection, MFA, email/SMS code, "
+                    "or a site message saying credentials/login/user verification are needed, do not "
+                    "finish the task as failed. Use the request_owner_input action and ask the owner to "
+                    "complete the required human step in the live browser session. After the owner "
+                    "confirms the step is done, continue in the same browser session."
+                )
 
             agent_kwargs: dict[str, Any] = {
                 "task": composed_task,

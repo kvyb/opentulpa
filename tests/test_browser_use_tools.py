@@ -273,6 +273,31 @@ async def test_browser_use_run_returns_when_waiting_for_owner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> None:
+    manager = _DummyBrowserManager()
+    tools = register_runtime_tools(_DummyRuntime(manager))
+
+    async def start_blocked_task(**kwargs) -> dict:
+        payload = await _DummyBrowserManager.start_task(manager, **kwargs)
+        payload["status"] = "finished"
+        payload["isSuccess"] = False
+        payload["backend"] = "browserbase"
+        payload["liveUrl"] = "https://browserbase.example/live/session"
+        payload["output"] = "Blocked by network security. Login credentials may be required."
+        return payload
+
+    manager.start_task = start_blocked_task  # type: ignore[method-assign]
+
+    result = await tools["browser_use_run"].ainvoke({"task": "open reddit"})
+
+    assert result.get("status") == "waiting_for_owner"
+    assert result.get("handoff_required") is True
+    assert result.get("live_url") == "https://browserbase.example/live/session"
+    assert "Share live_url with the owner now" in str(result.get("message"))
+    assert "same session_id" in str(result.get("message"))
+
+
+@pytest.mark.asyncio
 async def test_browser_use_owner_input_submit_resumes_waiting_task() -> None:
     manager = _DummyBrowserManager()
     task = await manager.start_task(task="login", max_steps=5, llm="browser-use-llm")
