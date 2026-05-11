@@ -360,23 +360,6 @@ wheels = [
 ]
 
 [[package]]
-name = "browserbase"
-version = "1.8.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4b/07/4ab4b91921833d0fb1731940d74141396d83120821f4c85482ed80bb2457/browserbase-1.8.0.tar.gz", hash = "sha256:dc62910c2f1fab3e944f338af9fbf82f53bbffcb3aeb6382b4e435a752383011", size = 147213 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/c3/a29e57566c52fdb24712dcbb93a9bc97937c0c75874d8880a41a651daa5c/browserbase-1.8.0-py3-none-any.whl", hash = "sha256:4c4215973cc99f2f6d34550ae105c3f1f83b5fe22df2845bea0920b10f809526", size = 110012 },
-]
-
-[[package]]
 name = "bubus"
 version = "1.5.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2494,7 +2477,6 @@ source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
     { name = "browser-use" },
-    { name = "browserbase" },
     { name = "chardet" },
     { name = "composio" },
     { name = "composio-langchain" },
@@ -2536,7 +2518,6 @@ dev = [
 requires-dist = [
     { name = "apscheduler", specifier = ">=3.10" },
     { name = "browser-use", specifier = "==0.12.2" },
-    { name = "browserbase", specifier = ">=1.8.0" },
     { name = "chardet", specifier = "<6" },
     { name = "composio", specifier = ">=0.11.4" },
     { name = "composio-langchain", specifier = ">=0.11.4" },

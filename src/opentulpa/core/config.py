@@ -298,32 +298,22 @@ class Settings(BaseSettings):
             "survive process restarts when local/container storage persists."
         ),
     )
-    browserbase_api_key: str | None = Field(
+    browser_use_api_key: str | None = Field(
         default=None,
         description=(
-            "Optional Browserbase API key. When set with BROWSERBASE_PROJECT_ID, "
-            "Browser Use runs use Browserbase cloud browser sessions with persisted contexts."
+            "Optional Browser Use Cloud API key. When set, browser_use_run uses "
+            "Browser Use Cloud browser sessions with stealth, live view, proxies, and profiles."
         ),
     )
-    browserbase_project_id: str | None = Field(
-        default=None,
-        description="Browserbase project id used for Browserbase context/session creation.",
+    browser_use_cloud_proxy_country_code: str | None = Field(
+        default="us",
+        description="Browser Use Cloud residential proxy country code for browser sessions.",
     )
-    browserbase_base_url: str = Field(
-        default="https://api.browserbase.com",
-        description="Browserbase API base URL.",
-    )
-    browserbase_proxy_country_code: str | None = Field(
-        default=None,
-        description="Optional Browserbase managed proxy country code for browser sessions.",
-    )
-    browserbase_solve_captchas: bool | None = Field(
-        default=None,
-        description="Optional Browserbase CAPTCHA solving flag for browser sessions.",
-    )
-    browserbase_advanced_stealth: bool | None = Field(
-        default=None,
-        description="Optional Browserbase advanced stealth flag for browser sessions.",
+    browser_use_cloud_timeout_minutes: int = Field(
+        default=240,
+        ge=1,
+        le=240,
+        description="Browser Use Cloud browser session timeout in minutes.",
     )
     capsolver_api_key: str | None = Field(
         default=None,

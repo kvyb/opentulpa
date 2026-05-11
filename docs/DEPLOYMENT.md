@@ -128,32 +128,29 @@ Use action for supported reCAPTCHA v2/v3 and Cloudflare Turnstile pages. Without
 the key, the solver is not registered and normal Browser Use behavior is
 unchanged.
 
-Optional Browserbase cloud sessions are enabled when both values are set:
+Optional Browser Use Cloud sessions are enabled when this value is set:
 
 ```bash
-BROWSERBASE_API_KEY=...
-BROWSERBASE_PROJECT_ID=...
+BROWSER_USE_API_KEY=...
 ```
 
-With Browserbase enabled, `browser_use_run` creates Browserbase sessions instead
-of local Chromium sessions. OpenTulpa stores the Browserbase context id under
-`BROWSER_USE_USER_DATA_DIR` per customer/session so repeat runs reuse persisted
-cookies and localStorage. Returned task payloads include a `live_url` when
-Browserbase exposes one, which can be sent to the owner for login, MFA, or other
-interactive account steps.
+With Browser Use Cloud enabled, `browser_use_run` creates stealth cloud browser
+sessions instead of local Chromium sessions. OpenTulpa stores the Browser Use
+profile id under `BROWSER_USE_USER_DATA_DIR` per customer/session so repeat runs
+reuse persisted cookies and localStorage. Returned task payloads include a
+`live_url`, which can be sent to the owner for login, MFA, or other interactive
+account steps.
 
-Non-secret Browserbase browser settings live in `opentulpa.config.yaml`:
+Non-secret Browser Use Cloud browser settings live in `opentulpa.config.yaml`:
 
 ```yaml
-browserbase_proxy_country_code: us
-browserbase_solve_captchas: true
-browserbase_advanced_stealth: false
+browser_use_cloud_proxy_country_code: us
+browser_use_cloud_timeout_minutes: 240
 ```
 
 Use a stable country matching the user/account. For logged-in workflows, prefer
 one persistent context and stable proxy region over rotating identity between
-runs. `browserbase_advanced_stealth` is disabled by default because Browserbase
-requires an Enterprise plan for that feature.
+runs.
 
 ## Useful startup commands
 

@@ -71,8 +71,8 @@ class _BrowserUseSessionState:
     customer_id: str
     session_id: str
     backend: str = "local"
-    browserbase_context_id: str | None = None
-    browserbase_session_id: str | None = None
+    cloud_profile_id: str | None = None
+    cloud_browser_session_id: str | None = None
     live_url: str | None = None
     recording_url: str | None = None
     updated_monotonic: float = field(default_factory=time.monotonic)
@@ -94,12 +94,9 @@ class BrowserUseLocalManager:
         task_retention_seconds: int = 1800,
         user_data_dir: str | Path | None = None,
         capsolver_api_key: str | None = None,
-        browserbase_api_key: str | None = None,
-        browserbase_project_id: str | None = None,
-        browserbase_base_url: str = "https://api.browserbase.com",
-        browserbase_proxy_country_code: str | None = None,
-        browserbase_solve_captchas: bool | None = None,
-        browserbase_advanced_stealth: bool | None = None,
+        browser_use_api_key: str | None = None,
+        browser_use_cloud_proxy_country_code: str | None = "us",
+        browser_use_cloud_timeout_minutes: int = 240,
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")
@@ -110,17 +107,19 @@ class BrowserUseLocalManager:
         self._task_retention_seconds = max(60, int(task_retention_seconds))
         self._user_data_dir = self._resolve_user_data_dir(user_data_dir)
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
-        self._browserbase_api_key = str(browserbase_api_key or "").strip()
-        self._browserbase_project_id = str(browserbase_project_id or "").strip()
-        self._browserbase_base_url = str(browserbase_base_url or "").strip().rstrip("/") or "https://api.browserbase.com"
-        self._browserbase_proxy_country_code = str(browserbase_proxy_country_code or "").strip()
-        self._browserbase_solve_captchas = browserbase_solve_captchas
-        self._browserbase_advanced_stealth = browserbase_advanced_stealth
-        self._browserbase_client: Any | None = None
+        self._browser_use_api_key = str(browser_use_api_key or "").strip()
+        self._browser_use_cloud_proxy_country_code = str(
+            browser_use_cloud_proxy_country_code or ""
+        ).strip()
+        self._browser_use_cloud_timeout_minutes = max(
+            1, min(int(browser_use_cloud_timeout_minutes), 240)
+        )
+        self._browser_use_cloud_client: Any | None = None
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
         self._tasks: dict[str, _BrowserUseTaskState] = {}
         self._sessions: dict[str, _BrowserUseSessionState] = {}
+        self._cloud_session_ids_by_browser_session: dict[int, str] = {}
         self._preflight_checked = False
         self._preflight_error: str | None = None
         self._cleanup_task: asyncio.Task[Any] | None = None
@@ -139,16 +138,19 @@ class BrowserUseLocalManager:
             )
             return self._preflight_error
 
-        if self._browserbase_enabled():
-            if not self._browserbase_project_id:
-                self._preflight_error = (
-                    "browser_use Browserbase backend unavailable: BROWSERBASE_PROJECT_ID missing"
-                )
-                return self._preflight_error
+        if self._browser_use_cloud_enabled():
             if self._user_data_dir is None:
                 self._preflight_error = (
-                    "browser_use Browserbase backend unavailable: BROWSER_USE_USER_DATA_DIR "
-                    "is required to remember Browserbase context ids"
+                    "browser_use cloud backend unavailable: BROWSER_USE_USER_DATA_DIR "
+                    "is required to remember Browser Use Cloud profile ids"
+                )
+                return self._preflight_error
+            try:
+                self._get_browser_use_cloud_client()
+            except Exception as exc:
+                self._preflight_error = (
+                    "browser_use cloud backend unavailable: Browser Use Cloud SDK import failed "
+                    f"({exc}). Install dependencies with `uv sync`."
                 )
                 return self._preflight_error
             self._preflight_error = None
@@ -271,7 +273,7 @@ class BrowserUseLocalManager:
                         "sessions": self._session_summaries_locked(safe_customer_id),
                 }
             if session_state is None:
-                browser_session, browserbase_info = await self._new_browser_session(
+                browser_session, browser_info = await self._new_browser_session(
                     allowed_domains=safe_domains,
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
@@ -280,12 +282,16 @@ class BrowserUseLocalManager:
                     session=browser_session,
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
-                    backend=browserbase_info.get("backend", "local"),
-                    browserbase_context_id=browserbase_info.get("context_id"),
-                    browserbase_session_id=browserbase_info.get("session_id"),
-                    live_url=browserbase_info.get("live_url"),
-                    recording_url=browserbase_info.get("recording_url"),
+                    backend=browser_info.get("backend", "local"),
+                    cloud_profile_id=browser_info.get("profile_id"),
+                    cloud_browser_session_id=browser_info.get("session_id"),
+                    live_url=browser_info.get("live_url"),
+                    recording_url=browser_info.get("recording_url"),
                 )
+                if session_state.cloud_browser_session_id:
+                    self._cloud_session_ids_by_browser_session[id(browser_session)] = (
+                        session_state.cloud_browser_session_id
+                    )
                 self._sessions[session_key] = session_state
                 self._write_profile_metadata(
                     customer_id=safe_customer_id,
@@ -391,8 +397,8 @@ class BrowserUseLocalManager:
                         "persisted": self._profile_dir_exists(safe_customer_id, session_state.session_id),
                         "live_url": session_state.live_url,
                         "recording_url": session_state.recording_url,
-                        "browserbase_context_id": session_state.browserbase_context_id,
-                        "browserbase_session_id": session_state.browserbase_session_id,
+                        "cloud_profile_id": session_state.cloud_profile_id,
+                        "cloud_browser_session_id": session_state.cloud_browser_session_id,
                         "active_task_ids": active_task_ids,
                         "latest_task_id": latest.task_id if latest is not None else None,
                         "latest_status": latest.status if latest is not None else None,
@@ -420,8 +426,8 @@ class BrowserUseLocalManager:
                         "persisted": True,
                         "live_url": metadata.get("liveUrl") or None,
                         "recording_url": metadata.get("recordingUrl") or None,
-                        "browserbase_context_id": metadata.get("browserbaseContextId") or None,
-                        "browserbase_session_id": metadata.get("browserbaseSessionId") or None,
+                        "cloud_profile_id": metadata.get("browserUseProfileId") or None,
+                        "cloud_browser_session_id": metadata.get("browserUseBrowserSessionId") or None,
                         "active_task_ids": [],
                         "latest_task_id": None,
                         "latest_status": None,
@@ -1030,18 +1036,18 @@ class BrowserUseLocalManager:
         session_id: str,
     ) -> tuple[Any, dict[str, str]]:
         _, _, browser_session_cls = self._import_browser_use_components()
-        if self._browserbase_enabled():
-            browserbase_session = await self._new_browserbase_session(
+        if self._browser_use_cloud_enabled():
+            cloud_session = await self._new_browser_use_cloud_session(
                 customer_id=customer_id,
                 session_id=session_id,
             )
-            browserbase_session_kwargs: dict[str, Any] = {
-                "cdp_url": browserbase_session["connect_url"],
+            cloud_session_kwargs: dict[str, Any] = {
+                "cdp_url": cloud_session["cdp_url"],
                 "keep_alive": True,
             }
             if allowed_domains:
-                browserbase_session_kwargs["allowed_domains"] = allowed_domains
-            return browser_session_cls(**browserbase_session_kwargs), browserbase_session
+                cloud_session_kwargs["allowed_domains"] = allowed_domains
+            return browser_session_cls(**cloud_session_kwargs), cloud_session
 
         session_kwargs: dict[str, Any] = {"headless": self._headless, "keep_alive": True}
         if allowed_domains:
@@ -1052,55 +1058,41 @@ class BrowserUseLocalManager:
             session_kwargs["user_data_dir"] = str(session_profile_dir)
         return browser_session_cls(**session_kwargs), {"backend": "local"}
 
-    async def _new_browserbase_session(self, *, customer_id: str, session_id: str) -> dict[str, str]:
-        context_id = self._browserbase_context_id(customer_id, session_id)
-        if not context_id:
-            context_id = await self._get_browserbase_client().create_context()
+    async def _new_browser_use_cloud_session(
+        self, *, customer_id: str, session_id: str
+    ) -> dict[str, str]:
+        profile_id = self._browser_use_cloud_profile_id(customer_id, session_id)
+        if not profile_id:
+            profile_id = await self._get_browser_use_cloud_client().create_profile(
+                name=self._browser_use_cloud_profile_name(customer_id, session_id)
+            )
             self._write_profile_metadata(
                 customer_id=customer_id,
                 session_id=session_id,
                 status="idle",
-                backend="browserbase",
-                browserbase_context_id=context_id,
+                backend="browser-use-cloud",
+                cloud_profile_id=profile_id,
             )
-        session = await self._get_browserbase_client().create_session(
-            context_id=context_id,
-            customer_id=customer_id,
-            profile_id=session_id,
-            persist=True,
-            keep_alive=True,
-            proxy_country_code=self._browserbase_proxy_country_code or None,
-            solve_captchas=self._browserbase_solve_captchas,
-            advanced_stealth=self._browserbase_advanced_stealth,
+        session = await self._get_browser_use_cloud_client().create_browser_session(
+            profile_id=profile_id,
         )
-        live_url = None
-        debugger_url = None
-        with suppress(Exception):
-            debug_payload = await self._get_browserbase_client().get_live_urls(session.id)
-            live_url = (
-                str(debug_payload.get("debuggerFullscreenUrl") or "").strip()
-                or str(debug_payload.get("debuggerUrl") or "").strip()
-                or None
-            )
-            debugger_url = str(debug_payload.get("debuggerUrl") or "").strip() or None
         self._write_profile_metadata(
             customer_id=customer_id,
             session_id=session_id,
             status="idle",
-            backend="browserbase",
-            browserbase_context_id=session.context_id,
-            browserbase_session_id=session.id,
-            live_url=live_url,
+            backend="browser-use-cloud",
+            cloud_profile_id=session.profile_id,
+            cloud_browser_session_id=session.id,
+            live_url=session.live_url,
             recording_url=session.recording_url,
         )
         return {
-            "backend": "browserbase",
-            "connect_url": session.connect_url,
-            "context_id": session.context_id,
+            "backend": "browser-use-cloud",
+            "cdp_url": session.cdp_url,
+            "profile_id": session.profile_id,
             "session_id": session.id,
-            "live_url": live_url or "",
-            "debugger_url": debugger_url or "",
-            "recording_url": session.recording_url,
+            "live_url": session.live_url or "",
+            "recording_url": session.recording_url or "",
         }
 
     @staticmethod
@@ -1199,8 +1191,8 @@ class BrowserUseLocalManager:
         task_id: str | None = None,
         last_url: str | None = None,
         backend: str | None = None,
-        browserbase_context_id: str | None = None,
-        browserbase_session_id: str | None = None,
+        cloud_profile_id: str | None = None,
+        cloud_browser_session_id: str | None = None,
         live_url: str | None = None,
         recording_url: str | None = None,
     ) -> None:
@@ -1227,10 +1219,10 @@ class BrowserUseLocalManager:
             metadata["lastUrl"] = last_url
         if backend:
             metadata["backend"] = backend
-        if browserbase_context_id:
-            metadata["browserbaseContextId"] = browserbase_context_id
-        if browserbase_session_id:
-            metadata["browserbaseSessionId"] = browserbase_session_id
+        if cloud_profile_id:
+            metadata["browserUseProfileId"] = cloud_profile_id
+        if cloud_browser_session_id:
+            metadata["browserUseBrowserSessionId"] = cloud_browser_session_id
         if live_url:
             metadata["liveUrl"] = live_url
         if recording_url:
@@ -1308,11 +1300,9 @@ class BrowserUseLocalManager:
             "backend": session_state.backend if session_state is not None else "local",
             "liveUrl": session_state.live_url if session_state is not None else None,
             "recordingUrl": session_state.recording_url if session_state is not None else None,
-            "browserbaseContextId": (
-                session_state.browserbase_context_id if session_state is not None else None
-            ),
-            "browserbaseSessionId": (
-                session_state.browserbase_session_id if session_state is not None else None
+            "browserUseProfileId": session_state.cloud_profile_id if session_state is not None else None,
+            "browserUseBrowserSessionId": (
+                session_state.cloud_browser_session_id if session_state is not None else None
             ),
             "status": state.status,
             "isSuccess": state.is_success,
@@ -1332,6 +1322,10 @@ class BrowserUseLocalManager:
     async def _close_session(self, session: Any) -> None:
         if session is None:
             return
+        cloud_session_id = self._cloud_session_ids_by_browser_session.pop(id(session), "")
+        if cloud_session_id:
+            with suppress(Exception):
+                await self._get_browser_use_cloud_client().stop_browser_session(cloud_session_id)
         if hasattr(session, "stop"):
             with suppress(Exception):
                 await session.stop()
@@ -1483,34 +1477,40 @@ class BrowserUseLocalManager:
                     "active_task_id": active_task.task_id if active_task is not None else None,
                     "live_url": session_state.live_url,
                     "recording_url": session_state.recording_url,
-                    "browserbase_context_id": session_state.browserbase_context_id,
-                    "browserbase_session_id": session_state.browserbase_session_id,
+                    "cloud_profile_id": session_state.cloud_profile_id,
+                    "cloud_browser_session_id": session_state.cloud_browser_session_id,
                     "last_used_monotonic": float(session_state.updated_monotonic or 0.0),
                 }
             )
         out.sort(key=lambda item: item["last_used_monotonic"], reverse=True)
         return out
 
-    def _browserbase_enabled(self) -> bool:
-        return bool(self._browserbase_api_key)
+    def _browser_use_cloud_enabled(self) -> bool:
+        return bool(self._browser_use_api_key)
 
-    def _get_browserbase_client(self) -> Any:
-        if self._browserbase_client is None:
-            from opentulpa.integrations.browserbase import BrowserbaseClient
+    def _get_browser_use_cloud_client(self) -> Any:
+        if self._browser_use_cloud_client is None:
+            from opentulpa.integrations.browser_use_cloud import BrowserUseCloudClient
 
-            self._browserbase_client = BrowserbaseClient(
-                api_key=self._browserbase_api_key,
-                project_id=self._browserbase_project_id,
-                base_url=self._browserbase_base_url,
+            self._browser_use_cloud_client = BrowserUseCloudClient(
+                api_key=self._browser_use_api_key,
+                proxy_country_code=self._browser_use_cloud_proxy_country_code or None,
+                browser_timeout_minutes=self._browser_use_cloud_timeout_minutes,
             )
-        return self._browserbase_client
+        return self._browser_use_cloud_client
 
-    def _browserbase_context_id(self, customer_id: str, session_id: str) -> str | None:
+    def _browser_use_cloud_profile_id(self, customer_id: str, session_id: str) -> str | None:
         if self._user_data_dir is None:
             return None
         metadata = self._read_profile_metadata(self._profile_dir(customer_id, session_id))
-        value = str(metadata.get("browserbaseContextId") or "").strip()
+        value = str(metadata.get("browserUseProfileId") or "").strip()
         return value or None
+
+    @classmethod
+    def _browser_use_cloud_profile_name(cls, customer_id: str, session_id: str) -> str:
+        customer = cls._normalize_customer_id(customer_id)
+        session = cls._safe_profile_name(session_id)
+        return f"opentulpa-{customer}-{session}"[:100]
 
     def _session_has_active_tasks_locked(self, customer_id: str, session_id: str) -> bool:
         safe_customer = self._normalize_customer_id(customer_id)

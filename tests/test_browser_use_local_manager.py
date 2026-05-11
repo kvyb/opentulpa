@@ -41,55 +41,27 @@ class _FakeBrowserSession:
         return raw
 
 
-class _FakeBrowserbaseClient:
+class _FakeBrowserUseCloudClient:
     def __init__(self) -> None:
-        self.created_contexts = 0
+        self.created_profiles: list[dict[str, Any]] = []
         self.created_sessions: list[dict[str, Any]] = []
 
-    async def create_context(self) -> str:
-        self.created_contexts += 1
-        return "ctx_123"
+    async def create_profile(self, *, name: str) -> str:
+        self.created_profiles.append({"name": name})
+        return "prof_123"
 
-    async def create_session(
-        self,
-        *,
-        context_id: str,
-        customer_id: str,
-        profile_id: str,
-        persist: bool = True,
-        keep_alive: bool = True,
-        proxy_country_code: str | None = None,
-        solve_captchas: bool | None = None,
-        advanced_stealth: bool | None = None,
-    ) -> Any:
-        self.created_sessions.append(
-            {
-                "context_id": context_id,
-                "customer_id": customer_id,
-                "profile_id": profile_id,
-                "persist": persist,
-                "keep_alive": keep_alive,
-                "proxy_country_code": proxy_country_code,
-                "solve_captchas": solve_captchas,
-                "advanced_stealth": advanced_stealth,
-            }
-        )
+    async def create_browser_session(self, *, profile_id: str) -> Any:
+        self.created_sessions.append({"profile_id": profile_id})
 
         @dataclass(frozen=True)
         class _Session:
             id: str = "ses_123"
-            connect_url: str = "wss://connect.browserbase.test/session"
-            context_id: str = "ctx_123"
-            recording_url: str = "https://browserbase.com/sessions/ses_123"
+            cdp_url: str = "wss://connect.browser-use.test/session"
+            profile_id: str = "prof_123"
+            live_url: str = "https://browser-use.com/live/ses_123"
+            recording_url: str = "https://browser-use.com/sessions/ses_123"
 
         return _Session()
-
-    async def get_live_urls(self, session_id: str) -> dict[str, str]:
-        assert session_id == "ses_123"
-        return {
-            "debuggerFullscreenUrl": "https://browserbase.com/live/ses_123",
-            "debuggerUrl": "https://browserbase.com/debug/ses_123",
-        }
 
 
 @dataclass
@@ -233,7 +205,7 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
 
 
 @pytest.mark.asyncio
-async def test_local_manager_uses_browserbase_context_and_live_url(
+async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -242,15 +214,12 @@ async def test_local_manager_uses_browserbase_context_and_live_url(
         openrouter_base_url="https://openrouter.ai/api/v1",
         default_model="google/gemini-3-flash-preview",
         user_data_dir=tmp_path,
-        browserbase_api_key="bb-key",
-        browserbase_project_id="proj_123",
-        browserbase_proxy_country_code="us",
-        browserbase_solve_captchas=True,
-        browserbase_advanced_stealth=True,
+        browser_use_api_key="bu-key",
+        browser_use_cloud_proxy_country_code="us",
     )
-    fake_browserbase = _FakeBrowserbaseClient()
+    fake_cloud = _FakeBrowserUseCloudClient()
     monkeypatch.setattr(manager, "preflight", _no_preflight)
-    monkeypatch.setattr(manager, "_get_browserbase_client", lambda: fake_browserbase)
+    monkeypatch.setattr(manager, "_get_browser_use_cloud_client", lambda: fake_cloud)
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
@@ -274,18 +243,15 @@ async def test_local_manager_uses_browserbase_context_and_live_url(
         raise AssertionError("task did not finish in time")
 
     assert payload is not None
-    assert payload["backend"] == "browserbase"
-    assert payload["liveUrl"] == "https://browserbase.com/live/ses_123"
-    assert payload["recordingUrl"] == "https://browserbase.com/sessions/ses_123"
-    assert payload["browserbaseContextId"] == "ctx_123"
-    assert fake_browserbase.created_contexts == 1
-    assert fake_browserbase.created_sessions[0]["persist"] is True
-    assert fake_browserbase.created_sessions[0]["customer_id"] == "cust_1"
-    assert fake_browserbase.created_sessions[0]["proxy_country_code"] == "us"
-    assert fake_browserbase.created_sessions[0]["solve_captchas"] is True
-    assert fake_browserbase.created_sessions[0]["advanced_stealth"] is True
+    assert payload["backend"] == "browser-use-cloud"
+    assert payload["liveUrl"] == "https://browser-use.com/live/ses_123"
+    assert payload["recordingUrl"] == "https://browser-use.com/sessions/ses_123"
+    assert payload["browserUseProfileId"] == "prof_123"
+    assert payload["browserUseBrowserSessionId"] == "ses_123"
+    assert fake_cloud.created_profiles == [{"name": "opentulpa-cust_1-github"}]
+    assert fake_cloud.created_sessions == [{"profile_id": "prof_123"}]
     session = manager._tasks[task_id].browser_session
-    assert session.kwargs["cdp_url"] == "wss://connect.browserbase.test/session"
+    assert session.kwargs["cdp_url"] == "wss://connect.browser-use.test/session"
 
 
 @pytest.mark.asyncio

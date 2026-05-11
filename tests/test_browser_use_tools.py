@@ -281,8 +281,8 @@ async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> No
         payload = await _DummyBrowserManager.start_task(manager, **kwargs)
         payload["status"] = "finished"
         payload["isSuccess"] = False
-        payload["backend"] = "browserbase"
-        payload["liveUrl"] = "https://browserbase.example/live/session"
+        payload["backend"] = "browser-use-cloud"
+        payload["liveUrl"] = "https://browser-use.example/live/session"
         payload["output"] = "Blocked by network security. Login credentials may be required."
         return payload
 
@@ -292,7 +292,7 @@ async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> No
 
     assert result.get("status") == "waiting_for_owner"
     assert result.get("handoff_required") is True
-    assert result.get("live_url") == "https://browserbase.example/live/session"
+    assert result.get("live_url") == "https://browser-use.example/live/session"
     assert "Share live_url with the owner now" in str(result.get("message"))
     assert "same session_id" in str(result.get("message"))
 

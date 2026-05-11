@@ -99,22 +99,16 @@ def test_settings_accepts_browser_use_user_data_dir_env(monkeypatch) -> None:
     assert settings.browser_use_user_data_dir == "/tmp/opentulpa-browser-profiles"
 
 
-def test_settings_accepts_browserbase_env(monkeypatch) -> None:
-    monkeypatch.setenv("BROWSERBASE_API_KEY", "bb-key")
-    monkeypatch.setenv("BROWSERBASE_PROJECT_ID", "proj_123")
-    monkeypatch.setenv("BROWSERBASE_BASE_URL", "https://api.browserbase.test")
-    monkeypatch.setenv("BROWSERBASE_PROXY_COUNTRY_CODE", "us")
-    monkeypatch.setenv("BROWSERBASE_SOLVE_CAPTCHAS", "true")
-    monkeypatch.setenv("BROWSERBASE_ADVANCED_STEALTH", "true")
+def test_settings_accepts_browser_use_cloud_env(monkeypatch) -> None:
+    monkeypatch.setenv("BROWSER_USE_API_KEY", "bu-key")
+    monkeypatch.setenv("BROWSER_USE_CLOUD_PROXY_COUNTRY_CODE", "de")
+    monkeypatch.setenv("BROWSER_USE_CLOUD_TIMEOUT_MINUTES", "120")
 
     settings = Settings()
 
-    assert settings.browserbase_api_key == "bb-key"
-    assert settings.browserbase_project_id == "proj_123"
-    assert settings.browserbase_base_url == "https://api.browserbase.test"
-    assert settings.browserbase_proxy_country_code == "us"
-    assert settings.browserbase_solve_captchas is True
-    assert settings.browserbase_advanced_stealth is True
+    assert settings.browser_use_api_key == "bu-key"
+    assert settings.browser_use_cloud_proxy_country_code == "de"
+    assert settings.browser_use_cloud_timeout_minutes == 120
 
 
 def test_settings_accepts_langfuse_base_url_or_host_alias(monkeypatch) -> None:
