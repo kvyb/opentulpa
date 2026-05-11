@@ -25,6 +25,9 @@ _OWNER_WAITING_STATUS = "waiting_for_owner"
 _OWNER_INPUT_TIMEOUT_SECONDS = 24 * 60 * 60
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
 _CLOUD_SESSION_IDLE_TIMEOUT_SECONDS = 10 * 60
+_CLOUD_AGENT_POLL_SECONDS = 2.0
+_CLOUD_AGENT_STUCK_REPEAT_POLLS = 12
+_CLOUD_AGENT_MAX_STUCK_INTERVENTIONS = 2
 _SESSION_CLEANUP_POLL_SECONDS = 60.0
 _MAX_BROWSER_USE_SESSIONS = 20
 _DEFAULT_SESSION_ID = "default"
@@ -243,7 +246,6 @@ class BrowserUseLocalManager:
             return await self._start_cloud_agent_task(
                 task_text=task_text,
                 resolved_model=resolved_model,
-                safe_max_steps=safe_max_steps,
                 safe_start_url=safe_start_url,
                 safe_domains=safe_domains,
                 safe_session_id=safe_session_id,
@@ -727,7 +729,6 @@ class BrowserUseLocalManager:
                 runner = asyncio.create_task(
                     self._run_cloud_agent_task(
                         task_id=safe_task_id,
-                        max_steps=40,
                         start_url="",
                         allowed_domains=[],
                     ),
@@ -784,7 +785,6 @@ class BrowserUseLocalManager:
         *,
         task_text: str,
         resolved_model: str,
-        safe_max_steps: int,
         safe_start_url: str,
         safe_domains: list[str],
         safe_session_id: str,
@@ -838,7 +838,6 @@ class BrowserUseLocalManager:
             runner = asyncio.create_task(
                 self._run_cloud_agent_task(
                     task_id=task_id,
-                    max_steps=safe_max_steps,
                     start_url=safe_start_url,
                     allowed_domains=safe_domains,
                 ),
@@ -859,7 +858,6 @@ class BrowserUseLocalManager:
         self,
         *,
         task_id: str,
-        max_steps: int,
         start_url: str,
         allowed_domains: list[str],
     ) -> None:
@@ -886,7 +884,6 @@ class BrowserUseLocalManager:
             composed_task = self._compose_cloud_agent_task(
                 task_text=task_text,
                 start_url=start_url,
-                max_steps=max_steps,
                 allowed_domains=allowed_domains,
                 allow_owner_input=allow_owner_input,
             )
@@ -929,6 +926,9 @@ class BrowserUseLocalManager:
                 )
 
             last_status = ""
+            repeated_signature = ""
+            repeated_count = 0
+            stuck_interventions = 0
             for _ in range(max(1, int(self._browser_use_cloud_timeout_minutes * 30))):
                 async with self._lock:
                     state = self._tasks.get(task_id)
@@ -941,7 +941,61 @@ class BrowserUseLocalManager:
                 await self._apply_cloud_agent_session(task_id, cloud_session)
                 if last_status in {"idle", "stopped", "timed_out", "error"}:
                     break
-                await asyncio.sleep(2.0)
+                progress_signature = self._cloud_agent_progress_signature(cloud_session)
+                if progress_signature and progress_signature == repeated_signature:
+                    repeated_count += 1
+                else:
+                    repeated_signature = progress_signature
+                    repeated_count = 1 if progress_signature else 0
+                if repeated_count >= _CLOUD_AGENT_STUCK_REPEAT_POLLS:
+                    if stuck_interventions >= _CLOUD_AGENT_MAX_STUCK_INTERVENTIONS:
+                        await self._get_browser_use_cloud_client().stop_agent_session(
+                            cloud_session.id,
+                            strategy="task",
+                        )
+                        async with self._lock:
+                            state = self._tasks.get(task_id)
+                            if state is not None:
+                                state.error = (
+                                    "Browser Use Cloud Agent stopped because it repeated "
+                                    f"the same progress signal: {progress_signature[:300]}"
+                                )
+                                state.is_success = False
+                        last_status = "error"
+                        break
+                    await self._get_browser_use_cloud_client().stop_agent_session(
+                        cloud_session.id,
+                        strategy="task",
+                    )
+                    stuck_interventions += 1
+                    recovery_task = self._compose_cloud_agent_recovery_task(
+                        original_task=composed_task,
+                        repeated_signal=progress_signature,
+                        attempt=stuck_interventions,
+                    )
+                    cloud_session = await self._create_cloud_agent_session(
+                        task=recovery_task,
+                        model=cloud_model,
+                        profile_id=profile_id,
+                        session_id=cloud_session.id,
+                    )
+                    async with self._lock:
+                        state = self._tasks.get(task_id)
+                        if state is not None:
+                            state.cloud_agent_session_id = cloud_session.id
+                            state.browser_session = cloud_session.id
+                            recovery_session_state = self._sessions.get(
+                                self._session_key(state.customer_id, str(state.session_id or ""))
+                            )
+                            if recovery_session_state is not None:
+                                recovery_session_state.cloud_browser_session_id = cloud_session.id
+                                recovery_session_state.live_url = (
+                                    cloud_session.live_url or recovery_session_state.live_url
+                                )
+                                recovery_session_state.updated_monotonic = time.monotonic()
+                    repeated_count = 0
+                    repeated_signature = ""
+                await asyncio.sleep(_CLOUD_AGENT_POLL_SECONDS)
 
             await self._finish_cloud_agent_task(task_id, last_status=last_status)
         except Exception as exc:
@@ -1483,7 +1537,6 @@ class BrowserUseLocalManager:
         *,
         task_text: str,
         start_url: str,
-        max_steps: int,
         allowed_domains: list[str],
         allow_owner_input: bool,
     ) -> str:
@@ -1491,10 +1544,6 @@ class BrowserUseLocalManager:
         if start_url:
             parts.append(f"First navigate to this URL: {start_url}.")
         parts.append(task_text)
-        parts.append(
-            "Use no more than "
-            f"{max(1, int(max_steps))} meaningful browser steps before reporting progress."
-        )
         if allowed_domains:
             parts.append(
                 "Stay within these domains unless the user explicitly asked otherwise: "
@@ -1511,6 +1560,33 @@ class BrowserUseLocalManager:
                 "owner confirms, OpenTulpa will continue in this same Browser Use session."
             )
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _compose_cloud_agent_recovery_task(
+        *,
+        original_task: str,
+        repeated_signal: str,
+        attempt: int,
+    ) -> str:
+        return (
+            f"{original_task}\n\n"
+            "OpenTulpa supervisory guidance: the browser run appears stuck repeating "
+            f"the same progress signal for attempt {max(1, int(attempt))}: "
+            f"{repeated_signal[:500]}. Continue from the current browser state, but "
+            "change strategy now. Do not repeat the same click, scroll, wait, or page "
+            "analysis loop. If the page is blocking progress, report the concrete "
+            "blocker or request owner handoff using the required handoff format."
+        )
+
+    @staticmethod
+    def _cloud_agent_progress_signature(cloud_session: Any) -> str:
+        summary = str(getattr(cloud_session, "last_step_summary", "") or "").strip()
+        if summary:
+            return summary[:500]
+        step_count = getattr(cloud_session, "step_count", None)
+        if isinstance(step_count, int) and step_count > 0:
+            return f"step_count:{step_count}"
+        return ""
 
     @staticmethod
     def _browser_use_cloud_model(model_name: str) -> str:

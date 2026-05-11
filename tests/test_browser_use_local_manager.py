@@ -51,6 +51,8 @@ class _FakeBrowserUseCloudClient:
         self.stopped_sessions: list[str] = []
         self.agent_statuses: list[str] = ["idle"]
         self.agent_output = "finished"
+        self.agent_last_step_summary = "Finished"
+        self.agent_step_count = 1
         self.fail_existing_session_once = False
 
     async def create_profile(self, *, name: str) -> str:
@@ -103,8 +105,8 @@ class _FakeBrowserUseCloudClient:
             output=self.agent_output,
             is_task_successful=True,
             screenshot_url="https://browser-use.com/screenshot.png",
-            step_count=1,
-            last_step_summary="Finished",
+            step_count=self.agent_step_count,
+            last_step_summary=self.agent_last_step_summary,
         )
 
     async def list_agent_messages(self, session_id: str, *, limit: int = 20) -> list[Any]:  # noqa: ARG002
@@ -119,8 +121,8 @@ class _FakeBrowserUseCloudClient:
             )
         ]
 
-    async def stop_agent_session(self, session_id: str, *, strategy: str = "session") -> None:  # noqa: ARG002
-        self.stopped_sessions.append(session_id)
+    async def stop_agent_session(self, session_id: str, *, strategy: str = "session") -> None:
+        self.stopped_sessions.append(f"{session_id}:{strategy}")
 
     async def create_browser_session(self, *, profile_id: str) -> Any:
         self.created_sessions.append({"profile_id": profile_id})
@@ -321,6 +323,7 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
     assert fake_cloud.created_agent_sessions[0]["profile_id"] == "prof_123"
     assert fake_cloud.created_agent_sessions[0]["model"] == "gemini-3-flash"
     assert fake_cloud.created_agent_sessions[0]["keep_alive"] is True
+    assert "Use no more than" not in fake_cloud.created_agent_sessions[0]["task"]
     assert manager._session_key("cust_1", "github") in manager._sessions
     after_close = await manager.get_task(task_id, customer_id="cust_1")
     assert after_close is not None
@@ -391,6 +394,54 @@ async def test_cloud_agent_retries_with_profile_when_saved_session_is_stale(
     assert fake_cloud.created_agent_sessions[0]["session_id"] == "stale_ses"
     assert fake_cloud.created_agent_sessions[1]["session_id"] is None
     assert fake_cloud.created_agent_sessions[1]["profile_id"] == "prof_123"
+
+
+@pytest.mark.asyncio
+async def test_cloud_agent_intervenes_when_progress_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import opentulpa.integrations.browser_use_local as browser_use_local
+
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path,
+        browser_use_api_key="bu-key",
+    )
+    fake_cloud = _FakeBrowserUseCloudClient()
+    fake_cloud.agent_statuses = ["running", "running", "idle"]
+    fake_cloud.agent_output = None
+    fake_cloud.agent_last_step_summary = "Clicking the same search result"
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(manager, "_get_browser_use_cloud_client", lambda: fake_cloud)
+    monkeypatch.setattr(browser_use_local, "_CLOUD_AGENT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(browser_use_local, "_CLOUD_AGENT_STUCK_REPEAT_POLLS", 2)
+
+    created = await manager.start_task(
+        task="Find sales leads for boutique hotels in Austin",
+        max_steps=1,
+        llm="browser-use-llm",
+        session_id="lead_search",
+        customer_id="cust_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(80):
+        payload = await manager.get_task(task_id, customer_id="cust_1")
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["status"] == "finished"
+    assert fake_cloud.stopped_sessions == ["agent_ses_123:task"]
+    assert len(fake_cloud.created_agent_sessions) == 2
+    assert "supervisory guidance" in fake_cloud.created_agent_sessions[1]["task"]
+    assert "Clicking the same search result" in fake_cloud.created_agent_sessions[1]["task"]
+    assert fake_cloud.created_agent_sessions[1]["session_id"] == "agent_ses_123"
 
 
 @pytest.mark.asyncio
