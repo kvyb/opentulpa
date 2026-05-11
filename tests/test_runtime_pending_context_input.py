@@ -992,7 +992,7 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
 
 
 @pytest.mark.asyncio
-async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix() -> None:
+async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     captured: dict[str, Any] = {}
 
@@ -1061,7 +1061,7 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
     )
 
     assert result["final_response_text"] == "ok"
-    assert captured["stable_prefix_count"] >= 2
+    assert captured["stable_prefix_count"] == 1
     prompt_messages = captured["messages"]
     older_assistant_index = next(
         idx
@@ -1074,7 +1074,6 @@ async def test_interactive_prompt_injects_memory_grounding_after_stable_prefix()
         if "Relevant long-term memory grounding" in str(getattr(msg, "content", ""))
     )
     assert older_assistant_index < grounding_index
-    assert grounding_index < captured["stable_prefix_count"]
     last_human_index = max(
         idx
         for idx, msg in enumerate(prompt_messages)
@@ -1173,7 +1172,7 @@ async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
     assert result["final_response_text"] == "Done."
     assert len(captured_messages) == 2
     assert live_time_calls == 1
-    assert captured_prefix_counts[0] >= 2
+    assert captured_prefix_counts[0] == 1
     assert captured_prefix_counts[1] == captured_prefix_counts[0]
 
     def _live_time_block(messages: list[Any]) -> str:
