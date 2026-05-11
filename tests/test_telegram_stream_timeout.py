@@ -12,6 +12,7 @@ class _NeverYieldsRuntime:
     def __init__(self, status: str | None = None) -> None:
         self.status = status
         self.status_calls = 0
+        self.status_contexts: list[dict] = []
 
     async def astream_text(self, **kwargs):
         while True:
@@ -20,6 +21,9 @@ class _NeverYieldsRuntime:
 
     async def generate_status_message(self, **kwargs):
         self.status_calls += 1
+        context = kwargs.get("context")
+        if isinstance(context, dict):
+            self.status_contexts.append(context)
         if not self.status:
             return None
         return {"ok": True, "text": self.status}
@@ -110,17 +114,23 @@ async def test_stream_timeout_returns_user_visible_timeout(monkeypatch: pytest.M
     finally:
         monkeypatch.setattr(relay_module.asyncio, "wait_for", original_wait_for)
 
-    assert suppressed is True
-    assert final is None
+    assert suppressed is False
+    assert isinstance(final, str)
+    assert "reply timeout" in final
     assert runtime.status_calls == 1
+    assert runtime.status_contexts
+    assert runtime.status_contexts[0]["latest_user_message"] == "hello"
+    assert "do not quote" in runtime.status_contexts[0]["latest_user_message_usage"]
     # One automatic retry is attempted before surfacing timeout.
     assert calls["count"] >= 2
-    assert ("Уточняю детали и скоро отвечу." in [text for _, text, _ in fake_client.message_calls])
+    sent_texts = [text for _, text, _ in fake_client.message_calls]
+    assert "Уточняю детали и скоро отвечу." in sent_texts
+    assert final in sent_texts
     assert fake_client.chat_actions
 
 
 @pytest.mark.asyncio
-async def test_stream_timeout_logs_silent_suppression_when_status_generation_fails(
+async def test_stream_timeout_sends_final_timeout_when_status_generation_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -154,15 +164,16 @@ async def test_stream_timeout_logs_silent_suppression_when_status_generation_fai
     finally:
         monkeypatch.setattr(relay_module.asyncio, "wait_for", original_wait_for)
 
-    assert suppressed is True
-    assert final is None
+    assert suppressed is False
+    assert isinstance(final, str)
+    assert "reply timeout" in final
     assert runtime.status_calls == 1
-    assert fake_client.message_calls == []
+    assert [text for _, text, _ in fake_client.message_calls] == [final]
     assert calls["count"] >= 2
     messages = [record.getMessage() for record in caplog.records]
     assert any("telegram.stream status_generation_skipped" in message for message in messages)
     assert any(
-        "telegram.stream silent_timeout_suppressed" in message
+        "telegram.stream timeout_without_final_reply" in message
         and "interim_status_sent=False" in message
         and "delivered_any=False" in message
         for message in messages

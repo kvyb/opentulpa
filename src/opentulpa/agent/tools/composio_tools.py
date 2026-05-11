@@ -9,6 +9,43 @@ from langchain.tools import tool
 from opentulpa.agent.tools.common import require_customer_id
 
 
+def _toolkit_from_slug(tool_slug: str) -> str:
+    prefix = str(tool_slug or "").strip().split("_", 1)[0].lower()
+    if prefix == "googlesheets":
+        return "googlesheets"
+    if prefix == "googledrive":
+        return "googledrive"
+    if prefix == "instagram":
+        return "instagram"
+    return prefix
+
+
+def _composio_failure_payload(
+    *,
+    operation: str,
+    status_code: int,
+    response_text: str,
+    retryable: bool,
+    suggested_next_action: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": f"{operation} failed",
+        "status_code": status_code,
+        "retryable": retryable,
+        "response": response_text,
+        "suggested_next_action": suggested_next_action,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _is_retryable_internal_status(status_code: int) -> bool:
+    return int(status_code or 0) in {408, 429, 500, 502, 503, 504}
+
+
 def register_composio_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def composio_status() -> Any:
@@ -209,20 +246,68 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
     ) -> Any:
         """Execute a Composio tool for the active user using explicit JSON arguments from the tool schema. For Instagram sends, verify the exact thread first with composio_instagram_reply_precheck."""
         customer_id = require_customer_id(runtime)
+        safe_tool_slug = str(tool_slug or "").strip()
+        schema_response = await runtime._request_with_backoff(
+            "GET",
+            f"/internal/composio/tools/{safe_tool_slug}/schema",
+            timeout=20.0,
+        )
+        if schema_response.status_code != 200:
+            retryable = _is_retryable_internal_status(schema_response.status_code)
+            toolkit = _toolkit_from_slug(safe_tool_slug)
+            candidates: Any = []
+            if toolkit and not retryable:
+                search_response = await runtime._request_with_backoff(
+                    "GET",
+                    "/internal/composio/tools/search",
+                    params={"query": safe_tool_slug, "toolkits": toolkit, "limit": 8},
+                    timeout=20.0,
+                )
+                if search_response.status_code == 200:
+                    candidates = search_response.json().get("items", [])
+            return _composio_failure_payload(
+                operation="composio_tool_execute preflight",
+                status_code=schema_response.status_code,
+                response_text=schema_response.text,
+                retryable=retryable,
+                suggested_next_action=(
+                    "Retry the same call later."
+                    if retryable
+                    else "The requested Composio tool slug is not available. Choose one of the "
+                    "candidate tools from composio_tool_search, then retry with that exact slug."
+                ),
+                extra={
+                    "tool_slug": safe_tool_slug,
+                    "candidate_tools": candidates,
+                },
+            )
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/composio/tools/execute",
             json_body={
                 "customer_id": customer_id,
-                "tool_slug": tool_slug,
+                "tool_slug": safe_tool_slug,
                 "arguments": arguments if isinstance(arguments, dict) else {},
                 "connected_account_id": connected_account_id,
                 "text": text,
             },
             timeout=120.0,
+            retries=0,
         )
         if r.status_code != 200:
-            return {"error": f"composio_tool_execute failed: {r.text}"}
+            retryable = r.status_code in {408, 429, 500, 502, 503, 504}
+            return _composio_failure_payload(
+                operation="composio_tool_execute",
+                status_code=r.status_code,
+                response_text=r.text,
+                retryable=retryable,
+                suggested_next_action=(
+                    "Retry the same call later."
+                    if retryable
+                    else "Inspect the error. If it says the account is not connected, ask the user to authorize the toolkit. If arguments are invalid, repair them from composio_tool_schema."
+                ),
+                extra={"tool_slug": safe_tool_slug},
+            )
         return r.json()
 
     return {

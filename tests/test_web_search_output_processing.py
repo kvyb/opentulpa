@@ -78,3 +78,43 @@ async def test_web_search_requests_medium_reasoning_effort(monkeypatch: pytest.M
 
     assert isinstance(result, dict)
     assert captured["json"]["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_web_search_retries_transient_openrouter_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    async def _fake_sleep(delay: float) -> None:
+        captured_delays.append(delay)
+
+    async def _fake_post(
+        self: httpx.AsyncClient,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        _ = self, json, headers
+        calls["count"] += 1
+        request = httpx.Request("POST", url)
+        if calls["count"] == 1:
+            return httpx.Response(status_code=502, request=request, json={"error": "bad gateway"})
+        return httpx.Response(
+            status_code=200,
+            request=request,
+            json={"choices": [{"message": {"content": "Recovered answer"}}]},
+        )
+
+    captured_delays: list[float] = []
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+    monkeypatch.setattr(web_search_module.asyncio, "sleep", _fake_sleep)
+
+    result = await web_search_module.web_search("current news")
+
+    assert calls["count"] == 2
+    assert captured_delays == [0.75]
+    assert isinstance(result, dict)
+    assert result["answer"] == "Recovered answer"

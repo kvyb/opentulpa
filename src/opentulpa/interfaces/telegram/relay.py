@@ -469,6 +469,14 @@ async def stream_langgraph_reply_to_telegram(
                 "stage": stage,
                 "turn_mode": normalize_turn_mode(turn_mode),
                 "latest_user_message": str(text or "").strip()[:1000],
+                "latest_user_message_usage": (
+                    "Background context only. Use it to understand why the turn may be slow, "
+                    "but do not quote, paraphrase, summarize, or mention it in the status text."
+                ),
+                "status_goal": (
+                    "Send a generic progress update that says the assistant is still checking "
+                    "or preparing the answer."
+                ),
             },
             language="Russian",
         )
@@ -755,7 +763,7 @@ async def stream_langgraph_reply_to_telegram(
         await typing_task
     if not suppressed and not final_reply and timeout_failed_without_reply:
         logger.error(
-            "telegram.stream silent_timeout_suppressed chat_id=%s thread_id=%s customer_id=%s stage=%s "
+            "telegram.stream timeout_without_final_reply chat_id=%s thread_id=%s customer_id=%s stage=%s "
             "interim_status_sent=%s delivered_any=%s",
             chat_id,
             thread_id,
@@ -764,7 +772,10 @@ async def stream_langgraph_reply_to_telegram(
             interim_status_sent,
             delivered_any,
         )
-        suppressed = True
+        final_reply = (
+            "I couldn't finish that step before the reply timeout. "
+            "Please ask me to continue, and I'll resume from the saved context."
+        )
     if not suppressed and not final_reply:
         logger.error(
             "telegram.stream no_final_reply chat_id=%s thread_id=%s customer_id=%s",

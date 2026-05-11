@@ -12,8 +12,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from opentulpa.core.public_urls import build_public_composio_callback_path
 
 logger = logging.getLogger(__name__)
-
-
 def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
