@@ -147,12 +147,13 @@ Non-secret Browserbase browser settings live in `opentulpa.config.yaml`:
 ```yaml
 browserbase_proxy_country_code: us
 browserbase_solve_captchas: true
-browserbase_advanced_stealth: true
+browserbase_advanced_stealth: false
 ```
 
 Use a stable country matching the user/account. For logged-in workflows, prefer
 one persistent context and stable proxy region over rotating identity between
-runs.
+runs. `browserbase_advanced_stealth` is disabled by default because Browserbase
+requires an Enterprise plan for that feature.
 
 ## Useful startup commands
 
