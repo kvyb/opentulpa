@@ -26,6 +26,7 @@ class _DummyBrowserManager:
     def __init__(self) -> None:
         self.tasks: dict[str, dict] = {}
         self.last_screenshot: dict[str, object] | None = None
+        self.control_calls: list[dict[str, object]] = []
 
     async def start_task(
         self,
@@ -79,6 +80,9 @@ class _DummyBrowserManager:
         customer_id: str | None = None,
     ) -> dict:
         self.last_control_customer_id = customer_id
+        self.control_calls.append(
+            {"task_id": task_id, "action": action, "customer_id": customer_id}
+        )
         payload = self.tasks.get(task_id)
         if payload is None:
             return {"error": "task not found"}
@@ -295,6 +299,41 @@ async def test_browser_use_run_promotes_live_url_blocks_to_owner_handoff() -> No
     assert result.get("live_url") == "https://browser-use.example/live/session"
     assert "Share live_url with the owner now" in str(result.get("message"))
     assert "same session_id" in str(result.get("message"))
+
+
+@pytest.mark.asyncio
+async def test_browser_use_run_timeout_stops_task_and_session() -> None:
+    manager = _DummyBrowserManager()
+    tools = register_runtime_tools(_DummyRuntime(manager))
+
+    async def start_running_task(**kwargs) -> dict:
+        payload = await _DummyBrowserManager.start_task(manager, **kwargs)
+        payload["status"] = "running"
+        payload["backend"] = "browser-use-cloud"
+        payload["liveUrl"] = "https://browser-use.example/live/session"
+        return payload
+
+    manager.start_task = start_running_task  # type: ignore[method-assign]
+
+    result = await tools["browser_use_run"].ainvoke(
+        {
+            "task": "open reddit",
+            "wait_timeout_seconds": 1,
+            "poll_interval_seconds": 1,
+        }
+    )
+
+    assert result.get("timed_out") is True
+    assert result.get("status") == "running"
+    assert result.get("live_url") == "https://browser-use.example/live/session"
+    assert "timed out and was stopped" in str(result.get("message"))
+    assert manager.control_calls == [
+        {
+            "task_id": "task_123",
+            "action": "stop_task_and_session",
+            "customer_id": "u_1",
+        }
+    ]
 
 
 @pytest.mark.asyncio

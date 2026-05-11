@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -174,7 +175,7 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         task: str,
         allowed_domains: list[str] | None = None,
         max_steps: int = 20,
-        wait_timeout_seconds: int = 600,
+        wait_timeout_seconds: int = 120,
         poll_interval_seconds: int = 4,
         llm: str = "browser-use-llm",
         start_url: str | None = None,
@@ -199,8 +200,8 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         customer_id = require_customer_id(runtime)
 
         safe_max_steps = max(1, min(int(max_steps), 80))
-        safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
-        safe_poll_interval = max(2, min(int(poll_interval_seconds), 30))
+        safe_wait_timeout = max(1, min(int(wait_timeout_seconds), 300))
+        safe_poll_interval = max(1, min(int(poll_interval_seconds), 30))
         safe_domains = _normalize_allowed_domains(allowed_domains)
         safe_llm = str(llm or "").strip() or "browser-use-llm"
         safe_start_url = str(start_url or "").strip()
@@ -284,16 +285,27 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                 return compact
 
             if datetime.now(UTC).timestamp() >= deadline:
-                return {
-                    "task_id": task_id,
-                    "session_id": result_session_id or None,
-                    "status": status or "started",
-                    "timed_out": True,
-                    "message": (
-                        "Task is still running. Use browser_use_task_get(task_id) "
-                        "to check progress or browser_use_task_control to stop."
-                    ),
-                }
+                latest = _compact_browser_use_task_view(task_data)
+                with suppress(Exception):
+                    await manager.control_task(
+                        task_id=task_id,
+                        action="stop_task_and_session",
+                        customer_id=customer_id,
+                    )
+                latest.update(
+                    {
+                        "task_id": task_id,
+                        "session_id": result_session_id or latest.get("session_id") or None,
+                        "status": status or "started",
+                        "timed_out": True,
+                        "message": (
+                            "Browser task timed out and was stopped. "
+                            "If live_url is present, share it with the owner or retry with "
+                            "the same session_id after the page is ready."
+                        ),
+                    }
+                )
+                return latest
 
             await asyncio.sleep(safe_poll_interval)
 
