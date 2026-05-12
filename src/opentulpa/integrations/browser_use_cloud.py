@@ -24,6 +24,7 @@ class BrowserUseCloudBrowserSession:
 @dataclass(frozen=True, slots=True)
 class BrowserUseCloudAgentSession:
     id: str
+    model: str | None = None
     profile_id: str | None = None
     live_url: str | None = None
     recording_urls: list[str] | None = None
@@ -251,6 +252,7 @@ class BrowserUseCloudClient:
         success = payload.get("isTaskSuccessful")
         return BrowserUseCloudAgentSession(
             id=session_id,
+            model=cls._optional_response_str(payload, "model"),
             profile_id=cls._optional_response_str(payload, "profileId"),
             live_url=cls._optional_response_str(payload, "liveUrl"),
             recording_urls=[str(item) for item in recording_urls] if recording_urls else None,

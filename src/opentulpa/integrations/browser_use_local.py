@@ -78,6 +78,7 @@ class _BrowserUseSessionState:
     backend: str = "local"
     cloud_profile_id: str | None = None
     cloud_browser_session_id: str | None = None
+    cloud_model: str | None = None
     live_url: str | None = None
     recording_url: str | None = None
     updated_monotonic: float = field(default_factory=time.monotonic)
@@ -416,6 +417,7 @@ class BrowserUseLocalManager:
                         "recording_url": session_state.recording_url,
                         "cloud_profile_id": session_state.cloud_profile_id,
                         "cloud_browser_session_id": session_state.cloud_browser_session_id,
+                        "cloud_model": session_state.cloud_model,
                         "active_task_ids": active_task_ids,
                         "latest_task_id": latest.task_id if latest is not None else None,
                         "latest_status": latest.status if latest is not None else None,
@@ -445,6 +447,7 @@ class BrowserUseLocalManager:
                         "recording_url": metadata.get("recordingUrl") or None,
                         "cloud_profile_id": metadata.get("browserUseProfileId") or None,
                         "cloud_browser_session_id": metadata.get("browserUseBrowserSessionId") or None,
+                        "cloud_model": metadata.get("browserUseModel") or None,
                         "active_task_ids": [],
                         "latest_task_id": None,
                         "latest_status": None,
@@ -909,6 +912,7 @@ class BrowserUseLocalManager:
                     backend="browser-use-cloud-agent",
                     cloud_profile_id=profile_id,
                     cloud_browser_session_id=cloud_session.id,
+                    cloud_model=cloud_model,
                     live_url=cloud_session.live_url,
                     recording_url=recording_url,
                 )
@@ -921,6 +925,7 @@ class BrowserUseLocalManager:
                     task_id=task_id,
                     cloud_profile_id=profile_id,
                     cloud_browser_session_id=cloud_session.id,
+                    cloud_model=cloud_model,
                     live_url=cloud_session.live_url,
                     recording_url=recording_url,
                 )
@@ -989,6 +994,7 @@ class BrowserUseLocalManager:
                             )
                             if recovery_session_state is not None:
                                 recovery_session_state.cloud_browser_session_id = cloud_session.id
+                                recovery_session_state.cloud_model = cloud_model
                                 recovery_session_state.live_url = (
                                     cloud_session.live_url or recovery_session_state.live_url
                                 )
@@ -1456,22 +1462,36 @@ class BrowserUseLocalManager:
     ) -> Any:
         client = self._get_browser_use_cloud_client()
         try:
-            return await client.create_agent_session(
+            cloud_session = await client.create_agent_session(
                 task=task,
                 model=model,
                 profile_id=profile_id,
                 session_id=session_id,
                 keep_alive=True,
             )
+            self._validate_cloud_agent_model(cloud_session=cloud_session, requested_model=model)
+            return cloud_session
         except Exception:
             if not session_id:
                 raise
-            return await client.create_agent_session(
+            cloud_session = await client.create_agent_session(
                 task=task,
                 model=model,
                 profile_id=profile_id,
                 session_id=None,
                 keep_alive=True,
+            )
+            self._validate_cloud_agent_model(cloud_session=cloud_session, requested_model=model)
+            return cloud_session
+
+    @staticmethod
+    def _validate_cloud_agent_model(*, cloud_session: Any, requested_model: str) -> None:
+        actual_model = str(getattr(cloud_session, "model", "") or "").strip()
+        expected_model = str(requested_model or "").strip()
+        if actual_model and expected_model and actual_model != expected_model:
+            raise RuntimeError(
+                "Browser Use Cloud returned a different model than requested: "
+                f"requested {expected_model!r}, got {actual_model!r}"
             )
 
     async def _finish_cloud_agent_task(self, task_id: str, *, last_status: str) -> None:
@@ -1735,6 +1755,7 @@ class BrowserUseLocalManager:
         backend: str | None = None,
         cloud_profile_id: str | None = None,
         cloud_browser_session_id: str | None = None,
+        cloud_model: str | None = None,
         live_url: str | None = None,
         recording_url: str | None = None,
         clear_live_session: bool = False,
@@ -1766,6 +1787,8 @@ class BrowserUseLocalManager:
             metadata["browserUseProfileId"] = cloud_profile_id
         if cloud_browser_session_id:
             metadata["browserUseBrowserSessionId"] = cloud_browser_session_id
+        if cloud_model:
+            metadata["browserUseModel"] = cloud_model
         if live_url:
             metadata["liveUrl"] = live_url
         if recording_url:
@@ -1866,6 +1889,9 @@ class BrowserUseLocalManager:
             if session_state is not None
             else metadata.get("browserUseBrowserSessionId")
         )
+        cloud_model = (
+            session_state.cloud_model if session_state is not None else metadata.get("browserUseModel")
+        )
         return {
             "id": state.task_id,
             "customerId": state.customer_id,
@@ -1875,6 +1901,7 @@ class BrowserUseLocalManager:
             "recordingUrl": recording_url or None,
             "browserUseProfileId": cloud_profile_id or None,
             "browserUseBrowserSessionId": cloud_browser_session_id or None,
+            "browserUseModel": cloud_model or None,
             "status": state.status,
             "isSuccess": state.is_success,
             "startedAt": state.started_at,

@@ -54,6 +54,7 @@ class _FakeBrowserUseCloudClient:
         self.agent_last_step_summary = "Finished"
         self.agent_step_count = 1
         self.fail_existing_session_once = False
+        self.next_agent_models: list[str] = []
 
     async def create_profile(self, *, name: str) -> str:
         self.created_profiles.append({"name": name})
@@ -81,8 +82,10 @@ class _FakeBrowserUseCloudClient:
             self.fail_existing_session_once = False
             raise RuntimeError("stale session")
 
+        returned_model = self.next_agent_models.pop(0) if self.next_agent_models else model
         return SimpleNamespace(
             id="agent_ses_123",
+            model=returned_model,
             profile_id="prof_123",
             live_url="https://browser-use.com/live/agent_ses_123",
             recording_urls=None,
@@ -98,6 +101,7 @@ class _FakeBrowserUseCloudClient:
         status = self.agent_statuses.pop(0) if self.agent_statuses else "idle"
         return SimpleNamespace(
             id="agent_ses_123",
+            model=self.created_agent_sessions[-1]["model"] if self.created_agent_sessions else None,
             profile_id="prof_123",
             live_url="https://browser-use.com/live/agent_ses_123",
             recording_urls=None,
@@ -330,6 +334,7 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
     assert after_close["liveUrl"] == "https://browser-use.com/live/agent_ses_123"
     assert after_close["browserUseBrowserSessionId"] == "agent_ses_123"
     assert after_close["browserUseProfileId"] == "prof_123"
+    assert after_close["browserUseModel"] == "gemini-3-flash"
 
     second = await manager.start_task(
         task="Continue after login",
@@ -345,6 +350,54 @@ async def test_local_manager_uses_browser_use_cloud_profile_and_live_url(
         await asyncio.sleep(0.01)
     assert fake_cloud.created_agent_sessions[-1]["session_id"] == "agent_ses_123"
     assert fake_cloud.created_profiles == [{"name": "opentulpa-cust_1-github"}]
+
+
+@pytest.mark.asyncio
+async def test_cloud_agent_retries_fresh_session_when_reused_session_has_wrong_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path,
+        browser_use_api_key="bu-key",
+    )
+    fake_cloud = _FakeBrowserUseCloudClient()
+    fake_cloud.next_agent_models = ["bu-mini", "gemini-3-flash"]
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(manager, "_get_browser_use_cloud_client", lambda: fake_cloud)
+    manager._write_profile_metadata(
+        customer_id="cust_1",
+        session_id="github",
+        status="idle",
+        backend="browser-use-cloud-agent",
+        cloud_profile_id="prof_123",
+        cloud_browser_session_id="old_ses",
+    )
+
+    created = await manager.start_task(
+        task="Continue",
+        max_steps=5,
+        llm="browser-use-llm",
+        session_id="github",
+        customer_id="cust_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id, customer_id="cust_1")
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["status"] == "finished"
+    assert fake_cloud.created_agent_sessions[0]["session_id"] == "old_ses"
+    assert fake_cloud.created_agent_sessions[1]["session_id"] is None
+    assert fake_cloud.created_agent_sessions[1]["model"] == "gemini-3-flash"
 
 
 @pytest.mark.asyncio

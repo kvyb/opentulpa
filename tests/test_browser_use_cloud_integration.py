@@ -46,6 +46,7 @@ async def test_browser_use_cloud_client_creates_profile_and_agent_session() -> N
                 json={
                     "id": "sess_123",
                     "status": "running",
+                    "model": "gemini-3-flash",
                     "profileId": "prof_123",
                     "liveUrl": "https://live.browser-use.test/sess_123",
                     "recordingUrls": [],
@@ -58,6 +59,7 @@ async def test_browser_use_cloud_client_creates_profile_and_agent_session() -> N
                 json={
                     "id": "sess_123",
                     "status": "idle",
+                    "model": "gemini-3-flash",
                     "profileId": "prof_123",
                     "output": "done",
                     "isTaskSuccessful": True,
@@ -104,6 +106,7 @@ async def test_browser_use_cloud_client_creates_profile_and_agent_session() -> N
 
     assert profile_id == "prof_123"
     assert session.id == "sess_123"
+    assert session.model == "gemini-3-flash"
     assert session.profile_id == "prof_123"
     assert session.live_url == "https://live.browser-use.test/sess_123"
     assert refreshed.status == "idle"
