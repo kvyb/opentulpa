@@ -1502,11 +1502,16 @@ class BrowserUseLocalManager:
                 return
             status = str(last_status or "").strip().lower()
             handoff_prompt = self._extract_owner_handoff_prompt(state.output)
+            session_state = self._sessions.get(
+                self._session_key(state.customer_id, str(state.session_id or ""))
+            )
+            live_url = str(getattr(session_state, "live_url", "") or "").strip()
+            can_handoff = bool(live_url) and status not in {"stopped", "timed_out", "error"}
             if state.stop_requested:
                 state.status = "stopped"
                 state.is_success = False
                 state.output = state.output or "Task stopped by user."
-            elif handoff_prompt and state.allow_owner_input:
+            elif handoff_prompt and state.allow_owner_input and can_handoff:
                 state.status = _OWNER_WAITING_STATUS
                 state.owner_input_prompt = handoff_prompt
                 state.owner_input_type = "text"
@@ -1522,6 +1527,13 @@ class BrowserUseLocalManager:
                     last_url=self._latest_step_url(state),
                 )
                 return
+            elif handoff_prompt and state.allow_owner_input:
+                state.status = "failed"
+                state.is_success = False
+                state.error = (
+                    "Browser Use Cloud requested owner handoff after the live session ended; "
+                    "start a new browser task to get a fresh live link."
+                )
             elif status in {"error", "timed_out"}:
                 state.status = "failed"
                 state.is_success = False

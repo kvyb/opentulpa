@@ -53,6 +53,7 @@ class _FakeBrowserUseCloudClient:
         self.agent_output = "finished"
         self.agent_last_step_summary = "Finished"
         self.agent_step_count = 1
+        self.agent_live_url: str | None = "https://browser-use.com/live/agent_ses_123"
         self.fail_existing_session_once = False
         self.next_agent_models: list[str] = []
 
@@ -87,7 +88,7 @@ class _FakeBrowserUseCloudClient:
             id="agent_ses_123",
             model=returned_model,
             profile_id="prof_123",
-            live_url="https://browser-use.com/live/agent_ses_123",
+            live_url=self.agent_live_url,
             recording_urls=None,
             status="running",
             output=None,
@@ -103,7 +104,7 @@ class _FakeBrowserUseCloudClient:
             id="agent_ses_123",
             model=self.created_agent_sessions[-1]["model"] if self.created_agent_sessions else None,
             profile_id="prof_123",
-            live_url="https://browser-use.com/live/agent_ses_123",
+            live_url=self.agent_live_url,
             recording_urls=None,
             status=status,
             output=self.agent_output,
@@ -536,6 +537,47 @@ async def test_cloud_agent_decision_marker_waits_for_owner(
     assert payload is not None
     assert payload["ownerInputPrompt"] == "Choose whether to use Reddit search or Google search for lead discovery."
     assert "Choose whether to use Reddit search or Google search" in payload["ownerInputPrompt"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_agent_handoff_marker_fails_when_live_session_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path,
+        browser_use_api_key="bu-key",
+    )
+    fake_cloud = _FakeBrowserUseCloudClient()
+    fake_cloud.agent_statuses = ["stopped"]
+    fake_cloud.agent_live_url = None
+    fake_cloud.agent_output = "OPENTULPA_OWNER_HANDOFF_REQUIRED: Log in to Reddit."
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(manager, "_get_browser_use_cloud_client", lambda: fake_cloud)
+
+    created = await manager.start_task(
+        task="Reply on Reddit",
+        max_steps=5,
+        llm="browser-use-llm",
+        session_id="reddit",
+        customer_id="cust_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id, customer_id="cust_1")
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["status"] == "failed"
+    assert payload["liveUrl"] is None
+    assert "fresh live link" in payload["error"]
 
 
 @pytest.mark.asyncio
