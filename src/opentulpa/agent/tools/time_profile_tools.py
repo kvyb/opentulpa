@@ -18,7 +18,7 @@ from opentulpa.context.customer_profile_models import (
 def register_time_profile_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def time_profile_get() -> Any:
-        """Get stored user UTC offset (if known)."""
+        """Get stored user timezone/UTC offset for scheduling and reminders."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -32,7 +32,7 @@ def register_time_profile_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def time_profile_set(utc_offset: str) -> Any:
-        """Set user UTC offset in +HH:MM or -HH:MM format."""
+        """Set user timezone/UTC offset in +HH:MM or -HH:MM format."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",

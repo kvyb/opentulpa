@@ -104,7 +104,7 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_setup_preflight() -> Any:
-        """Validate the current setup draft before proposing it.
+        """Run workflow setup preflight validation on the current draft before proposing it.
 
         Use this after the draft has the intended channel, source, sink, required_fields, and knowledge files.
         It is non-destructive: it may normalize safe sink details like a single discovered Google Sheets tab,

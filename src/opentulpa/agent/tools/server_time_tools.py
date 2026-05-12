@@ -11,7 +11,7 @@ from langchain.tools import tool
 def register_server_time_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def server_time() -> Any:
-        """Get server time."""
+        """Get current server time, local timezone, UTC time, and Unix timestamp."""
         now_local = datetime.now().astimezone()
         now_utc = datetime.now(UTC)
         return {

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.tools import tool as lc_tool
 
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -14,6 +15,12 @@ class _TraceResponse:
     def __init__(self) -> None:
         self.content = "All good."
         self.tool_calls = [{"id": "call_1", "name": "memory_search", "args": {"query": "pricing"}}]
+        self.response_metadata = {
+            "id": "gen_trace_test",
+            "model_provider": "openrouter",
+            "model_name": "google/gemini-3-flash-preview",
+            "system_fingerprint": "fp_trace_test",
+        }
         self.usage = {
             "prompt_tokens": 1234,
             "completion_tokens": 56,
@@ -56,6 +63,13 @@ class _OpenRouterCostModel(_TraceModel):
         return _OpenRouterCostResponse()
 
 
+@lc_tool
+def _trace_lookup_tool(query: str) -> str:
+    """Look up trace fixture data."""
+
+    return f"result for {query}"
+
+
 @pytest.mark.asyncio
 async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     runtime = OpenTulpaLangGraphRuntime(
@@ -66,6 +80,7 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
         prompt_caching_enabled=True,
     )
     runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+    runtime._tools = {"trace_lookup": _trace_lookup_tool}
     model = _TraceModel()
 
     await runtime.ainvoke_model(
@@ -109,6 +124,21 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     assert record["native_cost_usd"] == 0.023471989
     assert record["native_cost_prompt_usd"] == 0.017
     assert record["native_cost_completion_usd"] == 0.006471989
+    assert record["openrouter_generation_id"] == "gen_trace_test"
+    assert record["response_model_provider"] == "openrouter"
+    assert record["response_model_name"] == "google/gemini-3-flash-preview"
+    assert record["response_system_fingerprint"] == "fp_trace_test"
+    assert record["bound_tool_count"] == 1
+    assert record["bound_tool_names"] == ["_trace_lookup_tool"]
+    assert len(record["bound_tool_schema_hash"]) == 64
+    assert record["bound_tool_schema_chars"] > 0
+    assert len(record["prompt_hash"]) == 64
+    assert len(record["stable_prefix_hash"]) == 64
+    assert record["stable_prefix_chars"] == len("Stable system prompt")
+    assert len(record["sticky_first_system_hash"]) == 64
+    assert record["sticky_first_system_chars"] == len("Stable system prompt")
+    assert len(record["sticky_first_non_system_hash"]) == 64
+    assert record["sticky_first_non_system_chars"] == len("What do you remember about pricing?")
     assert record["response_text"] == "All good."
     assert record["response_tool_calls"][0]["name"] == "memory_search"
     assert len(record["prompt_messages"]) == 2

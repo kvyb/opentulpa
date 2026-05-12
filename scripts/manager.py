@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import secrets
@@ -22,6 +23,17 @@ WEBHOOK_SYNC_ATTEMPTS = 12
 TUNNEL_URL_POLL_ATTEMPTS = 60
 TUNNEL_RECOVER_ATTEMPTS = 3
 TUNNEL_DNS_WARMUP_SECONDS = 20
+WEBHOOK_VERIFY_INTERVAL_SECONDS = 60
+TELEGRAM_WEBHOOK_ALLOWED_UPDATES = [
+    "message",
+    "edited_message",
+    "callback_query",
+    "my_chat_member",
+    "business_connection",
+    "business_message",
+    "edited_business_message",
+    "deleted_business_messages",
+]
 
 
 def load_dotenv(repo_root: Path) -> None:
@@ -167,7 +179,10 @@ class TulpaManager:
 
         async with httpx.AsyncClient() as client:
             for attempt in range(1, WEBHOOK_SYNC_ATTEMPTS + 1):
-                data: dict[str, str] = {"url": webhook_url}
+                data: dict[str, str] = {
+                    "url": webhook_url,
+                    "allowed_updates": json.dumps(TELEGRAM_WEBHOOK_ALLOWED_UPDATES),
+                }
                 if secret:
                     data["secret_token"] = secret
 
@@ -218,6 +233,29 @@ class TulpaManager:
                 )
                 await asyncio.sleep(min(2.0 * attempt, 10.0))
 
+        return False
+
+    async def verify_webhook(self, *, bot_token: str, tunnel_url: str) -> bool:
+        webhook_url = f"{tunnel_url}/webhook/telegram"
+        base = f"https://api.telegram.org/bot{bot_token}"
+        try:
+            async with httpx.AsyncClient() as client:
+                info_resp = await client.get(f"{base}/getWebhookInfo", timeout=15.0)
+        except Exception as exc:
+            self.error(f"webhook drift check failed: {exc}")
+            return False
+
+        info_payload = self._safe_json(info_resp)
+        result = info_payload.get("result", {}) if isinstance(info_payload, dict) else {}
+        live_url = str(result.get("url", "")).strip()
+        last_error = str(result.get("last_error_message", "")).strip()
+        if live_url == webhook_url and not last_error:
+            return True
+        self.error(
+            "webhook drift detected: "
+            f"url={live_url or '<empty>'}, expected={webhook_url}, "
+            f"last_error={last_error or '<none>'}"
+        )
         return False
 
     async def recover_tunnel_and_webhook(self, app_env: dict[str, str]) -> str | None:
@@ -275,6 +313,9 @@ class TulpaManager:
         self.log("--- OpenTulpa is live ---")
         self.log(f"Tunnel URL: {tunnel_url}")
         self.log("Press Ctrl+C to shutdown.")
+        last_webhook_verify = 0.0
+        bot_token = str(app_env.get("TELEGRAM_BOT_TOKEN", "")).strip()
+        secret = str(app_env.get("TELEGRAM_WEBHOOK_SECRET", "")).strip() or None
 
         while not self.stopping:
             if self.app_proc is not None and self.app_proc.poll() is not None:
@@ -288,6 +329,15 @@ class TulpaManager:
                     break
                 tunnel_url = recovered_url
                 self.log(f"tunnel recovered: {tunnel_url}")
+            now = asyncio.get_running_loop().time()
+            if bot_token and now - last_webhook_verify >= WEBHOOK_VERIFY_INTERVAL_SECONDS:
+                last_webhook_verify = now
+                if not await self.verify_webhook(bot_token=bot_token, tunnel_url=tunnel_url):
+                    await self.sync_webhook(
+                        bot_token=bot_token,
+                        secret=secret,
+                        tunnel_url=tunnel_url,
+                    )
             await asyncio.sleep(5)
 
         self.stop()

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.tools import tool as lc_tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict
 
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -91,6 +93,114 @@ def test_tools_for_routine_wake_excludes_interactive_owner_update_tool() -> None
 
     assert runtime.tools_for_turn_mode("interactive") == [send_owner_update, tulpa_read_file]
     assert runtime.tools_for_turn_mode("routine_wake") == [tulpa_read_file]
+
+
+@lc_tool
+def _runtime_structured_test_tool() -> str:
+    """Tiny runtime structured model test helper."""
+
+    return "ok"
+
+
+def _tool_schema_chars(tools: list[Any]) -> int:
+    total = 0
+    for tool in tools:
+        schema = convert_to_openai_tool(tool)
+        total += len(
+            json.dumps(
+                schema,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    return total
+
+
+def test_tools_for_workflow_setup_uses_task_specific_profile() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._tools = {
+        "intake_workflow_setup_begin": _runtime_structured_test_tool,
+        "intake_workflow_setup_update": _runtime_structured_test_tool,
+        "intake_workflow_setup_finalize_confirmation": _runtime_structured_test_tool,
+        "telegram_business_status": _runtime_structured_test_tool,
+        "business_knowledge_query": _runtime_structured_test_tool,
+        "intake_workflow_upsert": _runtime_structured_test_tool,
+        "browser_use_run": _runtime_structured_test_tool,
+        "routine_create": _runtime_structured_test_tool,
+        "tulpa_run_terminal": _runtime_structured_test_tool,
+    }
+
+    workflow_setup_tools = runtime.tools_for_turn_mode("workflow_setup")
+
+    assert workflow_setup_tools == [
+        _runtime_structured_test_tool,
+        _runtime_structured_test_tool,
+        _runtime_structured_test_tool,
+        _runtime_structured_test_tool,
+        _runtime_structured_test_tool,
+    ]
+
+
+def test_real_workflow_setup_profile_removes_large_irrelevant_schemas(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    interactive_tools = runtime.tools_for_turn_mode("interactive")
+    workflow_tools = runtime.tools_for_turn_mode("workflow_setup")
+    workflow_tool_ids = {
+        tool_id
+        for tool_id, tool in runtime._tools.items()
+        if any(tool is selected for selected in workflow_tools)
+    }
+
+    assert "intake_workflow_setup_begin" in workflow_tool_ids
+    assert "intake_workflow_setup_update" in workflow_tool_ids
+    assert "intake_workflow_setup_finalize_confirmation" in workflow_tool_ids
+    assert "telegram_business_status" in workflow_tool_ids
+    assert "business_knowledge_query" in workflow_tool_ids
+    assert "intake_workflow_upsert" not in workflow_tool_ids
+    assert "browser_use_run" not in workflow_tool_ids
+    assert "routine_create" not in workflow_tool_ids
+    assert "tulpa_run_terminal" not in workflow_tool_ids
+    assert len(workflow_tools) < len(interactive_tools)
+    assert _tool_schema_chars(workflow_tools) < _tool_schema_chars(interactive_tools) * 0.5
+
+
+def test_registered_tools_have_searchable_descriptions(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    missing = [
+        name
+        for name, tool in runtime._tools.items()
+        if not str(getattr(tool, "description", "") or "").strip()
+    ]
+    assert missing == []
+
+    required_terms = {
+        "intake_workflow_setup_begin": ("workflow", "setup"),
+        "intake_workflow_setup_update": ("workflow", "draft"),
+        "intake_workflow_setup_preflight": ("workflow", "preflight"),
+        "business_knowledge_query": ("business", "knowledge"),
+        "uploaded_file_search": ("uploaded", "file"),
+        "user_context_query": ("user", "context"),
+        "composio_tool_search": ("composio", "tool"),
+        "browser_use_run": ("browser",),
+    }
+    for name, terms in required_terms.items():
+        description = str(getattr(runtime._tools[name], "description", "") or "").lower()
+        assert all(term in description for term in terms), name
 
 
 class _ProviderAwareStructuredRunner:

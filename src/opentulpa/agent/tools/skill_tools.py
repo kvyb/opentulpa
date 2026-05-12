@@ -12,7 +12,7 @@ from opentulpa.agent.tools.common import require_customer_id
 def register_skill_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def skill_list(include_global: bool = True, limit: int = 50) -> Any:
-        """List reusable skills available to this user."""
+        """List reusable user/global skills available for task-specific instructions."""
         customer_id = require_customer_id(runtime)
         safe_limit = max(1, min(int(limit), 200))
         r = await runtime._request_with_backoff(
@@ -36,7 +36,7 @@ def register_skill_tools(runtime: Any) -> dict[str, Any]:
         include_files: bool = True,
         include_global: bool = True,
     ) -> Any:
-        """Get one skill by name, using user-scope first then global fallback."""
+        """Fetch one reusable skill by name, checking user scope before global fallback."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -61,7 +61,7 @@ def register_skill_tools(runtime: Any) -> dict[str, Any]:
         scope: str = "user",
         supporting_files: dict[str, str] | None = None,
     ) -> Any:
-        """Create or update a reusable skill for this user (or global when explicitly chosen)."""
+        """Create or update reusable task instructions as a user or global skill."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -83,7 +83,7 @@ def register_skill_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def skill_delete(name: str, scope: str = "user") -> Any:
-        """Delete a reusable skill by name."""
+        """Delete a reusable user or global skill by name."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",

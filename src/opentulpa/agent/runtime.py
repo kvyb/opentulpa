@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 from langchain.chat_models import init_chat_model
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openrouter import ChatOpenRouter
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel, ConfigDict, Field
@@ -378,6 +379,119 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
     return fields
 
 
+def _extract_response_metadata_trace_fields(response: Any) -> dict[str, Any]:
+    metadata = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    fields: dict[str, Any] = {}
+    generation_id = str(metadata.get("id") or "").strip()
+    if generation_id:
+        fields["openrouter_generation_id"] = generation_id
+    model_provider = str(metadata.get("model_provider") or "").strip()
+    if model_provider:
+        fields["response_model_provider"] = model_provider
+    response_model_name = str(metadata.get("model_name") or "").strip()
+    if response_model_name:
+        fields["response_model_name"] = response_model_name
+    system_fingerprint = str(metadata.get("system_fingerprint") or "").strip()
+    if system_fingerprint:
+        fields["response_system_fingerprint"] = system_fingerprint
+    return fields
+
+
+def _tool_trace_name(tool: Any) -> str:
+    return str(getattr(tool, "name", "") or "").strip()
+
+
+def _fallback_tool_schema(tool: Any) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "name": _tool_trace_name(tool),
+        "description": str(getattr(tool, "description", "") or ""),
+    }
+    args_schema = getattr(tool, "args_schema", None)
+    model_json_schema = getattr(args_schema, "model_json_schema", None)
+    if callable(model_json_schema):
+        with suppress(Exception):
+            schema["args_schema"] = model_json_schema()
+    elif args_schema is not None:
+        schema["args_schema"] = str(args_schema)
+    return schema
+
+
+def _tool_schema_trace_fields(runtime: Any, turn_mode: str) -> dict[str, Any]:
+    normalized_turn_mode = str(turn_mode or "").strip().lower()
+    if not normalized_turn_mode:
+        return {}
+    tools_for_turn_mode = getattr(runtime, "tools_for_turn_mode", None)
+    if not callable(tools_for_turn_mode):
+        return {}
+    try:
+        tools = list(tools_for_turn_mode(normalized_turn_mode))
+    except Exception as exc:
+        return {"bound_tool_schema_error": f"{type(exc).__name__}: {exc}"}
+
+    schemas: list[Any] = []
+    names: list[str] = []
+    errors: list[str] = []
+    for tool in tools:
+        name = _tool_trace_name(tool)
+        if name:
+            names.append(name)
+        try:
+            schema = convert_to_openai_tool(tool)
+        except Exception as exc:
+            errors.append(f"{name or type(tool).__name__}: {type(exc).__name__}")
+            schema = _fallback_tool_schema(tool)
+        schemas.append(_json_safe(schema))
+
+    serialized = json.dumps(schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fields: dict[str, Any] = {
+        "bound_tool_count": len(tools),
+        "bound_tool_names": names,
+        "bound_tool_schema_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "bound_tool_schema_chars": len(serialized),
+    }
+    if errors:
+        fields["bound_tool_schema_errors"] = errors
+    return fields
+
+
+def _hash_json(value: Any) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _prompt_cache_trace_fields(
+    serialized_messages: list[dict[str, Any]],
+    *,
+    stable_prefix_count: int,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "prompt_hash": _hash_json(serialized_messages),
+    }
+    stable_count = max(0, min(int(stable_prefix_count), len(serialized_messages)))
+    if stable_count:
+        stable_messages = serialized_messages[:stable_count]
+        fields["stable_prefix_hash"] = _hash_json(stable_messages)
+        fields["stable_prefix_chars"] = sum(len(str(item.get("text", "") or "")) for item in stable_messages)
+
+    first_system = next(
+        (item for item in serialized_messages if str(item.get("role", "") or "") == "system"),
+        None,
+    )
+    first_non_system = next(
+        (item for item in serialized_messages if str(item.get("role", "") or "") != "system"),
+        None,
+    )
+    if first_system is not None:
+        fields["sticky_first_system_hash"] = _hash_json(first_system)
+        fields["sticky_first_system_chars"] = len(str(first_system.get("text", "") or ""))
+    if first_non_system is not None:
+        fields["sticky_first_non_system_hash"] = _hash_json(first_non_system)
+        fields["sticky_first_non_system_chars"] = len(str(first_non_system.get("text", "") or ""))
+    return fields
+
+
 _LINK_ID_TOKEN_RE = re.compile(r"\blink_[A-Za-z0-9]{4,12}\b")
 STREAM_WAIT_SIGNAL = "__TULPA_STREAM_WAIT__"
 STREAM_PROGRESS_PREFIX = "__TULPA_STREAM_PROGRESS__:"
@@ -413,6 +527,43 @@ _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
     "user_context_reindex": "Reindexing user context",
     "browser_use_run": "Using the browser",
     "browser_use_owner_input_submit": "Continuing browser verification",
+}
+WORKFLOW_SETUP_TOOL_NAMES: set[str] = {
+    "send_owner_update",
+    "uploaded_file_search",
+    "uploaded_file_get",
+    "uploaded_file_send",
+    "uploaded_file_analyze",
+    "uploaded_file_inspect_structure",
+    "business_knowledge_index",
+    "business_knowledge_query",
+    "user_context_add_files",
+    "user_context_query",
+    "user_context_list_sources",
+    "user_context_find_sources",
+    "user_context_reindex",
+    "user_context_archive_sources",
+    "user_context_promote_to_intake",
+    "intake_workflow_list",
+    "intake_workflow_get",
+    "intake_workflow_setup_begin",
+    "intake_workflow_setup_get",
+    "intake_workflow_setup_update",
+    "intake_workflow_setup_preflight",
+    "intake_workflow_setup_mark_proposed",
+    "intake_workflow_setup_confirm_current",
+    "intake_workflow_setup_commit",
+    "intake_workflow_setup_finalize_confirmation",
+    "intake_workflow_setup_pause",
+    "intake_workflow_setup_cancel",
+    "telegram_business_status",
+    "composio_status",
+    "composio_authorize_toolkit",
+    "composio_wait_for_connection",
+    "composio_toolkits",
+    "composio_connected_accounts",
+    "composio_tool_search",
+    "composio_tool_schema",
 }
 
 CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
@@ -1269,6 +1420,7 @@ class OpenTulpaLangGraphRuntime:
         self._graph = None
         self._tools: dict[str, Any] = {}
         self._model_with_tools = None
+        self._workflow_setup_model_with_tools = None
         self._wake_execution_model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
@@ -1305,6 +1457,8 @@ class OpenTulpaLangGraphRuntime:
             ).strip()
         if model is getattr(self, "_wake_execution_model_with_tools", None):
             return str(getattr(self, "_wake_execution_model_name", "") or "").strip()
+        if model is getattr(self, "_workflow_setup_model_with_tools", None):
+            return str(getattr(self, "model_name", "") or "").strip()
         if model is getattr(self, "_model", None) or model is getattr(
             self, "_model_with_tools", None
         ):
@@ -1321,10 +1475,21 @@ class OpenTulpaLangGraphRuntime:
             and self._wake_execution_model_with_tools is not None
         ):
             return self._wake_execution_model_with_tools
+        if (
+            normalized_turn_mode == "workflow_setup"
+            and self._workflow_setup_model_with_tools is not None
+        ):
+            return self._workflow_setup_model_with_tools
         return self._model_with_tools
 
     def tools_for_turn_mode(self, turn_mode: str) -> list[Any]:
         normalized_turn_mode = str(turn_mode or "").strip().lower()
+        if normalized_turn_mode == "workflow_setup":
+            return [
+                tool
+                for name, tool in self._tools.items()
+                if str(name or "").strip() in WORKFLOW_SETUP_TOOL_NAMES
+            ]
         blocked_tools: set[str] = set()
         if normalized_turn_mode == "routine_wake":
             blocked_tools.add("send_owner_update")
@@ -1579,13 +1744,25 @@ class OpenTulpaLangGraphRuntime:
     ) -> None:
         normalized_context = self._normalize_llm_call_context(call_context)
         usage_fields = self.extract_response_usage_fields(response) if response is not None else {}
+        metadata_fields = (
+            _extract_response_metadata_trace_fields(response) if response is not None else {}
+        )
+        tool_schema_fields = _tool_schema_trace_fields(
+            self,
+            str(normalized_context.get("turn_mode") or ""),
+        )
         response_content = getattr(response, "content", response) if response is not None else ""
         safe_response_content = _json_safe(response_content)
+        serialized_prompt_messages = [_serialize_message(message) for message in prepared_messages]
+        prompt_cache_fields = _prompt_cache_trace_fields(
+            serialized_prompt_messages,
+            stable_prefix_count=stable_prefix_count,
+        )
         record: dict[str, Any] = {
             "ts": datetime.now(UTC).isoformat(),
             "model_name": str(model_name or "").strip(),
             "stable_prefix_count": int(stable_prefix_count),
-            "prompt_messages": [_serialize_message(message) for message in prepared_messages],
+            "prompt_messages": serialized_prompt_messages,
             "prompt_message_count": len(prepared_messages),
             "response_type": type(response).__name__ if response is not None else "",
             "response_message": _serialize_message(response) if response is not None else None,
@@ -1596,6 +1773,9 @@ class OpenTulpaLangGraphRuntime:
             "response_tool_calls": _json_safe(getattr(response, "tool_calls", None)),
             "error": str(error or "").strip() or None,
             **usage_fields,
+            **metadata_fields,
+            **tool_schema_fields,
+            **prompt_cache_fields,
         }
         for key, value in normalized_context.items():
             record[str(key)] = _json_safe(value)
@@ -2644,6 +2824,9 @@ class OpenTulpaLangGraphRuntime:
                 await maybe_coro
         self._register_tools()
         self._model_with_tools = self._model.bind_tools(self.tools_for_turn_mode("interactive"))
+        self._workflow_setup_model_with_tools = self._model.bind_tools(
+            self.tools_for_turn_mode("workflow_setup")
+        )
         self._wake_execution_model_with_tools = self._wake_execution_model.bind_tools(
             self.tools_for_turn_mode("routine_wake")
         )
@@ -2670,6 +2853,7 @@ class OpenTulpaLangGraphRuntime:
         self._checkpointer = None
         self._graph = None
         self._model_with_tools = None
+        self._workflow_setup_model_with_tools = None
         self._wake_execution_model_with_tools = None
 
     def healthy(self) -> bool:

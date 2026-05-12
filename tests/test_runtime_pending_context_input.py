@@ -474,8 +474,8 @@ async def test_graph_warns_owner_before_loop_limit_and_instructs_status_reply() 
     assert saw_loop_instruction is True
     assert emitted == [
         (
-            "Still working, but this turn is near its step limit. "
-            "I’ll stop tool work and send the current result or blocker now.",
+            "This turn is near its tool-step budget. I’ll stop polling tools now and "
+            "report the latest confirmed state.",
             "chat_loop_limit",
         )
     ]
@@ -537,11 +537,11 @@ async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
     )
 
     assert emitted == [
-        "Still working, but this turn is near its step limit. "
-        "I’ll stop tool work and send the current result or blocker now."
+        "This turn is near its tool-step budget. I’ll stop polling tools now and "
+        "report the latest confirmed state."
     ]
     assert tool_invoked is False
-    assert "turn step limit" in result["final_response_text"]
+    assert "tool-step budget" in result["final_response_text"]
 
 
 @pytest.mark.asyncio
@@ -1061,8 +1061,10 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     )
 
     assert result["final_response_text"] == "ok"
-    assert captured["stable_prefix_count"] == 1
+    assert captured["stable_prefix_count"] == 2
     prompt_messages = captured["messages"]
+    assert isinstance(prompt_messages[1], HumanMessage)
+    assert "OpenTulpa cache anchor v1" in str(prompt_messages[1].content)
     older_assistant_index = next(
         idx
         for idx, msg in enumerate(prompt_messages)

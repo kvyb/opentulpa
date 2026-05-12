@@ -39,7 +39,7 @@ def register_file_tools(runtime: Any) -> dict[str, Any]:
         file_id: str,
         max_excerpt_chars: int = 16000,
     ) -> Any:
-        """Get metadata and text excerpt for one uploaded file."""
+        """Fetch uploaded file metadata and a bounded text excerpt by file_id."""
         customer_id = require_customer_id(runtime)
         safe_chars = max(500, min(int(max_excerpt_chars), 60000))
         r = await runtime._request_with_backoff(

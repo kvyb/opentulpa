@@ -94,7 +94,7 @@ def register_routine_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def routine_list() -> Any:
-        """List routines for the current user."""
+        """List scheduled routines, reminders, and clock-driven automations for this user."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "GET",
@@ -108,7 +108,7 @@ def register_routine_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def routine_delete(routine_id: str) -> Any:
-        """Delete/stop one routine by id for the current user."""
+        """Delete or stop one scheduled routine automation by routine_id."""
         customer_id = require_customer_id(runtime)
         rid = str(routine_id or "").strip()
         if not rid:

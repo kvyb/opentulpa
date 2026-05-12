@@ -91,18 +91,20 @@ def _workflow_setup_no_progress_retry_limit(runtime: Any) -> int:
 
 LOOP_LIMIT_STATUS_REMAINING_STEPS = 3
 LOOP_LIMIT_STATUS_UPDATE_TEXT = (
-    "Still working, but this turn is near its step limit. "
-    "I’ll stop tool work and send the current result or blocker now."
+    "This turn is near its tool-step budget. I’ll stop polling tools now and "
+    "report the latest confirmed state."
 )
 LOOP_LIMIT_FINAL_STATUS_TEXT = (
-    "I hit the turn step limit while working. Current status: I was still using tools "
-    "and could not safely continue in this turn. Send a short follow-up and I’ll resume "
-    "from the latest state."
+    "I stopped tool work because this turn reached its tool-step budget. The latest "
+    "tool result is the current state; send a short follow-up to continue from there."
 )
 LOOP_LIMIT_REPAIR_INSTRUCTION = (
     "LOOP_LIMIT_APPROACHING: This turn is near its graph step limit. Do not call more tools. "
     "Write a concise user-facing status update now with what is done, the current blocker, "
     "or the next exact step."
+)
+CACHE_STICKY_ROUTING_ANCHOR = (
+    "OpenTulpa cache anchor v1. Real conversation messages follow; do not answer this marker."
 )
 
 
@@ -998,10 +1000,12 @@ def build_runtime_graph(runtime: Any):
         prefix_messages: list[AnyMessage] = [
             *stable_prompt_messages,
             *(message for _, message in kept_stable_optional_entries),
+            HumanMessage(content=CACHE_STICKY_ROUTING_ANCHOR),
         ]
         prefix_sections = [
             *stable_prompt_sections,
             *(section for section, _ in kept_stable_optional_entries),
+            "cache_sticky_routing_anchor",
         ]
 
         late_control_message = SystemMessage(content=late_control_content) if late_control_content else None
@@ -1199,8 +1203,8 @@ def build_runtime_graph(runtime: Any):
             *prefix_messages,
             *older_history_messages,
             *frozen_late_messages,
-            *dynamic_late_messages,
             *latest_turn_messages,
+            *dynamic_late_messages,
         ]
         _log(
             state,
@@ -1340,6 +1344,9 @@ def build_runtime_graph(runtime: Any):
                     "- If the latest owner message supplied workflow facts, sink details, files, fields, "
                     "or behavior rules: call intake_workflow_setup_get if needed, then "
                     "intake_workflow_setup_update to persist the new facts.\n"
+                    "- If the latest owner message supplied a local CSV path, persist it as "
+                    "draft_patch.sink_type='local_csv' and draft_patch.sink_config.file_path; "
+                    "do not ask for sink details already present.\n"
                     "- If the draft is complete after the update: call intake_workflow_setup_preflight; "
                     "when ready, call intake_workflow_setup_mark_proposed before summarizing the proposal.\n"
                     "- If the latest owner message explicitly confirms a shown proposal: call "
