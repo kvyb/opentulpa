@@ -1174,8 +1174,10 @@ async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
     assert result["final_response_text"] == "Done."
     assert len(captured_messages) == 2
     assert live_time_calls == 1
-    assert captured_prefix_counts[0] == 1
+    assert captured_prefix_counts[0] == 2
     assert captured_prefix_counts[1] == captured_prefix_counts[0]
+    assert isinstance(captured_messages[0][1], HumanMessage)
+    assert "OpenTulpa cache anchor v1" in str(captured_messages[0][1].content)
 
     def _live_time_block(messages: list[Any]) -> str:
         return next(
