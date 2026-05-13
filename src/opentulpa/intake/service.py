@@ -2639,15 +2639,11 @@ class IntakeWorkflowService:
                 if configured_conversation_ids:
                     items = []
                     for conversation_id in configured_conversation_ids:
-                        try:
-                            detailed = composio.get_instagram_conversation(
-                                customer_id=str(workflow["customer_id"]),
-                                conversation_id=conversation_id,
-                                connected_account_id=connected_account_id,
-                            )
-                        except Exception as exc:
-                            warnings.append({"conversation_id": conversation_id, "error": str(exc)})
-                            continue
+                        detailed = composio.get_instagram_conversation(
+                            customer_id=str(workflow["customer_id"]),
+                            conversation_id=conversation_id,
+                            connected_account_id=connected_account_id,
+                        )
                         items.append(_safe_dict(detailed.get("summary")))
                 else:
                     conversations_payload = composio.list_instagram_conversations(

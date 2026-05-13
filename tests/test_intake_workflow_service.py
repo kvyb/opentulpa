@@ -2782,6 +2782,53 @@ async def test_intake_workflow_run_keeps_source_scan_warnings_nonfatal(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_intake_workflow_run_fails_configured_instagram_conversation_fetch(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "conversation_updated_time": "2026-04-07T08:00:00+00:00",
+        "latest_message_id": "msg_1",
+        "latest_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_message_sender_id": "lead_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Hello",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+        latest_message_sender_id="lead_1",
+        latest_message_sender_username="lead",
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio(summary, conversation),
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        source_config={"conversation_id": "conv_missing"},
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time", "car_type", "wash_type"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["ok"] is False
+    assert result["workflow_id"] == workflow["workflow_id"]
+    assert "failed while reading Instagram DMs" in result["summary"]
+
+
+@pytest.mark.asyncio
 async def test_intake_workflow_run_skips_outbound_only_update_without_model_call(
     tmp_path: Path,
 ) -> None:
