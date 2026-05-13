@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from langgraph.types import Command
 
-from opentulpa.agent.lc_messages import AIMessage, SystemMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.tool_validation import (
     _build_tool_validation_repair_message,
@@ -27,6 +27,65 @@ GraphLogFn = Callable[..., None]
 LoopLimitNearFn = Callable[[AgentState], bool]
 RemainingStepsFn = Callable[[AgentState], int | None]
 ValidateToolsNode = Callable[[AgentState], Awaitable[ValidateToolsCommand]]
+_MAX_WEB_SEARCH_CALLS_PER_TURN = 2
+
+
+def _successful_tool_calls_in_latest_turn(messages: list[Any]) -> list[dict[str, Any]]:
+    latest_user_idx = 0
+    for idx in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[idx], HumanMessage):
+            latest_user_idx = idx
+            break
+
+    calls_by_id: dict[str, dict[str, Any]] = {}
+    for message in messages[latest_user_idx:]:
+        if isinstance(message, AIMessage):
+            for call in getattr(message, "tool_calls", []) or []:
+                call_id = str((call or {}).get("id", "")).strip()
+                call_name = str((call or {}).get("name", "")).strip()
+                if call_id and call_name:
+                    calls_by_id[call_id] = {
+                        "name": call_name,
+                        "args": (call or {}).get("args", {}) or {},
+                    }
+
+    successful: list[dict[str, Any]] = []
+    for message in messages[latest_user_idx:]:
+        if not isinstance(message, ToolMessage):
+            continue
+        call_id = str(getattr(message, "tool_call_id", "") or "").strip()
+        control = getattr(message, "additional_kwargs", {}).get("opentulpa_control", {})
+        status = str(control.get("status", "") if isinstance(control, dict) else "").strip()
+        if status == "ok":
+            call = calls_by_id.get(call_id)
+            if call is not None:
+                successful.append(call)
+    return successful
+
+
+def _successful_tool_count_in_latest_turn(messages: list[Any], *, tool_name: str) -> int:
+    return sum(
+        1
+        for call in _successful_tool_calls_in_latest_turn(messages)
+        if str(call.get("name", "")) == tool_name
+    )
+
+
+def _web_search_budget_error(*, prior_success_count: int) -> str:
+    if prior_success_count >= _MAX_WEB_SEARCH_CALLS_PER_TURN:
+        return (
+            "WEB_SEARCH_BUDGET_EXCEEDED: web_search is limited to "
+            f"{_MAX_WEB_SEARCH_CALLS_PER_TURN} calls per turn. Do not call web_search again "
+            "in this turn. Use browser_use_run for dynamic web investigation, "
+            "fetch_url_content for already found URLs, or synthesize from existing results."
+        )
+    remaining = _MAX_WEB_SEARCH_CALLS_PER_TURN - prior_success_count
+    return (
+        "WEB_SEARCH_BATCH_TOO_LARGE: web_search is limited to "
+        f"{_MAX_WEB_SEARCH_CALLS_PER_TURN} calls per turn. This turn has {remaining} "
+        "web_search call(s) remaining. Retry with no more than that many web_search calls "
+        "in the same batch, or use browser_use_run for dynamic web investigation."
+    )
 
 
 def build_validate_tool_calls_node(
@@ -80,10 +139,30 @@ def build_validate_tool_calls_node(
                 if candidate:
                     prior_assistant = candidate
                     break
-        for call in last.tool_calls:
+        for call_idx, call in enumerate(last.tool_calls):
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
             args = call.get("args", {}) or {}
+            if call_name == "web_search":
+                prior_web_search_count = _successful_tool_count_in_latest_turn(
+                    messages[:-1],
+                    tool_name="web_search",
+                )
+                current_batch_web_search_count = sum(
+                    1
+                    for existing_call in last.tool_calls[:call_idx]
+                    if str(existing_call.get("name", "")) == "web_search"
+                )
+                if prior_web_search_count + current_batch_web_search_count >= _MAX_WEB_SEARCH_CALLS_PER_TURN:
+                    validation_errors.append(
+                        ToolMessage(
+                            content=_web_search_budget_error(
+                                prior_success_count=prior_web_search_count,
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
             validation_error = _validate_model_tool_call(
                 call_name=call_name,
                 args=args,

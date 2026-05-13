@@ -44,6 +44,8 @@ browser_use_headless: true
 browser_use_model: null
 browser_use_max_concurrent_tasks: 2
 browser_use_task_retention_seconds: 1800
+browser_use_cloud_proxy_country_code: us
+browser_use_cloud_timeout_minutes: 15
 
 # Integrations (non-secret)
 opentulpa_app_url: http://127.0.0.1:8000

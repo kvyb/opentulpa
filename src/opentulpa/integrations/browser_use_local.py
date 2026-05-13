@@ -26,6 +26,10 @@ _OWNER_INPUT_TIMEOUT_SECONDS = 24 * 60 * 60
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
 _SESSION_CLEANUP_POLL_SECONDS = 60.0
 _MAX_BROWSER_USE_SESSIONS = 20
+_AGENT_RUN_TIMEOUT_MIN_SECONDS = 90
+_AGENT_RUN_TIMEOUT_SECONDS_PER_STEP = 45
+_AGENT_RUN_TIMEOUT_MAX_SECONDS = 1800
+_SESSION_CLOSE_TIMEOUT_SECONDS = 30
 _DEFAULT_SESSION_ID = "default"
 _DEFAULT_CUSTOMER_ID = "default"
 _PROFILE_RETENTION_SECONDS = 14 * 24 * 60 * 60
@@ -70,6 +74,10 @@ class _BrowserUseSessionState:
     session: Any
     customer_id: str
     session_id: str
+    backend: str = "local"
+    cloud_profile_id: str | None = None
+    cloud_browser_session_id: str | None = None
+    live_url: str | None = None
     updated_monotonic: float = field(default_factory=time.monotonic)
 
 
@@ -89,6 +97,9 @@ class BrowserUseLocalManager:
         task_retention_seconds: int = 1800,
         user_data_dir: str | Path | None = None,
         capsolver_api_key: str | None = None,
+        browser_use_api_key: str | None = None,
+        browser_use_cloud_proxy_country_code: str | None = "us",
+        browser_use_cloud_timeout_minutes: int = 15,
     ) -> None:
         self._openrouter_api_key = str(openrouter_api_key or "").strip()
         self._openrouter_base_url = str(openrouter_base_url or "").strip().rstrip("/")
@@ -99,6 +110,15 @@ class BrowserUseLocalManager:
         self._task_retention_seconds = max(60, int(task_retention_seconds))
         self._user_data_dir = self._resolve_user_data_dir(user_data_dir)
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
+        self._browser_use_api_key = str(browser_use_api_key or "").strip()
+        self._browser_use_cloud_proxy_country_code = str(
+            browser_use_cloud_proxy_country_code or ""
+        ).strip()
+        self._browser_use_cloud_timeout_minutes = max(
+            1, min(int(browser_use_cloud_timeout_minutes), 240)
+        )
+        self._browser_use_cloud_client: Any | None = None
+        self._cloud_session_ids_by_browser_session: dict[int, str] = {}
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._lock = asyncio.Lock()
         self._tasks: dict[str, _BrowserUseTaskState] = {}
@@ -120,6 +140,24 @@ class BrowserUseLocalManager:
                 f"({exc}). Install dependencies with `uv sync`."
             )
             return self._preflight_error
+
+        if self._browser_use_cloud_enabled():
+            if self._user_data_dir is None:
+                self._preflight_error = (
+                    "browser_use cloud browser backend unavailable: "
+                    "BROWSER_USE_USER_DATA_DIR is required to remember profile ids"
+                )
+                return self._preflight_error
+            try:
+                self._get_browser_use_cloud_client()
+            except Exception as exc:
+                self._preflight_error = (
+                    "browser_use cloud browser backend unavailable: "
+                    f"Browser Use Cloud SDK import failed ({exc}). Install dependencies with `uv sync`."
+                )
+                return self._preflight_error
+            self._preflight_error = None
+            return None
 
         try:
             from playwright.async_api import async_playwright
@@ -238,7 +276,7 @@ class BrowserUseLocalManager:
                         "sessions": self._session_summaries_locked(safe_customer_id),
                 }
             if session_state is None:
-                browser_session = self._new_browser_session(
+                browser_session, browser_info = await self._new_browser_session(
                     allowed_domains=safe_domains,
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
@@ -247,12 +285,24 @@ class BrowserUseLocalManager:
                     session=browser_session,
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
+                    backend=browser_info.get("backend", "local"),
+                    cloud_profile_id=browser_info.get("profile_id"),
+                    cloud_browser_session_id=browser_info.get("session_id"),
+                    live_url=browser_info.get("live_url"),
                 )
+                if session_state.cloud_browser_session_id:
+                    self._cloud_session_ids_by_browser_session[id(browser_session)] = (
+                        session_state.cloud_browser_session_id
+                    )
                 self._sessions[session_key] = session_state
                 self._write_profile_metadata(
                     customer_id=safe_customer_id,
                     session_id=safe_session_id,
                     status="idle",
+                    backend=session_state.backend,
+                    cloud_profile_id=session_state.cloud_profile_id,
+                    cloud_browser_session_id=session_state.cloud_browser_session_id,
+                    live_url=session_state.live_url,
                 )
             else:
                 session_state.updated_monotonic = time.monotonic()
@@ -348,8 +398,12 @@ class BrowserUseLocalManager:
                     {
                         "session_id": session_state.session_id,
                         "customer_id": safe_customer_id,
+                        "backend": session_state.backend,
                         "reusable": not active_task_ids,
                         "persisted": self._profile_dir_exists(safe_customer_id, session_state.session_id),
+                        "live_url": session_state.live_url,
+                        "cloud_profile_id": session_state.cloud_profile_id,
+                        "cloud_browser_session_id": session_state.cloud_browser_session_id,
                         "active_task_ids": active_task_ids,
                         "latest_task_id": latest.task_id if latest is not None else None,
                         "latest_status": latest.status if latest is not None else None,
@@ -369,11 +423,15 @@ class BrowserUseLocalManager:
                     {
                         "session_id": session_id,
                         "customer_id": safe_customer_id,
+                        "backend": metadata.get("backend") or "local",
                         "reusable": (
                             self._live_session_count_for_customer_locked(safe_customer_id)
                             < _MAX_BROWSER_USE_SESSIONS
                         ),
                         "persisted": True,
+                        "live_url": metadata.get("liveUrl") or None,
+                        "cloud_profile_id": metadata.get("browserUseProfileId") or None,
+                        "cloud_browser_session_id": metadata.get("browserUseBrowserSessionId") or None,
                         "active_task_ids": [],
                         "latest_task_id": None,
                         "latest_status": None,
@@ -717,7 +775,16 @@ class BrowserUseLocalManager:
                 if state is not None:
                     state.agent = agent
 
-            history = await agent.run(max_steps=max_steps)
+            run_timeout = self._agent_run_timeout_seconds(max_steps)
+            try:
+                history = await asyncio.wait_for(
+                    agent.run(max_steps=max_steps),
+                    timeout=run_timeout,
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"browser_use task exceeded wall timeout after {run_timeout} seconds"
+                ) from exc
             history_payload = self._history_to_payload(history)
 
             session_to_close: Any | None = None
@@ -764,13 +831,16 @@ class BrowserUseLocalManager:
             if session_to_close is not None:
                 await self._close_session(session_to_close)
         except Exception as exc:
-            session_to_close: Any | None = None
+            session_to_close = None
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is not None:
+                    if state.agent is not None and hasattr(state.agent, "stop"):
+                        with suppress(Exception):
+                            state.agent.stop()
                     state.status = "failed"
                     state.is_success = False
-                    state.error = str(exc)[:2000]
+                    state.error = (str(exc).strip() or exc.__class__.__name__)[:2000]
                     state.finished_at = _utc_now_iso()
                     state.updated_monotonic = time.monotonic()
                     self._write_profile_metadata(
@@ -934,6 +1004,14 @@ class BrowserUseLocalManager:
         return out
 
     @staticmethod
+    def _agent_run_timeout_seconds(max_steps: int) -> int:
+        steps = max(1, min(int(max_steps), 120))
+        return max(
+            _AGENT_RUN_TIMEOUT_MIN_SECONDS,
+            min(_AGENT_RUN_TIMEOUT_MAX_SECONDS, steps * _AGENT_RUN_TIMEOUT_SECONDS_PER_STEP),
+        )
+
+    @staticmethod
     def _latest_step_url(state: _BrowserUseTaskState) -> str | None:
         for step in reversed(state.steps):
             if not isinstance(step, dict):
@@ -965,14 +1043,28 @@ class BrowserUseLocalManager:
             out.append(value)
         return out
 
-    def _new_browser_session(
+    async def _new_browser_session(
         self,
         *,
         allowed_domains: list[str],
         customer_id: str,
         session_id: str,
-    ) -> Any:
+    ) -> tuple[Any, dict[str, str]]:
         _, _, browser_session_cls = self._import_browser_use_components()
+        if self._browser_use_cloud_enabled():
+            cloud_session = await self._new_browser_use_cloud_session(
+                customer_id=customer_id,
+                session_id=session_id,
+            )
+            cloud_kwargs: dict[str, Any] = {
+                "cdp_url": cloud_session["cdp_url"],
+                "keep_alive": True,
+                "captcha_solver": True,
+            }
+            if allowed_domains:
+                cloud_kwargs["allowed_domains"] = allowed_domains
+            return browser_session_cls(**cloud_kwargs), cloud_session
+
         session_kwargs: dict[str, Any] = {"headless": self._headless, "keep_alive": True}
         if allowed_domains:
             session_kwargs["allowed_domains"] = allowed_domains
@@ -980,7 +1072,45 @@ class BrowserUseLocalManager:
             session_profile_dir = self._profile_dir(customer_id, session_id)
             session_profile_dir.mkdir(parents=True, exist_ok=True)
             session_kwargs["user_data_dir"] = str(session_profile_dir)
-        return browser_session_cls(**session_kwargs)
+        return browser_session_cls(**session_kwargs), {"backend": "local"}
+
+    async def _new_browser_use_cloud_session(
+        self,
+        *,
+        customer_id: str,
+        session_id: str,
+    ) -> dict[str, str]:
+        profile_id = self._browser_use_cloud_profile_id(customer_id, session_id)
+        if not profile_id:
+            profile_id = await self._get_browser_use_cloud_client().create_profile(
+                name=self._browser_use_cloud_profile_name(customer_id, session_id)
+            )
+            self._write_profile_metadata(
+                customer_id=customer_id,
+                session_id=session_id,
+                status="idle",
+                backend="browser-use-cloud",
+                cloud_profile_id=profile_id,
+            )
+        session = await self._get_browser_use_cloud_client().create_browser_session(
+            profile_id=profile_id,
+        )
+        self._write_profile_metadata(
+            customer_id=customer_id,
+            session_id=session_id,
+            status="idle",
+            backend="browser-use-cloud",
+            cloud_profile_id=session.profile_id,
+            cloud_browser_session_id=session.id,
+            live_url=session.live_url,
+        )
+        return {
+            "backend": "browser-use-cloud",
+            "cdp_url": session.cdp_url,
+            "profile_id": session.profile_id,
+            "session_id": session.id,
+            "live_url": session.live_url or "",
+        }
 
     @staticmethod
     def _resolve_user_data_dir(value: str | Path | None) -> Path | None:
@@ -1077,6 +1207,10 @@ class BrowserUseLocalManager:
         status: str,
         task_id: str | None = None,
         last_url: str | None = None,
+        backend: str | None = None,
+        cloud_profile_id: str | None = None,
+        cloud_browser_session_id: str | None = None,
+        live_url: str | None = None,
     ) -> None:
         if self._user_data_dir is None:
             return
@@ -1099,6 +1233,14 @@ class BrowserUseLocalManager:
             metadata["lastTaskId"] = task_id
         if last_url:
             metadata["lastUrl"] = last_url
+        if backend:
+            metadata["backend"] = backend
+        if cloud_profile_id:
+            metadata["browserUseProfileId"] = cloud_profile_id
+        if cloud_browser_session_id:
+            metadata["browserUseBrowserSessionId"] = cloud_browser_session_id
+        if live_url:
+            metadata["liveUrl"] = live_url
         (profile_dir / _PROFILE_METADATA_FILE).write_text(
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
@@ -1115,7 +1257,7 @@ class BrowserUseLocalManager:
     def _new_controller(self, *, task_id: str, allow_owner_input: bool = True) -> Any | None:
         from browser_use import ActionResult, Controller
 
-        controller = Controller()
+        controller: Any = Controller()
 
         if allow_owner_input:
             @controller.action(
@@ -1162,10 +1304,21 @@ class BrowserUseLocalManager:
         return Agent, ChatOpenAI, BrowserSession
 
     def _state_to_payload(self, state: _BrowserUseTaskState) -> dict[str, Any]:
+        session_state = self._sessions.get(
+            self._session_key(state.customer_id, str(state.session_id or ""))
+        )
         return {
             "id": state.task_id,
             "customerId": state.customer_id,
             "sessionId": state.session_id,
+            "backend": session_state.backend if session_state is not None else None,
+            "liveUrl": session_state.live_url if session_state is not None else None,
+            "browserUseProfileId": (
+                session_state.cloud_profile_id if session_state is not None else None
+            ),
+            "browserUseBrowserSessionId": (
+                session_state.cloud_browser_session_id if session_state is not None else None
+            ),
             "status": state.status,
             "isSuccess": state.is_success,
             "startedAt": state.started_at,
@@ -1184,13 +1337,25 @@ class BrowserUseLocalManager:
     async def _close_session(self, session: Any) -> None:
         if session is None:
             return
+        cloud_session_id = self._cloud_session_ids_by_browser_session.pop(id(session), "")
         if hasattr(session, "stop"):
             with suppress(Exception):
-                await session.stop()
-                return
-        if hasattr(session, "kill"):
+                await asyncio.wait_for(
+                    session.stop(),
+                    timeout=_SESSION_CLOSE_TIMEOUT_SECONDS,
+                )
+        elif hasattr(session, "kill"):
             with suppress(Exception):
-                await session.kill()
+                await asyncio.wait_for(
+                    session.kill(),
+                    timeout=_SESSION_CLOSE_TIMEOUT_SECONDS,
+                )
+        if cloud_session_id:
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    self._get_browser_use_cloud_client().stop_browser_session(cloud_session_id),
+                    timeout=_SESSION_CLOSE_TIMEOUT_SECONDS,
+                )
 
     def _ensure_cleanup_task_locked(self) -> None:
         if self._cleanup_task is not None and not self._cleanup_task.done():
@@ -1229,7 +1394,7 @@ class BrowserUseLocalManager:
             if age >= _SESSION_IDLE_TIMEOUT_SECONDS:
                 expired_sessions.append(session_key)
         for session_key in expired_sessions:
-            session_state = self._sessions.pop(session_key, None)
+            session_state = self._sessions.pop(session_key)
             if session_state is not None:
                 self._write_profile_metadata(
                     customer_id=session_state.customer_id,
@@ -1336,6 +1501,33 @@ class BrowserUseLocalManager:
             )
         out.sort(key=lambda item: item["last_used_monotonic"], reverse=True)
         return out
+
+    def _browser_use_cloud_enabled(self) -> bool:
+        return bool(self._browser_use_api_key)
+
+    def _get_browser_use_cloud_client(self) -> Any:
+        if self._browser_use_cloud_client is None:
+            from opentulpa.integrations.browser_use_cloud import BrowserUseCloudClient
+
+            self._browser_use_cloud_client = BrowserUseCloudClient(
+                api_key=self._browser_use_api_key,
+                proxy_country_code=self._browser_use_cloud_proxy_country_code or None,
+                browser_timeout_minutes=self._browser_use_cloud_timeout_minutes,
+            )
+        return self._browser_use_cloud_client
+
+    def _browser_use_cloud_profile_id(self, customer_id: str, session_id: str) -> str | None:
+        if self._user_data_dir is None:
+            return None
+        metadata = self._read_profile_metadata(self._profile_dir(customer_id, session_id))
+        value = str(metadata.get("browserUseProfileId") or "").strip()
+        return value or None
+
+    @classmethod
+    def _browser_use_cloud_profile_name(cls, customer_id: str, session_id: str) -> str:
+        customer = cls._safe_profile_name(cls._normalize_customer_id(customer_id))
+        session = cls._safe_profile_name(session_id)
+        return f"opentulpa-{customer}-{session}"[:100]
 
     def _session_has_active_tasks_locked(self, customer_id: str, session_id: str) -> bool:
         safe_customer = self._normalize_customer_id(customer_id)

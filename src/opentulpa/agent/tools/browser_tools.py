@@ -12,6 +12,20 @@ from langchain.tools import tool
 
 from opentulpa.agent.tools.common import require_customer_id
 
+_BROWSER_USE_DEFAULT_WAIT_TIMEOUT_SECONDS = 1800
+_BROWSER_USE_MAX_WAIT_TIMEOUT_SECONDS = 1800
+_BROWSER_USE_MIN_WAIT_TIMEOUT_SECONDS = 5
+_BROWSER_USE_SECONDS_PER_STEP_BUFFER = 50
+
+_BROWSER_USE_TASK_PREFIX = (
+    "Use the browser like a careful human operator. Prefer visible page evidence over guesses. "
+    "Open source pages before claiming facts, capture the URL/title/date when relevant, and stop "
+    "once you have enough evidence for the user's goal. If blocked by login, CAPTCHA, paywall, or "
+    "repeated same-state navigation, stop and report the blocker plus live_url. Do not keep browsing "
+    "just to be exhaustive.\n\n"
+    "Return a concise answer with verified facts, uncertain facts clearly marked, and any blockers."
+)
+
 
 def _get_browser_use_local_manager(runtime: Any) -> tuple[Any | None, str | None]:
     getter = getattr(runtime, "get_browser_use_local_manager", None)
@@ -50,6 +64,13 @@ def _normalize_allowed_domains(allowed_domains: list[str] | None) -> list[str]:
         seen.add(host)
         out.append(host)
     return out
+
+
+def _build_browser_use_task(task: str) -> str:
+    task_text = str(task or "").strip()
+    if not task_text:
+        return ""
+    return f"{_BROWSER_USE_TASK_PREFIX}\n\nTask:\n{task_text}"
 
 
 def _compact_browser_use_task_view(
@@ -92,6 +113,8 @@ def _compact_browser_use_task_view(
         "finished_at": data.get("finishedAt"),
         "task": data.get("task"),
         "llm": data.get("llm"),
+        "backend": data.get("backend"),
+        "live_url": data.get("liveUrl"),
         "output": output,
         "output_truncated": truncated_output,
         "output_files": output_files,
@@ -142,14 +165,14 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         task: str,
         allowed_domains: list[str] | None = None,
         max_steps: int = 20,
-        wait_timeout_seconds: int = 600,
+        wait_timeout_seconds: int = _BROWSER_USE_DEFAULT_WAIT_TIMEOUT_SECONDS,
         poll_interval_seconds: int = 4,
         llm: str = "browser-use-llm",
         start_url: str | None = None,
         session_id: str | None = None,
     ) -> Any:
         """
-        Run a local Browser Use task and wait for completion.
+        Run a Browser Use task and wait for completion/blocker in normal use.
         Use for dynamic web tasks that need real browser interactions, including
         owner-authorized login flows. Browser sessions are kept alive and may use
         persisted profile state when configured; reuse a prior session_id when
@@ -157,14 +180,24 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         MFA, the browser backend can use its registered solver/owner-input actions
         when available. Do not ask the owner to paste credentials into durable
         memory; use current-turn credentials only for the intended browser login.
+        Do not poll browser_use_task_get after this unless browser_use_run returns
+        running or the owner explicitly asks for browser status.
         """
-        task_text = str(task or "").strip()
+        task_text = _build_browser_use_task(str(task or ""))
         if not task_text:
             return {"error": "browser_use_run requires a non-empty task"}
         customer_id = require_customer_id(runtime)
 
         safe_max_steps = max(1, min(int(max_steps), 80))
-        safe_wait_timeout = max(30, min(int(wait_timeout_seconds), 1800))
+        requested_wait_timeout = max(
+            _BROWSER_USE_MIN_WAIT_TIMEOUT_SECONDS,
+            min(int(wait_timeout_seconds), _BROWSER_USE_MAX_WAIT_TIMEOUT_SECONDS),
+        )
+        expected_worker_timeout = min(
+            _BROWSER_USE_MAX_WAIT_TIMEOUT_SECONDS,
+            safe_max_steps * _BROWSER_USE_SECONDS_PER_STEP_BUFFER,
+        )
+        safe_wait_timeout = max(requested_wait_timeout, expected_worker_timeout)
         safe_poll_interval = max(2, min(int(poll_interval_seconds), 30))
         safe_domains = _normalize_allowed_domains(allowed_domains)
         safe_llm = str(llm or "").strip() or "browser-use-llm"
@@ -235,20 +268,24 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
                 compact["task_id"] = task_id
                 compact["session_id"] = result_session_id or compact.get("session_id")
                 compact["status"] = status or str(compact.get("status") or "unknown")
-                compact["live_url"] = None
                 return compact
 
             if datetime.now(UTC).timestamp() >= deadline:
-                return {
-                    "task_id": task_id,
-                    "session_id": result_session_id or None,
-                    "status": status or "started",
-                    "timed_out": True,
-                    "message": (
-                        "Task is still running. Use browser_use_task_get(task_id) "
-                        "to check progress or browser_use_task_control to stop."
-                    ),
-                }
+                compact = _compact_browser_use_task_view(
+                    task_data,
+                    include_steps=True,
+                    max_steps_preview=3,
+                )
+                compact["task_id"] = task_id
+                compact["session_id"] = result_session_id or compact.get("session_id")
+                compact["status"] = status or "started"
+                compact["timed_out"] = True
+                compact["message"] = (
+                    "Browser task is still running after the internal wait window. "
+                    "Answer from this status unless the owner asks for a fresh browser status; "
+                    "then call browser_use_task_get(task_id)."
+                )
+                return compact
 
             await asyncio.sleep(safe_poll_interval)
 
@@ -258,7 +295,11 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         include_steps: bool = False,
         max_steps_preview: int = 3,
     ) -> Any:
-        """Get Browser Use task status/details by task_id (compact by default)."""
+        """
+        Get Browser Use task status/details by task_id (compact by default).
+        Use when browser_use_run returned running, or when the owner explicitly
+        asks what is happening with an existing browser task.
+        """
         safe_task_id = str(task_id or "").strip()
         if not safe_task_id:
             return {"error": "browser_use_task_get requires task_id"}
