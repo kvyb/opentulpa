@@ -257,7 +257,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_list(include_disabled: bool = False) -> Any:
-        """List intake workflows for the current user."""
+        """List saved intake workflows for inbound DM automation and booking flows."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -274,7 +274,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_get(workflow_id: str) -> Any:
-        """Get one intake workflow by id."""
+        """Fetch one saved intake workflow configuration by workflow_id."""
         customer_id = require_customer_id(runtime)
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:
@@ -294,7 +294,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_delete(workflow_id: str) -> Any:
-        """Delete one intake workflow and its scheduled routine."""
+        """Delete one intake workflow automation and its scheduled routine, if any."""
         customer_id = require_customer_id(runtime)
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:
@@ -314,7 +314,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def intake_workflow_run(workflow_id: str, force: bool = False) -> Any:
-        """Run one intake workflow immediately for the current user."""
+        """Manually run one intake workflow now for testing or forced processing."""
         customer_id = require_customer_id(runtime)
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:

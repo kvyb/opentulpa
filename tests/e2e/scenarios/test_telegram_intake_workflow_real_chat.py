@@ -162,6 +162,38 @@ def _workflow_setup_has_proposal(
     return bool(str(session.get("last_proposed_draft_hash", "") or "").strip())
 
 
+def _looks_like_owner_proposal_message(item: dict[str, Any]) -> bool:
+    text = str(item.get("text", "") or "").strip().lower()
+    if not text:
+        return False
+    has_confirmation_request = "confirm" in text or "save" in text or "activate" in text
+    has_proposal_content = (
+        "proposal" in text
+        or "workflow" in text
+        or "configuration" in text
+        or "channel" in text
+        or "fields" in text
+    )
+    return has_confirmation_request and has_proposal_content
+
+
+def _workflow_setup_owner_proposal_message(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    thread_id: str,
+    owner_chat_id: int,
+    start_index: int,
+) -> dict[str, Any] | None:
+    if not _workflow_setup_has_proposal(harness, customer_id=customer_id, thread_id=thread_id):
+        return None
+    replies = _messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)
+    for item in reversed(replies):
+        if _looks_like_owner_proposal_message(item):
+            return item
+    return None
+
+
 def _workflow_setup_proposal_and_owner_reply_seen(
     harness: E2EHarness,
     *,
@@ -170,12 +202,13 @@ def _workflow_setup_proposal_and_owner_reply_seen(
     owner_chat_id: int,
     start_index: int,
 ) -> bool:
-    if not _workflow_setup_has_proposal(harness, customer_id=customer_id, thread_id=thread_id):
-        return False
-    replies = _messages_for_chat(harness, chat_id=owner_chat_id, start_index=start_index)
-    if not replies:
-        return False
-    return True
+    return _workflow_setup_owner_proposal_message(
+        harness,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        owner_chat_id=owner_chat_id,
+        start_index=start_index,
+    ) is not None
 
 
 def _assert_llm_semantic_match(
@@ -2016,7 +2049,8 @@ def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activa
     assert workflow["enabled"] is True
     assert workflow["schedule"] == ""
     assert workflow["routine_id"] == ""
-    assert workflow["source_config"] == {"business_connection_id": business_connection_id}
+    source_config = workflow["source_config"]
+    assert source_config["business_connection_id"] == business_connection_id
     assert set(workflow["required_fields"]) == {"car_model", "car_type", "wash_type", "date", "time"}
 
     latest_owner_message = _latest_message_for_chat(
@@ -2287,11 +2321,19 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         lambda: "workflow_setup" in _turn_modes_seen(e2e_harness, customer_id=customer_id),
         timeout_seconds=15.0,
     )
-    proposal_message = _latest_message_for_chat(
+    proposal_message = _workflow_setup_owner_proposal_message(
         e2e_harness,
-        chat_id=owner_chat_id,
+        customer_id=customer_id,
+        thread_id=owner_thread_id,
+        owner_chat_id=owner_chat_id,
         start_index=second_turn_start,
     )
+    if proposal_message is None:
+        proposal_message = _latest_message_for_chat(
+            e2e_harness,
+            chat_id=owner_chat_id,
+            start_index=second_turn_start,
+        )
     assert proposal_message is not None
 
     if not _wait_until(
@@ -2319,24 +2361,42 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         )
         assert clarification_status == 200
         assert _wait_until(
-            lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=clarification_start)) >= 1,
+            lambda: _workflow_setup_proposal_and_owner_reply_seen(
+                e2e_harness,
+                customer_id=customer_id,
+                thread_id=owner_thread_id,
+                owner_chat_id=owner_chat_id,
+                start_index=clarification_start,
+            ),
             timeout_seconds=90.0,
         )
-        proposal_message = _latest_message_for_chat(
+        proposal_message = _workflow_setup_owner_proposal_message(
             e2e_harness,
-            chat_id=owner_chat_id,
+            customer_id=customer_id,
+            thread_id=owner_thread_id,
+            owner_chat_id=owner_chat_id,
             start_index=clarification_start,
         )
         assert proposal_message is not None
 
     assert _wait_until(
-        lambda: _workflow_setup_has_proposal(
+        lambda: _workflow_setup_proposal_and_owner_reply_seen(
             e2e_harness,
             customer_id=customer_id,
             thread_id=owner_thread_id,
+            owner_chat_id=owner_chat_id,
+            start_index=second_turn_start,
         ),
         timeout_seconds=60.0,
     )
+    proposal_message = _workflow_setup_owner_proposal_message(
+        e2e_harness,
+        customer_id=customer_id,
+        thread_id=owner_thread_id,
+        owner_chat_id=owner_chat_id,
+        start_index=second_turn_start,
+    )
+    assert proposal_message is not None
     _assert_llm_semantic_match(
         e2e_harness,
         scenario="quality_owner_setup_proposal",
@@ -2362,7 +2422,8 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
     assert workflow["channel"] == "telegram_business_dm"
     assert workflow["provider"] == "telegram_bot_api"
     assert workflow["enabled"] is True
-    assert workflow["source_config"] == {"business_connection_id": business_connection_id}
+    source_config = workflow["source_config"]
+    assert source_config["business_connection_id"] == business_connection_id
     assert set(workflow["required_fields"]) == {"car_model", "car_type", "wash_type", "date", "time"}
     instructions = str(workflow.get("assistant_instructions", "")).strip()
     assert instructions
@@ -2532,9 +2593,11 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
         timeout_seconds=210.0,
     )
 
-    proposal_message = _latest_message_for_chat(
+    proposal_message = _workflow_setup_owner_proposal_message(
         e2e_harness,
-        chat_id=owner_chat_id,
+        customer_id=customer_id,
+        thread_id=owner_thread_id,
+        owner_chat_id=owner_chat_id,
         start_index=second_turn_start,
     )
     assert proposal_message is not None

@@ -14,7 +14,7 @@ from opentulpa.agent.tools.common import require_customer_id
 def register_memory_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def memory_search(query: str) -> Any:
-        """Search user memory."""
+        """Search durable user memory for preferences, facts, projects, and prior context."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -28,7 +28,7 @@ def register_memory_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def memory_add(summary: str) -> Any:
-        """Store a user memory summary."""
+        """Store a concise durable user memory summary for future conversations."""
         customer_id = require_customer_id(runtime)
         retryable_errors = (
             httpx.ConnectError,

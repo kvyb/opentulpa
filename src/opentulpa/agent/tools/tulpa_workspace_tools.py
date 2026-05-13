@@ -18,7 +18,7 @@ from opentulpa.agent.utils import looks_like_shell_command as _looks_like_shell_
 def register_tulpa_workspace_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def tulpa_write_file(path: str, content: str) -> Any:
-        """Write file in approved paths."""
+        """Write or update a file in approved tulpa_stuff workspace paths."""
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/tulpa/write_file",
@@ -62,7 +62,7 @@ def register_tulpa_workspace_tools(runtime: Any) -> dict[str, Any]:
         thread_id: str = "",
         execution_origin: str | None = None,
     ) -> Any:
-        """Run executable shell/script command in the agent venv."""
+        """Run a concrete shell/script command inside the tulpa_stuff agent venv."""
         safe_working_dir = str(working_dir or "").strip() or "tulpa_stuff"
         safe_command = normalize_command_for_working_dir(
             command=str(command or "").strip(),
@@ -104,7 +104,7 @@ def register_tulpa_workspace_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def tulpa_read_file(path: str, max_chars: int = 12000) -> Any:
-        """Read file in approved paths."""
+        """Read a bounded text excerpt from approved tulpa_stuff workspace paths."""
         safe_max_chars = max(500, min(int(max_chars), 20000))
         r = await runtime._request_with_backoff(
             "GET",
@@ -118,7 +118,7 @@ def register_tulpa_workspace_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def tulpa_catalog() -> Any:
-        """Get catalog of tracked files and artifacts."""
+        """List tracked tulpa_stuff workspace files, generated artifacts, and metadata."""
         r = await runtime._request_with_backoff("GET", "/internal/tulpa/catalog", timeout=10.0)
         if r.status_code != 200:
             return {"error": f"catalog failed: {r.text}"}

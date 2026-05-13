@@ -474,8 +474,8 @@ async def test_graph_warns_owner_before_loop_limit_and_instructs_status_reply() 
     assert saw_loop_instruction is True
     assert emitted == [
         (
-            "Still working, but this turn is near its step limit. "
-            "I’ll stop tool work and send the current result or blocker now.",
+            "This turn is near its tool-step budget. I’ll stop polling tools now and "
+            "report the latest confirmed state.",
             "chat_loop_limit",
         )
     ]
@@ -537,11 +537,11 @@ async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
     )
 
     assert emitted == [
-        "Still working, but this turn is near its step limit. "
-        "I’ll stop tool work and send the current result or blocker now."
+        "This turn is near its tool-step budget. I’ll stop polling tools now and "
+        "report the latest confirmed state."
     ]
     assert tool_invoked is False
-    assert "turn step limit" in result["final_response_text"]
+    assert "tool-step budget" in result["final_response_text"]
 
 
 @pytest.mark.asyncio
@@ -1061,8 +1061,10 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     )
 
     assert result["final_response_text"] == "ok"
-    assert captured["stable_prefix_count"] == 1
+    assert captured["stable_prefix_count"] == 2
     prompt_messages = captured["messages"]
+    assert isinstance(prompt_messages[1], HumanMessage)
+    assert "OpenTulpa cache anchor v1" in str(prompt_messages[1].content)
     older_assistant_index = next(
         idx
         for idx, msg in enumerate(prompt_messages)
@@ -1172,8 +1174,10 @@ async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
     assert result["final_response_text"] == "Done."
     assert len(captured_messages) == 2
     assert live_time_calls == 1
-    assert captured_prefix_counts[0] == 1
+    assert captured_prefix_counts[0] == 2
     assert captured_prefix_counts[1] == captured_prefix_counts[0]
+    assert isinstance(captured_messages[0][1], HumanMessage)
+    assert "OpenTulpa cache anchor v1" in str(captured_messages[0][1].content)
 
     def _live_time_block(messages: list[Any]) -> str:
         return next(

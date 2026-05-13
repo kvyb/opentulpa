@@ -20,7 +20,7 @@ from opentulpa.context.customer_profile_models import (
 def register_directive_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def directive_get() -> Any:
-        """Get the active persistent directive profile for this user."""
+        """Get persistent user directive profile, preferences, and proactive-mode instruction."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -34,7 +34,7 @@ def register_directive_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def directive_set(directive: str) -> Any:
-        """Set or overwrite the user's persistent directive profile."""
+        """Set or overwrite persistent user directive profile and proactive behavior."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
@@ -58,7 +58,7 @@ def register_directive_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def directive_clear() -> Any:
-        """Clear the user's persistent directive profile."""
+        """Clear persistent user directive profile and disable proactive behavior."""
         customer_id = require_customer_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
