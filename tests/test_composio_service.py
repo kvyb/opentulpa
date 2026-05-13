@@ -95,6 +95,56 @@ class _FakeGoogleSheetsComposioService(ComposioService):
         }
 
 
+class _PartialInstagramComposioService(ComposioService):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.calls: list[dict[str, object]] = []
+
+    def _sdk_execute_tool(self, *, slug, arguments, connected_account_id, user_id, text=None):  # type: ignore[override]
+        self.calls.append(
+            {
+                "slug": slug,
+                "arguments": dict(arguments),
+                "connected_account_id": connected_account_id,
+                "user_id": user_id,
+                "text": text,
+            }
+        )
+        if slug == "INSTAGRAM_LIST_ALL_CONVERSATIONS":
+            return {
+                "successful": True,
+                "error": None,
+                "data": {"data": [{"id": "conv_ok"}, {"id": "conv_bad"}]},
+            }
+        if arguments.get("conversation_id") == "conv_bad":
+            return {"successful": False, "error": "Unsupported get request", "data": {}}
+        return {
+            "successful": True,
+            "error": None,
+            "data": {
+                "id": "conv_ok",
+                "participants": {
+                    "data": [
+                        {"id": "business_1", "username": "biz"},
+                        {"id": "lead_1", "username": "lead"},
+                    ]
+                },
+                "messages": {
+                    "data": [
+                        {
+                            "id": "msg_1",
+                            "created_time": "2026-05-13T08:00:00+0000",
+                            "from": {"id": "lead_1", "username": "lead"},
+                            "to": {"data": [{"id": "business_1", "username": "biz"}]},
+                            "message": "Hello",
+                        }
+                    ]
+                },
+                "updated_time": "2026-05-13T08:00:00+0000",
+            },
+        }
+
+
 def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> None:
     service = _FakeComposioService(api_key="test-key")
 
@@ -114,6 +164,21 @@ def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> 
     assert service.calls[0]["arguments"]["reply_to_message_id"] == "mid_1"
     assert "reply_to_message_id" not in service.calls[1]["arguments"]
     assert result["data"]["retried_without_reply_to_message_id"] is True
+
+
+def test_list_instagram_conversations_skips_unreadable_threads() -> None:
+    service = _PartialInstagramComposioService(api_key="test-key")
+
+    result = service.list_instagram_conversations(
+        customer_id="telegram_1",
+        connected_account_id="acct_1",
+    )
+
+    assert result["ok"] is True
+    assert [item["conversation_id"] for item in result["items"]] == ["conv_ok"]
+    assert result["warnings"] == [
+        {"conversation_id": "conv_bad", "error": "Unsupported get request"}
+    ]
 
 
 def test_list_google_sheets_tab_names_uses_composio_sheet_discovery_tool() -> None:

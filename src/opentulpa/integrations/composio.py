@@ -657,15 +657,20 @@ class ComposioService:
             raise RuntimeError(str(response.get("error") or "failed to list Instagram conversations"))
         items = _safe_list(_safe_dict(response.get("data")).get("data"))
         summaries: list[dict[str, Any]] = []
+        warnings: list[dict[str, str]] = []
         for item in items:
             conversation_id = str(_safe_dict(item).get("id", "") or "").strip()
             if not conversation_id:
                 continue
-            conversation = self._fetch_instagram_conversation(
-                customer_id=safe_customer,
-                conversation_id=conversation_id,
-                connected_account_id=safe_account,
-            )
+            try:
+                conversation = self._fetch_instagram_conversation(
+                    customer_id=safe_customer,
+                    conversation_id=conversation_id,
+                    connected_account_id=safe_account,
+                )
+            except Exception as exc:
+                warnings.append({"conversation_id": conversation_id, "error": str(exc)})
+                continue
             summary = self._summarize_instagram_conversation(
                 conversation=conversation,
                 requested_recipient_id=None,
@@ -679,6 +684,7 @@ class ComposioService:
             "customer_id": safe_customer,
             "connected_account_id": safe_account,
             "items": summaries,
+            "warnings": warnings,
         }
 
     def get_instagram_conversation(

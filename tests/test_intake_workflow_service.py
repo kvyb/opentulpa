@@ -153,9 +153,11 @@ class _FakeComposio:
         conversation: dict[str, Any],
         *,
         sheet_names_by_spreadsheet: dict[str, list[str]] | None = None,
+        list_warnings: list[dict[str, str]] | None = None,
     ) -> None:
         self.summary = summary
         self.conversation = conversation
+        self.list_warnings = list(list_warnings or [])
         self.sheet_names_by_spreadsheet = {
             str(key): list(value)
             for key, value in (sheet_names_by_spreadsheet or {}).items()
@@ -174,7 +176,7 @@ class _FakeComposio:
     ) -> dict[str, Any]:
         del customer_id, connected_account_id, limit
         self.list_calls += 1
-        return {"ok": True, "items": [self.summary]}
+        return {"ok": True, "items": [self.summary], "warnings": self.list_warnings}
 
     def get_instagram_conversation(
         self,
@@ -2733,6 +2735,50 @@ async def test_intake_workflow_run_skips_quiet_inbox_without_model_call(tmp_path
     assert runtime.calls == []
     assert composio.list_calls == 1
     assert composio.get_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_run_keeps_source_scan_warnings_nonfatal(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "conversation_updated_time": "2026-04-07T08:00:00+00:00",
+        "latest_message_id": "msg_out_1",
+        "latest_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_message_sender_id": "business_1",
+        "latest_outbound_message_id": "msg_out_1",
+        "latest_outbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_out_1",
+        latest_message_text="Thanks, your booking is confirmed.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+        latest_message_sender_id="business_1",
+        latest_message_sender_username="detailer",
+    )
+    warning = {"conversation_id": "conv_bad", "error": "Unsupported get request"}
+    runtime = _FakeRuntime([])
+    composio = _FakeComposio(summary, conversation, list_warnings=[warning])
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time", "car_type", "wash_type"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+    assert result["source_warnings"] == [warning]
+    assert result["summary"] == NO_NOTIFY_TOKEN
 
 
 @pytest.mark.asyncio

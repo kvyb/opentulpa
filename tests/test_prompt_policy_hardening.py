@@ -98,6 +98,8 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "Keep scheduled routines distinct from intake workflows" in text
     assert "Telegram Business intake workflows use Telegram webhook events" in text
     assert "empty routine_id/schedule is expected" in text
+    assert "Instagram DM intake workflows use scheduled Composio polling" in text
+    assert "Do not promise webhook-like handling" in text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:

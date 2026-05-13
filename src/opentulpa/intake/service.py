@@ -956,7 +956,7 @@ class IntakeWorkflowService:
         conversation_id: str,
         fallback: dict[str, Any],
     ) -> tuple[dict[str, Any], str | None]:
-        items, source_error = self._load_source_items(workflow=workflow)
+        items, source_error, _source_warnings = self._load_source_items(workflow=workflow)
         if source_error is not None:
             return fallback, source_error
         for item in items:
@@ -1607,6 +1607,14 @@ class IntakeWorkflowService:
             }
 
         warnings: list[str] = []
+        safe_channel = str(normalized.get("channel", "") or "").strip().lower()
+        safe_provider = str(normalized.get("provider", "") or "").strip().lower()
+        if safe_channel == "instagram_dm" and safe_provider == "composio":
+            warnings.append(
+                "Instagram DM intake uses scheduled Composio polling, not webhook delivery; "
+                "new messages are handled on the configured schedule and only for conversations "
+                "Composio can read."
+            )
         dry_run = self._build_sink_dry_run_preview(normalized, warnings=warnings)
         return {
             "ok": True,
@@ -2607,13 +2615,13 @@ class IntakeWorkflowService:
         self,
         *,
         workflow: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    ) -> tuple[list[dict[str, Any]], str | None, list[dict[str, str]]]:
         channel = str(workflow.get("channel", "") or "").strip().lower()
         provider = str(workflow.get("provider", "") or "").strip().lower()
         if channel == "instagram_dm" and provider == "composio":
             composio = self._composio
             if composio is None or not bool(getattr(composio, "enabled", False)):
-                return [], f"Workflow {workflow['name']} failed: Composio is not available."
+                return [], f"Workflow {workflow['name']} failed: Composio is not available.", []
             source_config = _safe_dict(workflow.get("source_config"))
             connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
             scan_limit = max(1, min(int(source_config.get("scan_limit", 10) or 10), 25))
@@ -2626,15 +2634,20 @@ class IntakeWorkflowService:
                     else []
                 )
             )
+            warnings: list[dict[str, str]] = []
             try:
                 if configured_conversation_ids:
                     items = []
                     for conversation_id in configured_conversation_ids:
-                        detailed = composio.get_instagram_conversation(
-                            customer_id=str(workflow["customer_id"]),
-                            conversation_id=conversation_id,
-                            connected_account_id=connected_account_id,
-                        )
+                        try:
+                            detailed = composio.get_instagram_conversation(
+                                customer_id=str(workflow["customer_id"]),
+                                conversation_id=conversation_id,
+                                connected_account_id=connected_account_id,
+                            )
+                        except Exception as exc:
+                            warnings.append({"conversation_id": conversation_id, "error": str(exc)})
+                            continue
                         items.append(_safe_dict(detailed.get("summary")))
                 else:
                     conversations_payload = composio.list_instagram_conversations(
@@ -2643,17 +2656,25 @@ class IntakeWorkflowService:
                         limit=scan_limit,
                     )
                     items = _safe_list(conversations_payload.get("items"))
+                    warnings = [
+                        {
+                            "conversation_id": str(_safe_dict(item).get("conversation_id", "") or ""),
+                            "error": str(_safe_dict(item).get("error", "") or ""),
+                        }
+                        for item in _safe_list(conversations_payload.get("warnings"))
+                        if str(_safe_dict(item).get("error", "") or "").strip()
+                    ]
             except Exception as exc:
-                return [], f"Workflow {workflow['name']} failed while reading Instagram DMs: {exc}"
-            return items, None
+                return [], f"Workflow {workflow['name']} failed while reading Instagram DMs: {exc}", warnings
+            return items, None, warnings
         if channel == "telegram_business_dm" and provider == "telegram_bot_api":
             telegram_business = self._telegram_business
             if telegram_business is None:
-                return [], f"Workflow {workflow['name']} failed: Telegram Business is not available."
+                return [], f"Workflow {workflow['name']} failed: Telegram Business is not available.", []
             source_config = _safe_dict(workflow.get("source_config"))
             business_connection_id = str(source_config.get("business_connection_id", "") or "").strip()
             if not business_connection_id:
-                return [], f"Workflow {workflow['name']} failed: source_config.business_connection_id is required."
+                return [], f"Workflow {workflow['name']} failed: source_config.business_connection_id is required.", []
             scan_limit = max(1, min(int(source_config.get("scan_limit", 10) or 10), 50))
             configured_conversation_ids = _unique_string_list(
                 source_config.get("conversation_ids")
@@ -2670,11 +2691,11 @@ class IntakeWorkflowService:
                 limit=scan_limit,
                 chat_ids=configured_conversation_ids or None,
             )
-            return _safe_list(payload.get("items")), None
+            return _safe_list(payload.get("items")), None, []
         return [], (
             f"Workflow {workflow['name']} failed: unsupported source "
             f"{workflow.get('channel')}/{workflow.get('provider')}."
-        )
+        ), []
 
     def _load_source_conversation(
         self,
@@ -2754,7 +2775,7 @@ class IntakeWorkflowService:
                 "summary": NO_NOTIFY_TOKEN,
                 "reason": "workflow_disabled",
             }
-        items, source_error = self._load_source_items(workflow=workflow)
+        items, source_error, source_warnings = self._load_source_items(workflow=workflow)
         if source_error is not None:
             return {
                 "ok": False,
@@ -3171,6 +3192,7 @@ class IntakeWorkflowService:
             "matched_conversations": matched,
             "results": result_items,
             "errors": errors,
+            "source_warnings": source_warnings,
             "summary": summary,
         }
 

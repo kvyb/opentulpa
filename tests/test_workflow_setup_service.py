@@ -449,6 +449,7 @@ def test_workflow_setup_preflight_normalizes_single_google_sheet_tab_and_dry_run
     preflight = session["preflight"]
     assert preflight["ok"] is True
     assert preflight["status"] == "ready"
+    assert "scheduled Composio polling" in " ".join(preflight["warnings"])
     assert preflight["sink_preflight"]["dry_run"]["will_execute"] is False
     assert preflight["sink_preflight"]["dry_run"]["tool_slug"] == "GOOGLESHEETS_UPSERT_ROWS"
     static_arguments = session["draft_upsert"]["sink_config"]["static_arguments"]
