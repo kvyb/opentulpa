@@ -1200,6 +1200,9 @@ class OpenTulpaLangGraphRuntime:
         browser_use_max_concurrent_tasks: int = 2,
         browser_use_task_retention_seconds: int = 1800,
         browser_use_user_data_dir: str | None = ".opentulpa/browser_use_profiles",
+        browser_use_api_key: str | None = None,
+        browser_use_cloud_proxy_country_code: str | None = "us",
+        browser_use_cloud_timeout_minutes: int = 15,
         capsolver_api_key: str | None = None,
         prompt_caching_enabled: bool = True,
         prompt_cache_ttl_1h: bool = False,
@@ -1280,6 +1283,13 @@ class OpenTulpaLangGraphRuntime:
         self._browser_use_max_concurrent_tasks = max(1, int(browser_use_max_concurrent_tasks))
         self._browser_use_task_retention_seconds = max(60, int(browser_use_task_retention_seconds))
         self._browser_use_user_data_dir = str(browser_use_user_data_dir or "").strip()
+        self._browser_use_api_key = str(browser_use_api_key or "").strip()
+        self._browser_use_cloud_proxy_country_code = str(
+            browser_use_cloud_proxy_country_code or ""
+        ).strip()
+        self._browser_use_cloud_timeout_minutes = max(
+            1, min(int(browser_use_cloud_timeout_minutes), 240)
+        )
         self._capsolver_api_key = str(capsolver_api_key or "").strip()
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
@@ -1599,6 +1609,9 @@ class OpenTulpaLangGraphRuntime:
                 task_retention_seconds=self._browser_use_task_retention_seconds,
                 user_data_dir=self._browser_use_user_data_dir,
                 capsolver_api_key=self._capsolver_api_key,
+                browser_use_api_key=self._browser_use_api_key,
+                browser_use_cloud_proxy_country_code=self._browser_use_cloud_proxy_country_code,
+                browser_use_cloud_timeout_minutes=self._browser_use_cloud_timeout_minutes,
             )
         return self._browser_use_local_manager
 

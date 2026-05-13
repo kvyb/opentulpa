@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from opentulpa.agent.tools.browser_tools import _normalize_allowed_domains
+from opentulpa.agent.tools.browser_tools import _build_browser_use_task, _normalize_allowed_domains
 from opentulpa.agent.tools_registry import register_runtime_tools
 
 
@@ -167,6 +167,15 @@ def test_browser_use_tool_descriptions_include_login_session_and_secret_boundari
     assert "Do not ask the owner to paste credentials into durable memory" in normalized_run_description
 
 
+def test_build_browser_use_task_adds_operator_instruction() -> None:
+    task = _build_browser_use_task("Find the source page")
+
+    assert task.startswith("Use the browser like a careful human operator.")
+    assert "Prefer visible page evidence over guesses." in task
+    assert "Do not keep browsing just to be exhaustive." in task
+    assert task.endswith("Task:\nFind the source page")
+
+
 @pytest.mark.asyncio
 async def test_browser_use_run_uses_local_manager() -> None:
     manager = _DummyBrowserManager()
@@ -179,6 +188,10 @@ async def test_browser_use_run_uses_local_manager() -> None:
     assert result.get("status") == "finished"
     assert result.get("output") == "done"
     assert manager.last_customer_id == "u_1"
+    assert manager.tasks["task_123"]["task"].startswith(
+        "Use the browser like a careful human operator."
+    )
+    assert manager.tasks["task_123"]["task"].endswith("Task:\nopen docs")
 
 
 @pytest.mark.asyncio

@@ -298,6 +298,24 @@ class Settings(BaseSettings):
             "survive process restarts when local/container storage persists."
         ),
     )
+    browser_use_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional Browser Use Cloud API key. When set, OpenTulpa keeps the local "
+            "Browser Use agent loop but runs it against a hosted Browser Use Cloud "
+            "browser session via CDP, with a per-owner cloud profile for cookies."
+        ),
+    )
+    browser_use_cloud_proxy_country_code: str | None = Field(
+        default="us",
+        description="Optional Browser Use Cloud proxy country code for hosted browser sessions.",
+    )
+    browser_use_cloud_timeout_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=240,
+        description="Browser Use Cloud hosted browser session timeout in minutes.",
+    )
     capsolver_api_key: str | None = Field(
         default=None,
         description=(

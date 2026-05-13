@@ -508,6 +508,142 @@ def test_build_tool_validation_repair_message_is_generic_for_tooling_errors() ->
 
 
 @pytest.mark.asyncio
+async def test_validate_tool_calls_blocks_web_search_after_two_successes() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def _log(state: dict[str, object], event: str, **kwargs: object) -> None:
+        del state
+        events.append((event, kwargs))
+
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=_log,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find reddit threads"),
+                AIMessage(
+                    content="searching",
+                    tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "one"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_1",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching",
+                    tool_calls=[{"id": "call_2", "name": "web_search", "args": {"query": "two"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_2",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching again",
+                    tool_calls=[{"id": "call_3", "name": "web_search", "args": {"query": "three"}}],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "WEB_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
+    assert "browser_use_run" in str(update_messages[0].content)
+    assert isinstance(update_messages[1], SystemMessage)
+    assert any(event == "graph.validate_tools.failed" for event, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_rejects_oversized_web_search_batch_with_retry_instruction() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find reddit threads"),
+                AIMessage(
+                    content="too many searches",
+                    tool_calls=[
+                        {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
+                        {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
+                        {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "WEB_SEARCH_BATCH_TOO_LARGE" in str(update_messages[0].content)
+    assert "Retry with no more than" in str(update_messages[0].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_does_not_count_blocked_web_search_as_success() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find reddit threads"),
+                AIMessage(
+                    content="too many searches",
+                    tool_calls=[
+                        {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
+                        {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
+                        {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+                    ],
+                ),
+                ToolMessage(content="WEB_SEARCH_BUDGET_EXCEEDED", tool_call_id="call_3"),
+                SystemMessage(content="repair"),
+                AIMessage(
+                    content="try two searches",
+                    tool_calls=[
+                        {"id": "call_4", "name": "web_search", "args": {"query": "one"}},
+                        {"id": "call_5", "name": "web_search", "args": {"query": "two"}},
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "tools"
+    assert result.update["tool_validation_passed"] is True
+
+
+@pytest.mark.asyncio
 async def test_routine_intent_classifier_rejects_chat_only_request() -> None:
     runtime = _RoutineIntentRuntime(
         {

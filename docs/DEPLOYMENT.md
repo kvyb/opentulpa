@@ -116,6 +116,19 @@ Skip browser installation with:
 ./start.sh --no-browser-use
 ```
 
+For browser-heavy workflows, configure Browser Use Cloud:
+
+```bash
+BROWSER_USE_API_KEY=...
+```
+
+With this key, OpenTulpa keeps its local browser worker loop but runs it against
+Browser Use Cloud hosted sessions via CDP. This is the recommended browser
+backend when you need live owner handoff URLs, persisted cloud profiles,
+proxying, and managed browser infrastructure. Non-secret defaults such as
+`browser_use_cloud_proxy_country_code` and `browser_use_cloud_timeout_minutes`
+live in `opentulpa.config.yaml`.
+
 Optional CAPTCHA solving for Browser Use is disabled unless you configure
 CapSolver:
 

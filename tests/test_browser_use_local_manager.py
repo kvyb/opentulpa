@@ -4,6 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -39,6 +40,29 @@ class _FakeBrowserSession:
         if path:
             Path(path).write_bytes(raw)
         return raw
+
+
+class _FakeBrowserUseCloudClient:
+    def __init__(self) -> None:
+        self.created_profiles: list[str] = []
+        self.created_sessions: list[str] = []
+        self.stopped_sessions: list[str] = []
+
+    async def create_profile(self, *, name: str) -> str:
+        self.created_profiles.append(name)
+        return "prof_123"
+
+    async def create_browser_session(self, *, profile_id: str) -> Any:
+        self.created_sessions.append(profile_id)
+        return SimpleNamespace(
+            id="bs_123",
+            cdp_url="wss://secret-cdp.example/session",
+            profile_id=profile_id,
+            live_url="https://live.browser-use.example/session",
+        )
+
+    async def stop_browser_session(self, session_id: str) -> None:
+        self.stopped_sessions.append(session_id)
 
 
 @dataclass
@@ -322,6 +346,65 @@ async def test_local_manager_uses_persistent_profile_dir_per_session(
 
 
 @pytest.mark.asyncio
+async def test_local_manager_cloud_browser_uses_cdp_and_redacts_cdp_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cloud_client = _FakeBrowserUseCloudClient()
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+        user_data_dir=tmp_path / "browser_profiles",
+        browser_use_api_key="bu-test",
+    )
+    manager._browser_use_cloud_client = cloud_client
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    created = await manager.start_task(
+        task="open example",
+        max_steps=2,
+        llm="",
+        session_id="owner/reddit",
+        customer_id="owner_1",
+    )
+    task_id = str(created["id"])
+    for _ in range(50):
+        payload = await manager.get_task(task_id, customer_id="owner_1")
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["backend"] == "browser-use-cloud"
+    assert payload["liveUrl"] == "https://live.browser-use.example/session"
+    assert payload["browserUseProfileId"] == "prof_123"
+    assert payload["browserUseBrowserSessionId"] == "bs_123"
+    assert "cdp" not in str(payload).lower()
+    assert cloud_client.created_profiles == ["opentulpa-owner_1-owner_reddit"]
+    assert cloud_client.created_sessions == ["prof_123"]
+    session = manager._sessions[manager._session_key("owner_1", "owner_reddit")].session
+    assert session.kwargs["cdp_url"] == "wss://secret-cdp.example/session"
+    assert session.kwargs["captcha_solver"] is True
+    assert "user_data_dir" not in session.kwargs
+
+    sessions = await manager.list_sessions(customer_id="owner_1")
+    assert sessions[0]["backend"] == "browser-use-cloud"
+    assert sessions[0]["live_url"] == "https://live.browser-use.example/session"
+    assert "cdp" not in str(sessions).lower()
+
+    await manager.shutdown()
+    assert cloud_client.stopped_sessions == ["bs_123"]
+
+
+@pytest.mark.asyncio
 async def test_local_manager_keeps_customer_identity_raw_for_access_checks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -448,6 +531,45 @@ async def test_local_manager_control_stop_marks_task_stopped(
     assert payload is not None
     assert payload["status"] in {"stopped", "finished"}
     _FakeAgent.run_delay_seconds = 0.0
+
+
+@pytest.mark.asyncio
+async def test_local_manager_fails_task_when_agent_exceeds_wall_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import opentulpa.integrations.browser_use_local as browser_use_local
+
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="google/gemini-3-flash-preview",
+    )
+    _FakeAgent.run_delay_seconds = 2.0
+    monkeypatch.setattr(browser_use_local, "_AGENT_RUN_TIMEOUT_MIN_SECONDS", 1)
+    monkeypatch.setattr(browser_use_local, "_AGENT_RUN_TIMEOUT_SECONDS_PER_STEP", 1)
+    monkeypatch.setattr(browser_use_local, "_AGENT_RUN_TIMEOUT_MAX_SECONDS", 1)
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+    )
+
+    try:
+        created = await manager.start_task(task="slow task", max_steps=10, llm="")
+        task_id = str(created["id"])
+        payload = None
+        for _ in range(150):
+            payload = await manager.get_task(task_id)
+            if payload and str(payload.get("status")) in {"failed", "finished", "stopped"}:
+                break
+            await asyncio.sleep(0.01)
+        assert payload is not None
+        assert payload["status"] == "failed"
+        assert "wall timeout" in str(payload.get("error") or "")
+        assert manager._tasks[task_id].agent._stopped is True
+    finally:
+        _FakeAgent.run_delay_seconds = 0.0
 
 
 @pytest.mark.asyncio
