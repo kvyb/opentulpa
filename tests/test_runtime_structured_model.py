@@ -10,7 +10,15 @@ from langchain_core.tools import tool as lc_tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict
 
-from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime import (
+    INTERACTIVE_NATIVE_TOOL_NAMES,
+    ROUTINE_WAKE_NATIVE_TOOL_NAMES,
+    OpenTulpaLangGraphRuntime,
+)
+from opentulpa.agent.tools.tool_gateway_tools import (
+    TOOL_GATEWAY_TOOL_NAMES,
+    TOOL_GROUP_DEFINITIONS,
+)
 
 
 class _Schema(BaseModel):
@@ -85,14 +93,16 @@ class _BrokenStructuredThenFallbackModel(_FallbackModel):
 def test_tools_for_routine_wake_excludes_interactive_owner_update_tool() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     send_owner_update = object()
-    tulpa_read_file = object()
+    server_time = object()
+    gateway = object()
     runtime._tools = {
         "send_owner_update": send_owner_update,
-        "tulpa_read_file": tulpa_read_file,
+        "server_time": server_time,
+        "tool_group_exec": gateway,
     }
 
-    assert runtime.tools_for_turn_mode("interactive") == [send_owner_update, tulpa_read_file]
-    assert runtime.tools_for_turn_mode("routine_wake") == [tulpa_read_file]
+    assert runtime.tools_for_turn_mode("interactive") == [send_owner_update, server_time, gateway]
+    assert runtime.tools_for_turn_mode("routine_wake") == [server_time, gateway]
 
 
 @lc_tool
@@ -120,6 +130,11 @@ def _tool_schema_chars(tools: list[Any]) -> int:
 def test_tools_for_workflow_setup_uses_task_specific_profile() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime._tools = {
+        "send_owner_update": _runtime_structured_test_tool,
+        "server_time": _runtime_structured_test_tool,
+        "tool_group_list": _runtime_structured_test_tool,
+        "tool_group_describe": _runtime_structured_test_tool,
+        "tool_group_exec": _runtime_structured_test_tool,
         "intake_workflow_setup_begin": _runtime_structured_test_tool,
         "intake_workflow_setup_update": _runtime_structured_test_tool,
         "intake_workflow_setup_finalize_confirmation": _runtime_structured_test_tool,
@@ -159,17 +174,260 @@ def test_real_workflow_setup_profile_removes_large_irrelevant_schemas(tmp_path: 
         if any(tool is selected for selected in workflow_tools)
     }
 
-    assert "intake_workflow_setup_begin" in workflow_tool_ids
-    assert "intake_workflow_setup_update" in workflow_tool_ids
-    assert "intake_workflow_setup_finalize_confirmation" in workflow_tool_ids
-    assert "telegram_business_status" in workflow_tool_ids
-    assert "business_knowledge_query" in workflow_tool_ids
+    assert workflow_tool_ids == {
+        "send_owner_update",
+        "server_time",
+        "tool_group_list",
+        "tool_group_describe",
+        "tool_group_exec",
+    }
     assert "intake_workflow_upsert" not in workflow_tool_ids
     assert "browser_use_run" not in workflow_tool_ids
     assert "routine_create" not in workflow_tool_ids
     assert "tulpa_run_terminal" not in workflow_tool_ids
-    assert len(workflow_tools) < len(interactive_tools)
-    assert _tool_schema_chars(workflow_tools) < _tool_schema_chars(interactive_tools) * 0.5
+    assert len(workflow_tools) == len(interactive_tools)
+    assert _tool_schema_chars(workflow_tools) < 2500
+
+
+@pytest.mark.asyncio
+async def test_tool_group_gateway_describes_and_executes_commands(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    group_list = await runtime._tools["tool_group_list"].ainvoke({})
+    groups = {item["group"] for item in group_list["groups"]}
+    assert {"web", "browser", "intake", "composio", "memory"}.issubset(groups)
+
+    description = await runtime._tools["tool_group_describe"].ainvoke(
+        {"group": "web", "command": "web_search"}
+    )
+    assert description["command"] == "web_search"
+    assert description["call_pattern"]["tool"] == "tool_group_exec"
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {"group": "memory", "command": "server_time", "args_json": "{}"}
+    )
+    assert result["ok"] is True
+    assert result["command"] == "server_time"
+    assert "server_time_utc_iso" in result["result"]
+
+
+def test_tool_group_gateway_covers_registered_tools_exactly_once(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    core_bound = set(INTERACTIVE_NATIVE_TOOL_NAMES) | set(ROUTINE_WAKE_NATIVE_TOOL_NAMES)
+    intentionally_core = core_bound | TOOL_GATEWAY_TOOL_NAMES
+    grouped_by_tool: dict[str, list[str]] = {}
+    for group, definition in TOOL_GROUP_DEFINITIONS.items():
+        commands = definition.get("commands")
+        assert isinstance(commands, set)
+        for command in commands:
+            grouped_by_tool.setdefault(str(command), []).append(group)
+
+    registered = set(runtime._tools)
+    missing = sorted(registered - set(grouped_by_tool) - intentionally_core)
+    unknown_configured = sorted(set(grouped_by_tool) - registered)
+    duplicated = {
+        tool_name: groups
+        for tool_name, groups in sorted(grouped_by_tool.items())
+        if len(groups) != 1
+    }
+
+    assert missing == []
+    assert unknown_configured == []
+    assert duplicated == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_group_exec_runs_hidden_customer_scoped_tools(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    captured: dict[str, Any] = {}
+
+    class _Response:
+        status_code = 200
+        text = "{}"
+
+        def json(self) -> dict[str, Any]:
+            return {"skills": [{"name": "customer-skill"}]}
+
+    async def _request_with_backoff(*args: Any, **kwargs: Any) -> _Response:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _Response()
+
+    runtime._request_with_backoff = _request_with_backoff  # type: ignore[method-assign]
+    runtime._active_customer_id = "cust_gateway"
+    runtime._register_tools()
+
+    interactive_tool_names = {
+        str(getattr(tool, "name", "") or "").strip()
+        for tool in runtime.tools_for_turn_mode("interactive")
+    }
+    assert "skill_list" not in interactive_tool_names
+    assert "tool_group_exec" in interactive_tool_names
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {"group": "skills", "command": "skill_list", "args_json": {}}
+    )
+
+    assert result == {
+        "group": "skills",
+        "command": "skill_list",
+        "ok": True,
+        "result": [{"name": "customer-skill"}],
+    }
+    assert captured["args"][:2] == ("POST", "/internal/skills/list")
+    assert captured["kwargs"]["json_body"]["customer_id"] == "cust_gateway"
+
+
+@pytest.mark.asyncio
+async def test_tool_group_gateway_repairs_common_intake_update_shape(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    captured: dict[str, Any] = {}
+
+    class _Response:
+        status_code = 200
+        text = "{}"
+
+        def json(self) -> dict[str, Any]:
+            return {"session": {"ok": True}}
+
+    async def _request_with_backoff(*args: Any, **kwargs: Any) -> _Response:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _Response()
+
+    runtime._request_with_backoff = _request_with_backoff  # type: ignore[method-assign]
+    runtime._active_customer_id = "cust_1"
+    runtime._active_thread_id = "thread_1"
+    runtime._register_tools()
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {
+            "group": "intake",
+            "command": "intake_workflow_setup_update",
+            "args_json": {
+                "name": "E2E Telegram Car Wash",
+                "provider": "telegram",
+                "channel": "telegram_business_dm",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    json_body = captured["kwargs"]["json_body"]
+    assert json_body["draft_patch"] == {
+        "name": "E2E Telegram Car Wash",
+        "provider": "telegram_bot_api",
+        "channel": "telegram_business_dm",
+    }
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {
+            "group": "intake",
+            "command": "intake_workflow_setup_update",
+            "args_json": {
+                "draft_upsert": {
+                    "name": "E2E Telegram Car Wash",
+                    "provider": "telegram_business",
+                    "channel": "telegram_business_dm",
+                }
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert captured["kwargs"]["json_body"]["draft_patch"] == {
+        "name": "E2E Telegram Car Wash",
+        "provider": "telegram_bot_api",
+        "channel": "telegram_business_dm",
+    }
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {
+            "group": "intake",
+            "command": "intake_workflow_setup_update",
+            "args_json": {
+                "name": "E2E Telegram Car Wash",
+                "channel": "telegram_business_dm",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert captured["kwargs"]["json_body"]["draft_patch"]["provider"] == "telegram_bot_api"
+
+
+@pytest.mark.asyncio
+async def test_tool_group_exec_returns_compact_repair_hint_for_missing_args(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {"group": "browser", "command": "browser_use_run", "args_json": {}}
+    )
+
+    assert result["error"] == "missing required args"
+    assert result["missing_args"] == ["task"]
+    hint = result["repair_hint"]
+    assert hint["expected_args"]["args"]["task"]["required"] is True
+    assert hint["example_call"] == {
+        "tool": "tool_group_exec",
+        "group": "browser",
+        "command": "browser_use_run",
+        "args_json": "JSON object with the expected args above",
+    }
+    assert "tool_group_exec directly" in hint["next_step"]
+    assert "schema" not in hint
+
+
+@pytest.mark.asyncio
+async def test_tool_group_exec_returns_compact_repair_hint_for_bad_args_json(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {"group": "web", "command": "web_search", "args_json": "query=openai"}
+    )
+
+    assert result["error"] == "args_json must be a JSON object"
+    assert result["received_type"] == "str"
+    hint = result["repair_hint"]
+    assert hint["expected_args"]["args"]["query"]["required"] is True
+    assert hint["example_call"]["group"] == "web"
+    assert hint["example_call"]["command"] == "web_search"
+    assert "tool_group_describe" in hint["next_step"]
 
 
 def test_registered_tools_have_searchable_descriptions(tmp_path: Path) -> None:

@@ -162,8 +162,8 @@ def test_browser_use_tool_descriptions_include_login_session_and_secret_boundari
     normalized_run_description = " ".join(run_description.split())
 
     assert "persisted\nbrowser profile state" in session_description
-    assert "owner-authorized login flows" in normalized_run_description
-    assert "CAPTCHA or MFA" in normalized_run_description
+    assert "Browser Use-backed browser session" in normalized_run_description
+    assert "OpenTulpa-captured page evidence" in normalized_run_description
     assert "Do not ask the owner to paste credentials into durable memory" in normalized_run_description
 
 

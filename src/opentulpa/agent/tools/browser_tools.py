@@ -172,14 +172,13 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         session_id: str | None = None,
     ) -> Any:
         """
-        Run a Browser Use task and wait for completion/blocker in normal use.
-        Use for dynamic web tasks that need real browser interactions, including
-        owner-authorized login flows. Browser sessions are kept alive and may use
-        persisted profile state when configured; reuse a prior session_id when
-        continuing the same account/site workflow. If the task hits CAPTCHA or
-        MFA, the browser backend can use its registered solver/owner-input actions
-        when available. Do not ask the owner to paste credentials into durable
-        memory; use current-turn credentials only for the intended browser login.
+        Open a Browser Use-backed browser session, navigate when start_url or a URL
+        in task is present, and return OpenTulpa-captured page evidence. Use for
+        dynamic pages where a real browser snapshot is needed. Browser sessions are
+        kept alive and may use persisted profile state when configured; reuse a prior
+        session_id when continuing the same account/site workflow. Do not ask the
+        owner to paste credentials into durable memory; use current-turn credentials
+        only for the intended browser work.
         Do not poll browser_use_task_get after this unless browser_use_run returns
         running or the owner explicitly asks for browser status.
         """

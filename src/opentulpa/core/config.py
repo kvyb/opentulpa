@@ -301,9 +301,9 @@ class Settings(BaseSettings):
     browser_use_api_key: str | None = Field(
         default=None,
         description=(
-            "Optional Browser Use Cloud API key. When set, OpenTulpa keeps the local "
-            "Browser Use agent loop but runs it against a hosted Browser Use Cloud "
-            "browser session via CDP, with a per-owner cloud profile for cookies."
+            "Optional Browser Use Cloud API key. When set, OpenTulpa drives a hosted "
+            "Browser Use Cloud browser session via CDP, with a per-owner cloud profile "
+            "for cookies."
         ),
     )
     browser_use_cloud_proxy_country_code: str | None = Field(

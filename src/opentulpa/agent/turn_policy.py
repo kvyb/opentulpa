@@ -27,9 +27,9 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
             content=(
                 "Turn mode: workflow_setup.\n"
                 "You are collaborating on an intake workflow draft, not executing a normal chat task.\n"
-                "Maintain the workflow setup draft and scratchpad through the dedicated setup tools.\n"
-                "A workflow setup turn that changes, validates, proposes, confirms, or saves the workflow must call the dedicated intake_workflow_setup_* tools before replying.\n"
-                "When the owner provides new workflow facts, sink details, source files, field requirements, or behavior rules, call intake_workflow_setup_update to persist them in the draft; do not merely acknowledge them in prose.\n"
+                "Maintain the workflow setup draft and scratchpad through the intake tool group. Execute known setup commands directly with tool_group_exec(group=\"intake\", command=\"...\", args_json={...}); do not spend tool calls describing intake commands already named here.\n"
+                "A workflow setup turn that changes, validates, proposes, confirms, or saves the workflow must execute the relevant intake_workflow_setup_* command before replying.\n"
+                "When the owner provides new workflow facts, sink details, source files, field requirements, or behavior rules, execute intake_workflow_setup_update to persist them in the draft; do not merely acknowledge them in prose.\n"
                 "When the owner provides Google Sheets details, store them under sink_type=google_sheets_composio and sink_config.static_arguments, including spreadsheetId and sheetName when provided.\n"
                 "When the owner provides a local CSV path, store it under sink_type=local_csv and sink_config.file_path; do not ask for more sink details when the path is already present.\n"
                 "After updating a draft that now appears complete, call intake_workflow_setup_preflight. If ready, call intake_workflow_setup_mark_proposed before showing the proposal.\n"

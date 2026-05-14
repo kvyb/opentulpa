@@ -161,7 +161,7 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "propose it with explicit assumptions" in workflow_setup
     assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     base_policy = str(_build_system_prompt_message().content)
-    assert "use user_context_add_files/query/list/find/reindex/archive only when" in base_policy
+    assert "use user_context_add_files/query/list/find/reindex/archive through the knowledge group only when" in base_policy
     assert "recent instructions clearly say to manage or use durable context" in base_policy
     assert "For intake workflows over source docs" in base_policy
     assert "business_knowledge_index and query them with business_knowledge_query" in base_policy

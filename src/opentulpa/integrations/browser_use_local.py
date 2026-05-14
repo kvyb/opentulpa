@@ -26,14 +26,13 @@ _OWNER_INPUT_TIMEOUT_SECONDS = 24 * 60 * 60
 _SESSION_IDLE_TIMEOUT_SECONDS = 3600
 _SESSION_CLEANUP_POLL_SECONDS = 60.0
 _MAX_BROWSER_USE_SESSIONS = 20
-_AGENT_RUN_TIMEOUT_MIN_SECONDS = 90
-_AGENT_RUN_TIMEOUT_SECONDS_PER_STEP = 45
-_AGENT_RUN_TIMEOUT_MAX_SECONDS = 1800
 _SESSION_CLOSE_TIMEOUT_SECONDS = 30
 _DEFAULT_SESSION_ID = "default"
 _DEFAULT_CUSTOMER_ID = "default"
 _PROFILE_RETENTION_SECONDS = 14 * 24 * 60 * 60
 _PROFILE_METADATA_FILE = "profile.json"
+_DEFAULT_BROWSER_MODEL = "google/gemini-3-flash-preview"
+_DISALLOWED_BROWSER_MODEL_ALIASES = {"browser-use-llm", "bu-mini", "default"}
 
 
 def _utc_now_iso() -> str:
@@ -58,7 +57,6 @@ class _BrowserUseTaskState:
     created_monotonic: float = field(default_factory=time.monotonic)
     updated_monotonic: float = field(default_factory=time.monotonic)
     runner: asyncio.Task[Any] | None = None
-    agent: Any = None
     browser_session: Any = None
     allow_owner_input: bool = True
     owner_input_prompt: str | None = None
@@ -469,19 +467,12 @@ class BrowserUseLocalManager:
             if safe_customer_id is not None and state.customer_id != safe_customer_id:
                 return {"error": f"browser_use_task_control task not found: {safe_task_id}"}
 
-            agent = state.agent
             if safe_action == "pause":
-                if agent is not None and hasattr(agent, "pause"):
-                    with suppress(Exception):
-                        agent.pause()
                 if state.status == "running":
                     state.status = "paused"
                     state.updated_monotonic = time.monotonic()
                     self._touch_session_locked(state.customer_id, state.session_id)
             elif safe_action == "resume":
-                if agent is not None and hasattr(agent, "resume"):
-                    with suppress(Exception):
-                        agent.resume()
                 if state.status in {"paused", "queued"}:
                     state.status = "running"
                     state.updated_monotonic = time.monotonic()
@@ -490,9 +481,6 @@ class BrowserUseLocalManager:
                 state.stop_requested = True
                 if state.owner_input_future is not None and not state.owner_input_future.done():
                     state.owner_input_future.cancel()
-                if agent is not None and hasattr(agent, "stop"):
-                    with suppress(Exception):
-                        agent.stop()
                 state.status = "stopped"
                 state.is_success = False
                 if not state.finished_at:
@@ -702,9 +690,6 @@ class BrowserUseLocalManager:
         runners: list[asyncio.Task[Any]] = []
         for state in task_states:
             state.stop_requested = True
-            if state.agent is not None and hasattr(state.agent, "stop"):
-                with suppress(Exception):
-                    state.agent.stop()
             if state.runner is not None and not state.runner.done():
                 runners.append(state.runner)
 
@@ -725,7 +710,6 @@ class BrowserUseLocalManager:
     ) -> None:
         await self._semaphore.acquire()
         try:
-            agent_cls, chat_openai_cls, _ = self._import_browser_use_components()
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is None:
@@ -734,87 +718,41 @@ class BrowserUseLocalManager:
                 state.started_at = state.started_at or _utc_now_iso()
                 state.updated_monotonic = time.monotonic()
                 self._touch_session_locked(state.customer_id, state.session_id)
-                model_name = state.llm
                 task_text = state.task
                 browser_session = state.browser_session
 
-            llm = chat_openai_cls(
-                model=model_name,
-                api_key=self._openrouter_api_key,
-                base_url=self._openrouter_base_url,
-                reasoning_effort=self._reasoning_effort or "none",
+            assert browser_session is not None
+            target_url = self._target_url(start_url=start_url, task_text=task_text)
+            if hasattr(browser_session, "start"):
+                await browser_session.start()
+            if target_url:
+                await browser_session.navigate_to(target_url)
+            snapshot = await self._browser_snapshot(
+                browser_session=browser_session,
+                task_id=task_id,
+                task_text=task_text,
+                target_url=target_url,
             )
-            composed_task = task_text
-            if start_url:
-                composed_task = (
-                    f"First navigate to this URL: {start_url}. "
-                    f"Then complete this task: {task_text}"
-                )
-            if self._capsolver_api_key:
-                composed_task = (
-                    f"{composed_task}\n\n"
-                    "If a supported CAPTCHA blocks progress, use the "
-                    "solve_captcha_with_capsolver action before continuing. "
-                    "Supported challenges are reCAPTCHA v2, reCAPTCHA v3, and Cloudflare Turnstile."
-                )
-
-            agent_kwargs: dict[str, Any] = {
-                "task": composed_task,
-                "llm": llm,
-                "browser_session": browser_session,
-                "register_new_step_callback": self._step_callback(task_id),
-                "directly_open_url": True,
-            }
-            allow_owner_input = bool(state.allow_owner_input) if state is not None else True
-            controller = self._new_controller(task_id=task_id, allow_owner_input=allow_owner_input)
-            if controller is not None:
-                agent_kwargs["controller"] = controller
-            agent = agent_cls(**agent_kwargs)
-            async with self._lock:
-                state = self._tasks.get(task_id)
-                if state is not None:
-                    state.agent = agent
-
-            run_timeout = self._agent_run_timeout_seconds(max_steps)
-            try:
-                history = await asyncio.wait_for(
-                    agent.run(max_steps=max_steps),
-                    timeout=run_timeout,
-                )
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    f"browser_use task exceeded wall timeout after {run_timeout} seconds"
-                ) from exc
-            history_payload = self._history_to_payload(history)
 
             session_to_close: Any | None = None
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is None:
                     return
-                state.output = history_payload["output"]
-                state.is_success = history_payload["is_success"]
-                state.steps = history_payload["steps"] or state.steps
-                state.error = history_payload["error"]
+                state.output = snapshot["output"]
+                state.is_success = True
+                state.steps = snapshot["steps"]
+                state.error = None
                 state.finished_at = _utc_now_iso()
                 state.updated_monotonic = time.monotonic()
 
-                if state.status == _OWNER_WAITING_STATUS and not state.stop_requested:
-                    state.finished_at = None
-                    return
                 if state.stop_requested:
                     state.status = "stopped"
                     state.is_success = False
                     if not state.output:
                         state.output = "Task stopped by user."
-                elif history_payload["failed"]:
-                    state.status = "failed"
-                    if state.is_success is None:
-                        state.is_success = False
                 else:
                     state.status = "finished"
-                    if state.is_success is None:
-                        state.is_success = not bool(state.error)
                 self._write_profile_metadata(
                     customer_id=state.customer_id,
                     session_id=str(state.session_id or ""),
@@ -835,9 +773,6 @@ class BrowserUseLocalManager:
             async with self._lock:
                 state = self._tasks.get(task_id)
                 if state is not None:
-                    if state.agent is not None and hasattr(state.agent, "stop"):
-                        with suppress(Exception):
-                            state.agent.stop()
                     state.status = "failed"
                     state.is_success = False
                     state.error = (str(exc).strip() or exc.__class__.__name__)[:2000]
@@ -859,157 +794,89 @@ class BrowserUseLocalManager:
         finally:
             self._semaphore.release()
 
-    def _step_callback(self, task_id: str) -> Any:
-        async def _callback(browser_state_summary: Any, model_output: Any, n_steps: int) -> None:
-            step_number = max(1, int(n_steps))
-            url = str(getattr(browser_state_summary, "url", "") or "").strip() or None
-            actions = self._extract_actions(model_output)
-            step = {
-                "number": step_number,
-                "url": url,
-                "nextGoal": "",
-                "actions": actions[:5],
-                "screenshotUrl": None,
-            }
-            async with self._lock:
-                state = self._tasks.get(task_id)
-                if state is None:
-                    return
-                replaced = False
-                for idx, existing in enumerate(state.steps):
-                    if int(existing.get("number", 0) or 0) == step_number:
-                        state.steps[idx] = step
-                        replaced = True
-                        break
-                if not replaced:
-                    state.steps.append(step)
-                    state.steps.sort(key=lambda item: int(item.get("number", 0) or 0))
-                state.updated_monotonic = time.monotonic()
-                self._touch_session_locked(state.customer_id, state.session_id)
-                self._write_profile_metadata(
-                    customer_id=state.customer_id,
-                    session_id=str(state.session_id or ""),
-                    status=state.status,
-                    task_id=state.task_id,
-                    last_url=url,
-                )
+    @classmethod
+    def _target_url(cls, *, start_url: str, task_text: str) -> str:
+        explicit = str(start_url or "").strip()
+        if explicit:
+            return explicit
+        match = re.search(r"https?://[^\s'\"<>),]+", str(task_text or ""))
+        if match:
+            return match.group(0).rstrip(".")
+        return ""
 
-        return _callback
-
-    def _history_to_payload(self, history: Any) -> dict[str, Any]:
-        output = ""
-        is_success: bool | None = None
-        error_lines: list[str] = []
-        failed = False
-        steps = self._extract_steps_from_history(history)
-
+    async def _browser_snapshot(
+        self,
+        *,
+        browser_session: Any,
+        task_id: str,
+        task_text: str,
+        target_url: str,
+    ) -> dict[str, Any]:
+        current_url = ""
+        title = ""
+        state_text = ""
+        screenshot_path = ""
         with suppress(Exception):
-            out = history.final_result()
-            if out is not None:
-                output = str(out).strip()
-
+            current_url = str(await browser_session.get_current_page_url()).strip()
         with suppress(Exception):
-            value = history.is_successful()
-            if isinstance(value, bool):
-                is_success = value
-
+            title = str(await browser_session.get_current_page_title()).strip()
         with suppress(Exception):
-            errors = history.errors()
-            if isinstance(errors, list):
-                error_lines = [str(item).strip() for item in errors if str(item or "").strip()]
-                if error_lines:
-                    failed = True
-
-        if not output and error_lines:
-            output = "\n".join(error_lines[:6])[:12000]
-
+            state_text = str(await browser_session.get_state_as_text()).strip()
+        screenshot_path = await self._try_capture_task_screenshot(
+            browser_session=browser_session,
+            task_id=task_id,
+        )
+        output_parts = [
+            "Browser snapshot captured by OpenTulpa.",
+            f"Title: {title}" if title else "Title: ",
+            f"URL: {current_url}" if current_url else f"URL: {target_url}",
+        ]
+        if screenshot_path:
+            output_parts.append(f"Screenshot: {screenshot_path}")
+        if state_text:
+            output_parts.append("Visible page state:")
+            output_parts.append(state_text[:12000])
+        step = {
+            "number": 1,
+            "url": current_url or target_url or None,
+            "nextGoal": "Use this browser evidence to decide the next OpenTulpa tool call or final answer.",
+            "actions": [f"navigate_to({target_url})"] if target_url else ["snapshot_current_page"],
+            "screenshotUrl": screenshot_path or None,
+        }
         return {
-            "output": output or None,
-            "is_success": is_success,
-            "error": "\n".join(error_lines[:6])[:1200] if error_lines else None,
-            "failed": bool(failed),
-            "steps": steps,
+            "output": "\n".join(output_parts).strip(),
+            "steps": [step],
+            "task": task_text,
         }
 
-    def _extract_steps_from_history(self, history: Any) -> list[dict[str, Any]]:
-        urls: list[str | None] = []
-        actions_by_step: list[Any] = []
-        with suppress(Exception):
-            values = history.urls()
-            if isinstance(values, list):
-                urls = [str(v).strip() if v is not None else None for v in values]
-
-        with suppress(Exception):
-            values = history.model_actions()
-            if isinstance(values, list):
-                actions_by_step = values
-
-        step_count = max(len(urls), len(actions_by_step))
-        out: list[dict[str, Any]] = []
-        for idx in range(step_count):
-            step_actions: list[str] = []
-            if idx < len(actions_by_step):
-                raw = actions_by_step[idx]
-                if isinstance(raw, dict):
-                    for key, value in list(raw.items())[:5]:
-                        name = str(key or "").strip()
-                        if not name:
-                            continue
-                        if isinstance(value, dict) and value:
-                            arg_preview = ", ".join(str(k) for k in list(value.keys())[:3])
-                            step_actions.append(f"{name}({arg_preview})")
-                        else:
-                            step_actions.append(name)
-                elif raw is not None:
-                    step_actions.append(str(raw)[:200])
-            out.append(
-                {
-                    "number": idx + 1,
-                    "url": urls[idx] if idx < len(urls) else None,
-                    "nextGoal": "",
-                    "actions": step_actions[:5],
-                    "screenshotUrl": None,
-                }
+    async def _try_capture_task_screenshot(self, *, browser_session: Any, task_id: str) -> str:
+        if not hasattr(browser_session, "take_screenshot"):
+            return ""
+        screenshot_dir = (TULPA_STUFF_DIR / "screenshots" / "browser_use").resolve()
+        try:
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return ""
+        safe_task_id = self._safe_profile_name(task_id)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        target = (screenshot_dir / f"{safe_task_id}_{timestamp}.png").resolve()
+        try:
+            raw_bytes = await browser_session.take_screenshot(
+                path=str(target),
+                full_page=False,
+                format="png",
             )
-        return out
-
-    def _extract_actions(self, model_output: Any) -> list[str]:
-        raw_actions = getattr(model_output, "action", None)
-        if not isinstance(raw_actions, list):
-            return []
-        out: list[str] = []
-        for item in raw_actions[:5]:
-            data: dict[str, Any] = {}
-            if hasattr(item, "model_dump"):
-                with suppress(Exception):
-                    dumped = item.model_dump(exclude_none=True)
-                    if isinstance(dumped, dict):
-                        data = dumped
-            elif isinstance(item, dict):
-                data = item
-            if not data:
-                text = str(item or "").strip()
-                if text:
-                    out.append(text[:200])
-                continue
-            for key, value in list(data.items())[:1]:
-                name = str(key or "").strip()
-                if not name:
-                    continue
-                if isinstance(value, dict) and value:
-                    arg_preview = ", ".join(str(k) for k in list(value.keys())[:3])
-                    out.append(f"{name}({arg_preview})")
-                else:
-                    out.append(name)
-        return out
-
-    @staticmethod
-    def _agent_run_timeout_seconds(max_steps: int) -> int:
-        steps = max(1, min(int(max_steps), 120))
-        return max(
-            _AGENT_RUN_TIMEOUT_MIN_SECONDS,
-            min(_AGENT_RUN_TIMEOUT_MAX_SECONDS, steps * _AGENT_RUN_TIMEOUT_SECONDS_PER_STEP),
-        )
+        except Exception:
+            return ""
+        if not target.exists() and raw_bytes:
+            with suppress(Exception):
+                target.write_bytes(raw_bytes)
+        if not target.exists():
+            return ""
+        try:
+            return str(target.relative_to(TULPA_STUFF_DIR.resolve()))
+        except ValueError:
+            return str(target)
 
     @staticmethod
     def _latest_step_url(state: _BrowserUseTaskState) -> str | None:
@@ -1022,12 +889,19 @@ class BrowserUseLocalManager:
         return None
 
     def _resolve_model(self, *, llm: str) -> str:
-        candidate = str(llm or "").strip()
-        if candidate and candidate.lower() not in {"browser-use-llm", "default"}:
-            return candidate
         if self._model_override:
-            return self._model_override
-        return self._default_model
+            candidate = self._model_override.strip()
+            if candidate.lower() in _DISALLOWED_BROWSER_MODEL_ALIASES:
+                return _DEFAULT_BROWSER_MODEL
+            return candidate
+        for raw in (self._default_model, llm):
+            candidate = str(raw or "").strip()
+            if not candidate:
+                continue
+            if candidate.lower() in _DISALLOWED_BROWSER_MODEL_ALIASES:
+                continue
+            return candidate
+        return _DEFAULT_BROWSER_MODEL
 
     @staticmethod
     def _sanitize_domains(allowed_domains: list[str] | None) -> list[str]:
@@ -1254,54 +1128,11 @@ class BrowserUseLocalManager:
                 return datetime.fromisoformat(raw).timestamp()
         return profile_dir.stat().st_mtime
 
-    def _new_controller(self, *, task_id: str, allow_owner_input: bool = True) -> Any | None:
-        from browser_use import ActionResult, Controller
-
-        controller: Any = Controller()
-
-        if allow_owner_input:
-            @controller.action(
-                "Ask the OpenTulpa owner for input needed to continue the current browser task. "
-                "Use when login or verification is blocked by an email code, SMS code, authenticator code, "
-                "MFA approval, account choice, or owner-only decision. Keep the current browser page open.",
-                domains=["*"],
-            )
-            async def request_owner_input(prompt: str, input_type: str = "text") -> ActionResult:
-                try:
-                    owner_value = await self.request_owner_input(
-                        task_id=task_id,
-                        prompt=prompt,
-                        input_type=input_type,
-                    )
-                except TimeoutError:
-                    return ActionResult(
-                        success=False,
-                        error="Owner input timed out after 24 hours.",
-                    )
-                return ActionResult(
-                    extracted_content=(
-                        "Owner provided input for the current browser challenge. "
-                        f"Input type: {input_type}. Value: {owner_value}"
-                    ),
-                    include_extracted_content_only_once=True,
-                )
-
-        if not self._capsolver_api_key:
-            return controller
-        from opentulpa.integrations.browser_use_captcha import register_capsolver_action
-        from opentulpa.integrations.capsolver import CapSolverClient
-
-        return register_capsolver_action(
-            controller,
-            CapSolverClient(api_key=self._capsolver_api_key),
-        )
-
     @staticmethod
     def _import_browser_use_components() -> tuple[Any, Any, Any]:
-        from browser_use import Agent, ChatOpenAI
         from browser_use.browser import BrowserSession
 
-        return Agent, ChatOpenAI, BrowserSession
+        return None, None, BrowserSession
 
     def _state_to_payload(self, state: _BrowserUseTaskState) -> dict[str, Any]:
         session_state = self._sessions.get(

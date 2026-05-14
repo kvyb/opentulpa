@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,15 +14,36 @@ from opentulpa.integrations.browser_use_local import (
 )
 
 
-class _FakeChatOpenAI:
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
-
-
 class _FakeBrowserSession:
+    state_delay_seconds = 0.0
+    fail_navigate = False
+
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.stopped = False
+        self.started = False
+        self.navigated_urls: list[str] = []
+        self.current_url = ""
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def navigate_to(self, url: str) -> None:
+        if self.fail_navigate:
+            raise RuntimeError("navigation failed")
+        self.current_url = url
+        self.navigated_urls.append(url)
+
+    async def get_current_page_url(self) -> str:
+        return self.current_url
+
+    async def get_current_page_title(self) -> str:
+        return "Fake Browser Page"
+
+    async def get_state_as_text(self) -> str:
+        if self.state_delay_seconds > 0:
+            await asyncio.sleep(self.state_delay_seconds)
+        return "Fake visible page state"
 
     async def stop(self) -> None:
         self.stopped = True
@@ -65,98 +85,12 @@ class _FakeBrowserUseCloudClient:
         self.stopped_sessions.append(session_id)
 
 
-@dataclass
-class _FakeModelAction:
-    name: str
-
-    def model_dump(self, exclude_none: bool = True) -> dict[str, Any]:  # noqa: ARG002
-        return {self.name: {"query": "OpenAI"}}
-
-
-class _FakeModelOutput:
-    def __init__(self, action_name: str = "search_google") -> None:
-        self.action = [_FakeModelAction(action_name)]
-
-
-class _FakeBrowserState:
-    def __init__(self, url: str) -> None:
-        self.url = url
-
-
-class _FakeHistory:
-    def __init__(self, *, success: bool = True, output: str = "done", has_error: bool = False) -> None:
-        self._success = success
-        self._output = output
-        self._has_error = has_error
-
-    def final_result(self) -> str:
-        return self._output
-
-    def is_successful(self) -> bool:
-        return self._success
-
-    def errors(self) -> list[str | None]:
-        if self._has_error:
-            return ["browser failed"]
-        return []
-
-    def urls(self) -> list[str]:
-        return ["https://www.google.com/search?q=openai"]
-
-    def model_actions(self) -> list[dict[str, Any]]:
-        return [{"search_google": {"query": "openai"}}]
-
-
-class _FakeAgent:
-    run_delay_seconds = 0.0
-
-    def __init__(
-        self,
-        *,
-        task: str,
-        llm: Any,
-        browser_session: Any,
-        register_new_step_callback: Any,
-        controller: Any | None = None,
-        directly_open_url: bool = True,  # noqa: ARG002
-    ) -> None:
-        self.task = task
-        self.llm = llm
-        self.browser_session = browser_session
-        self.controller = controller
-        self._callback = register_new_step_callback
-        self._paused = False
-        self._stopped = False
-
-    async def run(self, max_steps: int = 20) -> _FakeHistory:  # noqa: ARG002
-        for idx in range(2):
-            if self._stopped:
-                break
-            while self._paused and not self._stopped:
-                await asyncio.sleep(0.001)
-            await self._callback(
-                _FakeBrowserState(f"https://example.com/{idx + 1}"),
-                _FakeModelOutput(),
-                idx + 1,
-            )
-            if self.run_delay_seconds > 0:
-                await asyncio.sleep(self.run_delay_seconds)
-        if self._stopped:
-            return _FakeHistory(success=False, output="stopped", has_error=False)
-        return _FakeHistory(success=True, output="finished", has_error=False)
-
-    def pause(self) -> None:
-        self._paused = True
-
-    def resume(self) -> None:
-        self._paused = False
-
-    def stop(self) -> None:
-        self._stopped = True
-
-
 async def _no_preflight() -> str | None:
     return None
+
+
+def _fake_browser_use_components() -> tuple[None, None, type[_FakeBrowserSession]]:
+    return None, None, _FakeBrowserSession
 
 
 @pytest.mark.asyncio
@@ -172,7 +106,7 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(
@@ -198,9 +132,86 @@ async def test_local_manager_start_task_finishes_and_uses_default_model(
     assert payload["isSuccess"] is True
     assert payload["steps"]
     state = manager._tasks[task_id]
-    assert state.agent.llm.kwargs["reasoning_effort"] == "medium"
-    assert state.agent.controller is not None
-    assert "solve_captcha_with_capsolver" not in state.agent.task
+    assert not hasattr(state, "agent")
+    assert "Browser snapshot captured by OpenTulpa" in str(payload.get("output") or "")
+    assert "Fake visible page state" in str(payload.get("output") or "")
+
+
+@pytest.mark.asyncio
+async def test_local_manager_rejects_model_override_from_tool_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="z-ai/glm-5.1",
+        model_override="google/gemini-3-flash-preview",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        _fake_browser_use_components,
+    )
+
+    created = await manager.start_task(
+        task="Search Google for OpenAI",
+        max_steps=5,
+        llm="openai/gpt-4o",
+        session_id="sess_1",
+    )
+    assert created.get("id")
+    task_id = str(created["id"])
+
+    for _ in range(50):
+        payload = await manager.get_task(task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["status"] == "finished"
+    assert payload["llm"] == "google/gemini-3-flash-preview"
+
+
+@pytest.mark.asyncio
+async def test_local_manager_normalizes_disallowed_browser_model_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BrowserUseLocalManager(
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        default_model="z-ai/glm-5.1",
+        model_override="bu-mini",
+    )
+    monkeypatch.setattr(manager, "preflight", _no_preflight)
+    monkeypatch.setattr(
+        manager,
+        "_import_browser_use_components",
+        _fake_browser_use_components,
+    )
+
+    created = await manager.start_task(
+        task="Search Google for OpenAI",
+        max_steps=5,
+        llm="browser-use-llm",
+        session_id="sess_1",
+    )
+    task_id = str(created["id"])
+
+    for _ in range(50):
+        payload = await manager.get_task(task_id)
+        if payload and str(payload.get("status")) in {"finished", "failed", "stopped"}:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover
+        raise AssertionError("task did not finish in time")
+
+    assert payload is not None
+    assert payload["status"] == "finished"
+    assert payload["llm"] == "google/gemini-3-flash-preview"
 
 
 @pytest.mark.asyncio
@@ -214,7 +225,7 @@ async def test_local_manager_reuses_session_id(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     first = await manager.start_task(task="first", max_steps=2, llm="", session_id="sess_shared")
@@ -244,7 +255,7 @@ async def test_local_manager_uses_default_persistent_session_without_session_id(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     first = await manager.start_task(task="first", max_steps=2, llm="")
@@ -276,12 +287,12 @@ async def test_local_manager_implicit_run_uses_fallback_profile_when_default_bus
         default_model="google/gemini-3-flash-preview",
         user_data_dir=tmp_path / "browser_profiles",
     )
-    _FakeAgent.run_delay_seconds = 0.2
+    _FakeBrowserSession.state_delay_seconds = 0.2
     monkeypatch.setattr(manager, "preflight", _no_preflight)
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     try:
@@ -303,7 +314,7 @@ async def test_local_manager_implicit_run_uses_fallback_profile_when_default_bus
         assert second["sessionId"] != "default"
         assert len(manager._sessions) == 2
     finally:
-        _FakeAgent.run_delay_seconds = 0.0
+        _FakeBrowserSession.state_delay_seconds = 0.0
         await manager.shutdown()
 
 
@@ -322,7 +333,7 @@ async def test_local_manager_uses_persistent_profile_dir_per_session(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(
@@ -363,7 +374,7 @@ async def test_local_manager_cloud_browser_uses_cdp_and_redacts_cdp_url(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(
@@ -419,7 +430,7 @@ async def test_local_manager_keeps_customer_identity_raw_for_access_checks(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(
@@ -503,12 +514,12 @@ async def test_local_manager_control_stop_marks_task_stopped(
         openrouter_base_url="https://openrouter.ai/api/v1",
         default_model="google/gemini-3-flash-preview",
     )
-    _FakeAgent.run_delay_seconds = 0.05
+    _FakeBrowserSession.state_delay_seconds = 0.05
     monkeypatch.setattr(manager, "preflight", _no_preflight)
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(task="slow task", max_steps=10, llm="", session_id="sess_stop")
@@ -530,33 +541,32 @@ async def test_local_manager_control_stop_marks_task_stopped(
         await asyncio.sleep(0.01)
     assert payload is not None
     assert payload["status"] in {"stopped", "finished"}
-    _FakeAgent.run_delay_seconds = 0.0
+    _FakeBrowserSession.state_delay_seconds = 0.0
 
 
 @pytest.mark.asyncio
-async def test_local_manager_fails_task_when_agent_exceeds_wall_timeout(
+async def test_local_manager_fails_task_when_browser_navigation_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import opentulpa.integrations.browser_use_local as browser_use_local
-
     manager = BrowserUseLocalManager(
         openrouter_api_key="sk-test",
         openrouter_base_url="https://openrouter.ai/api/v1",
         default_model="google/gemini-3-flash-preview",
     )
-    _FakeAgent.run_delay_seconds = 2.0
-    monkeypatch.setattr(browser_use_local, "_AGENT_RUN_TIMEOUT_MIN_SECONDS", 1)
-    monkeypatch.setattr(browser_use_local, "_AGENT_RUN_TIMEOUT_SECONDS_PER_STEP", 1)
-    monkeypatch.setattr(browser_use_local, "_AGENT_RUN_TIMEOUT_MAX_SECONDS", 1)
+    _FakeBrowserSession.fail_navigate = True
     monkeypatch.setattr(manager, "preflight", _no_preflight)
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     try:
-        created = await manager.start_task(task="slow task", max_steps=10, llm="")
+        created = await manager.start_task(
+            task="open https://example.com",
+            max_steps=10,
+            llm="",
+        )
         task_id = str(created["id"])
         payload = None
         for _ in range(150):
@@ -566,10 +576,9 @@ async def test_local_manager_fails_task_when_agent_exceeds_wall_timeout(
             await asyncio.sleep(0.01)
         assert payload is not None
         assert payload["status"] == "failed"
-        assert "wall timeout" in str(payload.get("error") or "")
-        assert manager._tasks[task_id].agent._stopped is True
+        assert "navigation failed" in str(payload.get("error") or "")
     finally:
-        _FakeAgent.run_delay_seconds = 0.0
+        _FakeBrowserSession.fail_navigate = False
 
 
 @pytest.mark.asyncio
@@ -611,7 +620,7 @@ async def test_local_manager_capture_screenshot_writes_file(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
     monkeypatch.setattr(browser_use_local, "TULPA_STUFF_DIR", tmp_path / "tulpa_stuff")
 
@@ -694,7 +703,7 @@ async def test_local_manager_rejects_task_access_for_wrong_customer(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
     monkeypatch.setattr(
         "opentulpa.integrations.browser_use_local.TULPA_STUFF_DIR",
@@ -730,7 +739,7 @@ async def test_local_manager_rejects_task_access_for_wrong_customer(
         customer_id="u_2",
     )
     assert "task not found" in str(screenshot.get("error"))
-    assert not (tmp_path / "tulpa_stuff").exists()
+    assert manager._tasks[task_id].customer_id == "u_1"
 
     future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
     manager._tasks[task_id].status = "waiting_for_owner"
@@ -765,7 +774,7 @@ async def test_local_manager_lists_sessions_and_expires_idle_ones(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(task="first", max_steps=2, llm="", session_id="sess_idle")
@@ -838,7 +847,7 @@ async def test_local_manager_allows_twenty_sessions(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     for idx in range(20):
@@ -878,7 +887,7 @@ async def test_local_manager_rejects_twenty_first_explicit_session_at_capacity(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
+        _fake_browser_use_components,
     )
 
     for idx in range(20):
@@ -899,12 +908,9 @@ async def test_local_manager_rejects_twenty_first_explicit_session_at_capacity(
 
 
 @pytest.mark.asyncio
-async def test_local_manager_attaches_capsolver_controller_when_key_is_set(
+async def test_local_manager_does_not_delegate_to_browser_use_agent_when_capsolver_key_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import opentulpa.integrations.browser_use_captcha as captcha_module
-
-    controller = object()
     manager = BrowserUseLocalManager(
         openrouter_api_key="sk-test",
         openrouter_base_url="https://openrouter.ai/api/v1",
@@ -915,12 +921,7 @@ async def test_local_manager_attaches_capsolver_controller_when_key_is_set(
     monkeypatch.setattr(
         manager,
         "_import_browser_use_components",
-        lambda: (_FakeAgent, _FakeChatOpenAI, _FakeBrowserSession),
-    )
-    monkeypatch.setattr(
-        captcha_module,
-        "register_capsolver_action",
-        lambda base_controller, client: controller,
+        _fake_browser_use_components,
     )
 
     created = await manager.start_task(task="blocked by captcha", max_steps=2, llm="", session_id="sess_cap")
@@ -933,5 +934,6 @@ async def test_local_manager_attaches_capsolver_controller_when_key_is_set(
     else:  # pragma: no cover
         raise AssertionError("task did not finish in time")
 
-    assert manager._tasks[task_id].agent.controller is controller
-    assert "solve_captcha_with_capsolver" in manager._tasks[task_id].agent.task
+    assert payload is not None
+    assert payload["status"] == "finished"
+    assert not hasattr(manager._tasks[task_id], "agent")

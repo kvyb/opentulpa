@@ -102,7 +102,9 @@ def test_live_llm_uses_browser_use_run_for_google_search(tmp_path: Path) -> None
         behavior_log_enabled=True,
         behavior_log_path=str(behavior_log),
         browser_use_headless=True,
-        browser_use_model_override=str(_settings.llm_model or "").strip(),
+        browser_use_model_override=str(
+            _settings.browser_use_model or "google/gemini-3-flash-preview"
+        ).strip(),
     )
     app = create_app(
         scheduler=SchedulerService(),
@@ -159,9 +161,9 @@ def test_live_llm_uses_browser_use_run_for_google_search(tmp_path: Path) -> None
         event
         for event in events
         if str(event.get("event", "")).strip() == "graph.tools.success"
-        and str(event.get("tool_name", "")).strip() == "browser_use_run"
+        and str(event.get("tool_name", "")).strip() in {"browser_use_run", "tool_group_exec"}
     ]
-    assert browser_tool_success, "Expected at least one successful browser_use_run tool call in behavior log"
+    assert browser_tool_success, "Expected at least one successful browser_use_run gateway tool call"
 
     if _has_title_and_url(answer):
         return
@@ -180,7 +182,7 @@ def test_live_llm_uses_browser_use_run_for_google_search(tmp_path: Path) -> None
     )
     if anti_bot_evidence:
         pytest.skip(
-            "Live Browser Use run verified browser_use_run tool calls, but anti-bot checks "
+            "Live Browser Use run verified browser_use_run gateway calls, but anti-bot checks "
             "blocked deterministic extraction in this environment."
         )
     assert _has_title_and_url(answer), answer
