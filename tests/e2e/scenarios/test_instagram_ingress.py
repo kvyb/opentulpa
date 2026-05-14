@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -54,7 +53,7 @@ def test_live_instagram_ingress_extract_and_local_sink(e2e_harness: E2EHarness) 
     assert int(payload.get("matched_conversations") or 0) >= 1
     assert isinstance(payload.get("results"), list) and payload["results"]
 
-    csv_path = Path.cwd() / csv_relative_path
+    csv_path = e2e_harness.project_root / csv_relative_path
     assert csv_path.exists()
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "Alex Rivera" in csv_text
