@@ -29,6 +29,7 @@ class E2EHarness:
     client: TestClient
     runtime: OpenTulpaLangGraphRuntime
     recorder: JsonlRecorder
+    project_root: Path
     system_log_path: Path
     status_report_path: Path
     behavior_log_path: Path
@@ -490,6 +491,7 @@ def build_harness(
         client=client,
         runtime=runtime,
         recorder=recorder,
+        project_root=isolated_project_root,
         system_log_path=system_log_path,
         status_report_path=status_report_path,
         behavior_log_path=behavior_log_path,

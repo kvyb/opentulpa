@@ -166,13 +166,27 @@ def _looks_like_owner_proposal_message(item: dict[str, Any]) -> bool:
     text = str(item.get("text", "") or "").strip().lower()
     if not text:
         return False
-    has_confirmation_request = "confirm" in text or "save" in text or "activate" in text
+    has_confirmation_request = any(
+        marker in text
+        for marker in (
+            "confirm",
+            "save",
+            "activate",
+            "подтверж",
+            "сохран",
+            "активир",
+        )
+    )
     has_proposal_content = (
         "proposal" in text
         or "workflow" in text
         or "configuration" in text
         or "channel" in text
         or "fields" in text
+        or "предлож" in text
+        or "воркфлоу" in text
+        or "канал" in text
+        or "поля" in text
     )
     return has_confirmation_request and has_proposal_content
 
@@ -209,6 +223,19 @@ def _workflow_setup_proposal_and_owner_reply_seen(
         owner_chat_id=owner_chat_id,
         start_index=start_index,
     ) is not None
+
+
+def test_workflow_setup_owner_proposal_detection_accepts_russian_confirmation() -> None:
+    assert _looks_like_owner_proposal_message(
+        {
+            "text": (
+                "Preflight прошёл успешно. Вот предложение:\n\n"
+                "**Workflow «AutoSpa Мойка и Шиномонтаж»**\n"
+                "**Канал** | Telegram Business DM\n\n"
+                "Подтверждаешь? Если нужны правки — скажи, что изменить."
+            )
+        }
+    )
 
 
 def _assert_llm_semantic_match(
@@ -2969,7 +2996,6 @@ def test_live_lead_simulator_can_complete_telegram_car_wash_booking(
     assert completed_booking
     assert str(completed_booking.get("status", "")).strip().lower() == "completed"
     assert str(completed_booking.get("sink_write_status", "")).strip().lower() == "succeeded"
-    extracted = completed_booking["extracted_fields"]
     _assert_llm_semantic_match(
         e2e_harness,
         scenario="lead_simulator_completed_booking_fields",

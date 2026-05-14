@@ -12,6 +12,7 @@ from opentulpa.agent.tools import (
     register_routine_tools,
     register_skill_tools,
 )
+from opentulpa.agent.tools.tool_gateway_tools import register_tool_gateway_tools
 
 
 def register_runtime_tools(runtime: Any) -> dict[str, Any]:
@@ -22,4 +23,5 @@ def register_runtime_tools(runtime: Any) -> dict[str, Any]:
     tools.update(register_composio_tools(runtime))
     tools.update(register_browser_tools(runtime))
     tools.update(register_routine_tools(runtime))
+    tools.update(register_tool_gateway_tools(runtime, tools))
     return tools

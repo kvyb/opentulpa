@@ -1405,6 +1405,17 @@ def build_runtime_graph(runtime: Any):
         invoked_skill_context = str(state.get("active_invoked_skill_context", "")).strip() or str(
             state.get("active_skill_context", "")
         ).strip()
+        allowed_tool_names: set[str] = set()
+        tools_for_turn_mode = getattr(runtime, "tools_for_turn_mode", None)
+        if callable(tools_for_turn_mode):
+            try:
+                allowed_tool_names = {
+                    str(getattr(tool, "name", "") or "").strip()
+                    for tool in tools_for_turn_mode(turn_mode)
+                    if str(getattr(tool, "name", "") or "").strip()
+                }
+            except Exception:
+                allowed_tool_names = set()
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
@@ -1413,6 +1424,11 @@ def build_runtime_graph(runtime: Any):
                 tool_fn = runtime._tools.get(call_name)
                 if tool_fn is None:
                     raise ValueError(f"Unknown tool: {call_name}")
+                if allowed_tool_names and call_name not in allowed_tool_names:
+                    raise ValueError(
+                        f"{call_name} is not bound in this turn. Use tool_group_exec "
+                        "with the matching group and command instead."
+                    )
                 if call_name in customer_scoped_tools and not str(customer_id or "").strip():
                     raise ValueError(f"{call_name} requires customer scope, but customer_id is missing")
                 if call_name in {"tulpa_run_terminal", "routine_create"}:

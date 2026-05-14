@@ -41,7 +41,7 @@ agent_prompt_cache_ttl_1h: false
 proactive_heartbeat_default_hours: 3
 agent_behavior_log_enabled: true
 browser_use_headless: true
-browser_use_model: null
+browser_use_model: google/gemini-3-flash-preview
 browser_use_max_concurrent_tasks: 2
 browser_use_task_retention_seconds: 1800
 browser_use_cloud_proxy_country_code: us

@@ -203,6 +203,7 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
     state_lines = [
         "WORKFLOW_SETUP_CONTROL_CARD",
         "Source: current setup database after any tools already run in this turn. Trust this card over stale summaries or old tool outputs if they conflict.",
+        "Tool access: execute named intake_workflow_setup_* commands with tool_group_exec(group=\"intake\", command=\"...\", args_json={...}) when they are not directly bound.",
         "",
         "STATE:",
         f"- session_status: {status}",

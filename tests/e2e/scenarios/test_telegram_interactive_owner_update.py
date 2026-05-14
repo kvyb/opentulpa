@@ -116,8 +116,12 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
                     },
                     {
                         "id": "call_search",
-                        "name": "web_search",
-                        "args": {"query": "OpenTulpa interactive owner update search test"},
+                        "name": "tool_group_exec",
+                        "args": {
+                            "group": "web",
+                            "command": "web_search",
+                            "args_json": {"query": "OpenTulpa interactive owner update search test"},
+                        },
                     },
                 ],
             )
@@ -254,6 +258,13 @@ def test_telegram_interactive_chat_can_send_owner_update_before_search_final(
 
     runtime._request_with_backoff = _request_with_backoff  # type: ignore[method-assign]
 
+    def owner_messages() -> list[dict[str, Any]]:
+        return [
+            item
+            for item in fake_tg.sent_messages
+            if int(item.get("chat_id", 0)) == 1100 and not item.get("business_connection_id")
+        ]
+
     with TestClient(app) as client:
         response = client.post(
             "/webhook/telegram",
@@ -265,16 +276,13 @@ def test_telegram_interactive_chat_can_send_owner_update_before_search_final(
                 text="Найди свежую информацию и сделай краткий вывод.",
             ),
         )
+        assert response.status_code == 200
+        assert _wait_until(lambda: len(owner_messages()) >= 2, timeout_seconds=10.0)
 
     get_settings.cache_clear()
 
     assert response.status_code == 200
-    owner_messages = [
-        item
-        for item in fake_tg.sent_messages
-        if int(item.get("chat_id", 0)) == 1100 and not item.get("business_connection_id")
-    ]
-    assert [item["text"] for item in owner_messages] == [
+    assert [item["text"] for item in owner_messages()] == [
         "Ищу свежие данные и потом дам короткий вывод.",
         (
             "Готово: поиск вернул тестовые данные по интерактивному update. "

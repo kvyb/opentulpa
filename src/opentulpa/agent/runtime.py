@@ -429,6 +429,10 @@ def _tool_schema_trace_fields(runtime: Any, turn_mode: str) -> dict[str, Any]:
         tools = list(tools_for_turn_mode(normalized_turn_mode))
     except Exception as exc:
         return {"bound_tool_schema_error": f"{type(exc).__name__}: {exc}"}
+    if not tools:
+        registered_tools = getattr(runtime, "_tools", {})
+        if isinstance(registered_tools, dict):
+            tools = list(registered_tools.values())
 
     schemas: list[Any] = []
     names: list[str] = []
@@ -530,6 +534,9 @@ _PROGRESS_TOOL_NAME_ALIASES: dict[str, str] = {
 }
 WORKFLOW_SETUP_TOOL_NAMES: set[str] = {
     "send_owner_update",
+    "tool_group_list",
+    "tool_group_describe",
+    "tool_group_exec",
     "uploaded_file_search",
     "uploaded_file_get",
     "uploaded_file_send",
@@ -564,6 +571,21 @@ WORKFLOW_SETUP_TOOL_NAMES: set[str] = {
     "composio_connected_accounts",
     "composio_tool_search",
     "composio_tool_schema",
+}
+
+INTERACTIVE_NATIVE_TOOL_NAMES: set[str] = {
+    "send_owner_update",
+    "server_time",
+    "tool_group_list",
+    "tool_group_describe",
+    "tool_group_exec",
+}
+
+ROUTINE_WAKE_NATIVE_TOOL_NAMES: set[str] = {
+    "server_time",
+    "tool_group_list",
+    "tool_group_describe",
+    "tool_group_exec",
 }
 
 CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
@@ -603,6 +625,7 @@ CUSTOMER_ID_REQUIRED_TOOLS: set[str] = {
     "browser_use_task_control",
     "browser_use_owner_input_submit",
     "tulpa_run_terminal",
+    "tool_group_exec",
 }
 
 
@@ -1498,8 +1521,13 @@ class OpenTulpaLangGraphRuntime:
             return [
                 tool
                 for name, tool in self._tools.items()
-                if str(name or "").strip() in WORKFLOW_SETUP_TOOL_NAMES
+                if str(name or "").strip() in INTERACTIVE_NATIVE_TOOL_NAMES
             ]
+        native_names = (
+            ROUTINE_WAKE_NATIVE_TOOL_NAMES
+            if normalized_turn_mode == "routine_wake"
+            else INTERACTIVE_NATIVE_TOOL_NAMES
+        )
         blocked_tools: set[str] = set()
         if normalized_turn_mode == "routine_wake":
             blocked_tools.add("send_owner_update")
@@ -1508,7 +1536,8 @@ class OpenTulpaLangGraphRuntime:
         return [
             tool
             for name, tool in self._tools.items()
-            if str(name or "").strip() not in blocked_tools
+            if str(name or "").strip() in native_names
+            and str(name or "").strip() not in blocked_tools
         ]
 
     def prepare_messages_for_prompt_cache(
