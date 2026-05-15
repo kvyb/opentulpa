@@ -24,6 +24,7 @@ _ROUTE_IMPORTS = {
     "register_tulpa_routes": "opentulpa.api.routes.tulpa",
     "register_user_context_routes": "opentulpa.api.routes.user_context",
     "register_wake_and_search_routes": "opentulpa.api.routes.wake_search",
+    "register_web_event_routes": "opentulpa.api.routes.web_events",
 }
 
 __all__ = list(_ROUTE_IMPORTS)

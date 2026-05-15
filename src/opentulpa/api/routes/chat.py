@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from opentulpa.domain.conversation import ConversationTurnRequest
+from opentulpa.web.events import append_web_event
 
 
 def register_chat_routes(
@@ -52,6 +53,14 @@ def register_chat_routes(
                 recursion_limit_override=recursion_limit_override,
             )
         )
+        if result.status == "ok":
+            append_web_event(
+                customer_id=result.customer_id,
+                thread_id=result.thread_id,
+                source="chat",
+                kind="assistant_message",
+                text=result.text,
+            )
         status_code = 200 if result.status == "ok" else 503 if result.status == "unavailable" else 400
         return JSONResponse(
             status_code=status_code,

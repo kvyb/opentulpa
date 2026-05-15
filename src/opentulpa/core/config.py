@@ -135,6 +135,10 @@ class Settings(BaseSettings):
         default=None,
         description="Optional secret for webhook path",
     )
+    opentulpa_web_token: str | None = Field(
+        default=None,
+        description="Bearer token required for dashboard web operations against this deployment.",
+    )
 
     # Memory (mem0)
     mem0_user_id: str = Field(default="default", description="Default user id for mem0")

@@ -1,0 +1,2 @@
+"""Web dashboard event support."""
+
