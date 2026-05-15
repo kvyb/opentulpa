@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -12,6 +13,43 @@ TOOL_GATEWAY_TOOL_NAMES: set[str] = {
     "tool_group_list",
     "tool_group_describe",
     "tool_group_exec",
+}
+
+TOOL_GROUP_EXEC_MAX_BATCH_SIZE = 5
+
+TOOL_GROUP_EXEC_BATCH_COMMANDS: set[str] = {
+    "memory_search",
+    "directive_get",
+    "time_profile_get",
+    "server_time",
+    "web_search",
+    "fetch_url_content",
+    "fetch_file_content",
+    "uploaded_file_search",
+    "uploaded_file_get",
+    "uploaded_file_analyze",
+    "uploaded_file_inspect_structure",
+    "business_knowledge_query",
+    "user_context_query",
+    "user_context_list_sources",
+    "user_context_find_sources",
+    "tulpa_read_file",
+    "tulpa_catalog",
+    "task_status",
+    "task_events",
+    "task_artifacts",
+    "telegram_business_status",
+    "intake_workflow_list",
+    "intake_workflow_get",
+    "intake_workflow_setup_get",
+    "composio_status",
+    "composio_toolkits",
+    "composio_connected_accounts",
+    "composio_tool_search",
+    "composio_tool_schema",
+    "routine_list",
+    "skill_list",
+    "skill_get",
 }
 
 
@@ -278,6 +316,15 @@ def _repair_command_args(command: str, args: dict[str, Any]) -> dict[str, Any]:
     return repaired
 
 
+def _batch_disallowed_commands(calls: list[dict[str, Any]]) -> list[str]:
+    disallowed: list[str] = []
+    for call in calls:
+        command = str(call.get("command", "")).strip()
+        if command not in TOOL_GROUP_EXEC_BATCH_COMMANDS and command not in disallowed:
+            disallowed.append(command)
+    return disallowed
+
+
 def register_tool_gateway_tools(runtime: Any, source_tools: dict[str, Any]) -> dict[str, Any]:
     assert isinstance(source_tools, dict)
 
@@ -350,9 +397,8 @@ def register_tool_gateway_tools(runtime: Any, source_tools: dict[str, Any]) -> d
             ),
         }
 
-    @tool
-    async def tool_group_exec(group: str, command: str, args_json: dict[str, Any] | str | None = None) -> Any:
-        """Execute one command from a tool group using args_json as a JSON object."""
+    async def _execute_one_tool_call(group: str, command: str, args_json: Any) -> dict[str, Any]:
+        assert isinstance(source_tools, dict)
         safe_group = str(group or "").strip().lower()
         safe_command = str(command or "").strip()
         commands = _group_commands(safe_group, source_tools)
@@ -398,6 +444,8 @@ def register_tool_gateway_tools(runtime: Any, source_tools: dict[str, Any]) -> d
                 "missing_args": missing_args,
                 "repair_hint": _compact_repair_hint(safe_group, safe_command, tool_obj),
             }
+        assert safe_command
+        assert isinstance(raw_args, dict)
         try:
             result = await tool_obj.ainvoke(raw_args)
         except Exception as exc:
@@ -424,6 +472,95 @@ def register_tool_gateway_tools(runtime: Any, source_tools: dict[str, Any]) -> d
             "command": safe_command,
             "ok": True,
             "result": result,
+        }
+
+    def _normalize_batch_calls(calls: Any) -> list[dict[str, Any]] | dict[str, Any]:
+        raw_calls = _coerce_json_like(calls)
+        if not isinstance(raw_calls, list):
+            return {
+                "error": "calls must be a JSON array",
+                "received_type": type(raw_calls).__name__,
+            }
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_calls):
+            if not isinstance(item, dict):
+                return {
+                    "error": "each batch call must be a JSON object",
+                    "index": index,
+                    "received_type": type(item).__name__,
+                }
+            normalized.append(
+                {
+                    "group": str(item.get("group", "")).strip(),
+                    "command": str(item.get("command", "")).strip(),
+                    "args_json": item.get("args_json"),
+                }
+            )
+        if not normalized:
+            return {"error": "calls must include at least one invocation"}
+        if len(normalized) > TOOL_GROUP_EXEC_MAX_BATCH_SIZE:
+            return {
+                "error": "too many batch calls",
+                "max_batch_size": TOOL_GROUP_EXEC_MAX_BATCH_SIZE,
+                "received_count": len(normalized),
+            }
+        return normalized
+
+    @tool
+    async def tool_group_exec(
+        group: str = "",
+        command: str = "",
+        args_json: dict[str, Any] | str | None = None,
+        calls: list[dict[str, Any]] | str | None = None,
+    ) -> Any:
+        """
+        Execute one command, or batch independent read/search/status commands using calls.
+
+        Single call shape: group, command, args_json.
+        Batch shape: calls=[{"group": "...", "command": "...", "args_json": {...}}, ...].
+        """
+        batch_input = calls
+        if batch_input is None and not str(group or "").strip() and not str(command or "").strip():
+            maybe_calls = _coerce_json_like(args_json)
+            if isinstance(maybe_calls, list):
+                batch_input = maybe_calls
+        if batch_input is None:
+            return await _execute_one_tool_call(group, command, args_json)
+        normalized_calls = _normalize_batch_calls(batch_input)
+        if isinstance(normalized_calls, dict):
+            return normalized_calls
+        assert normalized_calls
+        assert len(normalized_calls) <= TOOL_GROUP_EXEC_MAX_BATCH_SIZE
+        if len(normalized_calls) == 1:
+            call = normalized_calls[0]
+            return await _execute_one_tool_call(
+                call["group"],
+                call["command"],
+                call["args_json"],
+            )
+        disallowed = _batch_disallowed_commands(normalized_calls)
+        if disallowed:
+            return {
+                "error": "unsupported batch commands",
+                "unsupported_commands": disallowed,
+                "allowed_batch_commands": sorted(TOOL_GROUP_EXEC_BATCH_COMMANDS),
+                "repair_hint": (
+                    "Use one tool_group_exec call for side-effecting, browser, terminal, "
+                    "send, write, account-change, or workflow-mutation commands. Batch only "
+                    "independent read/search/status/fetch/inspect calls."
+                ),
+            }
+        results = await asyncio.gather(
+            *[
+                _execute_one_tool_call(call["group"], call["command"], call["args_json"])
+                for call in normalized_calls
+            ]
+        )
+        return {
+            "ok": all(bool(result.get("ok", False)) for result in results),
+            "batched": True,
+            "parallel": True,
+            "results": results,
         }
 
     return {
