@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.context.uploaded_files import build_uploaded_files_context
 from opentulpa.core.config import get_openai_compatible_api_key_from_env
 from opentulpa.core.debug_logs import (
     DEFAULT_DEBUG_LOG_LOOKBACK_DAYS,
@@ -17,7 +18,6 @@ from opentulpa.core.debug_logs import (
 )
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.attachments import (
-    build_uploaded_files_context,
     extract_attachments,
     ingest_attachments,
 )

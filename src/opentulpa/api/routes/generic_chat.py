@@ -8,21 +8,47 @@ import mimetypes
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from hmac import compare_digest
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from opentulpa.agent.runtime import STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL
 from opentulpa.api.file_helpers import sanitize_uploaded_file_record
-from opentulpa.interfaces.telegram.attachments import (
-    _skip_auto_summary_for_upload,
+from opentulpa.context.uploaded_files import (
     build_uploaded_files_context,
+    should_skip_auto_summary_for_upload,
 )
 from opentulpa.tasks.sandbox import TULPA_STUFF_DIR, is_within
 
 MAX_WEB_UPLOAD_BYTES = 45_000_000
+
+
+class WebChatTurnRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    customer_id: str = Field(min_length=1)
+    thread_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    file_ids: list[str] = Field(default_factory=list, max_length=20)
+    include_pending_context: bool = True
+
+    @field_validator("file_ids", mode="before")
+    @classmethod
+    def _clean_file_ids(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("file_ids must be a list")
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return cleaned[:20]
+
+
+class WebFileResponse(BaseModel):
+    ok: bool
+    file: dict[str, Any]
 
 
 def _bearer_token(request: Request) -> str:
@@ -60,8 +86,12 @@ def register_generic_chat_routes(
 ) -> None:
     """Register authenticated generic chat endpoints."""
 
-    @app.post("/web/chat/turns")
-    async def web_chat_turn(request: Request) -> Any:
+    @app.post(
+        "/web/chat/turns",
+        response_class=StreamingResponse,
+        responses={200: {"content": {"text/event-stream": {}}}},
+    )
+    async def web_chat_turn(payload: WebChatTurnRequest, request: Request) -> Any:
         secret = str(generic_api_secret or "").strip()
         if not secret:
             return JSONResponse(
@@ -71,18 +101,6 @@ def register_generic_chat_routes(
         if not _authorized(request, secret):
             return JSONResponse(status_code=401, content={"detail": "unauthorized"})
 
-        body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
-        thread_id = str(body.get("thread_id", "")).strip()
-        text = str(body.get("text", "")).strip()
-        raw_file_ids = body.get("file_ids") if isinstance(body.get("file_ids"), list) else []
-        file_ids = [str(item).strip() for item in raw_file_ids if str(item).strip()][:20]
-        include_pending_context = bool(body.get("include_pending_context", True))
-        if not customer_id or not thread_id or not text:
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "customer_id, thread_id, and text are required"},
-            )
         runtime = get_agent_runtime()
         if runtime is None or not (hasattr(runtime, "ainvoke_text") or hasattr(runtime, "astream_text")):
             return JSONResponse(status_code=503, content={"detail": "agent runtime unavailable"})
@@ -92,18 +110,25 @@ def register_generic_chat_routes(
                 runtime=runtime,
                 workflow_setup_service=get_workflow_setup_service(),
                 file_vault=get_file_vault(),
-                customer_id=customer_id,
-                thread_id=thread_id,
-                text=text,
-                file_ids=file_ids,
-                include_pending_context=include_pending_context,
+                customer_id=payload.customer_id,
+                thread_id=payload.thread_id,
+                text=payload.text,
+                file_ids=payload.file_ids,
+                include_pending_context=payload.include_pending_context,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.post("/web/files/upload")
-    async def web_file_upload(request: Request) -> Any:
+    @app.post("/web/files/upload", response_model=WebFileResponse)
+    async def web_file_upload(
+        request: Request,
+        customer_id: Annotated[str, Form(min_length=1)],
+        thread_id: Annotated[str, Form(min_length=1)],
+        upload: Annotated[UploadFile, File(alias="file")],
+        kind: Annotated[str, Form()] = "document",
+        caption: Annotated[str | None, Form()] = None,
+    ) -> Any:
         secret = str(generic_api_secret or "").strip()
         if not secret:
             return JSONResponse(
@@ -112,73 +137,76 @@ def register_generic_chat_routes(
             )
         if not _authorized(request, secret):
             return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        form = await request.form()
-        customer_id = str(form.get("customer_id") or "").strip()
-        thread_id = str(form.get("thread_id") or "").strip()
-        kind = str(form.get("kind") or "document").strip() or "document"
-        caption = str(form.get("caption") or "").strip() or None
-        upload = form.get("file")
-        if not customer_id or not thread_id:
+        safe_customer_id = str(customer_id or "").strip()
+        safe_thread_id = str(thread_id or "").strip()
+        safe_kind = str(kind or "document").strip() or "document"
+        safe_caption = str(caption or "").strip() or None
+        if not safe_customer_id or not safe_thread_id:
             return JSONResponse(
                 status_code=400,
                 content={"detail": "customer_id and thread_id are required"},
             )
-        if upload is None or not hasattr(upload, "read"):
-            return JSONResponse(status_code=400, content={"detail": "file is required"})
         raw_bytes = await upload.read()
         if not isinstance(raw_bytes, bytes) or not raw_bytes:
             return JSONResponse(status_code=400, content={"detail": "file is empty"})
         if len(raw_bytes) > MAX_WEB_UPLOAD_BYTES:
             return JSONResponse(status_code=413, content={"detail": "file is too large"})
-        filename = str(getattr(upload, "filename", "") or f"{kind}.bin").strip()
+        filename = str(getattr(upload, "filename", "") or f"{safe_kind}.bin").strip()
         content_type = str(getattr(upload, "content_type", "") or "").strip() or None
         vault = get_file_vault()
         record = vault.ingest_file(
-            customer_id=customer_id,
+            customer_id=safe_customer_id,
             chat_id=None,
-            kind=kind,
+            kind=safe_kind,
             telegram_file_id=None,
             original_filename=filename,
             mime_type=content_type,
-            caption=caption,
+            caption=safe_caption,
             raw_bytes=raw_bytes,
         )
         runtime = get_agent_runtime()
         record = await _postprocess_uploaded_file(
             runtime=runtime,
             vault=vault,
-            customer_id=customer_id,
+            customer_id=safe_customer_id,
             record=record,
             raw_bytes=raw_bytes,
-            caption=caption,
+            caption=safe_caption,
         )
         return {
             "ok": True,
             "file": _web_file_metadata(record),
         }
 
-    @app.get("/web/files/{file_id}/metadata")
-    async def web_file_metadata(file_id: str, request: Request) -> Any:
+    @app.get("/web/files/{file_id}/metadata", response_model=WebFileResponse)
+    async def web_file_metadata(
+        file_id: str,
+        request: Request,
+        customer_id: Annotated[str, Query(min_length=1)],
+    ) -> Any:
         auth = _authorized_web_request(request, generic_api_secret)
         if auth is not None:
             return auth
-        customer_id = str(request.query_params.get("customer_id") or "").strip()
-        record = get_file_vault().get_file(customer_id, file_id)
+        record = get_file_vault().get_file(customer_id.strip(), file_id)
         if not record:
             return JSONResponse(status_code=404, content={"detail": "file not found"})
         return {"ok": True, "file": _web_file_metadata(record)}
 
     @app.get("/web/files/{file_id}/content")
-    async def web_file_content(file_id: str, request: Request) -> Any:
+    async def web_file_content(
+        file_id: str,
+        request: Request,
+        customer_id: Annotated[str, Query(min_length=1)],
+    ) -> Any:
         auth = _authorized_web_request(request, generic_api_secret)
         if auth is not None:
             return auth
-        customer_id = str(request.query_params.get("customer_id") or "").strip()
+        safe_customer_id = customer_id.strip()
         vault = get_file_vault()
-        record = vault.get_file(customer_id, file_id)
+        record = vault.get_file(safe_customer_id, file_id)
         if not record:
             return JSONResponse(status_code=404, content={"detail": "file not found"})
-        raw_bytes = vault.read_file_bytes(customer_id, file_id)
+        raw_bytes = vault.read_file_bytes(safe_customer_id, file_id)
         if raw_bytes is None:
             return JSONResponse(status_code=404, content={"detail": "stored file bytes not found"})
         filename = str(record.get("original_filename") or "file.bin")
@@ -190,15 +218,18 @@ def register_generic_chat_routes(
         )
 
     @app.get("/web/local-files/content")
-    async def web_local_file_content(request: Request) -> Any:
+    async def web_local_file_content(
+        request: Request,
+        local_path: Annotated[str, Query(alias="path", min_length=1)],
+    ) -> Any:
         auth = _authorized_web_request(request, generic_api_secret)
         if auth is not None:
             return auth
-        local_path = str(request.query_params.get("path") or "").strip()
-        if not local_path:
+        safe_local_path = local_path.strip()
+        if not safe_local_path:
             return JSONResponse(status_code=400, content={"detail": "path is required"})
         try:
-            target = (TULPA_STUFF_DIR.parent / local_path).resolve()
+            target = (TULPA_STUFF_DIR.parent / safe_local_path).resolve()
         except Exception:
             return JSONResponse(status_code=400, content={"detail": "invalid path"})
         if not is_within(target, TULPA_STUFF_DIR) or not target.exists() or target.is_dir():
@@ -377,7 +408,7 @@ async def _postprocess_uploaded_file(
     if (
         runtime is not None
         and hasattr(runtime, "summarize_uploaded_blob")
-        and not _skip_auto_summary_for_upload(kind=kind, filename=filename, mime_type=mime_type)
+        and not should_skip_auto_summary_for_upload(kind=kind, filename=filename, mime_type=mime_type)
     ):
         with suppress(Exception):
             summary = await runtime.summarize_uploaded_blob(

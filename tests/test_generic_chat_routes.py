@@ -67,6 +67,21 @@ def test_web_chat_rejects_missing_bearer(monkeypatch: Any, tmp_path: Any) -> Non
     assert response.status_code == 401
 
 
+def test_web_chat_has_typed_request_validation(monkeypatch: Any, tmp_path: Any) -> None:
+    client, _ = _client(monkeypatch, tmp_path)
+    response = client.post(
+        "/web/chat/turns",
+        headers={"authorization": "Bearer generic-secret"},
+        json={"customer_id": "telegram_1", "thread_id": "dashboard-owner-1", "text": ""},
+    )
+    assert response.status_code == 422
+
+    openapi = client.get("/openapi.json").json()
+    operation = openapi["paths"]["/web/chat/turns"]["post"]
+    schema_ref = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    assert schema_ref.endswith("/WebChatTurnRequest")
+
+
 def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_path: Any) -> None:
     client, runtime = _client(monkeypatch, tmp_path)
     with client.stream(

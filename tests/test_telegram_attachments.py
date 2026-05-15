@@ -4,9 +4,8 @@ import pytest
 
 import opentulpa.interfaces.telegram.attachments as attachments_module
 from opentulpa.context.file_vault import FileVaultService
+from opentulpa.context.uploaded_files import XLSX_MIME_TYPE, build_uploaded_files_context
 from opentulpa.interfaces.telegram.attachments import (
-    XLSX_MIME_TYPE,
-    build_uploaded_files_context,
     extract_attachments,
     ingest_attachments,
 )
