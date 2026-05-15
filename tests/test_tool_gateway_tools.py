@@ -171,3 +171,58 @@ async def test_tool_group_exec_batch_returns_per_call_errors() -> None:
     assert result["ok"] is False
     assert [item["ok"] for item in result["results"]] == [True, False]
     assert result["results"][1]["error"] == "clock unavailable"
+
+
+@pytest.mark.asyncio
+async def test_tool_group_exec_rejects_web_search_in_multi_call_batch() -> None:
+    @tool
+    async def web_search(query: str) -> dict[str, Any]:
+        """Search the web."""
+        return {"query": query}
+
+    @tool
+    async def server_time() -> dict[str, Any]:
+        """Return server time."""
+        return {"now": "2026-05-15T00:00:00Z"}
+
+    tools = register_tool_gateway_tools(
+        None,
+        {
+            "web_search": web_search,
+            "server_time": server_time,
+        },
+    )
+
+    result = await tools["tool_group_exec"].ainvoke(
+        {
+            "calls": [
+                {"group": "web", "command": "web_search", "args_json": {"query": "one"}},
+                {"group": "memory", "command": "server_time", "args_json": {}},
+            ]
+        }
+    )
+
+    assert result["error"] == "unsupported batch commands"
+    assert result["unsupported_commands"] == ["web_search"]
+    assert "web_search" not in result["allowed_batch_commands"]
+
+
+@pytest.mark.asyncio
+async def test_tool_group_exec_allows_single_web_search_call_inside_calls_list() -> None:
+    @tool
+    async def web_search(query: str) -> dict[str, Any]:
+        """Search the web."""
+        return {"query": query}
+
+    tools = register_tool_gateway_tools(None, {"web_search": web_search})
+
+    result = await tools["tool_group_exec"].ainvoke(
+        {"calls": [{"group": "web", "command": "web_search", "args_json": {"query": "one"}}]}
+    )
+
+    assert result == {
+        "group": "web",
+        "command": "web_search",
+        "ok": True,
+        "result": {"query": "one"},
+    }

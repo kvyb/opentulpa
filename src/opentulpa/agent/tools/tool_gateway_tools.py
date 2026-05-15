@@ -22,7 +22,6 @@ TOOL_GROUP_EXEC_BATCH_COMMANDS: set[str] = {
     "directive_get",
     "time_profile_get",
     "server_time",
-    "web_search",
     "fetch_url_content",
     "fetch_file_content",
     "uploaded_file_search",
