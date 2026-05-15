@@ -17,6 +17,7 @@ from opentulpa.api.routes import (
     register_composio_routes,
     register_debug_log_routes,
     register_file_routes,
+    register_generic_chat_routes,
     register_health_routes,
     register_intake_workflow_routes,
     register_knowledge_routes,
@@ -534,6 +535,9 @@ def create_app(
             not trusted_server_client
             and not path.startswith("/webhook/")
             and path != "/web/events"
+            and not path.startswith("/web/chat/")
+            and not path.startswith("/web/files/")
+            and not path.startswith("/web/local-files/")
             and path not in public_health_paths
         ):
             return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
@@ -558,6 +562,13 @@ def create_app(
     register_health_routes(app, get_agent_runtime=get_agent_runtime)
     register_debug_log_routes(app)
     register_chat_routes(app, get_turn_orchestrator=get_turn_orchestrator)
+    register_generic_chat_routes(
+        app,
+        web_token=settings.opentulpa_web_token,
+        get_agent_runtime=get_agent_runtime,
+        get_file_vault=get_file_vault,
+        get_workflow_setup_service=get_workflow_setup_service,
+    )
     register_memory_routes(app, get_memory=get_memory)
     register_file_routes(
         app,

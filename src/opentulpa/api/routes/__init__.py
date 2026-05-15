@@ -10,6 +10,7 @@ _ROUTE_IMPORTS = {
     "register_composio_routes": "opentulpa.api.routes.composio",
     "register_debug_log_routes": "opentulpa.api.routes.debug_logs",
     "register_file_routes": "opentulpa.api.routes.files",
+    "register_generic_chat_routes": "opentulpa.api.routes.generic_chat",
     "register_health_routes": "opentulpa.api.routes.health",
     "register_intake_workflow_routes": "opentulpa.api.routes.intake",
     "register_knowledge_routes": "opentulpa.api.routes.knowledge",

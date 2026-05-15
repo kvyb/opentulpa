@@ -81,3 +81,25 @@ def test_web_events_route_public_with_bearer_auth(
     assert accepted.status_code == 200
     assert accepted.json() == {"events": [], "next_cursor": 999999}
     get_settings.cache_clear()
+
+
+def test_generic_web_chat_route_is_public_but_bearer_protected(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_WEB_TOKEN", "web-secret")
+    get_settings.cache_clear()
+    with _mk_client(tmp_path, client_host="8.8.8.8") as client:
+        no_header = client.post(
+            "/web/chat/turns",
+            json={"customer_id": "telegram_1", "thread_id": "dashboard-owner-1", "text": "hi"},
+        )
+        bad_body = client.post(
+            "/web/chat/turns",
+            headers={"authorization": "Bearer web-secret"},
+            json={"customer_id": "telegram_1", "thread_id": "dashboard-owner-1", "text": ""},
+        )
+
+    assert no_header.status_code == 401
+    assert bad_body.status_code == 422
+    get_settings.cache_clear()
