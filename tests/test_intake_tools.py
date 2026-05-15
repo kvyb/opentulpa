@@ -281,6 +281,7 @@ async def test_tulpa_file_send_marks_delivered_file_for_agent() -> None:
     assert runtime.calls[0][2]["json_body"] == {
         "path": "tulpa_stuff/sample_delivery_report.txt",
         "customer_id": "telegram_123",
+        "thread_id": "thread_123",
         "caption": "Sample delivery report",
     }
 

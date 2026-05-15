@@ -135,6 +135,10 @@ class Settings(BaseSettings):
         default=None,
         description="Optional secret for webhook path",
     )
+    opentulpa_generic_api_secret: str | None = Field(
+        default=None,
+        description="Optional bearer secret for authenticated generic non-Telegram API routes.",
+    )
 
     # Memory (mem0)
     mem0_user_id: str = Field(default="default", description="Default user id for mem0")

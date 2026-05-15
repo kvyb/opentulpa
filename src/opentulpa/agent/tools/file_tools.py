@@ -6,7 +6,7 @@ from typing import Any
 
 from langchain.tools import tool
 
-from opentulpa.agent.tools.common import require_customer_id
+from opentulpa.agent.tools.common import require_customer_id, require_thread_id
 from opentulpa.agent.tools.core_tools import (
     _compact_uploaded_file_inspection,
     _tool_error_payload,
@@ -61,14 +61,16 @@ def register_file_tools(runtime: Any) -> dict[str, Any]:
         file_id: str,
         caption: str | None = None,
     ) -> Any:
-        """Send a previously uploaded file back to the user's Telegram chat."""
+        """Send a previously uploaded file back to the current chat."""
         customer_id = require_customer_id(runtime)
+        thread_id = require_thread_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/files/send",
             json_body={
                 "file_id": file_id,
                 "customer_id": customer_id,
+                "thread_id": thread_id,
                 "caption": caption,
             },
             timeout=25.0,
@@ -82,14 +84,16 @@ def register_file_tools(runtime: Any) -> dict[str, Any]:
         path: str,
         caption: str | None = None,
     ) -> Any:
-        """Send a local file from tulpa_stuff/ back to the user's Telegram chat."""
+        """Send a local file from tulpa_stuff/ back to the current chat."""
         customer_id = require_customer_id(runtime)
+        thread_id = require_thread_id(runtime)
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/files/send_local",
             json_body={
                 "path": path,
                 "customer_id": customer_id,
+                "thread_id": thread_id,
                 "caption": caption,
             },
             timeout=25.0,
@@ -104,8 +108,9 @@ def register_file_tools(runtime: Any) -> dict[str, Any]:
         caption: str | None = None,
         max_bytes: int = 10_000_000,
     ) -> Any:
-        """Download an image from a web URL and send it to Telegram."""
+        """Download an image from a web URL and send it to the current chat."""
         customer_id = require_customer_id(runtime)
+        thread_id = require_thread_id(runtime)
         safe_max_bytes = max(250_000, min(int(max_bytes), 25_000_000))
         r = await runtime._request_with_backoff(
             "POST",
@@ -113,6 +118,7 @@ def register_file_tools(runtime: Any) -> dict[str, Any]:
             json_body={
                 "url": url,
                 "customer_id": customer_id,
+                "thread_id": thread_id,
                 "caption": caption,
                 "max_bytes": safe_max_bytes,
             },
