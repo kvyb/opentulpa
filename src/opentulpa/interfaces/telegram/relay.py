@@ -23,6 +23,7 @@ from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
 from opentulpa.interfaces.telegram.status_generation import generate_llm_status_message
+from opentulpa.web.events import append_web_event
 
 logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
@@ -497,6 +498,14 @@ async def stream_langgraph_reply_to_telegram(
         if sent:
             delivered_any = True
             interim_status_sent = True
+            append_web_event(
+                customer_id=customer_id,
+                thread_id=thread_id,
+                source="chat",
+                kind="status",
+                text=status_text,
+                metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
+            )
             logger.info(
                 "telegram.stream status_generation_sent chat_id=%s thread_id=%s customer_id=%s stage=%s chars=%s",
                 chat_id,
@@ -804,6 +813,14 @@ async def stream_langgraph_reply_to_telegram(
         )
         if sent:
             delivered_any = True
+            append_web_event(
+                customer_id=customer_id,
+                thread_id=thread_id,
+                source="chat",
+                kind="assistant_message",
+                text=final_reply,
+                metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
+            )
         else:
             final_reply = None
     logger.info(

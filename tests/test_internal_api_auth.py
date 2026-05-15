@@ -62,3 +62,22 @@ def test_webhook_route_public_with_telegram_auth(
         )
         assert response.status_code == 200
     get_settings.cache_clear()
+
+
+def test_web_events_route_public_with_bearer_auth(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_WEB_TOKEN", "web-secret")
+    get_settings.cache_clear()
+    with _mk_client(tmp_path, client_host="8.8.8.8") as client:
+        rejected = client.get("/web/events")
+        accepted = client.get(
+            "/web/events?after_id=999999",
+            headers={"authorization": "Bearer web-secret"},
+        )
+
+    assert rejected.status_code == 403
+    assert accepted.status_code == 200
+    assert accepted.json() == {"events": [], "next_cursor": 999999}
+    get_settings.cache_clear()

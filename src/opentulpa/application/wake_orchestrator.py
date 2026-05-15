@@ -9,6 +9,7 @@ from typing import Any
 
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
+from opentulpa.web.events import append_web_event
 
 
 class WakeOrchestrator:
@@ -67,6 +68,23 @@ class WakeOrchestrator:
                 source="routine",
                 event_type=event_type,
                 payload={key: value for key, value in event_payload.items() if value not in ("", None)},
+            )
+        summary = str(payload.get("execution_summary", "") or "").strip()
+        if summary and summary != NO_NOTIFY_TOKEN and bool(payload.get("notify_user", False)):
+            append_web_event(
+                customer_id=customer_id,
+                thread_id=str(payload.get("routine_id", "") or "").strip(),
+                source="routine",
+                kind="proactive_message",
+                text=summary,
+                metadata_json=json.dumps(
+                    {
+                        "event_type": event_type,
+                        "routine_id": str(payload.get("routine_id", "") or "").strip(),
+                        "routine_name": str(payload.get("routine_name", "") or "").strip(),
+                    },
+                    ensure_ascii=False,
+                ),
             )
 
     @staticmethod
@@ -155,11 +173,20 @@ class WakeOrchestrator:
             )
             return
         for item in replies:
-            await self._get_telegram_client().send_message(
+            sent = await self._get_telegram_client().send_message(
                 chat_id=item["chat_id"],
                 text=item["text"],
                 parse_mode="HTML",
             )
+            if sent:
+                append_web_event(
+                    customer_id=customer_id,
+                    thread_id=str(body.get("task_id", "") or "").strip(),
+                    source="task",
+                    kind="proactive_message",
+                    text=str(item.get("text", "") or ""),
+                    metadata_json=json.dumps({"event_type": event_type}, ensure_ascii=False),
+                )
 
     async def _handle_routine_event(self, body: dict[str, Any]) -> None:
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}

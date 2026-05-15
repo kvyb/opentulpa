@@ -31,6 +31,7 @@ from opentulpa.api.routes import (
     register_tulpa_routes,
     register_user_context_routes,
     register_wake_and_search_routes,
+    register_web_event_routes,
 )
 from opentulpa.api.tulpa_loader import TulpaRouterLoader
 from opentulpa.application import (
@@ -61,6 +62,7 @@ from opentulpa.tasks.sandbox import PROJECT_ROOT
 from opentulpa.tasks.sandbox import delete_file as sandbox_delete_file
 from opentulpa.tasks.service import TaskService
 from opentulpa.tasks.wake_queue import WakeQueueService
+from opentulpa.web.events import WebEventStore, set_default_web_event_store
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +215,10 @@ def create_app(
     context_events_service = context_events or EventContextService(
         db_path=PROJECT_ROOT / ".opentulpa" / "context_events.db"
     )
+    web_event_store = WebEventStore(
+        db_path=PROJECT_ROOT / ".opentulpa" / "web_events.db"
+    )
+    set_default_web_event_store(web_event_store)
     profile_service = customer_profile_service or CustomerProfileService(
         db_path=PROJECT_ROOT / ".opentulpa" / "customer_profiles.db"
     )
@@ -285,6 +291,9 @@ def create_app(
 
     def get_context_events() -> EventContextService:
         return _require(context_events_service, "EventContextService")
+
+    def get_web_events() -> WebEventStore:
+        return web_event_store
 
     def get_profiles() -> CustomerProfileService:
         return _require(profile_service, "CustomerProfileService")
@@ -524,6 +533,7 @@ def create_app(
         if (
             not trusted_server_client
             and not path.startswith("/webhook/")
+            and path != "/web/events"
             and path not in public_health_paths
         ):
             return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
@@ -595,6 +605,11 @@ def create_app(
         app,
         get_wake_queue=get_wake_queue,
         llm_model=settings.llm_model,
+    )
+    register_web_event_routes(
+        app,
+        settings=settings,
+        get_web_events=get_web_events,
     )
     register_tulpa_routes(
         app,
