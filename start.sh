@@ -533,6 +533,7 @@ ensure_required_env() {
         missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
       fi
     else
+      env_is_set "OPENTULPA_WEB_TOKEN" || missing+=("OPENTULPA_WEB_TOKEN")
       log "server Telegram disabled; web/API startup does not require Telegram env."
     fi
   fi
@@ -557,15 +558,23 @@ ensure_required_env() {
   fi
 
   env_is_set "OPENAI_COMPATIBLE_API_KEY" || prompt_env_value "OPENAI_COMPATIBLE_API_KEY" "OPENAI_COMPATIBLE_API_KEY" 1
-  if [[ "${runtime}" == "local" || "${runtime}" == "server" ]]; then
+  if [[ "${runtime}" == "local" ]]; then
     env_is_set "TELEGRAM_BOT_TOKEN" || prompt_env_value "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN" 1
     if ! telegram_allowlist_is_set; then
       prompt_env_value "TELEGRAM_ALLOWED_USERNAMES" "TELEGRAM_ALLOWED_USERNAMES (comma-separated, no @)"
     fi
   fi
   if [[ "${runtime}" == "server" ]]; then
-    env_is_set "TELEGRAM_WEBHOOK_SECRET" || prompt_env_value "TELEGRAM_WEBHOOK_SECRET" "TELEGRAM_WEBHOOK_SECRET" 1
-    public_base_url_is_set || prompt_env_value "PUBLIC_BASE_URL" "PUBLIC_BASE_URL"
+    if server_telegram_enabled; then
+      env_is_set "TELEGRAM_BOT_TOKEN" || prompt_env_value "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN" 1
+      if ! telegram_allowlist_is_set; then
+        prompt_env_value "TELEGRAM_ALLOWED_USERNAMES" "TELEGRAM_ALLOWED_USERNAMES (comma-separated, no @)"
+      fi
+      env_is_set "TELEGRAM_WEBHOOK_SECRET" || prompt_env_value "TELEGRAM_WEBHOOK_SECRET" "TELEGRAM_WEBHOOK_SECRET" 1
+      public_base_url_is_set || prompt_env_value "PUBLIC_BASE_URL" "PUBLIC_BASE_URL"
+    else
+      env_is_set "OPENTULPA_WEB_TOKEN" || prompt_env_value "OPENTULPA_WEB_TOKEN" "OPENTULPA_WEB_TOKEN" 1
+    fi
     env_is_set "OPENTULPA_DATA_ROOT" || prompt_env_value "OPENTULPA_DATA_ROOT" "OPENTULPA_DATA_ROOT" 0 "/app/opentulpa_data"
   fi
 }
@@ -693,6 +702,7 @@ run_doctor() {
       doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL, or rely on Railway's RAILWAY_PUBLIC_DOMAIN" || failures=$((failures + 1))
     else
       echo "[doctor] info: server Telegram disabled; skipping webhook URL/secret checks"
+      doctor_check "OPENTULPA_WEB_TOKEN is set" "$(env_is_set "OPENTULPA_WEB_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_WEB_TOKEN for web/API access" || failures=$((failures + 1))
     fi
     doctor_check "OPENTULPA_DATA_ROOT is set" "$(env_is_set "OPENTULPA_DATA_ROOT" && echo 1 || echo 0)" "set OPENTULPA_DATA_ROOT=/app/opentulpa_data and mount persistent storage there" || failures=$((failures + 1))
     if env_is_set "OPENTULPA_DATA_ROOT"; then
