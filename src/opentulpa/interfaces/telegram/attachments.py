@@ -128,7 +128,7 @@ def build_uploaded_files_context(
     if include_unclear_intent_guidance:
         lines.insert(
             2,
-            "If recent conversation clearly says these files should become reusable chat context, use user_context_add_files. If intent is unclear, ask what the user wants done with the files; do not infer intent from filenames or content.",
+            "Infer upload intent from the recent message and conversation when it is clear. If the files should become reusable user/chat context, use user_context_add_files. If intent is unclear, ask what the user wants done with the files; do not infer intent from filenames or content alone.",
         )
         lines.append(
             "User-facing reply guidance: briefly acknowledge the upload and ask one focused follow-up question when the intended action is unclear."

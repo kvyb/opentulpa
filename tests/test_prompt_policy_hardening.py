@@ -161,13 +161,21 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "propose it with explicit assumptions" in workflow_setup
     assert "Do not persist the workflow until the user has seen a proposal and explicitly confirmed it." in workflow_setup
     base_policy = str(_build_system_prompt_message().content)
-    assert "use user_context_add_files/query/list/find/reindex/archive through the knowledge group only when" in base_policy
-    assert "recent instructions clearly say to manage or use durable context" in base_policy
+    assert "choose among three first-class knowledge paths by inferred user intent" in base_policy
+    assert "one-off file analysis" in base_policy
+    assert "reusable user/chat context" in base_policy
+    assert "workflow/business knowledge" in base_policy
+    assert "If the recent message or conversation clearly implies a path, take it" in base_policy
+    assert "if intent is unclear, ask one concise question" in base_policy
+    assert "remember it for future chat, use it for a workflow/business bot, or answer about it once" in base_policy
     assert "For intake workflows over source docs" in base_policy
     assert "business_knowledge_index and query them with business_knowledge_query" in base_policy
-    assert "reuse existing user context during workflow setup" in base_policy
+    assert "reuse existing user/chat context during workflow setup" in base_policy
     assert "business_knowledge_index those file_ids into the current setup scope" in base_policy
     assert "after a workflow exists, user_context_promote_to_intake" in base_policy
+    assert "For knowledge-base capabilities" in base_policy
+    assert "user/chat context knowledge, workflow/business knowledge, and one-off file analysis" in base_policy
+    assert "instead of talking only about business knowledge" in base_policy
     assert "do not refuse merely because login, CAPTCHA, MFA, or session persistence may be involved" in base_policy
     assert "unless the owner explicitly asks to use or persist those credentials" in base_policy
     assert "you may persist them to local files, memory, or directives" in base_policy
