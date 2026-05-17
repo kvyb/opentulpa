@@ -123,6 +123,8 @@ COMPOSIO_API_KEY=...
 BROWSER_USE_API_KEY=...
 ```
 
+Telegram is optional for deployed web/API use. A Railway/dashboard deployment can start with `OPENTULPA_WEB_TOKEN`, `OPENAI_COMPATIBLE_API_KEY`, and `OPENTULPA_DATA_ROOT` only. Add Telegram env vars later when Telegram chat is enabled.
+
 **Composio is strongly recommended.** It unlocks app connectors for Google Workspace, Slack, Notion, Linear, HubSpot, Gmail, Instagram, and more without writing custom integration code.
 
 **Browser Use Cloud is recommended for browser-heavy work.** With `BROWSER_USE_API_KEY`, OpenTulpa still owns the browser worker loop, but runs it against Browser Use Cloud hosted sessions for live owner handoff URLs, persisted browser profiles, proxying, and managed browser infrastructure.

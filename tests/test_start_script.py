@@ -47,7 +47,7 @@ def test_start_script_dry_run_server_mode() -> None:
     result = _run_start(
         "server",
         "--dry-run",
-        env=EMPTY_REQUIRED_ENV,
+        env={**EMPTY_REQUIRED_ENV, "TELEGRAM_BOT_TOKEN": "test-token"},
     )
 
     assert result.returncode == 0
@@ -61,6 +61,25 @@ def test_start_script_dry_run_server_mode() -> None:
     assert "[start] running server mode." in result.stdout
     assert "uv run python -m opentulpa" in result.stdout
     assert "scripts/manager.py" not in result.stdout
+
+
+def test_start_script_dry_run_server_mode_allows_web_only_without_telegram() -> None:
+    result = _run_start(
+        "server",
+        "--dry-run",
+        env=EMPTY_REQUIRED_ENV,
+    )
+
+    assert result.returncode == 0
+    assert "required .env value(s) missing for server:" in result.stdout
+    assert "OPENAI_COMPATIBLE_API_KEY" in result.stdout
+    assert "OPENTULPA_DATA_ROOT" in result.stdout
+    assert "TELEGRAM_BOT_TOKEN" not in result.stdout
+    assert "TELEGRAM_WEBHOOK_SECRET" not in result.stdout
+    assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" not in result.stdout
+    assert "TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS" not in result.stdout
+    assert "server Telegram disabled; web/API startup does not require Telegram env." in result.stdout
+    assert "uv run python -m opentulpa" in result.stdout
 
 
 def test_start_script_dry_run_local_mode() -> None:

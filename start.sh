@@ -118,6 +118,10 @@ public_base_url_is_set() {
   env_is_set "PUBLIC_BASE_URL" || env_is_set "RAILWAY_PUBLIC_DOMAIN"
 }
 
+server_telegram_enabled() {
+  env_is_set "TELEGRAM_BOT_TOKEN" || env_is_set "TELEGRAM_WEBHOOK_SECRET" || telegram_allowlist_is_set
+}
+
 yaml_value_is_set() {
   local key="$1"
   local line value
@@ -520,12 +524,16 @@ ensure_required_env() {
   fi
 
   if [[ "${runtime}" == "server" ]]; then
-    env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
-    env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
-    public_base_url_is_set || missing+=("PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN")
     env_is_set "OPENTULPA_DATA_ROOT" || missing+=("OPENTULPA_DATA_ROOT")
-    if ! telegram_allowlist_is_set; then
-      missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
+    if server_telegram_enabled; then
+      env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
+      env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
+      public_base_url_is_set || missing+=("PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN")
+      if ! telegram_allowlist_is_set; then
+        missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
+      fi
+    else
+      log "server Telegram disabled; web/API startup does not require Telegram env."
     fi
   fi
 
@@ -666,8 +674,12 @@ run_doctor() {
   fi
   load_dotenv
   doctor_check "OPENAI_COMPATIBLE_API_KEY is set" "$(env_is_set "OPENAI_COMPATIBLE_API_KEY" && echo 1 || echo 0)" "set OPENAI_COMPATIBLE_API_KEY in .env" || failures=$((failures + 1))
-  doctor_check "TELEGRAM_BOT_TOKEN is set" "$(env_is_set "TELEGRAM_BOT_TOKEN" && echo 1 || echo 0)" "set TELEGRAM_BOT_TOKEN in .env" || failures=$((failures + 1))
-  doctor_check "Telegram allowlist is set" "$(telegram_allowlist_is_set && echo 1 || echo 0)" "set TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS in .env" || failures=$((failures + 1))
+  if [[ "${runtime}" != "server" ]] || server_telegram_enabled; then
+    doctor_check "TELEGRAM_BOT_TOKEN is set" "$(env_is_set "TELEGRAM_BOT_TOKEN" && echo 1 || echo 0)" "set TELEGRAM_BOT_TOKEN in .env" || failures=$((failures + 1))
+    doctor_check "Telegram allowlist is set" "$(telegram_allowlist_is_set && echo 1 || echo 0)" "set TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS in .env" || failures=$((failures + 1))
+  else
+    echo "[doctor] info: server Telegram disabled; skipping Telegram token and allowlist checks"
+  fi
   if env_is_set "COMPOSIO_API_KEY"; then
     echo "[doctor] ok: COMPOSIO_API_KEY is set"
   else
@@ -676,8 +688,12 @@ run_doctor() {
   emit_model_config_notice
   check_model_catalog
   if [[ "${runtime}" == "server" ]]; then
-    doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET in .env" || failures=$((failures + 1))
-    doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL, or rely on Railway's RAILWAY_PUBLIC_DOMAIN" || failures=$((failures + 1))
+    if server_telegram_enabled; then
+      doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET in .env" || failures=$((failures + 1))
+      doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL, or rely on Railway's RAILWAY_PUBLIC_DOMAIN" || failures=$((failures + 1))
+    else
+      echo "[doctor] info: server Telegram disabled; skipping webhook URL/secret checks"
+    fi
     doctor_check "OPENTULPA_DATA_ROOT is set" "$(env_is_set "OPENTULPA_DATA_ROOT" && echo 1 || echo 0)" "set OPENTULPA_DATA_ROOT=/app/opentulpa_data and mount persistent storage there" || failures=$((failures + 1))
     if env_is_set "OPENTULPA_DATA_ROOT"; then
       doctor_check "OPENTULPA_DATA_ROOT is writable" "$(mkdir -p "${OPENTULPA_DATA_ROOT}" 2>/dev/null && [[ -w "${OPENTULPA_DATA_ROOT}" ]] && echo 1 || echo 0)" "mount a writable persistent volume at OPENTULPA_DATA_ROOT" || failures=$((failures + 1))
