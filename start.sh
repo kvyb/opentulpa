@@ -119,7 +119,7 @@ public_base_url_is_set() {
 }
 
 server_telegram_enabled() {
-  env_is_set "TELEGRAM_BOT_TOKEN" || env_is_set "TELEGRAM_WEBHOOK_SECRET" || telegram_allowlist_is_set
+  env_is_set "TELEGRAM_BOT_TOKEN" || telegram_allowlist_is_set
 }
 
 yaml_value_is_set() {

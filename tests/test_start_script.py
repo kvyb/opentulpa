@@ -260,7 +260,10 @@ def test_start_script_run_server_accepts_platform_env_without_dotenv(tmp_path: P
 def test_start_script_server_accepts_railway_public_domain_fallback() -> None:
     env = {
         **EMPTY_REQUIRED_ENV,
+        "TELEGRAM_BOT_TOKEN": "test-token",
+        "TELEGRAM_WEBHOOK_SECRET": "test-secret",
         "RAILWAY_PUBLIC_DOMAIN": "opentulpa.example.railway.app",
+        "TELEGRAM_ALLOWED_USERNAMES": "owner",
     }
 
     result = _run_start("server", "--dry-run", env=env)
