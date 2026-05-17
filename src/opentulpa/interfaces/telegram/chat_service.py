@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 
 STATE_STORE = TelegramStateStore(STATE_PATH)
 logger = logging.getLogger(__name__)
+_BOT_USERNAME_BY_TOKEN: dict[str, str] = {}
 
 _UPLOAD_WITHOUT_TEXT_PREFIX = "User uploaded one or more files without extra text."
 _UPLOAD_CONTEXT_MARKER = "Internal uploaded-file context."
@@ -185,18 +187,85 @@ def _telegram_command_name(text: str) -> str:
     return head.split("@", 1)[0]
 
 
-def _telegram_reply_to_context(message: dict[str, Any]) -> str:
+async def _resolve_bot_username(bot_token: str | None) -> str:
+    safe_token = str(bot_token or "").strip()
+    if not safe_token:
+        return ""
+    cached = _BOT_USERNAME_BY_TOKEN.get(safe_token, "")
+    if cached:
+        return cached
+    client = TelegramClient(safe_token)
+    try:
+        me = await client.get_me()
+    finally:
+        with suppress(Exception):
+            await client.aclose()
+    username = str((me or {}).get("username", "")).strip().lstrip("@")
+    if username:
+        _BOT_USERNAME_BY_TOKEN[safe_token] = username
+    return username
+
+
+def _telegram_chat_is_group(message: dict[str, Any]) -> bool:
+    chat = message.get("chat")
+    chat_type = str((chat or {}).get("type", "") if isinstance(chat, dict) else "").strip()
+    return chat_type in {"group", "supergroup"}
+
+
+def _telegram_message_mentions_bot(message: dict[str, Any], bot_username: str) -> bool:
+    safe_username = str(bot_username or "").strip().lstrip("@").lower()
+    if not safe_username:
+        return False
+    text = str(message.get("text") or message.get("caption") or "")
+    if re.search(rf"(?<!\w)@{re.escape(safe_username)}(?!\w)", text, flags=re.IGNORECASE):
+        return True
+    for entity_key in ("entities", "caption_entities"):
+        entities = message.get(entity_key)
+        if not isinstance(entities, list):
+            continue
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            entity_type = str(entity.get("type", "")).strip()
+            user = entity.get("user")
+            if (
+                entity_type == "text_mention"
+                and isinstance(user, dict)
+                and user.get("is_bot") is True
+                and str(user.get("username", "")).strip().lstrip("@").lower() == safe_username
+            ):
+                return True
+    return False
+
+
+def _strip_bot_mention(text: str, bot_username: str) -> str:
+    safe_username = str(bot_username or "").strip().lstrip("@")
+    if not safe_username:
+        return str(text or "").strip()
+    stripped = re.sub(
+        rf"(?<!\w)@{re.escape(safe_username)}(?!\w)",
+        " ",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+    stripped = re.sub(r"[ \t]+", " ", stripped)
+    stripped = re.sub(r" *\n *", "\n", stripped)
+    return stripped.strip()
+
+
+def _telegram_reply_to_context(message: dict[str, Any], *, require_bot_author: bool = True) -> str:
     reply = message.get("reply_to_message")
     if not isinstance(reply, dict):
         return ""
     author = reply.get("from")
-    if isinstance(author, dict) and author.get("is_bot") is not True:
+    if require_bot_author and isinstance(author, dict) and author.get("is_bot") is not True:
         return ""
 
     message_id = reply.get("message_id")
-    lines = [
-        "Telegram reply context: the user replied to one of OpenTulpa's earlier messages.",
-    ]
+    if require_bot_author:
+        lines = ["Telegram reply context: the user replied to one of OpenTulpa's earlier messages."]
+    else:
+        lines = ["Telegram quoted message context: the user mentioned OpenTulpa while replying to this message."]
     if isinstance(message_id, int) and message_id > 0:
         lines.append(f"- replied_message_id: {message_id}")
 
@@ -1122,7 +1191,16 @@ async def handle_telegram_text(
 
     message = body.get("message") or body.get("edited_message") or {}
     caption = str(message.get("caption", "")).strip() or None
-    reply_context = _telegram_reply_to_context(message)
+    is_group_chat = _telegram_chat_is_group(message)
+    bot_username = await _resolve_bot_username(bot_token) if is_group_chat else ""
+    bot_was_mentioned = _telegram_message_mentions_bot(message, bot_username) if is_group_chat else False
+    if is_group_chat and not bot_was_mentioned:
+        return None
+    if bot_was_mentioned:
+        text = _strip_bot_mention(text or "", bot_username)
+        if caption:
+            caption = _strip_bot_mention(caption, bot_username) or None
+    reply_context = _telegram_reply_to_context(message, require_bot_author=not bot_was_mentioned)
     attachments = extract_attachments(message)
     username = (message.get("from", {}) or {}).get("username")
     username = username.strip() or None if isinstance(username, str) else None
