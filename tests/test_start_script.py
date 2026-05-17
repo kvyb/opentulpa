@@ -11,6 +11,7 @@ EMPTY_REQUIRED_ENV = {
     "TELEGRAM_WEBHOOK_SECRET": "",
     "PUBLIC_BASE_URL": "",
     "OPENTULPA_DATA_ROOT": "",
+    "OPENTULPA_WEB_TOKEN": "",
     "COMPOSIO_API_KEY": "",
     "TELEGRAM_ALLOWED_USERNAMES": "",
     "TELEGRAM_ALLOWED_USER_IDS": "",
@@ -47,7 +48,7 @@ def test_start_script_dry_run_server_mode() -> None:
     result = _run_start(
         "server",
         "--dry-run",
-        env=EMPTY_REQUIRED_ENV,
+        env={**EMPTY_REQUIRED_ENV, "TELEGRAM_BOT_TOKEN": "test-token"},
     )
 
     assert result.returncode == 0
@@ -61,6 +62,59 @@ def test_start_script_dry_run_server_mode() -> None:
     assert "[start] running server mode." in result.stdout
     assert "uv run python -m opentulpa" in result.stdout
     assert "scripts/manager.py" not in result.stdout
+
+
+def test_start_script_dry_run_server_mode_allows_web_only_without_telegram() -> None:
+    result = _run_start(
+        "server",
+        "--dry-run",
+        env=EMPTY_REQUIRED_ENV,
+    )
+
+    assert result.returncode == 0
+    assert "required .env value(s) missing for server:" in result.stdout
+    assert "OPENAI_COMPATIBLE_API_KEY" in result.stdout
+    assert "OPENTULPA_WEB_TOKEN" in result.stdout
+    assert "OPENTULPA_DATA_ROOT" in result.stdout
+    assert "TELEGRAM_BOT_TOKEN" not in result.stdout
+    assert "TELEGRAM_WEBHOOK_SECRET" not in result.stdout
+    assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" not in result.stdout
+    assert "TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS" not in result.stdout
+    assert "server Telegram disabled; web/API startup does not require Telegram env." in result.stdout
+    assert "uv run python -m opentulpa" in result.stdout
+
+
+def test_start_script_dry_run_server_mode_accepts_web_only_env() -> None:
+    result = _run_start(
+        "server",
+        "--dry-run",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENAI_COMPATIBLE_API_KEY": "test-key",
+            "OPENTULPA_DATA_ROOT": "/tmp/opentulpa-test-data",
+            "OPENTULPA_WEB_TOKEN": "test-web-token",
+        },
+    )
+
+    assert result.returncode == 0
+    assert "required .env value(s) missing for server:" not in result.stdout
+    assert "TELEGRAM_BOT_TOKEN" not in result.stdout
+    assert "TELEGRAM_WEBHOOK_SECRET" not in result.stdout
+    assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" not in result.stdout
+    assert "TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS" not in result.stdout
+    assert "server Telegram disabled; web/API startup does not require Telegram env." in result.stdout
+    assert "uv run python -m opentulpa" in result.stdout
+
+
+def test_start_script_doctor_server_web_only_requires_web_token() -> None:
+    result = _run_start("doctor", "server", env=EMPTY_REQUIRED_ENV)
+
+    assert result.returncode == 1
+    assert "server Telegram disabled; skipping Telegram token and allowlist checks" in result.stdout
+    assert "server Telegram disabled; skipping webhook URL/secret checks" in result.stdout
+    assert "fail: OPENTULPA_WEB_TOKEN is set" in result.stdout
+    assert "TELEGRAM_BOT_TOKEN is set" not in result.stdout
+    assert "TELEGRAM_WEBHOOK_SECRET is set" not in result.stdout
 
 
 def test_start_script_dry_run_local_mode() -> None:
@@ -241,7 +295,10 @@ def test_start_script_run_server_accepts_platform_env_without_dotenv(tmp_path: P
 def test_start_script_server_accepts_railway_public_domain_fallback() -> None:
     env = {
         **EMPTY_REQUIRED_ENV,
+        "TELEGRAM_BOT_TOKEN": "test-token",
+        "TELEGRAM_WEBHOOK_SECRET": "test-secret",
         "RAILWAY_PUBLIC_DOMAIN": "opentulpa.example.railway.app",
+        "TELEGRAM_ALLOWED_USERNAMES": "owner",
     }
 
     result = _run_start("server", "--dry-run", env=env)

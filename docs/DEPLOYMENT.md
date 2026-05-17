@@ -182,10 +182,14 @@ Railway builds from the included `Dockerfile` and starts through the same server
 ### Required settings
 
 - `OPENAI_COMPATIBLE_API_KEY`
+- `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
+- `OPENTULPA_WEB_TOKEN` for dashboard/web API access
+
+Telegram is optional in server mode. For web/API-only deployments, leave Telegram env vars empty. If Telegram is enabled, also set:
+
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `PUBLIC_BASE_URL=https://your-service.up.railway.app` or Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
-- `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
 - `TELEGRAM_ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERNAMES`
 
 ### Recommended settings
@@ -209,14 +213,15 @@ If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml
 2. Add one volume mounted at `/app/opentulpa_data`
 3. Set:
    - `OPENAI_COMPATIBLE_API_KEY`
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_WEBHOOK_SECRET`
-   - `PUBLIC_BASE_URL` if you do not want to rely on Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
    - `OPENTULPA_DATA_ROOT=/app/opentulpa_data`
-   - `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
+   - `OPENTULPA_WEB_TOKEN`
 4. Optionally set:
    - `COMPOSIO_API_KEY`
    - `COMPOSIO_DEFAULT_CALLBACK_URL`
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_WEBHOOK_SECRET`
+   - `PUBLIC_BASE_URL` if you do not want to rely on Railway's `RAILWAY_PUBLIC_DOMAIN` fallback
+   - `TELEGRAM_ALLOWED_USERNAMES` or `TELEGRAM_ALLOWED_USER_IDS`
    - `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`
 5. Deploy
 
