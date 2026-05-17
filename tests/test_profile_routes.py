@@ -134,3 +134,41 @@ def test_profile_binding_rejects_separate_existing_profiles(tmp_path: Path) -> N
         assert "manual merge" in str(exc)
     else:
         raise AssertionError("expected separate profile bind to be rejected")
+
+
+def test_profile_binding_rejects_existing_generic_profile_when_telegram_alias_is_bound(
+    tmp_path: Path,
+) -> None:
+    _, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("telegram_123", "legacy directive", source="test")
+    profiles.bind_telegram_user_id(user_id="usr_first", telegram_user_id="123")
+    profiles.set_directive("usr_second", "separate generic directive", source="test")
+
+    try:
+        profiles.bind_telegram_user_id(user_id="usr_second", telegram_user_id="123")
+    except ValueError as exc:
+        assert "manual merge" in str(exc)
+    else:
+        raise AssertionError("expected conflicting generic profile bind to be rejected")
+
+    assert profiles.resolve_customer_id("usr_second") == "usr_second"
+    assert profiles.get_directive("usr_second") == "separate generic directive"
+
+
+def test_profile_binding_rejects_existing_telegram_profile_when_generic_alias_is_bound(
+    tmp_path: Path,
+) -> None:
+    _, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("usr_default", "generic directive", source="test")
+    profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="123")
+    profiles.set_directive("telegram_456", "separate telegram directive", source="test")
+
+    try:
+        profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="456")
+    except ValueError as exc:
+        assert "manual merge" in str(exc)
+    else:
+        raise AssertionError("expected conflicting telegram profile bind to be rejected")
+
+    assert profiles.resolve_customer_id("telegram_456") == "telegram_456"
+    assert profiles.get_directive("telegram_456") == "separate telegram directive"

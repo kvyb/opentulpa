@@ -158,17 +158,23 @@ class CustomerProfileService:
         ).fetchone()
         uid_storage = str(uid_row["storage_user_id"]) if uid_row else ""
         telegram_storage = str(telegram_row["storage_user_id"]) if telegram_row else ""
+        uid_has_profile = self._profile_exists(conn, user_id)
+        telegram_has_profile = self._profile_exists(conn, telegram_alias)
         if uid_storage and telegram_storage and uid_storage != telegram_storage:
             raise ValueError("identity aliases already point at different storage_user_id values")
         if uid_storage:
+            if telegram_has_profile and telegram_alias != uid_storage:
+                raise ValueError("generic and telegram profiles both exist; manual merge is required")
             return uid_storage
         if telegram_storage:
+            if uid_has_profile and user_id != telegram_storage:
+                raise ValueError("generic and telegram profiles both exist; manual merge is required")
             return telegram_storage
-        if self._profile_exists(conn, user_id) and self._profile_exists(conn, telegram_alias):
+        if uid_has_profile and telegram_has_profile:
             raise ValueError("generic and telegram profiles both exist; manual merge is required")
-        if self._profile_exists(conn, user_id):
+        if uid_has_profile:
             return user_id
-        if self._profile_exists(conn, telegram_alias):
+        if telegram_has_profile:
             return telegram_alias
         return user_id
 
