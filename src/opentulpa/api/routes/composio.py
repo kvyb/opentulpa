@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
+from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
 from opentulpa.core.public_urls import build_public_composio_callback_path
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ def register_composio_routes(
     app: FastAPI,
     *,
     get_composio: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register internal Composio helper endpoints."""
 
@@ -67,7 +70,8 @@ def register_composio_routes(
     async def internal_composio_status() -> dict[str, Any]:
         service = get_composio()
         if hasattr(service, "status"):
-            return service.status()
+            result = service.status()
+            return dict(result) if isinstance(result, dict) else {"ok": True, "status": result}
         return {"ok": True, "enabled": bool(getattr(service, "enabled", False))}
 
     @app.post("/internal/composio/authorize")
@@ -75,7 +79,7 @@ def register_composio_routes(
         body = await request.json()
         try:
             return get_composio().authorize_toolkit(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 toolkit=str(body.get("toolkit", "")).strip(),
                 callback_url=str(body.get("callback_url", "")).strip() or None,
             )
@@ -109,7 +113,7 @@ def register_composio_routes(
             if str(is_connected or "").strip():
                 connected_flag = str(is_connected).strip().lower() in {"1", "true", "yes", "on"}
             return get_composio().list_toolkits(
-                customer_id=customer_id,
+                customer_id=resolve_customer_id_value(customer_id, resolve_customer_id),
                 toolkits=_parse_csv(toolkits),
                 is_connected=connected_flag,
                 limit=limit,
@@ -127,7 +131,7 @@ def register_composio_routes(
     ) -> Any:
         try:
             return get_composio().list_connected_accounts(
-                customer_id=customer_id,
+                customer_id=resolve_customer_id_value(customer_id, resolve_customer_id),
                 toolkits=_parse_csv(toolkits),
                 statuses=_parse_csv(statuses),
                 limit=limit,
@@ -182,7 +186,7 @@ def register_composio_routes(
         body = await request.json()
         try:
             return get_composio().inspect_instagram_reply_target(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 recipient_id=str(body.get("recipient_id", "")).strip() or None,
                 conversation_id=str(body.get("conversation_id", "")).strip() or None,
                 connected_account_id=str(body.get("connected_account_id", "")).strip() or None,
@@ -196,7 +200,7 @@ def register_composio_routes(
         body = await request.json()
         try:
             return get_composio().execute_tool(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 tool_slug=str(body.get("tool_slug", "")).strip(),
                 arguments=body.get("arguments") if isinstance(body.get("arguments"), dict) else {},
                 connected_account_id=str(body.get("connected_account_id", "")).strip() or None,

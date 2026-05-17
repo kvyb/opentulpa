@@ -24,6 +24,7 @@ class WakeOrchestrator:
         get_telegram_client: Callable[[], Any],
         get_agent_runtime: Callable[[], Any],
         get_intake_workflows: Callable[[], Any] | None = None,
+        resolve_customer_id: Callable[[str], str] | None = None,
     ) -> None:
         self._settings = settings
         self._get_context_events = get_context_events
@@ -31,6 +32,18 @@ class WakeOrchestrator:
         self._get_telegram_client = get_telegram_client
         self._get_agent_runtime = get_agent_runtime
         self._get_intake_workflows = get_intake_workflows
+        self._resolve_customer_id = resolve_customer_id
+
+    def _customer_id(self, value: Any) -> str:
+        cid = str(value or "").strip()
+        if not cid or self._resolve_customer_id is None:
+            return cid
+        resolved = str(self._resolve_customer_id(cid) or "").strip()
+        return resolved or cid
+
+    @staticmethod
+    def _payload(value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
 
     def _backlog(self, *, customer_id: str, source: str, event_type: str, payload: dict[str, Any]) -> None:
         self._get_context_events().add_event(
@@ -112,9 +125,9 @@ class WakeOrchestrator:
         await self._handle_routine_event(body)
 
     async def _handle_task_event(self, body: dict[str, Any]) -> None:
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = self._customer_id(body.get("customer_id", ""))
         event_type = str(body.get("event_type", "")).strip()
-        payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+        payload = self._payload(body.get("payload"))
         if not customer_id or event_type not in {"done", "failed", "needs_input", "worker_stopped"}:
             return
 
@@ -189,8 +202,8 @@ class WakeOrchestrator:
                 )
 
     async def _handle_routine_event(self, body: dict[str, Any]) -> None:
-        payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
-        customer_id = str(body.get("customer_id") or payload.get("customer_id") or "").strip()
+        payload = self._payload(body.get("payload"))
+        customer_id = self._customer_id(body.get("customer_id") or payload.get("customer_id") or "")
         if not customer_id:
             return
         event_type = str(body.get("event_type") or payload.get("event_type") or "scheduled").strip()
@@ -270,12 +283,12 @@ class WakeOrchestrator:
                     ),
                 )
                 return
-            slots: list[dict[str, Any]] = []
+            delivery_slots: list[dict[str, Any]] = []
             with suppress(Exception):
-                slots = self._get_telegram_chat().find_session_slots(customer_id)
-            owner_slots = [slot for slot in slots if str(slot.get("role", "")).strip() != "support"]
-            slots = owner_slots or slots[:1]
-            if not slots:
+                delivery_slots = self._get_telegram_chat().find_session_slots(customer_id)
+            owner_slots = [slot for slot in delivery_slots if str(slot.get("role", "")).strip() != "support"]
+            delivery_slots = owner_slots or delivery_slots[:1]
+            if not delivery_slots:
                 self._record_routine_execution(
                     customer_id=customer_id,
                     event_type=event_type,
@@ -284,8 +297,8 @@ class WakeOrchestrator:
                     notification_error="no_telegram_session_slots",
                 )
                 return
-            notified_chat_ids: list[int] = []
-            for slot in slots:
+            notified_owner_chat_ids: list[int] = []
+            for slot in delivery_slots:
                 chat_id = int(slot["chat_id"])
                 await self._get_telegram_client().send_message(
                     chat_id=chat_id,
@@ -294,13 +307,13 @@ class WakeOrchestrator:
                 )
                 with suppress(Exception):
                     self._get_telegram_chat().touch_assistant_message(chat_id)
-                notified_chat_ids.append(chat_id)
+                notified_owner_chat_ids.append(chat_id)
             self._record_routine_execution(
                 customer_id=customer_id,
                 event_type=event_type,
                 payload=queue_payload,
                 notification_status="sent",
-                notified_chat_ids=notified_chat_ids,
+                notified_chat_ids=notified_owner_chat_ids,
             )
             return
 
@@ -378,10 +391,10 @@ class WakeOrchestrator:
             )
             return
 
-        slots: list[dict[str, Any]] = []
+        routine_slots: list[dict[str, Any]] = []
         with suppress(Exception):
-            slots = self._get_telegram_chat().find_session_slots(customer_id)
-        if not slots:
+            routine_slots = self._get_telegram_chat().find_session_slots(customer_id)
+        if not routine_slots:
             self._record_routine_execution(
                 customer_id=customer_id,
                 event_type=event_type,
@@ -391,8 +404,8 @@ class WakeOrchestrator:
             )
             return
 
-        notified_chat_ids: list[int] = []
-        for slot in slots:
+        notified_routine_chat_ids: list[int] = []
+        for slot in routine_slots:
             chat_id = int(slot["chat_id"])
             await self._get_telegram_client().send_message(
                 chat_id=chat_id,
@@ -401,13 +414,13 @@ class WakeOrchestrator:
             )
             with suppress(Exception):
                 self._get_telegram_chat().touch_assistant_message(chat_id)
-            notified_chat_ids.append(chat_id)
+            notified_routine_chat_ids.append(chat_id)
         self._record_routine_execution(
             customer_id=customer_id,
             event_type=event_type,
             payload=queue_payload,
             notification_status="sent",
-            notified_chat_ids=notified_chat_ids,
+            notified_chat_ids=notified_routine_chat_ids,
         )
 
 

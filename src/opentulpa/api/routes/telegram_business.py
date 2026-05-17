@@ -7,11 +7,14 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
+
 
 def register_telegram_business_routes(
     app: FastAPI,
     *,
     get_telegram_business: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register Telegram Business status routes."""
 
@@ -19,4 +22,4 @@ def register_telegram_business_routes(
     async def internal_telegram_business_status(request: Request) -> Any:
         service = get_telegram_business()
         body = await request.json()
-        return service.status(customer_id=str(body.get("customer_id", "")).strip())
+        return service.status(customer_id=resolve_body_customer_id(body, resolve_customer_id))

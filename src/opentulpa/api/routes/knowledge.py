@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
 from opentulpa.business_knowledge.service import query_result_payload
 
 
@@ -15,6 +16,7 @@ def register_knowledge_routes(
     app: FastAPI,
     *,
     get_knowledge_service: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register internal business knowledge endpoints."""
 
@@ -24,7 +26,7 @@ def register_knowledge_routes(
         body = await request.json()
         try:
             return service.index_sources(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 scope_type=str(body.get("scope_type", "")).strip(),
                 scope_id=str(body.get("scope_id", "")).strip(),
                 file_ids=body.get("file_ids") if isinstance(body.get("file_ids"), list) else [],
@@ -38,7 +40,7 @@ def register_knowledge_routes(
         body = await request.json()
         try:
             result = service.query(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 scope_type=str(body.get("scope_type", "")).strip(),
                 scope_id=str(body.get("scope_id", "")).strip(),
                 query=str(body.get("query", "")).strip(),
@@ -57,7 +59,7 @@ def register_knowledge_routes(
         body = await request.json()
         try:
             return service.preflight_scope(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 scope_type=str(body.get("scope_type", "")).strip(),
                 scope_id=str(body.get("scope_id", "")).strip(),
                 workflow_goal=str(body.get("workflow_goal", "")).strip(),
@@ -71,7 +73,7 @@ def register_knowledge_routes(
         body = await request.json()
         try:
             return service.promote_scope(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
                 source_scope_type=str(body.get("source_scope_type", "")).strip(),
                 source_scope_id=str(body.get("source_scope_id", "")).strip(),
                 target_scope_type=str(body.get("target_scope_type", "")).strip(),

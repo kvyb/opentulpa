@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
 from opentulpa.domain.conversation import ConversationTurnRequest
 from opentulpa.web.events import append_web_event
 
@@ -16,13 +17,14 @@ def register_chat_routes(
     app: FastAPI,
     *,
     get_turn_orchestrator: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register API chat endpoints for direct (non-Telegram) turn simulation."""
 
     @app.post("/internal/chat")
     async def internal_chat(request: Request) -> Any:
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         text = str(body.get("text", "")).strip()
         thread_id = str(body.get("thread_id", "")).strip()
         if not thread_id and customer_id:
@@ -43,6 +45,13 @@ def register_chat_routes(
                 status_code=400,
                 content={"detail": "customer_id and text are required"},
             )
+        append_web_event(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            source="chat",
+            kind="user_message",
+            text=text,
+        )
         orchestrator = get_turn_orchestrator()
         result = await orchestrator.run_turn(
             ConversationTurnRequest(

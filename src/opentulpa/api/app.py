@@ -276,6 +276,9 @@ def create_app(
             bot_token=settings.telegram_bot_token,
             file_vault=vault_service,
             memory=memory_service,
+            resolve_customer_id=profile_service.resolve_customer_id,
+            resolve_telegram_customer_id=profile_service.resolve_telegram_customer_id,
+            alias_user_ids=profile_service.alias_user_ids,
         )
         if settings.telegram_bot_token
         else None
@@ -328,11 +331,14 @@ def create_app(
 
     telegram_business = TelegramBusinessService(
         db_path=PROJECT_ROOT / ".opentulpa" / "telegram_business.db",
-        owner_customer_id=_telegram_business_owner_customer_id(
-            allowed_usernames=settings.telegram_allowed_usernames,
-            allowed_user_ids=settings.telegram_allowed_user_ids,
-            state_path=PROJECT_ROOT / ".opentulpa" / "telegram_state.json",
+        owner_customer_id=profile_service.resolve_customer_id(
+            _telegram_business_owner_customer_id(
+                allowed_usernames=settings.telegram_allowed_usernames,
+                allowed_user_ids=settings.telegram_allowed_user_ids,
+                state_path=PROJECT_ROOT / ".opentulpa" / "telegram_state.json",
+            )
         ),
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     telegram_business.client = telegram_client
 
@@ -468,6 +474,7 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
         get_intake_workflows=get_intake_workflows,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
 
     async def process_wake_event(body: dict[str, Any]) -> None:
@@ -561,15 +568,24 @@ def create_app(
 
     register_health_routes(app, get_agent_runtime=get_agent_runtime)
     register_debug_log_routes(app)
-    register_chat_routes(app, get_turn_orchestrator=get_turn_orchestrator)
+    register_chat_routes(
+        app,
+        get_turn_orchestrator=get_turn_orchestrator,
+        resolve_customer_id=profile_service.resolve_customer_id,
+    )
     register_generic_chat_routes(
         app,
         web_token=settings.opentulpa_web_token,
         get_agent_runtime=get_agent_runtime,
         get_file_vault=get_file_vault,
         get_workflow_setup_service=get_workflow_setup_service,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
-    register_memory_routes(app, get_memory=get_memory)
+    register_memory_routes(
+        app,
+        get_memory=get_memory,
+        resolve_customer_id=profile_service.resolve_customer_id,
+    )
     register_file_routes(
         app,
         get_file_vault=get_file_vault,
@@ -577,13 +593,19 @@ def create_app(
         get_telegram_client=get_telegram_client,
         get_agent_runtime=get_agent_runtime,
         telegram_enabled=bool(settings.telegram_bot_token),
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
-    register_knowledge_routes(app, get_knowledge_service=get_knowledge_service)
+    register_knowledge_routes(
+        app,
+        get_knowledge_service=get_knowledge_service,
+        resolve_customer_id=profile_service.resolve_customer_id,
+    )
     register_user_context_routes(
         app,
         get_user_context_service=get_user_context_service,
         get_file_vault=get_file_vault,
         get_agent_runtime=get_agent_runtime,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_profile_routes(
         app,
@@ -594,40 +616,54 @@ def create_app(
         app,
         get_skill_store=get_skill_store,
         get_memory=lambda: memory_service,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_intake_workflow_routes(
         app,
         get_intake_workflows=get_intake_workflows,
         get_workflow_setup_service=get_workflow_setup_service,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_telegram_business_routes(
         app,
         get_telegram_business=get_telegram_business,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_system_routes(app)
-    register_composio_routes(app, get_composio=get_composio)
+    register_composio_routes(
+        app,
+        get_composio=get_composio,
+        resolve_customer_id=profile_service.resolve_customer_id,
+    )
 
     register_scheduler_routes(
         app,
         get_scheduler=get_scheduler,
         delete_file=sandbox_delete_file,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_wake_and_search_routes(
         app,
         get_wake_queue=get_wake_queue,
         llm_model=settings.llm_model,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_web_event_routes(
         app,
         settings=settings,
         get_web_events=get_web_events,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_tulpa_routes(
         app,
         get_tulpa_loader=get_tulpa_loader,
         refresh_tulpa_mounts=refresh_tulpa_mounts,
     )
-    register_task_routes(app, get_tasks=get_tasks)
+    register_task_routes(
+        app,
+        get_tasks=get_tasks,
+        resolve_customer_id=profile_service.resolve_customer_id,
+    )
 
     register_telegram_webhook_routes(
         app,

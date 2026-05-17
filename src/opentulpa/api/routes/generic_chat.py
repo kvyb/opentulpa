@@ -16,12 +16,14 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from opentulpa.agent.runtime import STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL
+from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
 from opentulpa.api.file_helpers import sanitize_uploaded_file_record
 from opentulpa.context.uploaded_files import (
     build_uploaded_files_context,
     should_skip_auto_summary_for_upload,
 )
 from opentulpa.tasks.sandbox import TULPA_STUFF_DIR, is_within
+from opentulpa.web.events import append_web_event
 
 MAX_WEB_UPLOAD_BYTES = 45_000_000
 
@@ -83,8 +85,12 @@ def register_generic_chat_routes(
     get_agent_runtime: Callable[[], Any],
     get_file_vault: Callable[[], Any],
     get_workflow_setup_service: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register authenticated generic chat endpoints."""
+
+    def _resolve_customer_id(customer_id: str) -> str:
+        return resolve_customer_id_value(customer_id, resolve_customer_id)
 
     @app.post(
         "/web/chat/turns",
@@ -110,7 +116,7 @@ def register_generic_chat_routes(
                 runtime=runtime,
                 workflow_setup_service=get_workflow_setup_service(),
                 file_vault=get_file_vault(),
-                customer_id=payload.customer_id,
+                customer_id=_resolve_customer_id(payload.customer_id),
                 thread_id=payload.thread_id,
                 text=payload.text,
                 file_ids=payload.file_ids,
@@ -137,7 +143,7 @@ def register_generic_chat_routes(
             )
         if not _authorized(request, secret):
             return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        safe_customer_id = str(customer_id or "").strip()
+        safe_customer_id = _resolve_customer_id(customer_id)
         safe_thread_id = str(thread_id or "").strip()
         safe_kind = str(kind or "document").strip() or "document"
         safe_caption = str(caption or "").strip() or None
@@ -187,7 +193,7 @@ def register_generic_chat_routes(
         auth = _authorized_web_request(request, web_token)
         if auth is not None:
             return auth
-        record = get_file_vault().get_file(customer_id.strip(), file_id)
+        record = get_file_vault().get_file(_resolve_customer_id(customer_id), file_id)
         if not record:
             return JSONResponse(status_code=404, content={"detail": "file not found"})
         return {"ok": True, "file": _web_file_metadata(record)}
@@ -201,7 +207,7 @@ def register_generic_chat_routes(
         auth = _authorized_web_request(request, web_token)
         if auth is not None:
             return auth
-        safe_customer_id = customer_id.strip()
+        safe_customer_id = _resolve_customer_id(customer_id)
         vault = get_file_vault()
         record = vault.get_file(safe_customer_id, file_id)
         if not record:
@@ -263,6 +269,13 @@ async def _stream_turn(
         safe = str(message or "").strip()
         if not safe:
             return {"ok": False, "sent": False, "reason": "empty_message"}
+        append_web_event(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            source="web",
+            kind="owner_update",
+            text=safe,
+        )
         await queue.put(("owner_update", {"message": safe}))
         return {"ok": True, "sent": True}
 
@@ -273,6 +286,13 @@ async def _stream_turn(
         return {"ok": True, "sent": True}
 
     async def _run_turn() -> None:
+        append_web_event(
+            customer_id=customer_id,
+            thread_id=thread_id,
+            source="web",
+            kind="user_message",
+            text=text,
+        )
         turn_mode = "interactive"
         if workflow_setup_service is not None and hasattr(workflow_setup_service, "thread_status"):
             status = workflow_setup_service.thread_status(
@@ -337,6 +357,14 @@ async def _stream_turn(
                     reply_text=final_text,
                 )
             await queue.put(("final", {"text": final_text}))
+            if final_text:
+                append_web_event(
+                    customer_id=customer_id,
+                    thread_id=thread_id,
+                    source="web",
+                    kind="assistant_message",
+                    text=final_text,
+                )
         except Exception as exc:
             await queue.put(("error", {"message": str(exc), "type": type(exc).__name__}))
         finally:

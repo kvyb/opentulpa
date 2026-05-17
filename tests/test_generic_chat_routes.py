@@ -5,6 +5,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from opentulpa.api.app import create_app
+from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.config import get_settings
 
@@ -107,6 +108,36 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert "event: final" in text
     assert runtime.calls[0]["customer_id"] == "telegram_1"
     assert runtime.calls[0]["thread_id"] == "dashboard-owner-1"
+
+
+def test_web_chat_resolves_bound_telegram_alias(monkeypatch: Any, tmp_path: Any) -> None:
+    monkeypatch.setenv("OPENTULPA_WEB_TOKEN", "web-secret")
+    get_settings.cache_clear()
+    runtime = _StreamingRuntime()
+    vault = FileVaultService(root_dir=tmp_path / "vault", db_path=tmp_path / "vault.db")
+    profiles = CustomerProfileService(tmp_path / "profiles.db")
+    profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="1")
+    app = create_app(
+        agent_runtime=runtime,
+        file_vault_service=vault,
+        customer_profile_service=profiles,
+    )
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/web/chat/turns",
+        headers={"authorization": "Bearer web-secret"},
+        json={
+            "customer_id": "telegram_1",
+            "thread_id": "dashboard-owner-1",
+            "text": "hi",
+        },
+    ) as response:
+        _ = response.read()
+
+    assert response.status_code == 200
+    assert runtime.calls[0]["customer_id"] == "usr_default"
 
 
 def test_web_file_upload_and_content_are_bearer_protected(monkeypatch: Any, tmp_path: Any) -> None:

@@ -103,6 +103,49 @@ This keeps these concerns separate:
 
 If a Business account is not visible after setup, inspect webhook delivery and stored connection state instead of adding the Business account to env vars. The useful checks are Telegram `getWebhookInfo`, `/debug_logs` webhook diagnostics, `.opentulpa/telegram_business.db`, and the workflow `source_config.business_connection_id`.
 
+### Profile identity aliases
+
+OpenTulpa identity is not required to be Telegram identity. The durable account id can be a generic `user_id` such as `usr_default`, and a Telegram user id can be bound later to add Telegram chat capability. Generic identity alone does not enable Telegram: Telegram chat and Telegram Business require a real Telegram user id plus a configured bot token/client.
+
+Profile binding is alias resolution, not data copying. Before storage reads or writes, API and Telegram entrypoints resolve the inbound id to one storage scope:
+
+```text
+request customer_id: usr_default  -> storage_user_id: usr_default
+request customer_id: telegram_123 -> storage_user_id: usr_default
+```
+
+Use the generic id when creating a non-Telegram OpenTulpa account. All normal OpenTulpa state can be created under that id: profiles, workflows, files, skills, memory, web chat events, scheduler rows, wake/search state, artifacts, and sandbox files. Example workflow payload:
+
+```json
+{
+  "customer_id": "usr_default",
+  "name": "Car Wash Intake"
+}
+```
+
+Bind Telegram only after the real Telegram user id is known:
+
+```http
+POST /profiles/bind-telegram
+Content-Type: application/json
+
+{"user_id":"usr_default","telegram_user_id":"123"}
+```
+
+After that bind, requests using either `usr_default` or `telegram_123` operate on the same canonical storage scope. The id `telegram_123` is the Telegram alias format; callers pass the raw Telegram id only to the bind route.
+
+First-created storage wins. If `usr_default` exists first, binding maps `telegram_123` to `usr_default`. If `telegram_123` already existed first, binding maps `usr_default` to the existing Telegram storage so legacy Telegram users keep their data. If both ids already have separate data, OpenTulpa rejects automatic binding because a silent merge can corrupt conversation history, artifacts, workflow state, or sandbox references.
+
+The current product model supports one generic OpenTulpa user and at most one main Telegram user binding for it. Existing Telegram-canonical users keep working because unbound Telegram chats still fall back to `telegram_<telegram_user_id>`.
+
+Manage ids with:
+
+- `GET /profiles`: list known profile ids and bindings.
+- `POST /profiles/bind-telegram`: bind a generic `user_id` to a Telegram user id.
+- Any customer-scoped route: pass either the generic id or its Telegram alias; the route resolves to canonical storage before reading or writing.
+
+Do not copy history, artifacts, or workflow rows between ids. If a user needs Telegram capability, create or keep the generic account, bind the Telegram user id, and let alias resolution share the same storage scope.
+
 ### Support act-as flow
 
 Support operators are trusted operators configured by `TELEGRAM_SUPPORT_USER_IDS` or `TELEGRAM_SUPPORT_USERNAMES`.

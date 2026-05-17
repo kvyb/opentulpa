@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from opentulpa.agent.knowledge_prep import inspect_uploaded_file_structure
+from opentulpa.api.customer_ids import resolve_body_customer_id
 from opentulpa.api.file_helpers import (
     download_image_from_web_url,
     sanitize_uploaded_file_record,
@@ -41,6 +42,7 @@ def register_file_routes(
     get_telegram_client: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
     telegram_enabled: bool,
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register uploaded-file search/get/send/analyze endpoints."""
 
@@ -48,7 +50,7 @@ def register_file_routes(
     async def internal_files_search(request: Request) -> Any:
         vault = get_file_vault()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         query = str(body.get("query", "")).strip()
         limit = int(body.get("limit", 5))
         results = [
@@ -61,7 +63,7 @@ def register_file_routes(
     async def internal_files_get(request: Request) -> Any:
         vault = get_file_vault()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         file_id = str(body.get("file_id", "")).strip()
         max_excerpt_chars = max(500, min(int(body.get("max_excerpt_chars", 16000)), 60000))
         record = vault.get_file(customer_id, file_id)
@@ -80,7 +82,7 @@ def register_file_routes(
     async def internal_files_send(request: Request) -> Any:
         vault = get_file_vault()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         file_id = str(body.get("file_id", "")).strip()
         caption_raw = body.get("caption")
         caption = str(caption_raw).strip() if caption_raw is not None else None
@@ -123,7 +125,7 @@ def register_file_routes(
     @app.post("/internal/files/send_local")
     async def internal_files_send_local(request: Request) -> Any:
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         local_path = str(body.get("path", "")).strip()
         caption_raw = body.get("caption")
         caption = str(caption_raw).strip() if caption_raw is not None else None
@@ -185,7 +187,7 @@ def register_file_routes(
     @app.post("/internal/files/send_web_image")
     async def internal_files_send_web_image(request: Request) -> Any:
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         image_url = str(body.get("url", "")).strip()
         caption_raw = body.get("caption")
         caption = str(caption_raw).strip() if caption_raw is not None else None
@@ -240,7 +242,7 @@ def register_file_routes(
     async def internal_files_analyze(request: Request) -> Any:
         vault = get_file_vault()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         file_id = str(body.get("file_id", "")).strip()
         question_raw = body.get("question")
         question = str(question_raw).strip() if question_raw is not None else None
@@ -286,7 +288,7 @@ def register_file_routes(
     async def internal_files_inspect_structure(request: Request) -> Any:
         vault = get_file_vault()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         file_id = str(body.get("file_id", "")).strip()
         if not customer_id or not file_id:
             return JSONResponse(

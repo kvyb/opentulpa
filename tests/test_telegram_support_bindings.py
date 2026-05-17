@@ -110,6 +110,23 @@ async def test_support_commands_rejected_when_support_env_unset(
 
 
 @pytest.mark.asyncio
+async def test_owner_fresh_uses_bound_generic_customer_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 1, "sessions": {}, "pending_key_by_chat": {}})
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+
+    text = await chat_module.handle_telegram_text(
+        body=_body(chat_id=1000, user_id=123, username="owner", text="/fresh"),
+        allowed_user_ids_csv="123",
+        resolve_telegram_customer_id=lambda user_id: "usr_default",
+    )
+
+    assert "Started a fresh chat context" in str(text)
+    assert fake_store.state["sessions"]["1000"]["customer_id"] == "usr_default"
+
+
+@pytest.mark.asyncio
 async def test_support_bind_by_id_and_route_runtime_to_bound_customer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

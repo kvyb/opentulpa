@@ -8,18 +8,21 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
+
 
 def register_task_routes(
     app: FastAPI,
     *,
     get_tasks: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register task create/status/event/artifact/control endpoints."""
 
     @app.post("/internal/tasks/create")
     async def internal_task_create(request: Request) -> Any:
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         goal = str(body.get("goal", "")).strip()
         payload = body.get("payload") or {}
         risk_level = str(body.get("risk_level", "low")).strip() or "low"

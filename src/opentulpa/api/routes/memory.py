@@ -7,11 +7,14 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 
+from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
+
 
 def register_memory_routes(
     app: FastAPI,
     *,
     get_memory: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register internal memory add/search endpoints."""
 
@@ -20,7 +23,7 @@ def register_memory_routes(
         mem = get_memory()
         body = await request.json()
         messages = body.get("messages", [])
-        user_id = body.get("user_id") or mem.user_id
+        user_id = resolve_customer_id_value(body.get("user_id") or mem.user_id, resolve_customer_id)
         metadata = body.get("metadata") or {}
         infer = bool(body.get("infer", True))
         retries = int(body.get("retries", 1) or 1)
@@ -38,7 +41,7 @@ def register_memory_routes(
         mem = get_memory()
         body = await request.json()
         query = str(body.get("query", "") or "")
-        user_id = body.get("user_id") or mem.user_id
+        user_id = resolve_customer_id_value(body.get("user_id") or mem.user_id, resolve_customer_id)
         try:
             limit = int(body.get("limit", 5))
         except (TypeError, ValueError):

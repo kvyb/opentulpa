@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from opentulpa.api.app import create_app
+from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.intake.service import IntakeWorkflowService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
@@ -17,7 +18,11 @@ class _DisabledComposio:
         return {"ok": True, "enabled": False}
 
 
-def _mk_client(tmp_path: Path) -> TestClient:
+def _mk_client(
+    tmp_path: Path,
+    *,
+    customer_profiles: CustomerProfileService | None = None,
+) -> TestClient:
     scheduler = SchedulerService(db_path=tmp_path / "scheduler.db")
     skills = SkillStoreService(
         db_path=tmp_path / "skills.db",
@@ -34,6 +39,7 @@ def _mk_client(tmp_path: Path) -> TestClient:
             composio=_DisabledComposio(),
         ),
         composio_service=_DisabledComposio(),
+        customer_profile_service=customer_profiles,
     )
     return TestClient(app)
 
@@ -79,6 +85,33 @@ def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
+
+
+def test_intake_workflow_routes_resolve_customer_alias(tmp_path: Path) -> None:
+    profiles = CustomerProfileService(tmp_path / "profiles.db")
+    profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="123")
+
+    with _mk_client(tmp_path, customer_profiles=profiles) as client:
+        upsert = client.post(
+            "/internal/intake/workflows/upsert",
+            json={
+                "customer_id": "telegram_123",
+                "name": "Alias Intake",
+                "intent_description": "Handle alias-routed requests.",
+                "required_fields": ["name"],
+                "sink_type": "local_csv",
+                "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            },
+        )
+        assert upsert.status_code == 200
+        assert upsert.json()["workflow"]["customer_id"] == "usr_default"
+
+        listed = client.post(
+            "/internal/intake/workflows/list",
+            json={"customer_id": "usr_default", "include_disabled": True},
+        )
+        assert listed.status_code == 200
+        assert [item["name"] for item in listed.json()["workflows"]] == ["Alias Intake"]
 
 
 def test_telegram_business_workflow_route_requires_delete_then_recreate(tmp_path: Path) -> None:

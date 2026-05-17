@@ -83,3 +83,92 @@ def test_profile_routes_reject_invalid_payloads_via_pydantic(tmp_path: Path) -> 
         json={"customer_id": "telegram_1", "utc_offset": "UTC+8"},
     )
     assert bad_offset.status_code == 422
+
+
+def test_profile_routes_bind_telegram_alias_to_generic_storage(tmp_path: Path) -> None:
+    client, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("usr_default", "use generic storage", source="test")
+
+    bind = client.post(
+        "/profiles/bind-telegram",
+        json={"user_id": "usr_default", "telegram_user_id": "123"},
+    )
+    assert bind.status_code == 200
+    assert bind.json() == {"ok": True, "customer_id": "usr_default"}
+
+    assert profiles.resolve_customer_id("telegram_123") == "usr_default"
+    assert profiles.get_directive("telegram_123") == "use generic storage"
+
+    listed = client.get("/profiles")
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["profiles"] == [
+        {
+            "user_id": "usr_default",
+            "storage_user_id": "usr_default",
+            "telegram_user_id": "123",
+            "aliases": ["usr_default", "telegram_123"],
+        }
+    ]
+    assert body["bindings"][1]["alias_user_id"] == "telegram_123"
+
+
+def test_profile_binding_uses_legacy_telegram_storage_when_it_exists_first(tmp_path: Path) -> None:
+    _, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("telegram_123", "legacy directive", source="test")
+
+    profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="123")
+
+    assert profiles.resolve_customer_id("usr_default") == "telegram_123"
+    assert profiles.get_directive("usr_default") == "legacy directive"
+
+
+def test_profile_binding_rejects_separate_existing_profiles(tmp_path: Path) -> None:
+    _, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("usr_default", "generic directive", source="test")
+    profiles.set_directive("telegram_123", "telegram directive", source="test")
+
+    try:
+        profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="123")
+    except ValueError as exc:
+        assert "manual merge" in str(exc)
+    else:
+        raise AssertionError("expected separate profile bind to be rejected")
+
+
+def test_profile_binding_rejects_existing_generic_profile_when_telegram_alias_is_bound(
+    tmp_path: Path,
+) -> None:
+    _, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("telegram_123", "legacy directive", source="test")
+    profiles.bind_telegram_user_id(user_id="usr_first", telegram_user_id="123")
+    profiles.set_directive("usr_second", "separate generic directive", source="test")
+
+    try:
+        profiles.bind_telegram_user_id(user_id="usr_second", telegram_user_id="123")
+    except ValueError as exc:
+        assert "manual merge" in str(exc)
+    else:
+        raise AssertionError("expected conflicting generic profile bind to be rejected")
+
+    assert profiles.resolve_customer_id("usr_second") == "usr_second"
+    assert profiles.get_directive("usr_second") == "separate generic directive"
+
+
+def test_profile_binding_rejects_existing_telegram_profile_when_generic_alias_is_bound(
+    tmp_path: Path,
+) -> None:
+    _, profiles, _ = _mk_client(tmp_path)
+    profiles.set_directive("usr_default", "generic directive", source="test")
+    profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="123")
+    profiles.set_directive("telegram_456", "separate telegram directive", source="test")
+
+    try:
+        profiles.bind_telegram_user_id(user_id="usr_default", telegram_user_id="456")
+    except ValueError as exc:
+        assert "manual merge" in str(exc)
+    else:
+        raise AssertionError("expected conflicting telegram profile bind to be rejected")
+
+    assert profiles.resolve_customer_id("telegram_456") == "telegram_456"
+    assert profiles.get_directive("telegram_456") == "separate telegram directive"

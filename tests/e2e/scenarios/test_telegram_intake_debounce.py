@@ -13,6 +13,7 @@ from harness.runner import E2EHarness
 from mocks.telegram import FakeTelegramClient
 
 from opentulpa.api.app import create_app
+from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.core.config import get_settings
 from opentulpa.intake import service as intake_service_module
 from opentulpa.scheduler.service import SchedulerService
@@ -260,6 +261,7 @@ def _create_fake_telegram_app(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     runtime: Any,
+    customer_profiles: CustomerProfileService | None = None,
 ) -> tuple[Any, FakeTelegramClient]:
     from opentulpa.api import app as app_module
     from opentulpa.tasks import sandbox as sandbox_module
@@ -280,7 +282,11 @@ def _create_fake_telegram_app(
     get_settings.cache_clear()
 
     scheduler = SchedulerService(db_path=tmp_path / "scheduler.sqlite")
-    app = create_app(agent_runtime=runtime, scheduler=scheduler)
+    app = create_app(
+        agent_runtime=runtime,
+        scheduler=scheduler,
+        customer_profile_service=customer_profiles,
+    )
     return app, fake_telegram
 
 
@@ -604,6 +610,119 @@ def test_telegram_business_intake_worker_does_not_block_unrelated_leads(
         f"Reply for {second['lead_chat_id']}",
     }
     assert runtime.max_active >= 2
+
+
+def test_telegram_business_intake_uses_generic_user_id_after_late_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _ParallelRuntime()
+    profiles = CustomerProfileService(tmp_path / "profiles.sqlite")
+    app, fake_telegram = _create_fake_telegram_app(
+        tmp_path,
+        monkeypatch,
+        runtime,
+        customer_profiles=profiles,
+    )
+    generic_user_id = "usr_default"
+    owner_user_id = 631
+    owner_chat_id = 6631
+    lead_chat_id = 783
+    lead_user_id = 893
+    business_connection_id = "bc_e2e_generic_late_bind"
+
+    with TestClient(app) as client:
+        connection = app.state.telegram_business.upsert_connection(
+            {
+                "id": business_connection_id,
+                "user_chat_id": owner_chat_id,
+                "is_enabled": True,
+                "user": {
+                    "id": owner_user_id,
+                    "is_bot": False,
+                    "first_name": "Generic Owner",
+                },
+                "rights": {"can_reply": True},
+            }
+        )
+        assert connection["customer_id"] == f"telegram_{owner_user_id}"
+
+        create = client.post(
+            "/internal/intake/workflows/upsert",
+            json={
+                "customer_id": generic_user_id,
+                "name": "Generic Telegram Intake",
+                "channel": "telegram_business_dm",
+                "provider": "telegram_bot_api",
+                "source_config": {"business_connection_id": business_connection_id},
+                "intent_description": "Handle Telegram Business intake requests for generic owner.",
+                "required_fields": ["time"],
+                "assistant_instructions": "Reply to the lead from generic owner storage.",
+                "sink_type": "local_csv",
+                "sink_config": {"file_path": "tulpa_stuff/generic_late_bind.csv"},
+            },
+        )
+        assert create.status_code == 200, create.text
+        workflow = create.json()["workflow"]
+        assert workflow["customer_id"] == generic_user_id
+
+        bind = client.post(
+            "/profiles/bind-telegram",
+            json={"user_id": generic_user_id, "telegram_user_id": str(owner_user_id)},
+        )
+        assert bind.status_code == 200, bind.text
+        assert profiles.resolve_customer_id(f"telegram_{owner_user_id}") == generic_user_id
+
+        message_status = client.post(
+            "/webhook/telegram",
+            headers={"x-telegram-bot-api-secret-token": "test-secret"},
+            json=_business_message(
+                business_connection_id=business_connection_id,
+                lead_chat_id=lead_chat_id,
+                lead_user_id=lead_user_id,
+                message_id=50,
+                text="Need detailing today",
+            ),
+        )
+        assert message_status.status_code == 200
+
+        assert _wait_until(
+            lambda: len(
+                [
+                    item
+                    for item in fake_telegram.sent_messages
+                    if str(item.get("business_connection_id", "")).strip() == business_connection_id
+                    and int(item.get("chat_id", 0)) == lead_chat_id
+                ]
+            )
+            == 1,
+            timeout_seconds=5.0,
+        )
+
+    assert runtime.calls
+    assert runtime.calls[0]["customer_id"] == generic_user_id
+    assert runtime.calls[0]["workflow"]["workflow_id"] == workflow["workflow_id"]
+    assert runtime.calls[0]["conversation"]["summary"]["conversation_id"] == str(lead_chat_id)
+
+    lead_replies = [
+        item
+        for item in fake_telegram.sent_messages
+        if str(item.get("business_connection_id", "")).strip() == business_connection_id
+        and int(item.get("chat_id", 0)) == lead_chat_id
+    ]
+    assert len(lead_replies) == 1
+    assert lead_replies[0]["reply_to_message_id"] == 50
+    assert lead_replies[0]["text"] == f"Reply for {lead_chat_id}"
+
+    stored_connection = app.state.telegram_business.get_connection(business_connection_id)
+    assert stored_connection is not None
+    assert stored_connection["customer_id"] == generic_user_id
+    conversation = app.state.telegram_business.get_conversation(
+        customer_id=generic_user_id,
+        business_connection_id=business_connection_id,
+        conversation_id=str(lead_chat_id),
+    )
+    assert conversation["ok"] is True
 
 
 @pytest.mark.live_llm

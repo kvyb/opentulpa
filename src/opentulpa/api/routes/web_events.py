@@ -10,12 +10,15 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
+
 
 def register_web_event_routes(
     app: FastAPI,
     *,
     settings: Any,
     get_web_events: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register dashboard-facing event feed routes."""
 
@@ -35,7 +38,10 @@ def register_web_event_routes(
 
         after_id = _int_query(request, "after_id", default=0)
         limit = _int_query(request, "limit", default=100)
-        customer_id = str(request.query_params.get("customer_id", "") or "").strip() or None
+        customer_id = (
+            resolve_customer_id_value(request.query_params.get("customer_id", ""), resolve_customer_id)
+            or None
+        )
         events = get_web_events().list_events(
             after_id=after_id,
             limit=limit,

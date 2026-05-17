@@ -21,6 +21,8 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
+
 
 def register_user_context_routes(
     app: FastAPI,
@@ -28,6 +30,7 @@ def register_user_context_routes(
     get_user_context_service: Callable[[], Any],
     get_file_vault: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register internal user-context endpoints."""
 
@@ -147,18 +150,19 @@ def register_user_context_routes(
         body = await request.json()
         try:
             started = time.monotonic()
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             file_ids = body.get("file_ids") if isinstance(body.get("file_ids"), list) else []
             prep = await _prepare_user_context_files(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_ids=file_ids,
             )
             result = service.add_files(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_ids=file_ids,
             )
             _record_user_context_event(
                 "user_context.add_files",
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_count=len(file_ids),
                 source_count=_source_count(result),
                 warning_count=_warning_count(result),
@@ -175,8 +179,9 @@ def register_user_context_routes(
         service = get_user_context_service()
         body = await request.json()
         try:
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             return service.list_sources(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 include_archived=bool(body.get("include_archived", False)),
             )
         except Exception as exc:
@@ -187,8 +192,9 @@ def register_user_context_routes(
         service = get_user_context_service()
         body = await request.json()
         try:
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             return service.find_sources(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 query=str(body.get("query", "")).strip(),
                 limit=int(body.get("limit", 10) or 10),
             )
@@ -201,14 +207,15 @@ def register_user_context_routes(
         body = await request.json()
         try:
             started = time.monotonic()
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             result = service.query(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 query=str(body.get("query", "")).strip(),
                 max_extract_chars=int(body.get("max_extract_chars", 3000) or 3000),
             )
             _record_user_context_event(
                 "user_context.query",
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 ok=bool(result.get("ok")) if isinstance(result, dict) else False,
                 source_count=int(result.get("source_count") or 0) if isinstance(result, dict) else 0,
                 section_count=int(result.get("section_count") or 0) if isinstance(result, dict) else 0,
@@ -225,20 +232,21 @@ def register_user_context_routes(
         body = await request.json()
         try:
             started = time.monotonic()
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             file_ids = body.get("file_ids") if isinstance(body.get("file_ids"), list) else None
             prep = {"prepared_count": 0, "failed_count": 0}
             if file_ids:
                 prep = await _prepare_user_context_files(
-                    customer_id=str(body.get("customer_id", "")).strip(),
+                    customer_id=customer_id,
                     file_ids=file_ids,
                 )
             result = service.reindex(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_ids=file_ids,
             )
             _record_user_context_event(
                 "user_context.reindex",
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_count=len(file_ids or []),
                 source_count=_source_count(result),
                 warning_count=_warning_count(result),
@@ -256,14 +264,15 @@ def register_user_context_routes(
         body = await request.json()
         try:
             started = time.monotonic()
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             file_ids = body.get("file_ids") if isinstance(body.get("file_ids"), list) else []
             result = service.archive_sources(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_ids=file_ids,
             )
             _record_user_context_event(
                 "user_context.archive_sources",
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 file_count=len(file_ids),
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
@@ -277,15 +286,16 @@ def register_user_context_routes(
         body = await request.json()
         try:
             started = time.monotonic()
+            customer_id = resolve_body_customer_id(body, resolve_customer_id)
             file_ids = body.get("file_ids") if isinstance(body.get("file_ids"), list) else []
             result = service.promote_to_intake(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 workflow_id=str(body.get("workflow_id", "")).strip(),
                 file_ids=file_ids,
             )
             _record_user_context_event(
                 "user_context.promote_to_intake",
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 workflow_id=str(body.get("workflow_id", "")).strip(),
                 file_count=len(file_ids),
                 source_count=_source_count(result),

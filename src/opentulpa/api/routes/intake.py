@@ -8,12 +8,15 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
+
 
 def register_intake_workflow_routes(
     app: FastAPI,
     *,
     get_intake_workflows: Callable[[], Any],
     get_workflow_setup_service: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register internal intake workflow endpoints."""
 
@@ -21,9 +24,10 @@ def register_intake_workflow_routes(
     async def internal_intake_workflows_upsert(request: Request) -> Any:
         service = get_intake_workflows()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             workflow = service.upsert_workflow(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 workflow_id=str(body.get("workflow_id", "")).strip() or None,
                 name=str(body.get("name", "")).strip(),
                 channel=str(body.get("channel", "instagram_dm")).strip() or "instagram_dm",
@@ -50,7 +54,7 @@ def register_intake_workflow_routes(
         service = get_intake_workflows()
         body = await request.json()
         workflows = service.list_workflows(
-            customer_id=str(body.get("customer_id", "")).strip(),
+            customer_id=resolve_body_customer_id(body, resolve_customer_id),
             include_disabled=bool(body.get("include_disabled", False)),
         )
         return {"ok": True, "workflows": workflows}
@@ -60,7 +64,7 @@ def register_intake_workflow_routes(
         service = get_intake_workflows()
         body = await request.json()
         workflow = service.get_workflow(
-            customer_id=str(body.get("customer_id", "")).strip(),
+            customer_id=resolve_body_customer_id(body, resolve_customer_id),
             workflow_id=str(body.get("workflow_id", "")).strip(),
         )
         if workflow is None:
@@ -72,7 +76,7 @@ def register_intake_workflow_routes(
         service = get_intake_workflows()
         body = await request.json()
         result = service.delete_workflow(
-            customer_id=str(body.get("customer_id", "")).strip(),
+            customer_id=resolve_body_customer_id(body, resolve_customer_id),
             workflow_id=str(body.get("workflow_id", "")).strip(),
         )
         if not bool(result.get("deleted", False)):
@@ -84,7 +88,7 @@ def register_intake_workflow_routes(
         service = get_intake_workflows()
         body = await request.json()
         workflow_id = str(body.get("workflow_id", "")).strip()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         if not workflow_id or not customer_id:
             return JSONResponse(
                 status_code=400,
@@ -103,9 +107,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_begin(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.begin_session(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
                 mode=str(body.get("mode", "")).strip(),
                 workflow_id=str(body.get("workflow_id", "")).strip() or None,
@@ -119,7 +124,7 @@ def register_intake_workflow_routes(
         service = get_workflow_setup_service()
         body = await request.json()
         session = service.get_thread_session(
-            customer_id=str(body.get("customer_id", "")).strip(),
+            customer_id=resolve_body_customer_id(body, resolve_customer_id),
             thread_id=str(body.get("thread_id", "")).strip(),
             include_paused=bool(body.get("include_paused", True)),
         )
@@ -131,9 +136,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_update(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.update_session(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
                 draft_patch=body.get("draft_patch") if isinstance(body.get("draft_patch"), dict) else None,
                 scratchpad_patch=body.get("scratchpad_patch") if isinstance(body.get("scratchpad_patch"), dict) else None,
@@ -146,9 +152,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_mark_proposed(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.mark_proposed(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
             )
         except Exception as exc:
@@ -159,9 +166,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_preflight(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.preflight_current(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
             )
         except Exception as exc:
@@ -172,9 +180,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_confirm_current(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.confirm_current(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
             )
         except Exception as exc:
@@ -185,9 +194,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_commit(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.commit(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
             )
         except Exception as exc:
@@ -198,9 +208,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_finalize_confirmation(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.finalize_confirmation(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
                 draft_patch=body.get("draft_patch") if isinstance(body.get("draft_patch"), dict) else None,
                 scratchpad_patch=body.get("scratchpad_patch") if isinstance(body.get("scratchpad_patch"), dict) else None,
@@ -213,9 +224,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_pause(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.pause(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
             )
         except Exception as exc:
@@ -226,9 +238,10 @@ def register_intake_workflow_routes(
     async def internal_intake_setup_cancel(request: Request) -> Any:
         service = get_workflow_setup_service()
         body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             session = service.cancel(
-                customer_id=str(body.get("customer_id", "")).strip(),
+                customer_id=customer_id,
                 thread_id=str(body.get("thread_id", "")).strip(),
             )
         except Exception as exc:
