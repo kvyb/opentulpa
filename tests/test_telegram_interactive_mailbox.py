@@ -154,6 +154,118 @@ async def test_telegram_interactive_owner_reply_to_bot_photo_adds_reply_context(
 
 
 @pytest.mark.asyncio
+async def test_telegram_group_mention_reply_adds_quoted_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
+    runtime = _InteractiveRuntime()
+    service = chat_module.TelegramChatService(
+        bot_token="123:abc",
+        file_vault=object(),
+        memory=None,
+    )
+    captured_turn_texts: list[str] = []
+
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+    monkeypatch.setattr(chat_module, "get_openai_compatible_api_key_from_env", lambda: "key")
+    monkeypatch.setattr(chat_module, "is_user_allowed", lambda **kwargs: True)
+
+    async def _fake_resolve_bot_username(bot_token: str | None) -> str:
+        assert bot_token == "123:abc"
+        return "OpenTulpaBot"
+
+    async def _fake_stream_langgraph_reply_to_telegram(**kwargs: Any) -> tuple[str | None, bool]:
+        captured_turn_texts.append(str(kwargs.get("text", "")))
+        return "done", False
+
+    monkeypatch.setattr(chat_module, "_resolve_bot_username", _fake_resolve_bot_username)
+    monkeypatch.setattr(
+        chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram
+    )
+
+    result = await service.handle_update(
+        body={
+            "message": {
+                "chat": {"id": -1001, "type": "supergroup"},
+                "from": {"id": 100, "username": "owner"},
+                "text": "@OpenTulpaBot summarize this",
+                "entities": [{"type": "mention", "offset": 0, "length": 14}],
+                "reply_to_message": {
+                    "message_id": 88,
+                    "from": {"id": 200, "is_bot": False, "username": "alice"},
+                    "text": "We should move the meeting to 14:30 and bring the price sheet.",
+                },
+            }
+        },
+        agent_runtime=runtime,
+    )
+
+    assert result is None
+    assert captured_turn_texts and len(captured_turn_texts) == 1
+    turn_text = captured_turn_texts[0]
+    assert "Telegram quoted message context" in turn_text
+    assert "replied_message_id: 88" in turn_text
+    assert "move the meeting to 14:30" in turn_text
+    assert "Current user message:\nsummarize this" in turn_text
+    assert "@OpenTulpaBot" not in turn_text
+    assert runtime.registered_thread_ids == ["chat--1001"]
+    assert runtime.cleared_thread_ids == ["chat--1001"]
+    assert fake_store.assistant_touches == [-1001]
+
+
+@pytest.mark.asyncio
+async def test_telegram_group_message_without_bot_mention_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
+    runtime = _InteractiveRuntime()
+    service = chat_module.TelegramChatService(
+        bot_token="123:abc",
+        file_vault=object(),
+        memory=None,
+    )
+    captured_turn_texts: list[str] = []
+
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+    monkeypatch.setattr(chat_module, "get_openai_compatible_api_key_from_env", lambda: "key")
+    monkeypatch.setattr(chat_module, "is_user_allowed", lambda **kwargs: True)
+
+    async def _fake_resolve_bot_username(bot_token: str | None) -> str:
+        del bot_token
+        return "OpenTulpaBot"
+
+    async def _fake_stream_langgraph_reply_to_telegram(**kwargs: Any) -> tuple[str | None, bool]:
+        captured_turn_texts.append(str(kwargs.get("text", "")))
+        return "done", False
+
+    monkeypatch.setattr(chat_module, "_resolve_bot_username", _fake_resolve_bot_username)
+    monkeypatch.setattr(
+        chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram
+    )
+
+    result = await service.handle_update(
+        body={
+            "message": {
+                "chat": {"id": -1001, "type": "supergroup"},
+                "from": {"id": 100, "username": "owner"},
+                "text": "summarize this",
+                "reply_to_message": {
+                    "message_id": 88,
+                    "from": {"id": 200, "is_bot": False, "username": "alice"},
+                    "text": "We should move the meeting to 14:30.",
+                },
+            }
+        },
+        agent_runtime=runtime,
+    )
+
+    assert result is None
+    assert captured_turn_texts == []
+    assert runtime.registered_thread_ids == []
+    assert fake_store.assistant_touches == []
+
+
+@pytest.mark.asyncio
 async def test_telegram_interactive_failed_voice_reply_does_not_stream_reply_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
