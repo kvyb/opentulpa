@@ -9,12 +9,15 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_body_customer_id
+
 
 def register_skill_routes(
     app: FastAPI,
     *,
     get_skill_store: Callable[[], Any],
     get_memory: Callable[[], Any],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register internal skill list/get/upsert/delete endpoints."""
 
@@ -22,7 +25,7 @@ def register_skill_routes(
     async def internal_skills_list(request: Request) -> Any:
         store = get_skill_store()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         include_global = bool(body.get("include_global", True))
         include_disabled = bool(body.get("include_disabled", False))
         limit = int(body.get("limit", 200))
@@ -38,7 +41,7 @@ def register_skill_routes(
     async def internal_skills_get(request: Request) -> Any:
         store = get_skill_store()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         name = str(body.get("name", "")).strip()
         include_files = bool(body.get("include_files", True))
         include_global = bool(body.get("include_global", True))
@@ -58,7 +61,7 @@ def register_skill_routes(
     async def internal_skills_upsert(request: Request) -> Any:
         store = get_skill_store()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         scope = str(body.get("scope", "user")).strip().lower()
         name = str(body.get("name", "")).strip()
         description = str(body.get("description", "")).strip()
@@ -118,7 +121,7 @@ def register_skill_routes(
     async def internal_skills_delete(request: Request) -> Any:
         store = get_skill_store()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
         scope = str(body.get("scope", "user")).strip().lower()
         name = str(body.get("name", "")).strip()
         if not name:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,9 +46,16 @@ def _message_text(message: dict[str, Any]) -> str:
 class TelegramBusinessService:
     """Persist Telegram Business connections and normalized message state."""
 
-    def __init__(self, *, db_path: Path, owner_customer_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        db_path: Path,
+        owner_customer_id: str | None = None,
+        resolve_customer_id: Callable[[str], str] | None = None,
+    ) -> None:
         self._db_path = db_path.resolve()
         self._owner_customer_id = str(owner_customer_id or "").strip()
+        self._resolve_customer_id_callback = resolve_customer_id
         self.client: Any | None = None
         self._init_db()
         self._bind_existing_connections_to_owner()
@@ -97,12 +105,49 @@ class TelegramBusinessService:
 
     def _customer_id_from_connection(self, connection: dict[str, Any]) -> str:
         if self._owner_customer_id:
-            return self._owner_customer_id
+            return self._resolve_customer_id(self._owner_customer_id)
         user = _safe_dict(connection.get("user"))
         user_id = str(user.get("id", "") or "").strip()
         if not user_id:
             return ""
-        return f"telegram_{user_id}"
+        return self._resolve_customer_id(f"telegram_{user_id}")
+
+    def _resolve_customer_id(self, customer_id: str) -> str:
+        safe_customer = str(customer_id or "").strip()
+        if not safe_customer or self._resolve_customer_id_callback is None:
+            return safe_customer
+        resolved = str(self._resolve_customer_id_callback(safe_customer) or "").strip()
+        return resolved or safe_customer
+
+    def _rebind_connection_customer_id(
+        self,
+        *,
+        business_connection_id: str,
+        customer_id: str,
+    ) -> None:
+        safe_business_connection_id = str(business_connection_id or "").strip()
+        safe_customer = str(customer_id or "").strip()
+        if not safe_business_connection_id or not safe_customer:
+            return
+        now = _utc_now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE telegram_business_connections
+                SET customer_id = ?, updated_at = ?
+                WHERE business_connection_id = ?
+                """,
+                (safe_customer, now, safe_business_connection_id),
+            )
+            conn.execute(
+                """
+                UPDATE telegram_business_messages
+                SET customer_id = ?, updated_at = ?
+                WHERE business_connection_id = ?
+                """,
+                (safe_customer, now, safe_business_connection_id),
+            )
+            conn.commit()
 
     def _bind_existing_connections_to_owner(self) -> None:
         if not self._owner_customer_id:
@@ -530,16 +575,22 @@ class TelegramBusinessService:
                     "user_chat_id": "",
                     "trigger_workflows": False,
                 }
+            customer_id = self._resolve_customer_id(str(connection_record.get("customer_id", "") or ""))
+            if customer_id and customer_id != str(connection_record.get("customer_id", "") or ""):
+                self._rebind_connection_customer_id(
+                    business_connection_id=business_connection_id,
+                    customer_id=customer_id,
+                )
             record = self.upsert_message(
                 business_connection_id=business_connection_id,
-                customer_id=str(connection_record.get("customer_id", "") or ""),
+                customer_id=customer_id,
                 message=message,
             )
             return {
                 "handled": True,
                 "kind": key,
                 "business_connection_id": business_connection_id,
-                "customer_id": str(connection_record.get("customer_id", "") or ""),
+                "customer_id": customer_id,
                 "user_chat_id": str(connection_record.get("user_chat_id", "") or ""),
                 "chat_id": str(record.get("chat_id", "") or ""),
                 "message_id": str(record.get("message_id", "") or ""),

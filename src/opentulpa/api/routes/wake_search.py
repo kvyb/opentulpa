@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
 from opentulpa.integrations.web_search import web_search as run_web_search
 
 
@@ -16,6 +17,7 @@ def register_wake_and_search_routes(
     *,
     get_wake_queue: Callable[[], Any],
     llm_model: str | None,
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register wake queue APIs and OpenRouter-backed web search endpoint."""
     _ = llm_model
@@ -28,6 +30,12 @@ def register_wake_and_search_routes(
             return JSONResponse(
                 status_code=400,
                 content={"detail": "wake payload must be JSON object"},
+            )
+        if str(body.get("customer_id", "")).strip():
+            body = dict(body)
+            body["customer_id"] = resolve_customer_id_value(
+                body.get("customer_id", ""),
+                resolve_customer_id,
             )
         queue_id = await get_wake_queue().enqueue(body)
         return {"ok": True, "queued": True, "queue_id": queue_id}

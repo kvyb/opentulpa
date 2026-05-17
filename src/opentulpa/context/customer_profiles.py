@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import re
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
 from opentulpa.context.customer_profile_models import (
     CustomerProfileRecord,
+    IdentityBindingRecord,
     LegacyProfileImportSummary,
+    ProfileIdentityRecord,
 )
+from opentulpa.persistence.sqlite import connect_sqlite
 
 
 def _normalize_utc_offset(value: str) -> str:
@@ -55,6 +56,21 @@ class CustomerProfileService:
                     source TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS customer_identity_aliases (
+                    alias_user_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    storage_user_id TEXT NOT NULL,
+                    alias_kind TEXT NOT NULL,
+                    provider TEXT,
+                    provider_user_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_identity_aliases_provider
+                    ON customer_identity_aliases(provider, provider_user_id)
+                    WHERE provider IS NOT NULL AND provider_user_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_customer_identity_aliases_storage
+                    ON customer_identity_aliases(storage_user_id);
                 """
             )
 
@@ -69,6 +85,236 @@ class CustomerProfileService:
         text = str(value).strip()
         return text or None
 
+    @staticmethod
+    def _telegram_alias(telegram_user_id: str | int) -> str:
+        tid = str(telegram_user_id or "").strip()
+        if not tid:
+            raise ValueError("telegram_user_id is required")
+        return f"telegram_{tid}"
+
+    def resolve_customer_id(self, customer_id: str) -> str:
+        cid = str(customer_id or "").strip()
+        if not cid:
+            return ""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT storage_user_id
+                FROM customer_identity_aliases
+                WHERE alias_user_id=?
+                """,
+                (cid,),
+            ).fetchone()
+        return str(row["storage_user_id"]) if row else cid
+
+    def resolve_telegram_customer_id(self, telegram_user_id: str | int) -> str:
+        return self.resolve_customer_id(self._telegram_alias(telegram_user_id))
+
+    def alias_user_ids(self, customer_id: str) -> list[str]:
+        cid = str(customer_id or "").strip()
+        if not cid:
+            return []
+        storage_user_id = self.resolve_customer_id(cid)
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT alias_user_id
+                FROM customer_identity_aliases
+                WHERE storage_user_id=?
+                ORDER BY alias_kind, alias_user_id
+                """,
+                (storage_user_id,),
+            ).fetchall()
+        aliases = [str(row["alias_user_id"]) for row in rows]
+        if cid not in aliases:
+            aliases.insert(0, cid)
+        if storage_user_id and storage_user_id not in aliases:
+            aliases.append(storage_user_id)
+        return aliases
+
+    def _profile_exists(self, conn: sqlite3.Connection, customer_id: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM customer_profiles WHERE customer_id=?",
+            (customer_id,),
+        ).fetchone()
+        return row is not None
+
+    def _select_identity_storage(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        user_id: str,
+        telegram_alias: str,
+    ) -> str:
+        assert user_id
+        assert telegram_alias
+        uid_row = conn.execute(
+            "SELECT storage_user_id FROM customer_identity_aliases WHERE alias_user_id=?",
+            (user_id,),
+        ).fetchone()
+        telegram_row = conn.execute(
+            "SELECT storage_user_id FROM customer_identity_aliases WHERE alias_user_id=?",
+            (telegram_alias,),
+        ).fetchone()
+        uid_storage = str(uid_row["storage_user_id"]) if uid_row else ""
+        telegram_storage = str(telegram_row["storage_user_id"]) if telegram_row else ""
+        if uid_storage and telegram_storage and uid_storage != telegram_storage:
+            raise ValueError("identity aliases already point at different storage_user_id values")
+        if uid_storage:
+            return uid_storage
+        if telegram_storage:
+            return telegram_storage
+        if self._profile_exists(conn, user_id) and self._profile_exists(conn, telegram_alias):
+            raise ValueError("generic and telegram profiles both exist; manual merge is required")
+        if self._profile_exists(conn, user_id):
+            return user_id
+        if self._profile_exists(conn, telegram_alias):
+            return telegram_alias
+        return user_id
+
+    def _upsert_identity_alias(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        alias_user_id: str,
+        user_id: str,
+        storage_user_id: str,
+        alias_kind: str,
+        provider: str | None,
+        provider_user_id: str | None,
+        now: str,
+    ) -> None:
+        assert alias_user_id
+        assert storage_user_id
+        conn.execute(
+            """
+            INSERT INTO customer_identity_aliases (
+                alias_user_id, user_id, storage_user_id, alias_kind,
+                provider, provider_user_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(alias_user_id)
+            DO UPDATE SET
+                user_id=excluded.user_id,
+                storage_user_id=excluded.storage_user_id,
+                alias_kind=excluded.alias_kind,
+                provider=excluded.provider,
+                provider_user_id=excluded.provider_user_id,
+                updated_at=excluded.updated_at
+            """,
+            (
+                alias_user_id,
+                user_id,
+                storage_user_id,
+                alias_kind,
+                provider,
+                provider_user_id,
+                now,
+                now,
+            ),
+        )
+
+    def bind_telegram_user_id(self, *, user_id: str, telegram_user_id: str | int) -> IdentityBindingRecord:
+        uid = str(user_id or "").strip()
+        telegram_id = str(telegram_user_id or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
+        telegram_alias = self._telegram_alias(telegram_id)
+        if uid == telegram_alias:
+            raise ValueError("user_id must be generic, not telegram-derived")
+
+        now = self._utc_now_iso()
+        with self._conn() as conn:
+            storage_user_id = self._select_identity_storage(
+                conn,
+                user_id=uid,
+                telegram_alias=telegram_alias,
+            )
+            assert uid
+            assert telegram_alias
+            for alias_user_id, alias_kind, provider, provider_user_id in (
+                (uid, "generic", None, None),
+                (telegram_alias, "telegram", "telegram", telegram_id),
+            ):
+                self._upsert_identity_alias(
+                    conn,
+                    alias_user_id=alias_user_id,
+                    user_id=uid,
+                    storage_user_id=storage_user_id,
+                    alias_kind=alias_kind,
+                    provider=provider,
+                    provider_user_id=provider_user_id,
+                    now=now,
+                )
+            conn.commit()
+        return IdentityBindingRecord(
+            user_id=uid,
+            alias_user_id=telegram_alias,
+            storage_user_id=storage_user_id,
+            alias_kind="telegram",
+            provider="telegram",
+            provider_user_id=telegram_id,
+            updated_at=now,
+        )
+
+    def list_identity_bindings(self) -> list[IdentityBindingRecord]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT alias_user_id, user_id, storage_user_id, alias_kind,
+                       provider, provider_user_id, updated_at
+                FROM customer_identity_aliases
+                ORDER BY user_id, alias_kind, alias_user_id
+                """
+            ).fetchall()
+        return [
+            IdentityBindingRecord(
+                user_id=str(row["user_id"]),
+                alias_user_id=str(row["alias_user_id"]),
+                storage_user_id=str(row["storage_user_id"]),
+                alias_kind=str(row["alias_kind"]),
+                provider=self._optional_text(row["provider"]),
+                provider_user_id=self._optional_text(row["provider_user_id"]),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+    def list_profiles(self) -> list[ProfileIdentityRecord]:
+        bindings = self.list_identity_bindings()
+        by_user: dict[str, ProfileIdentityRecord] = {}
+        for binding in bindings:
+            item = by_user.setdefault(
+                binding.user_id,
+                ProfileIdentityRecord(
+                    user_id=binding.user_id,
+                    storage_user_id=binding.storage_user_id,
+                    aliases=[],
+                ),
+            )
+            item.aliases.append(binding.alias_user_id)
+            if binding.provider == "telegram":
+                item.telegram_user_id = binding.provider_user_id
+
+        known = set(by_user)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT customer_id FROM customer_profiles ORDER BY customer_id"
+            ).fetchall()
+        for row in rows:
+            cid = str(row["customer_id"])
+            storage = self.resolve_customer_id(cid)
+            if cid in known or any(cid in item.aliases for item in by_user.values()):
+                continue
+            by_user[cid] = ProfileIdentityRecord(
+                user_id=cid,
+                storage_user_id=storage,
+                telegram_user_id=cid.removeprefix("telegram_") if cid.startswith("telegram_") else None,
+                aliases=[cid],
+            )
+
+        return sorted(by_user.values(), key=lambda item: item.user_id)
+
     def _upsert(
         self,
         customer_id: str,
@@ -78,7 +324,7 @@ class CustomerProfileService:
         locale: str | None = None,
         source: str = "agent",
     ) -> CustomerProfileRecord:
-        cid = str(customer_id or "").strip()
+        cid = self.resolve_customer_id(customer_id)
         if not cid:
             raise ValueError("customer_id is required")
         updated_at = self._utc_now_iso()
@@ -132,7 +378,7 @@ class CustomerProfileService:
         )
 
     def get_profile(self, customer_id: str) -> CustomerProfileRecord | None:
-        cid = str(customer_id or "").strip()
+        cid = self.resolve_customer_id(customer_id)
         if not cid:
             return None
         with self._conn() as conn:

@@ -110,6 +110,8 @@ def _reset_chat_session_context(
     chat_id: int,
     user_id: int,
     username: str | None = None,
+    resolve_customer_id: Callable[[str], str] | None = None,
+    resolve_telegram_customer_id: Callable[[int], str] | None = None,
 ) -> tuple[str, str]:
     sessions = state.get("sessions")
     if not isinstance(sessions, dict):
@@ -118,7 +120,17 @@ def _reset_chat_session_context(
     slot = sessions.get(chat_key)
     if not isinstance(slot, dict):
         slot = {}
-    customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{user_id}"
+    existing_customer_id = str(slot.get("customer_id", "")).strip()
+    if existing_customer_id and resolve_customer_id is not None:
+        customer_id = str(resolve_customer_id(existing_customer_id) or "").strip()
+    elif existing_customer_id:
+        customer_id = existing_customer_id
+    elif resolve_telegram_customer_id is not None:
+        customer_id = str(resolve_telegram_customer_id(user_id) or "").strip()
+    else:
+        customer_id = f"telegram_{user_id}"
+    if not customer_id:
+        customer_id = f"telegram_{user_id}"
     now_utc_iso = datetime.now(UTC).isoformat()
     thread_id = new_short_id("chat")
     wake_thread_id = new_short_id("wake")
@@ -1098,6 +1110,8 @@ async def handle_telegram_text(
     support_customer_listing: Callable[[], list[dict[str, Any]]] | None = None,
     workflow_setup_status: Callable[..., dict[str, Any]] | None = None,
     workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
+    resolve_customer_id: Callable[[str], str] | None = None,
+    resolve_telegram_customer_id: Callable[[int], str] | None = None,
 ) -> str | None:
     parsed = parse_telegram_update(body)
     if not parsed:
@@ -1192,6 +1206,8 @@ async def handle_telegram_text(
                 chat_id=ctx.chat_id,
                 user_id=ctx.user_id,
                 username=ctx.username,
+                resolve_customer_id=resolve_customer_id,
+                resolve_telegram_customer_id=resolve_telegram_customer_id,
             )
         )
         if interactive_inbox is not None:
@@ -1235,7 +1251,17 @@ async def handle_telegram_text(
             slot = {}
         thread_id = _clean_thread_id(slot.get("thread_id")) or f"chat-{ctx.chat_id}"
         wake_thread_id = _clean_thread_id(slot.get("wake_thread_id")) or None
-        customer_id = str(slot.get("customer_id", "")).strip() or f"telegram_{ctx.user_id}"
+        existing_customer_id = str(slot.get("customer_id", "")).strip()
+        if existing_customer_id and resolve_customer_id is not None:
+            customer_id = str(resolve_customer_id(existing_customer_id) or "").strip()
+        elif existing_customer_id:
+            customer_id = existing_customer_id
+        elif resolve_telegram_customer_id is not None:
+            customer_id = str(resolve_telegram_customer_id(ctx.user_id) or "").strip()
+        else:
+            customer_id = f"telegram_{ctx.user_id}"
+        if not customer_id:
+            customer_id = f"telegram_{ctx.user_id}"
         now_utc_iso = datetime.now(UTC).isoformat()
         sessions[str(ctx.chat_id)] = {
             "user_id": ctx.user_id,
@@ -1438,7 +1464,7 @@ async def handle_telegram_text(
                 thread_id=thread_id,
                 reply_text=str(response or ""),
             )
-        return response
+        return str(response) if response is not None else None
     except Exception as exc:
         logger.exception(
             "Telegram non-streaming reply failed (chat_id=%s, thread_id=%s): %s",
@@ -1461,6 +1487,9 @@ class TelegramChatService:
         support_customer_listing: Callable[[], list[dict[str, Any]]] | None = None,
         workflow_setup_status: Callable[..., dict[str, Any]] | None = None,
         workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
+        resolve_customer_id: Callable[[str], str] | None = None,
+        resolve_telegram_customer_id: Callable[[int], str] | None = None,
+        alias_user_ids: Callable[[str], list[str]] | None = None,
     ) -> None:
         self.bot_token = str(bot_token or "").strip()
         self.file_vault = file_vault
@@ -1468,10 +1497,27 @@ class TelegramChatService:
         self.support_customer_listing = support_customer_listing
         self.workflow_setup_status = workflow_setup_status
         self.workflow_setup_after_reply = workflow_setup_after_reply
+        self.resolve_customer_id = resolve_customer_id
+        self.resolve_telegram_customer_id = resolve_telegram_customer_id
+        self.alias_user_ids = alias_user_ids
         self._interactive_inbox = TelegramInteractiveInbox()
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
-        return find_session_slots_for_customer_id(customer_id)
+        aliases = (
+            self.alias_user_ids(customer_id)
+            if self.alias_user_ids is not None
+            else [customer_id]
+        )
+        slots: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for alias in aliases:
+            for slot in find_session_slots_for_customer_id(alias):
+                key = str(slot.get("chat_id", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                slots.append(slot)
+        return slots
 
     def get_session_slot(self, chat_id: int) -> dict[str, Any] | None:
         return get_session_slot_for_chat_id(chat_id)
@@ -1491,11 +1537,13 @@ class TelegramChatService:
         payload: dict[str, Any],
         agent_runtime: Any | None = None,
     ) -> list[dict[str, Any]]:
-        return await relay_task_event_via_main_agent(
+        return await _relay_task_event_via_main_agent(
             customer_id=customer_id,
             task_id=task_id,
             event_type=event_type,
             payload=payload,
+            state_store=STATE_STORE,
+            find_session_slots=self.find_session_slots,
             agent_runtime=agent_runtime,
         )
 
@@ -1507,10 +1555,12 @@ class TelegramChatService:
         payload: dict[str, Any],
         agent_runtime: Any | None = None,
     ) -> list[dict[str, Any]]:
-        return await relay_event_via_main_agent(
+        return await _relay_event_via_main_agent(
             customer_id=customer_id,
             event_label=event_label,
             payload=payload,
+            state_store=STATE_STORE,
+            find_session_slots=self.find_session_slots,
             agent_runtime=agent_runtime,
         )
 
@@ -1538,4 +1588,6 @@ class TelegramChatService:
             support_customer_listing=self.support_customer_listing,
             workflow_setup_status=self.workflow_setup_status,
             workflow_setup_after_reply=self.workflow_setup_after_reply,
+            resolve_customer_id=self.resolve_customer_id,
+            resolve_telegram_customer_id=self.resolve_telegram_customer_id,
         )

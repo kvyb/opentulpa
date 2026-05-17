@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
 from opentulpa.api.file_helpers import collect_routine_cleanup_paths, normalize_cleanup_paths
 from opentulpa.core.ids import new_short_id
 from opentulpa.scheduler.models import Routine
@@ -18,6 +19,7 @@ def register_scheduler_routes(
     *,
     get_scheduler: Callable[[], Any],
     delete_file: Callable[..., dict[str, Any]],
+    resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
     """Register scheduler routine management endpoints."""
 
@@ -26,6 +28,12 @@ def register_scheduler_routes(
         sched = get_scheduler()
         body = await request.json()
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+        if str(payload.get("customer_id", "")).strip():
+            payload = dict(payload)
+            payload["customer_id"] = resolve_customer_id_value(
+                payload.get("customer_id", ""),
+                resolve_customer_id,
+            )
         instruction = str(payload.get("instruction", "")).strip()
         if not instruction:
             return JSONResponse(
@@ -49,12 +57,16 @@ def register_scheduler_routes(
     async def internal_scheduler_list_routines(customer_id: str | None = None) -> Any:
         sched = get_scheduler()
         routines = sched.list_routines()
-        cid = str(customer_id or "").strip()
+        cid = resolve_customer_id_value(customer_id, resolve_customer_id)
         if cid:
             routines = [
                 r
                 for r in routines
-                if str((r.payload or {}).get("customer_id", "")).strip() == cid
+                if resolve_customer_id_value(
+                    (r.payload or {}).get("customer_id", ""),
+                    resolve_customer_id,
+                )
+                == cid
             ]
         return {
             "routines": [
@@ -75,12 +87,15 @@ def register_scheduler_routes(
         customer_id: str | None = None,
     ) -> Any:
         sched = get_scheduler()
-        cid = str(customer_id or "").strip()
+        cid = resolve_customer_id_value(customer_id, resolve_customer_id)
         if cid:
             routine = sched.get_routine(routine_id)
             if routine is None:
                 return {"ok": False}
-            owner = str((routine.payload or {}).get("customer_id", "")).strip()
+            owner = resolve_customer_id_value(
+                (routine.payload or {}).get("customer_id", ""),
+                resolve_customer_id,
+            )
             if owner != cid:
                 return JSONResponse(
                     status_code=403,
@@ -93,7 +108,7 @@ def register_scheduler_routes(
     async def internal_scheduler_remove_routine_with_assets(request: Request) -> Any:
         sched = get_scheduler()
         body = await request.json()
-        customer_id = str(body.get("customer_id", "")).strip()
+        customer_id = resolve_customer_id_value(body.get("customer_id", ""), resolve_customer_id)
         if not customer_id:
             return JSONResponse(status_code=400, content={"detail": "customer_id is required"})
 
@@ -106,7 +121,11 @@ def register_scheduler_routes(
         routines = [
             r
             for r in sched.list_routines()
-            if str((r.payload or {}).get("customer_id", "")).strip() == customer_id
+            if resolve_customer_id_value(
+                (r.payload or {}).get("customer_id", ""),
+                resolve_customer_id,
+            )
+            == customer_id
         ]
         if routine_id:
             matched = [r for r in routines if r.id == routine_id]
