@@ -159,7 +159,7 @@ class TelegramClient:
                 payload["reply_parameters"] = {"message_id": reply_to_message_id}
             data = await self._post("sendMessage", payload)
             if not isinstance(data, dict):
-                return first_data
+                return None
             if first_data is None:
                 first_data = data
         return first_data
