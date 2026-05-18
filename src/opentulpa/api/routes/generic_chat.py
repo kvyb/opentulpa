@@ -353,16 +353,18 @@ async def _stream_turn(
                     text=effective_text,
                     turn_mode=turn_mode,
                     include_pending_context=include_pending_context,
+                    stream_precommit_seconds=0.0,
+                    stream_incremental_deltas=True,
                 ):
-                    current = str(chunk or "").strip()
+                    current = str(chunk or "")
                     if not current:
                         continue
-                    progress = _progress_message(current)
+                    progress = _progress_message(current.strip())
                     if progress:
                         await queue.put(("status", {"message": progress}))
                         continue
-                    final_text = current
-                    await queue.put(("delta", {"text": current}))
+                    final_text = f"{final_text}{current}"
+                    await queue.put(("delta", {"text": current, "append": True}))
             final_text = str(final_text or "").strip()
             if (
                 turn_mode == "workflow_setup"
