@@ -119,11 +119,14 @@ Set these when prompted, or add them to `.env`:
 OPENAI_COMPATIBLE_API_KEY=...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_USERNAMES=your_handle
+OPENTULPA_OWNER_CUSTOMER_ID=usr_default
 COMPOSIO_API_KEY=...
 BROWSER_USE_API_KEY=...
 ```
 
 Telegram is optional for deployed web/API use. A Railway/dashboard deployment can start with `OPENTULPA_WEB_TOKEN`, `OPENAI_COMPATIBLE_API_KEY`, and `OPENTULPA_DATA_ROOT` only. Add Telegram env vars later when Telegram chat is enabled.
+
+For generic-first dashboard deployments, `OPENTULPA_OWNER_CUSTOMER_ID` lets the first message from the single allowed Telegram username bind that user's numeric Telegram id to the generic owner scope.
 
 **Composio is strongly recommended.** It unlocks app connectors for Google Workspace, Slack, Notion, Linear, HubSpot, Gmail, Instagram, and more without writing custom integration code.
 

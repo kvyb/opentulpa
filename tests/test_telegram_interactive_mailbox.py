@@ -266,6 +266,97 @@ async def test_telegram_group_message_without_bot_mention_is_ignored(
 
 
 @pytest.mark.asyncio
+async def test_telegram_allowed_username_auto_binds_generic_owner_from_group_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = _FakeStateStore({"admin_user_id": 100, "pending_key_by_chat": {}, "sessions": {}})
+    runtime = _InteractiveRuntime()
+    bindings: dict[str, str] = {}
+    stream_customers: list[str] = []
+    service = chat_module.TelegramChatService(
+        bot_token="123:abc",
+        file_vault=object(),
+        memory=None,
+        owner_customer_id="usr_default",
+        resolve_telegram_customer_id=lambda user_id: bindings.get(
+            f"telegram_{user_id}", f"telegram_{user_id}"
+        ),
+        bind_telegram_customer_id=lambda **kwargs: bindings.__setitem__(
+            f"telegram_{kwargs['telegram_user_id']}", str(kwargs["user_id"])
+        ),
+    )
+
+    monkeypatch.setattr(chat_module, "STATE_STORE", fake_store)
+    monkeypatch.setattr(chat_module, "get_openai_compatible_api_key_from_env", lambda: "key")
+
+    async def _fake_resolve_bot_username(bot_token: str | None) -> str:
+        del bot_token
+        return "OpenTulpaBot"
+
+    async def _fake_stream_langgraph_reply_to_telegram(**kwargs: Any) -> tuple[str | None, bool]:
+        stream_customers.append(str(kwargs.get("customer_id", "")))
+        return "done", False
+
+    monkeypatch.setattr(chat_module, "_resolve_bot_username", _fake_resolve_bot_username)
+    monkeypatch.setattr(
+        chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram
+    )
+
+    result = await service.handle_update(
+        body={
+            "message": {
+                "chat": {"id": -1001, "type": "supergroup"},
+                "from": {"id": 100, "username": "owner"},
+                "text": "@OpenTulpaBot list my sheets",
+                "entities": [{"type": "mention", "offset": 0, "length": 14}],
+            }
+        },
+        allowed_usernames_csv="owner",
+        agent_runtime=runtime,
+    )
+
+    assert result is None
+    assert bindings == {"telegram_100": "usr_default"}
+    assert stream_customers == ["usr_default"]
+    assert fake_store.state["sessions"]["-1001"]["customer_id"] == "usr_default"
+
+
+def test_telegram_allowed_username_auto_bind_skips_telegram_owner_id() -> None:
+    calls: list[dict[str, Any]] = []
+
+    chat_module._maybe_auto_bind_allowed_username(
+        owner_customer_id="telegram_100",
+        allowed_usernames_csv="owner",
+        username="owner",
+        user_id=100,
+        bind_telegram_customer_id=lambda **kwargs: calls.append(dict(kwargs)),
+    )
+
+    assert calls == []
+
+
+def test_telegram_allowed_username_auto_bind_requires_single_matching_username() -> None:
+    calls: list[dict[str, Any]] = []
+
+    chat_module._maybe_auto_bind_allowed_username(
+        owner_customer_id="usr_default",
+        allowed_usernames_csv="owner,helper",
+        username="owner",
+        user_id=100,
+        bind_telegram_customer_id=lambda **kwargs: calls.append(dict(kwargs)),
+    )
+    chat_module._maybe_auto_bind_allowed_username(
+        owner_customer_id="usr_default",
+        allowed_usernames_csv="owner",
+        username="other",
+        user_id=101,
+        bind_telegram_customer_id=lambda **kwargs: calls.append(dict(kwargs)),
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_telegram_interactive_failed_voice_reply_does_not_stream_reply_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

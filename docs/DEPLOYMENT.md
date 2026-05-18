@@ -248,6 +248,8 @@ If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml
 
 Allowed users are not automatically pooled into one owner tenant. Each normal allowed Telegram chat gets its own owner session by default, with a default `customer_id` shaped like `telegram_<user_id>`. If several humans should operate on the same customer tenant without sharing the owner's chat history, configure them as support operators instead and have them bind to that tenant.
 
+For generic-first dashboard deployments, set `OPENTULPA_OWNER_CUSTOMER_ID=usr_default` plus a single `TELEGRAM_ALLOWED_USERNAMES` value when the owner's numeric Telegram id is not known yet. The first message from that username, including a group message that mentions the bot, binds the observed numeric Telegram id to `usr_default`. If the deployment already uses a Telegram-derived owner id like `telegram_123`, this username bootstrap is skipped.
+
 ## Support operator access
 
 Support mode is optional. If no support allowlist is configured, support commands are disabled.
