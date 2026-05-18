@@ -73,6 +73,7 @@ def markdownish_to_html(text: str) -> str:
     working = re.sub(r"~~([^\n]+?)~~", r"<s>\1</s>", working)
     working = re.sub(r"(?<!\*)\*([^\n*]+?)\*(?!\*)", r"<i>\1</i>", working)
     working = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", working)
+    working = working.replace("**", "")
 
     # Line-oriented transforms.
     lines = working.splitlines()
@@ -98,6 +99,64 @@ def markdownish_to_html(text: str) -> str:
         working = working.replace(f"%%LINK_{idx}%%", html_link)
 
     return working
+
+
+def split_text_for_telegram(text: str, *, max_chars: int = TELEGRAM_TEXT_CHAR_LIMIT) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    limit = max(120, int(max_chars))
+    chunks: list[str] = []
+    remaining = raw
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining.strip())
+            break
+        clipped = remaining[:limit].rstrip()
+        boundary_floor = max(0, int(limit * 0.55))
+        cut_positions = [
+            clipped.rfind("\n\n", boundary_floor),
+            clipped.rfind("\n", boundary_floor),
+            clipped.rfind(". ", boundary_floor),
+            clipped.rfind("! ", boundary_floor),
+            clipped.rfind("? ", boundary_floor),
+            clipped.rfind("; ", boundary_floor),
+            clipped.rfind(", ", boundary_floor),
+            clipped.rfind(" ", boundary_floor),
+        ]
+        best_cut = max(cut_positions)
+        if best_cut <= 0:
+            best_cut = limit
+        chunk = remaining[:best_cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[best_cut:].strip()
+    return chunks
+
+
+def prepare_text_chunks_and_mode(text: str, parse_mode: str | None) -> tuple[list[str], str | None]:
+    raw = str(text or "").strip()
+    if not raw:
+        return [], parse_mode
+    mode = (parse_mode or "HTML").upper()
+    if mode != "HTML":
+        return split_text_for_telegram(raw), parse_mode
+    formatted = markdownish_to_html(raw)
+    if len(formatted) <= TELEGRAM_TEXT_CHAR_LIMIT:
+        return [formatted], "HTML"
+    out: list[str] = []
+    pending = split_text_for_telegram(raw, max_chars=TELEGRAM_TEXT_CHAR_LIMIT - 700)
+    while pending:
+        chunk = pending.pop(0)
+        formatted_chunk = markdownish_to_html(chunk)
+        if len(formatted_chunk) <= TELEGRAM_TEXT_CHAR_LIMIT:
+            out.append(formatted_chunk)
+            continue
+        if len(chunk) <= 120:
+            out.append(escape(_truncate_plain_text(chunk, max_chars=TELEGRAM_TEXT_CHAR_LIMIT - 32)))
+            continue
+        pending = split_text_for_telegram(chunk, max_chars=max(120, len(chunk) // 2)) + pending
+    return out, "HTML"
 
 
 def prepare_text_and_mode(text: str, parse_mode: str | None) -> tuple[str, str | None]:

@@ -11,7 +11,10 @@ from typing import Any
 
 import httpx
 
-from opentulpa.interfaces.telegram.formatter import prepare_text_and_mode
+from opentulpa.interfaces.telegram.formatter import (
+    prepare_text_and_mode,
+    prepare_text_chunks_and_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,19 +142,27 @@ class TelegramClient:
         business_connection_id: str | None = None,
         reply_to_message_id: int | None = None,
     ) -> dict[str, Any] | None:
-        final_text, final_mode = prepare_text_and_mode(text, parse_mode)
-        payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
-        if final_mode:
-            payload["parse_mode"] = final_mode
-        if isinstance(reply_markup, dict):
-            payload["reply_markup"] = reply_markup
         safe_business_connection_id = str(business_connection_id or "").strip()
-        if safe_business_connection_id:
-            payload["business_connection_id"] = safe_business_connection_id
-        if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
-            payload["reply_parameters"] = {"message_id": reply_to_message_id}
-        data = await self._post("sendMessage", payload)
-        return data if isinstance(data, dict) else None
+        chunks, final_mode = prepare_text_chunks_and_mode(text, parse_mode)
+        if not chunks:
+            return None
+        first_data: dict[str, Any] | None = None
+        for idx, final_text in enumerate(chunks):
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
+            if final_mode:
+                payload["parse_mode"] = final_mode
+            if idx == 0 and isinstance(reply_markup, dict):
+                payload["reply_markup"] = reply_markup
+            if safe_business_connection_id:
+                payload["business_connection_id"] = safe_business_connection_id
+            if idx == 0 and isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+                payload["reply_parameters"] = {"message_id": reply_to_message_id}
+            data = await self._post("sendMessage", payload)
+            if not isinstance(data, dict):
+                return first_data
+            if first_data is None:
+                first_data = data
+        return first_data
 
     async def send_message_draft(
         self,

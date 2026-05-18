@@ -52,6 +52,18 @@ class _NotModifiedEditClient:
         )
 
 
+class _RecordingSendClient:
+    payloads: list[dict]
+
+    def __init__(self):
+        self.payloads = []
+
+    async def post(self, _url, *, json, timeout):
+        del timeout
+        self.payloads.append(dict(json))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.payloads)}})
+
+
 @pytest.mark.asyncio
 async def test_post_returns_none_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(telegram_client_module.httpx, "AsyncClient", _AlwaysTimeoutClient)
@@ -78,3 +90,27 @@ async def test_post_treats_not_modified_edit_as_success(monkeypatch: pytest.Monk
     result = await tg._post("editMessageText", {"chat_id": 1, "message_id": 10, "text": "..."})
     assert isinstance(result, dict)
     assert result.get("ok") is True
+
+
+@pytest.mark.asyncio
+async def test_send_message_splits_long_markdown_into_formatted_messages() -> None:
+    recorder = _RecordingSendClient()
+    tg = TelegramClient("dummy")
+    tg._client = recorder
+    text = (
+        "## ВОПРОС 1\n\n"
+        "**1. «I retired my nice girl era» — Before/After**\n"
+        "- Хук: резкий переход в чёрное платье\n"
+        '- Титр: *"I retired my nice girl era"*\n'
+        "- Почему вирусный: трансформация хорошо репостится\n\n"
+    ) * 80
+
+    result = await tg.send_message(chat_id=1, text=text, parse_mode="HTML")
+
+    assert isinstance(result, dict)
+    assert len(recorder.payloads) > 1
+    assert all(payload.get("parse_mode") == "HTML" for payload in recorder.payloads)
+    assert all(len(str(payload.get("text", ""))) <= 3800 for payload in recorder.payloads)
+    assert all("## " not in str(payload.get("text", "")) for payload in recorder.payloads)
+    assert all("**" not in str(payload.get("text", "")) for payload in recorder.payloads)
+    assert all("[Truncated to fit Telegram.]" not in str(payload.get("text", "")) for payload in recorder.payloads)
