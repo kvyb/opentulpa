@@ -71,8 +71,12 @@ class ContextEngineer:
             return mode == "execution"
         if normalized_kind == "task_directive":
             return mode != "literal_chat"
-        if normalized_kind in {"thread_rollup", "skill_discovery", "invoked_skills", "link_aliases"}:
+        if normalized_kind == "skill_discovery":
+            return mode != "literal_chat"
+        if normalized_kind in {"thread_rollup", "invoked_skills", "link_aliases"}:
             return mode != "literal_chat" and bool(should_retrieve)
+        if normalized_kind == "memory_grounding":
+            return mode != "literal_chat"
         return False
 
     @staticmethod

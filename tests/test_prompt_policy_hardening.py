@@ -110,10 +110,28 @@ def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
         ],
         selected_names=["browser-use-operator"],
     )
-    assert "Skills relevant to this task:" in text
-    assert "Use skill_get(name) before relying on a skill's actual instructions." in text
+    assert "Available skills registry:" in text
+    assert "call skill_get(name)" in text
     assert "browser-use-operator" in text
     assert "routine-schedule-composer" not in text
+
+
+def test_build_relevant_skill_discovery_context_lists_registry_without_selector() -> None:
+    text = _build_relevant_skill_discovery_context(
+        available_skills=[
+            {
+                "name": "browser-use-operator",
+                "description": "Use browser steps for dynamic websites with authenticated pages, JavaScript rendering, screenshots, forms, navigation, session reuse, retries, and extra words that should be trimmed down hard.",
+                "scope": "global",
+            },
+            {"name": "routine-schedule-composer", "description": "Compose robust routine instructions", "scope": "global"},
+        ],
+        selected_names=[],
+    )
+    assert "Available skills registry:" in text
+    assert "browser-use-operator" in text
+    assert "routine-schedule-composer" in text
+    assert "extra words that should be trimmed down hard" not in text
 
 
 def test_tool_validation_helpers_live_in_dedicated_module() -> None:

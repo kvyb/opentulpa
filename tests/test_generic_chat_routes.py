@@ -136,10 +136,11 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert "event: file" in text
     assert "/web/files/file_123/content" in text
     assert "event: delta" in text
-    assert _sse_payloads(text, "delta") == [
-        {"text": "Hello", "append": True},
-        {"text": " from web.", "append": True},
-    ]
+    deltas = _sse_payloads(text, "delta")
+    assert [delta["text"] for delta in deltas] == ["Hello", " from web."]
+    assert [delta["append"] for delta in deltas] == [True, True]
+    assert [delta["seq"] for delta in deltas] == [1, 2]
+    assert all(isinstance(delta["server_received_at_ms"], int) for delta in deltas)
     assert "Hello from web." in text
     assert "event: final" in text
     assert runtime.calls[0]["customer_id"] == "telegram_1"
@@ -168,13 +169,11 @@ def test_web_chat_preserves_whitespace_only_incremental_deltas(
         text = response.read().decode("utf-8")
 
     assert response.status_code == 200
-    assert _sse_payloads(text, "delta") == [
-        {"text": "Hello", "append": True},
-        {"text": " ", "append": True},
-        {"text": "world", "append": True},
-        {"text": "\n\n", "append": True},
-        {"text": "Again", "append": True},
-    ]
+    deltas = _sse_payloads(text, "delta")
+    assert [delta["text"] for delta in deltas] == ["Hello", " ", "world", "\n\n", "Again"]
+    assert [delta["append"] for delta in deltas] == [True, True, True, True, True]
+    assert [delta["seq"] for delta in deltas] == [1, 2, 3, 4, 5]
+    assert all(isinstance(delta["server_received_at_ms"], int) for delta in deltas)
     assert _sse_payloads(text, "final") == [{"text": "Hello world\n\nAgain"}]
 
 

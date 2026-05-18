@@ -2491,64 +2491,8 @@ class OpenTulpaLangGraphRuntime:
         available = (
             candidates if isinstance(candidates, list) else await self._list_available_skills(cid)
         )
-        if not available:
-            return {"skill_names": [], "context": ""}
-        selected = await self._select_relevant_skills(
-            customer_id=cid,
-            query=query,
-            candidates=available,
-            prompt_mode=prompt_mode,
-            max_skills=1,
-        )
-        if not selected:
-            return {"skill_names": [], "context": ""}
-
-        sections: list[str] = []
-        skill_names: list[str] = []
-        total_chars = 0
-        max_total_chars = 9000
-        for item in selected:
-            name = str(item.get("name", "")).strip()
-            if not name:
-                continue
-            try:
-                r = await self._request_with_backoff(
-                    "POST",
-                    "/internal/skills/get",
-                    json_body={
-                        "customer_id": cid,
-                        "name": name,
-                        "include_files": False,
-                        "include_global": True,
-                    },
-                    timeout=8.0,
-                    retries=1,
-                )
-                if r.status_code != 200:
-                    continue
-                payload = r.json()
-                skill = payload.get("skill", {})
-                if not isinstance(skill, dict):
-                    continue
-                skill_md = str(skill.get("skill_markdown", "")).strip()
-                if not skill_md:
-                    continue
-                snippet = (
-                    f"Skill name: {name}\n"
-                    f"Scope: {skill.get('scope', '')}\n"
-                    f"Description: {skill.get('description', '')}\n"
-                    f"Selection reason: {item.get('reason', '')}\n\n"
-                    f"SKILL.md:\n{skill_md[:3500]}"
-                )
-                if total_chars + len(snippet) > max_total_chars:
-                    break
-                sections.append(snippet)
-                skill_names.append(name)
-                total_chars += len(snippet)
-            except Exception:
-                continue
-        context = "\n\n---\n\n".join(sections).strip()
-        return {"skill_names": skill_names, "context": context}
+        del available
+        return {"skill_names": [], "context": ""}
 
     async def _load_skill_context_by_names(
         self,
@@ -2848,22 +2792,10 @@ class OpenTulpaLangGraphRuntime:
                 "active_invoked_skill_names": [],
                 "active_skill_context": "",
             }
-        selected = await self._select_relevant_skills(
-            customer_id=customer_id,
-            query=query,
-            candidates=available_skills,
-            prompt_mode=prompt_mode,
-            max_skills=3,
-        )
-        names = [
-            str(item.get("name", "")).strip()
-            for item in selected
-            if str(item.get("name", "")).strip()
-        ]
         return {
             "prompt_mode": prompt_mode,
             "active_skill_query": query,
-            "active_skill_names": names,
+            "active_skill_names": [],
             "active_available_skills": available_skills,
             "active_skill_discovery_context": "",
             "active_invoked_skill_context": "",
