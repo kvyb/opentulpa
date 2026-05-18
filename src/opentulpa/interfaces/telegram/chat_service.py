@@ -352,6 +352,33 @@ def _is_support_user(
     return bool(username and username.lower() in support_usernames)
 
 
+def _maybe_auto_bind_allowed_username(
+    *,
+    owner_customer_id: str | None,
+    allowed_usernames_csv: str | None,
+    username: str | None,
+    user_id: int,
+    bind_telegram_customer_id: Callable[..., Any] | None,
+) -> None:
+    owner_id = str(owner_customer_id or "").strip()
+    if not owner_id or owner_id.startswith("telegram_") or bind_telegram_customer_id is None:
+        return
+    allowed_usernames = parse_csv_set(allowed_usernames_csv, normalize_username=True)
+    safe_username = str(username or "").strip().removeprefix("@").lower()
+    if len(allowed_usernames) != 1 or safe_username not in allowed_usernames:
+        return
+    try:
+        bind_telegram_customer_id(user_id=owner_id, telegram_user_id=int(user_id))
+    except ValueError as exc:
+        logger.warning(
+            "Telegram username bootstrap bind skipped for customer_id=%s username=%s user_id=%s: %s",
+            owner_id,
+            safe_username,
+            user_id,
+            exc,
+        )
+
+
 def _support_bindings(state: dict[str, Any]) -> dict[str, Any]:
     bindings = state.get("support_bindings")
     if not isinstance(bindings, dict):
@@ -1181,6 +1208,8 @@ async def handle_telegram_text(
     workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
     resolve_customer_id: Callable[[str], str] | None = None,
     resolve_telegram_customer_id: Callable[[int], str] | None = None,
+    owner_customer_id: str | None = None,
+    bind_telegram_customer_id: Callable[..., Any] | None = None,
 ) -> str | None:
     parsed = parse_telegram_update(body)
     if not parsed:
@@ -1225,6 +1254,14 @@ async def handle_telegram_text(
     )
     if not normal_allowed and not support_allowed:
         return "This bot is restricted and your Telegram account is not allowed."
+    if normal_allowed and not support_allowed:
+        _maybe_auto_bind_allowed_username(
+            owner_customer_id=owner_customer_id,
+            allowed_usernames_csv=allowed_usernames_csv,
+            username=ctx.username,
+            user_id=ctx.user_id,
+            bind_telegram_customer_id=bind_telegram_customer_id,
+        )
     if support_allowed:
         await _maybe_configure_support_commands_for_chat(
             bot_token=bot_token,
@@ -1567,6 +1604,8 @@ class TelegramChatService:
         workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
         resolve_customer_id: Callable[[str], str] | None = None,
         resolve_telegram_customer_id: Callable[[int], str] | None = None,
+        owner_customer_id: str | None = None,
+        bind_telegram_customer_id: Callable[..., Any] | None = None,
         alias_user_ids: Callable[[str], list[str]] | None = None,
     ) -> None:
         self.bot_token = str(bot_token or "").strip()
@@ -1577,6 +1616,8 @@ class TelegramChatService:
         self.workflow_setup_after_reply = workflow_setup_after_reply
         self.resolve_customer_id = resolve_customer_id
         self.resolve_telegram_customer_id = resolve_telegram_customer_id
+        self.owner_customer_id = str(owner_customer_id or "").strip()
+        self.bind_telegram_customer_id = bind_telegram_customer_id
         self.alias_user_ids = alias_user_ids
         self._interactive_inbox = TelegramInteractiveInbox()
 
@@ -1668,4 +1709,6 @@ class TelegramChatService:
             workflow_setup_after_reply=self.workflow_setup_after_reply,
             resolve_customer_id=self.resolve_customer_id,
             resolve_telegram_customer_id=self.resolve_telegram_customer_id,
+            owner_customer_id=self.owner_customer_id,
+            bind_telegram_customer_id=self.bind_telegram_customer_id,
         )

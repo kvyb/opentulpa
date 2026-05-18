@@ -223,6 +223,9 @@ def create_app(
     profile_service = customer_profile_service or CustomerProfileService(
         db_path=PROJECT_ROOT / ".opentulpa" / "customer_profiles.db"
     )
+    configured_owner_customer_id = str(
+        getattr(settings, "opentulpa_owner_customer_id", None) or ""
+    ).strip()
     vault_service = file_vault_service or FileVaultService(
         root_dir=PROJECT_ROOT / ".opentulpa" / "file_vault",
         db_path=PROJECT_ROOT / ".opentulpa" / "file_vault.db",
@@ -276,8 +279,10 @@ def create_app(
             bot_token=settings.telegram_bot_token,
             file_vault=vault_service,
             memory=memory_service,
+            owner_customer_id=configured_owner_customer_id,
             resolve_customer_id=profile_service.resolve_customer_id,
             resolve_telegram_customer_id=profile_service.resolve_telegram_customer_id,
+            bind_telegram_customer_id=profile_service.bind_telegram_user_id,
             alias_user_ids=profile_service.alias_user_ids,
         )
         if settings.telegram_bot_token
@@ -332,7 +337,8 @@ def create_app(
     telegram_business = TelegramBusinessService(
         db_path=PROJECT_ROOT / ".opentulpa" / "telegram_business.db",
         owner_customer_id=profile_service.resolve_customer_id(
-            _telegram_business_owner_customer_id(
+            configured_owner_customer_id
+            or _telegram_business_owner_customer_id(
                 allowed_usernames=settings.telegram_allowed_usernames,
                 allowed_user_ids=settings.telegram_allowed_user_ids,
                 state_path=PROJECT_ROOT / ".opentulpa" / "telegram_state.json",

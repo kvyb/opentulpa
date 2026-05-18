@@ -135,6 +135,14 @@ class Settings(BaseSettings):
         default=None,
         description="Optional secret for webhook path",
     )
+    opentulpa_owner_customer_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional canonical owner customer id for generic-first deployments. "
+            "When set to a non-telegram id, an allowed Telegram username can bootstrap "
+            "a numeric Telegram id binding on first message."
+        ),
+    )
     opentulpa_web_token: str | None = Field(
         default=None,
         description="Bearer token required for dashboard web operations against this deployment.",
