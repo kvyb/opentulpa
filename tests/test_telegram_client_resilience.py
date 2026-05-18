@@ -122,6 +122,8 @@ async def test_send_message_splits_long_markdown_into_formatted_messages() -> No
     result = await tg.send_message(chat_id=1, text=text, parse_mode="HTML")
 
     assert isinstance(result, dict)
+    assert isinstance(result.get("results"), list)
+    assert len(result["results"]) == len(recorder.payloads)
     assert len(recorder.payloads) > 1
     assert all(payload.get("parse_mode") == "HTML" for payload in recorder.payloads)
     assert all(len(str(payload.get("text", ""))) <= 3800 for payload in recorder.payloads)

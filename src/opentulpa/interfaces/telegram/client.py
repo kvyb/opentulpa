@@ -147,6 +147,7 @@ class TelegramClient:
         if not chunks:
             return None
         first_data: dict[str, Any] | None = None
+        sent_results: list[dict[str, Any]] = []
         for idx, final_text in enumerate(chunks):
             payload: dict[str, Any] = {"chat_id": chat_id, "text": final_text}
             if final_mode:
@@ -160,8 +161,12 @@ class TelegramClient:
             data = await self._post("sendMessage", payload)
             if not isinstance(data, dict):
                 return None
+            sent_results.append(data)
             if first_data is None:
                 first_data = data
+        if first_data is not None and len(sent_results) > 1:
+            first_data = dict(first_data)
+            first_data["results"] = sent_results
         return first_data
 
     async def send_message_draft(

@@ -479,6 +479,48 @@ class _FakeTelegramClient:
         }
 
 
+class _SplitResultTelegramClient:
+    def __init__(self) -> None:
+        self.sent_messages: list[dict[str, Any]] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int | str,
+        text: str,
+        parse_mode: str | None = "HTML",
+        reply_markup: dict[str, Any] | None = None,
+        business_connection_id: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> dict[str, Any]:
+        del parse_mode, reply_markup, reply_to_message_id
+        chunks = ["First chunk", "Second chunk"]
+        results: list[dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks, start=1):
+            self.sent_messages.append(
+                {
+                    "chat_id": str(chat_id),
+                    "text": chunk,
+                    "business_connection_id": business_connection_id,
+                    "message_id": 2_000 + idx,
+                }
+            )
+            results.append(
+                {
+                    "ok": True,
+                    "result": {
+                        "message_id": 2_000 + idx,
+                        "date": int(datetime.now(UTC).timestamp()) + idx,
+                        "chat": {"id": chat_id, "type": "private"},
+                        "text": chunk,
+                        "business_connection_id": business_connection_id,
+                        "sender_business_bot": {"id": "fake-bot"},
+                    },
+                }
+            )
+        return {"ok": True, "result": results[0]["result"], "results": results}
+
+
 def _mk_service(
     tmp_path: Path,
     *,
@@ -1238,6 +1280,44 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert sent["chat_id"] == "555"
     assert sent["business_connection_id"] == "bc_123"
     assert sent["reply_to_message_id"] == 10
+
+
+@pytest.mark.asyncio
+async def test_telegram_business_reply_persists_each_split_message(
+    tmp_path: Path,
+) -> None:
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio({}, {}),
+    )
+    telegram_business.client = _SplitResultTelegramClient()
+    workflow = {
+        "customer_id": "telegram_123",
+        "source_config": {"business_connection_id": "bc_123"},
+    }
+    conversation_summary = {
+        "conversation_id": "555",
+        "latest_inbound_message_id": "10",
+    }
+
+    error = await service._send_telegram_business_reply(
+        workflow=workflow,
+        conversation_summary=conversation_summary,
+        reply_text="First chunk\n\nSecond chunk",
+    )
+
+    assert error is None
+    conversation = telegram_business.get_conversation(
+        customer_id="telegram_123",
+        business_connection_id="bc_123",
+        conversation_id="555",
+    )
+    assert conversation["ok"] is True
+    messages = conversation["conversation"]["messages"]
+    assert [item["message_id"] for item in messages] == ["2001", "2002"]
+    assert [item["text"] for item in messages] == ["First chunk", "Second chunk"]
+    assert all(item["sender_role"] == "assistant" for item in messages)
 
 
 @pytest.mark.asyncio
