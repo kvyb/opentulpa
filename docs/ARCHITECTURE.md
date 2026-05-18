@@ -54,6 +54,10 @@ The system is split so that transports and storage are replaceable, while the ag
 6. Tool-call preambles and interactive progress updates can be surfaced before the final reply when the runtime emits them
 7. Telegram webhook handling returns quickly while the tracked turn continues in the background when needed
 
+### Graceful deploy shutdown
+
+OpenTulpa tracks active web turns and accepted Telegram webhook work, including owner chat and Telegram Business intake, in a process-local shutdown drain. During shutdown the app marks itself draining, `/healthz` returns `503`, new web chat and Telegram webhook turns are rejected by that old process, and in-flight work is allowed to finish until `OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` expires. Railway uses overlapping deploys plus `drainingSeconds`, so idle deployments switch quickly while active agent loops get a bounded window to send their final reply.
+
 ### External DM intake flow
 
 This is the flow behind persistent lead handling such as Telegram Business inboxes.

@@ -107,6 +107,14 @@ def test_ensure_telegram_webhook_secret_generates_when_missing(monkeypatch) -> N
     assert os.environ.get("TELEGRAM_WEBHOOK_SECRET") == generated
 
 
+def test_shutdown_grace_seconds_defaults_and_parses(monkeypatch) -> None:
+    monkeypatch.delenv("OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", raising=False)
+    assert entry._shutdown_grace_seconds() == 300
+
+    monkeypatch.setenv("OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", "45.5")
+    assert entry._shutdown_grace_seconds() == 45
+
+
 def test_auto_configure_telegram_webhook_posts_secret_and_business_updates(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 

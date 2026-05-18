@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,6 +49,7 @@ from opentulpa.context.link_aliases import LinkAliasService
 from opentulpa.context.service import EventContextService
 from opentulpa.context.user_context import UserContextService
 from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_settings
+from opentulpa.core.shutdown_drain import ShutdownDrain
 from opentulpa.intake import (
     IntakeWorkflowService,
     WorkflowSetupService,
@@ -193,6 +195,17 @@ def _business_knowledge_oracle(
     )
 
 
+def _shutdown_drain_timeout_seconds() -> float:
+    raw = str(os.environ.get("OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", "") or "").strip()
+    if not raw:
+        return 300.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("Invalid OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS=%r; using 300", raw)
+        return 300.0
+
+
 def create_app(
     memory: MemoryService | None = None,
     scheduler: SchedulerService | None = None,
@@ -213,6 +226,7 @@ def create_app(
     task_runner = task_service
     runtime = agent_runtime
     settings = get_settings()
+    shutdown_drain = ShutdownDrain(timeout_seconds=_shutdown_drain_timeout_seconds())
     context_events_service = context_events or EventContextService(
         db_path=PROJECT_ROOT / ".opentulpa" / "context_events.db"
     )
@@ -355,6 +369,9 @@ def create_app(
 
     def get_agent_runtime() -> Any:
         return runtime
+
+    def get_shutdown_drain() -> ShutdownDrain:
+        return shutdown_drain
 
     intake_service = intake_workflow_service or IntakeWorkflowService(
         db_path=PROJECT_ROOT / ".opentulpa" / "intake_workflows.db",
@@ -507,6 +524,12 @@ def create_app(
         if intake_service and hasattr(intake_service, "start"):
             await intake_service.start()
         yield
+        drained = await shutdown_drain.drain()
+        if not drained:
+            logger.warning(
+                "Shutdown drain timed out with active_turns=%s",
+                shutdown_drain.status().active_turns,
+            )
         if intake_service and hasattr(intake_service, "shutdown"):
             await intake_service.shutdown()
         if scheduler_service:
@@ -534,6 +557,7 @@ def create_app(
     app.state.knowledge_service = knowledge
     app.state.user_context_service = user_context_service
     app.state.telegram_business = telegram_business
+    app.state.shutdown_drain = shutdown_drain
 
     @app.middleware("http")
     async def enforce_public_route_boundary(
@@ -574,7 +598,11 @@ def create_app(
     )
     tulpa_loader.reload()
 
-    register_health_routes(app, get_agent_runtime=get_agent_runtime)
+    register_health_routes(
+        app,
+        get_agent_runtime=get_agent_runtime,
+        get_shutdown_drain=get_shutdown_drain,
+    )
     register_debug_log_routes(app)
     register_chat_routes(
         app,
@@ -588,6 +616,7 @@ def create_app(
         get_file_vault=get_file_vault,
         get_workflow_setup_service=get_workflow_setup_service,
         resolve_customer_id=profile_service.resolve_customer_id,
+        get_shutdown_drain=get_shutdown_drain,
     )
     register_memory_routes(
         app,
@@ -681,6 +710,7 @@ def create_app(
         get_intake_workflows=get_intake_workflows,
         get_telegram_chat=get_telegram_chat,
         get_agent_runtime=get_agent_runtime,
+        get_shutdown_drain=get_shutdown_drain,
     )
 
     refresh_tulpa_mounts()
