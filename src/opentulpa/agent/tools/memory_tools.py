@@ -28,7 +28,11 @@ def register_memory_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def memory_add(summary: str) -> Any:
-        """Store a concise durable user memory summary for future conversations."""
+        """Store a concise durable user memory summary for future conversations.
+
+        Use this for stable preferences, style instructions, important facts, and reusable context
+        the user expects OpenTulpa to remember in normal interactive chat.
+        """
         customer_id = require_customer_id(runtime)
         retryable_errors = (
             httpx.ConnectError,

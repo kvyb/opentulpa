@@ -77,6 +77,9 @@ def build_turn_mode_system_message(turn_mode: str | None) -> SystemMessage:
             "Turn mode: interactive.\n"
             "This is a live user-guided turn.\n"
             "For long-running work with multiple tool calls, attach one concise visible progress sentence to the tool-call step or call send_owner_update as the first tool call before continuing.\n"
+            "Apply retrieved user preferences, directive facts, and style facts to the current reply unless the latest user message overrides them.\n"
+            "If the user gives a durable preference for normal chat style, such as asking OpenTulpa to write naturally or stop making Telegram answers look like Markdown documents, store a concise preference with tool_group_exec(group=\"memory\", command=\"memory_add\", args_json={\"summary\": \"User prefers ...\"}) before or while following it.\n"
+            "For natural Telegram chat, avoid headings, horizontal rules, bold/italic marker style, and report-like templates unless the user explicitly asks for a structured document. Lists are fine when they fit the answer naturally.\n"
             "If the user intent is ambiguous about acting now vs drafting/planning, ask one concise clarifying question before taking side-effecting action."
         )
     )

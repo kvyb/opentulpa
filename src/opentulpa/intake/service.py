@@ -4017,12 +4017,19 @@ class IntakeWorkflowService:
             return f"failed to send Telegram Business reply: {exc}"
         if not sent:
             return "Telegram Business reply failed"
-        result_message = {}
+        result_messages: list[dict[str, Any]] = []
         if isinstance(sent, dict):
-            candidate = sent.get("result")
-            if isinstance(candidate, dict):
-                result_message = dict(candidate)
-        if result_message:
+            candidates = sent.get("results")
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    result = candidate.get("result")
+                    if isinstance(result, dict):
+                        result_messages.append(dict(result))
+            elif isinstance(sent.get("result"), dict):
+                result_messages.append(dict(sent["result"]))
+        for result_message in result_messages:
             result_message.setdefault("message_id", new_short_id("tgmsg"))
             result_message.setdefault("date", int(_utc_now().timestamp()))
             result_message.setdefault(

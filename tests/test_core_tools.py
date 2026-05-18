@@ -107,6 +107,15 @@ async def test_memory_search_passes_customer_scope() -> None:
     assert kwargs["json_body"]["user_id"] == "telegram_123"
 
 
+def test_memory_add_documents_interactive_style_preferences() -> None:
+    tools = register_runtime_tools(DummyRuntime([]))
+    description = str(tools["memory_add"].description)
+
+    assert "stable preferences" in description
+    assert "style instructions" in description
+    assert "normal interactive chat" in description
+
+
 @pytest.mark.asyncio
 async def test_server_time_returns_expected_keys() -> None:
     runtime = DummyRuntime([])
