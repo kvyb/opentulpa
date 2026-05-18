@@ -1572,6 +1572,24 @@ class OpenTulpaLangGraphRuntime:
             call_context=call_context,
         )
 
+    async def astream_model(
+        self,
+        model: Any,
+        messages: list[Any],
+        *,
+        model_name: str | None = None,
+        stable_prefix_count: int = 0,
+        call_context: dict[str, Any] | None = None,
+    ) -> Any:
+        return await _model_pool.astream_model(
+            self,
+            model,
+            messages,
+            model_name=model_name,
+            stable_prefix_count=stable_prefix_count,
+            call_context=call_context,
+        )
+
     @staticmethod
     def _looks_like_provisional_reply(text: str) -> bool:
         candidate = " ".join(str(text or "").split()).strip()
@@ -2934,6 +2952,7 @@ class OpenTulpaLangGraphRuntime:
             "workflow_setup_repair_instruction": "",
             "frozen_prompt_context": None,
             "frozen_history_projection": None,
+            "stream_model_calls": False,
             **skill_state,
         }
 
@@ -3353,6 +3372,8 @@ class OpenTulpaLangGraphRuntime:
         include_pending_context: bool = True,
         forced_skill_names: list[str] | None = None,
         prompt_mode_override: str | None = None,
+        stream_precommit_seconds: float | None = None,
+        stream_incremental_deltas: bool = False,
     ) -> AsyncIterator[str]:
         await self.start()
         assert self._graph is not None
@@ -3438,6 +3459,7 @@ class OpenTulpaLangGraphRuntime:
                 prompt_mode_override=prompt_mode_override,
             )
             config = prepared.config
+            prepared.graph_input["stream_model_calls"] = True
             segment_accumulated = ""
             stream_key = ""
             yielded_any = False
@@ -3448,7 +3470,11 @@ class OpenTulpaLangGraphRuntime:
                 str(os.environ.get("AGENT_STREAM_NO_VISIBLE_PROGRESS_SECONDS", "210")).strip()
                 or "210"
             )
-            stream_precommit_seconds = STREAM_PRECOMMIT_SECONDS
+            effective_stream_precommit_seconds = (
+                STREAM_PRECOMMIT_SECONDS
+                if stream_precommit_seconds is None
+                else max(0.0, float(stream_precommit_seconds))
+            )
             stream_total_chunks = 0
             stream_agent_chunks = 0
             stream_tool_chunks = 0
@@ -3460,6 +3486,7 @@ class OpenTulpaLangGraphRuntime:
             buffered_visible = ""
             buffered_visible_truncated = False
             buffered_visible_source_chars = 0
+            emitted_visible_text = ""
             pending_progress_text = "Working on it…"
             self.log_behavior_event(
                 event="turn_stream_loop_start",
@@ -3467,14 +3494,14 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 customer_id=customer_id,
                 stream_no_visible_timeout_s=stream_no_visible_timeout_s,
-                stream_precommit_seconds=stream_precommit_seconds,
+                stream_precommit_seconds=effective_stream_precommit_seconds,
                 turn_mode=normalized_turn_mode,
             )
 
             def _precommit_active() -> bool:
-                if stream_precommit_seconds <= 0 or yielded_any:
+                if effective_stream_precommit_seconds <= 0 or yielded_any:
                     return False
-                return (time.monotonic() - stream_started_at) < stream_precommit_seconds
+                return (time.monotonic() - stream_started_at) < effective_stream_precommit_seconds
 
             def _finalize_segment(*, register_links: bool = True) -> None:
                 nonlocal segment_accumulated
@@ -3617,7 +3644,16 @@ class OpenTulpaLangGraphRuntime:
                                 first_visible_yield_ms=first_visible_yield_ms,
                                 turn_mode=normalized_turn_mode,
                             )
-                        yield expanded
+                        visible_output = expanded
+                        if stream_incremental_deltas:
+                            visible_output = (
+                                expanded[len(emitted_visible_text) :]
+                                if emitted_visible_text and expanded.startswith(emitted_visible_text)
+                                else expanded
+                            )
+                            emitted_visible_text = expanded
+                        if visible_output:
+                            yield visible_output
                         if truncated:
                             self.log_behavior_event(
                                 event="turn_stream_reply_truncated",
@@ -3690,7 +3726,17 @@ class OpenTulpaLangGraphRuntime:
                         elapsed_ms=int((time.monotonic() - stream_started_at) * 1000),
                         turn_mode=normalized_turn_mode,
                     )
-                    yield buffered_visible
+                    visible_output = buffered_visible
+                    if stream_incremental_deltas:
+                        visible_output = (
+                            buffered_visible[len(emitted_visible_text) :]
+                            if emitted_visible_text
+                            and buffered_visible.startswith(emitted_visible_text)
+                            else buffered_visible
+                        )
+                        emitted_visible_text = buffered_visible
+                    if visible_output:
+                        yield visible_output
                     if buffered_visible_truncated:
                         self.log_behavior_event(
                             event="turn_stream_reply_truncated",

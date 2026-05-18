@@ -1310,32 +1310,41 @@ def build_runtime_graph(runtime: Any):
         )
         model_with_tools = runtime.model_with_tools_for_turn_mode(turn_mode)
         assert model_with_tools is not None
+        call_context = {
+            "call_site": "graph_agent",
+            "trace_id": state.get("agent_trace_id"),
+            "thread_id": thread_id,
+            "customer_id": customer_id,
+            "turn_mode": turn_mode,
+            "prompt_mode": prompt_mode,
+            "_langfuse_graph_callback_covers_call": bool(
+                state.get("langfuse_graph_callback_attached")
+            ),
+            "prompt_sections": prompt_section_names,
+            "stable_prefix_count": stable_prefix_count,
+            "stable_prefix_tokens": stable_prefix_tokens,
+            "frozen_late_tokens": frozen_late_tokens,
+            "dynamic_late_tokens": dynamic_late_tokens,
+            "older_history_tokens": older_history_tokens,
+            "latest_turn_tokens": latest_turn_tokens,
+            "prompt_overhead_tokens": prompt_overhead_tokens,
+            "history_message_count": len(actual_history_messages),
+            "raw_chat_history_count": raw_chat_history_count,
+            "raw_tool_history_count": raw_tool_history_count,
+            "protected_history_count": protected_history_count,
+            "optional_context_messages": optional_context_messages,
+        }
+        stream_model_calls = bool(state.get("stream_model_calls"))
+        astream_fn = getattr(runtime, "astream_model", None)
         ainvoke_fn = getattr(runtime, "ainvoke_model", None)
-        if callable(ainvoke_fn):
-            call_context = {
-                "call_site": "graph_agent",
-                "trace_id": state.get("agent_trace_id"),
-                "thread_id": thread_id,
-                "customer_id": customer_id,
-                "turn_mode": turn_mode,
-                "prompt_mode": prompt_mode,
-                "_langfuse_graph_callback_covers_call": bool(
-                    state.get("langfuse_graph_callback_attached")
-                ),
-                "prompt_sections": prompt_section_names,
-                "stable_prefix_count": stable_prefix_count,
-                "stable_prefix_tokens": stable_prefix_tokens,
-                "frozen_late_tokens": frozen_late_tokens,
-                "dynamic_late_tokens": dynamic_late_tokens,
-                "older_history_tokens": older_history_tokens,
-                "latest_turn_tokens": latest_turn_tokens,
-                "prompt_overhead_tokens": prompt_overhead_tokens,
-                "history_message_count": len(actual_history_messages),
-                "raw_chat_history_count": raw_chat_history_count,
-                "raw_tool_history_count": raw_tool_history_count,
-                "protected_history_count": protected_history_count,
-                "optional_context_messages": optional_context_messages,
-            }
+        if stream_model_calls and callable(astream_fn):
+            response = await astream_fn(
+                model_with_tools,
+                model_messages,
+                stable_prefix_count=stable_prefix_count,
+                call_context=call_context,
+            )
+        elif callable(ainvoke_fn):
             response = await ainvoke_fn(
                 model_with_tools,
                 model_messages,

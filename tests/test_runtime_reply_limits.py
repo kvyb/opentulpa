@@ -34,6 +34,24 @@ class _OversizedStreamGraph:
         return {"messages": [AIMessage(content="unused")]}
 
 
+class _MultiChunkStreamGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(content="Hello"), {"langgraph_node": "agent"}
+        yield AIMessage(content=" from"), {"langgraph_node": "agent"}
+        yield AIMessage(content=" web."), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [AIMessage(content="unused")]}
+
+
 def _build_runtime(tmp_path, graph: Any) -> OpenTulpaLangGraphRuntime:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime._graph = graph
@@ -102,3 +120,21 @@ async def test_astream_text_truncates_oversized_stream_reply(tmp_path) -> None:
     lines = runtime._behavior_log_path.read_text(encoding="utf-8").strip().splitlines()
     events = [json.loads(line)["event"] for line in lines if line.strip()]
     assert "turn_stream_reply_truncated" in events
+
+
+@pytest.mark.asyncio
+async def test_astream_text_can_emit_incremental_visible_deltas(tmp_path) -> None:
+    runtime = _build_runtime(tmp_path, _MultiChunkStreamGraph())
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-stream-deltas",
+        customer_id="telegram_limit",
+        text="draft the post",
+        stream_precommit_seconds=0.0,
+        stream_incremental_deltas=True,
+    ):
+        chunks.append(chunk)
+
+    assert chunks == ["Hello", " from", " web."]
+    assert "".join(chunks) == "Hello from web."

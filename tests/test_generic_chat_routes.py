@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -46,8 +47,27 @@ class _StreamingRuntime:
         file_result = self.file_sender({"id": "file_123", "original_filename": "demo.pdf"})
         if hasattr(file_result, "__await__"):
             await file_result
+        if kwargs.get("stream_incremental_deltas"):
+            yield "Hello"
+            yield " from web."
+            return
         yield "Hello"
         yield "Hello from web."
+
+
+def _sse_payloads(text: str, event_name: str) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for block in text.split("\n\n"):
+        if f"event: {event_name}" not in block:
+            continue
+        data_lines = [
+            line.removeprefix("data:").strip()
+            for line in block.splitlines()
+            if line.startswith("data:")
+        ]
+        assert data_lines
+        payloads.append(json.loads("\n".join(data_lines)))
+    return payloads
 
 
 def _client(monkeypatch: Any, tmp_path: Any) -> tuple[TestClient, _StreamingRuntime]:
@@ -104,10 +124,16 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert "event: file" in text
     assert "/web/files/file_123/content" in text
     assert "event: delta" in text
+    assert _sse_payloads(text, "delta") == [
+        {"text": "Hello", "append": True},
+        {"text": " from web.", "append": True},
+    ]
     assert "Hello from web." in text
     assert "event: final" in text
     assert runtime.calls[0]["customer_id"] == "telegram_1"
     assert runtime.calls[0]["thread_id"] == "dashboard-owner-1"
+    assert runtime.calls[0]["stream_precommit_seconds"] == 0.0
+    assert runtime.calls[0]["stream_incremental_deltas"] is True
 
 
 def test_web_chat_resolves_bound_telegram_alias(monkeypatch: Any, tmp_path: Any) -> None:

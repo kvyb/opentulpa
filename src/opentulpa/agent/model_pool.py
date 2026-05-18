@@ -12,7 +12,7 @@ from langchain.chat_models import init_chat_model
 from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
-from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
@@ -373,6 +373,37 @@ def supports_ainvoke_kwargs(target: Any, kwargs: dict[str, Any]) -> bool:
     return all(key in sig.parameters for key in kwargs)
 
 
+def supports_astream_kwargs(target: Any, kwargs: dict[str, Any]) -> bool:
+    if not kwargs:
+        return False
+    astream = getattr(target, "astream", None)
+    if not callable(astream):
+        return False
+    try:
+        sig = inspect.signature(astream)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters.values()
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
+        return True
+    return all(key in sig.parameters for key in kwargs)
+
+
+def _ai_message_from_stream_chunk(chunk: Any) -> AIMessage:
+    if isinstance(chunk, AIMessage):
+        return chunk
+    content = getattr(chunk, "content", "")
+    return AIMessage(
+        content=content,
+        additional_kwargs=dict(getattr(chunk, "additional_kwargs", {}) or {}),
+        response_metadata=dict(getattr(chunk, "response_metadata", {}) or {}),
+        id=getattr(chunk, "id", None),
+        tool_calls=list(getattr(chunk, "tool_calls", []) or []),
+        invalid_tool_calls=list(getattr(chunk, "invalid_tool_calls", []) or []),
+        usage_metadata=getattr(chunk, "usage_metadata", None),
+    )
+
+
 async def ainvoke_model(
     runtime: Any,
     model: Any,
@@ -445,6 +476,97 @@ async def ainvoke_model(
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("Model invocation failed without attempts.")
+
+
+async def astream_model(
+    runtime: Any,
+    model: Any,
+    messages: list[Any],
+    *,
+    model_name: str | None = None,
+    stable_prefix_count: int = 0,
+    call_context: dict[str, Any] | None = None,
+) -> Any:
+    resolved_model_name = runtime._resolve_model_name_for_runtime_call(
+        model, explicit_name=model_name
+    )
+    prepared_messages = runtime.prepare_messages_for_prompt_cache(
+        list(messages),
+        model_name=resolved_model_name,
+        stable_prefix_count=stable_prefix_count,
+    )
+    base_invoke_extras = runtime.model_invoke_extras(model_name=resolved_model_name)
+    attempts = runtime._model_request_attempts(model_name=resolved_model_name)
+    last_exc: Exception | None = None
+    for attempt_index, attempt in enumerate(attempts):
+        invoke_extras = deep_merge_dicts(
+            dict(base_invoke_extras),
+            dict(attempt.get("invoke_extras") or {}),
+        )
+        attempt_context = dict(call_context or {})
+        attempt_context.update(dict(attempt.get("call_context") or {}))
+        attempt_context["provider_attempt_name"] = (
+            str(attempt.get("name") or "").strip() or "default"
+        )
+        attempt_context["provider_attempt_index"] = attempt_index + 1
+        attempt_context["provider_attempt_count"] = len(attempts)
+        callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
+        astream = getattr(callback_target, "astream", None)
+        if not callable(astream):
+            return await ainvoke_model(
+                runtime,
+                model,
+                messages,
+                model_name=resolved_model_name,
+                stable_prefix_count=stable_prefix_count,
+                call_context=call_context,
+            )
+        response: Any | None = None
+        error_text: str | None = None
+        try:
+            accumulated: Any | None = None
+            if supports_astream_kwargs(callback_target, invoke_extras):
+                stream = astream(prepared_messages, **invoke_extras)
+            else:
+                stream = astream(prepared_messages)
+            async for chunk in stream:
+                accumulated = chunk if accumulated is None else accumulated + chunk
+            if accumulated is None:
+                response = AIMessage(content="")
+            else:
+                response = _ai_message_from_stream_chunk(accumulated)
+            return response
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}"
+            last_exc = exc
+            if attempt_index + 1 >= len(attempts):
+                raise
+            logger.warning(
+                "Streaming model invocation via %s failed for %s; retrying with next provider route: %s",
+                attempt_context["provider_attempt_name"],
+                resolved_model_name,
+                error_text,
+            )
+            runtime.log_behavior_event(
+                event="llm.provider_fallback",
+                model_name=resolved_model_name,
+                failed_provider_attempt=attempt_context["provider_attempt_name"],
+                next_provider_attempt=str(attempts[attempt_index + 1].get("name") or "").strip()
+                or "default",
+                error=error_text,
+            )
+        finally:
+            runtime._record_llm_call_trace(
+                model_name=resolved_model_name,
+                prepared_messages=prepared_messages,
+                stable_prefix_count=stable_prefix_count,
+                response=response,
+                error=error_text,
+                call_context=attempt_context,
+            )
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Streaming model invocation failed without attempts.")
 
 
 async def invoke_structured_model[StructuredModelT: BaseModel](
