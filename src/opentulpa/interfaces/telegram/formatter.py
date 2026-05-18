@@ -80,7 +80,6 @@ def markdownish_to_html(text: str) -> str:
     out_lines: list[str] = []
     for line in lines:
         if re.fullmatch(r"\s*([-*_]\s*){3,}\s*", line):
-            out_lines.append("────────")
             continue
         heading = re.match(r"^\s*#{1,6}\s+(.+)$", line)
         if heading:

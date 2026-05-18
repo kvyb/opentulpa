@@ -20,6 +20,7 @@ def test_prepare_text_and_mode_truncates_oversized_html_message() -> None:
 def test_prepare_text_chunks_and_mode_splits_markdown_without_raw_fallback() -> None:
     section = (
         "## ВОПРОС 1\n\n"
+        "---\n\n"
         "**1. «I retired my nice girl era» — Before/After**\n"
         "- Хук: резкий переход в чёрное платье\n"
         '- Титр: *"I retired my nice girl era"*\n'
@@ -35,4 +36,6 @@ def test_prepare_text_chunks_and_mode_splits_markdown_without_raw_fallback() -> 
     assert all("[Truncated to fit Telegram.]" not in chunk for chunk in chunks)
     assert all("## " not in chunk for chunk in chunks)
     assert all("**" not in chunk for chunk in chunks)
+    assert all("────────" not in chunk for chunk in chunks)
+    assert all("\n---\n" not in chunk for chunk in chunks)
     assert all("<b>" in chunk or "• " in chunk for chunk in chunks)
