@@ -4,10 +4,38 @@ from __future__ import annotations
 
 import pytest
 
+from opentulpa.agent.graph_builder import (
+    _build_connected_composio_toolkits_context,
+    _build_late_turn_control_text,
+)
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
 from opentulpa.agent.prompt_policy import build_system_prompt_message
 from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+
+
+class _PromptComposio:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def list_connected_accounts(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return {
+            "items": [
+                {"toolkit_slug": "github", "status": "ACTIVE"},
+                {"toolkit_slug": "instagram", "status": "ACTIVE"},
+                {"toolkit_slug": "github", "status": "ACTIVE"},
+                {"toolkit_slug": "googlesheets", "status": "INACTIVE"},
+                {"toolkit_slug": "", "status": "ACTIVE"},
+            ]
+        }
+
+
+class _PromptComposioRuntime:
+    def __init__(self, composio: _PromptComposio | None) -> None:
+        self._composio_service = composio
 
 
 def test_prompt_dynamic_boundary_marker_is_single_line_prefix() -> None:
@@ -21,6 +49,50 @@ def test_full_runtime_policy_retains_hardened_rules() -> None:
     assert "[SECTION C] Tool Selection" in text
     assert "[SECTION D] Claim Discipline And Execution" in text
     assert PROMPT_DYNAMIC_BOUNDARY not in text
+    assert "Available via Composio tool for this customer" not in text
+
+
+@pytest.mark.asyncio
+async def test_connected_composio_toolkits_context_is_dynamic_and_cached() -> None:
+    composio = _PromptComposio()
+    runtime = _PromptComposioRuntime(composio)
+
+    text = await _build_connected_composio_toolkits_context(runtime, "telegram_1")
+
+    assert text.startswith("Available via Composio tool for this customer: github, instagram.")
+    assert 'tool_group_exec(group="composio")' in text
+    assert "googlesheets" not in text
+    assert composio.calls == [
+        {
+            "customer_id": "telegram_1",
+            "statuses": ["ACTIVE"],
+            "limit": 20,
+        }
+    ]
+
+    cached_text = await _build_connected_composio_toolkits_context(runtime, "telegram_1")
+    assert cached_text == text
+    assert len(composio.calls) == 1
+
+
+def test_late_turn_control_can_include_connected_composio_toolkits() -> None:
+    text = _build_late_turn_control_text(
+        prompt_mode="default",
+        turn_mode="interactive",
+        customer_id="telegram_1",
+        connected_composio_toolkits_context="Available via Composio tool for this customer: github.",
+        live_time={
+            "server_time_local_iso": "2026-05-18T10:00:00+08:00",
+            "server_time_utc_iso": "2026-05-18T02:00:00+00:00",
+            "server_utc_offset": "+08:00",
+            "user_time_local_iso": "2026-05-18T10:00:00+08:00",
+            "user_utc_offset": "+08:00",
+            "user_time_source": "server_default",
+        },
+    )
+
+    assert PROMPT_DYNAMIC_BOUNDARY in text
+    assert "Available via Composio tool for this customer: github." in text
 
 
 def test_model_invoke_extras_empty_when_caching_disabled() -> None:

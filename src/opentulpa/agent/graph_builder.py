@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -75,6 +77,10 @@ from opentulpa.agent.workflow_setup_prompt_context import (
 )
 
 logger = logging.getLogger(__name__)
+
+_COMPOSIO_PROMPT_TOOLKIT_CACHE_SECONDS = 300
+_COMPOSIO_PROMPT_TOOLKIT_LIMIT = 20
+_COMPOSIO_PROMPT_TOOLKIT_TIMEOUT_SECONDS = 2.0
 
 
 def _graph_retry_budget(runtime: Any) -> int:
@@ -229,6 +235,7 @@ def _build_late_turn_control_text(
     turn_mode: str,
     customer_id: str,
     live_time: dict[str, str],
+    connected_composio_toolkits_context: str = "",
 ) -> str:
     parts: list[str] = [
         PROMPT_DYNAMIC_BOUNDARY,
@@ -238,6 +245,7 @@ def _build_late_turn_control_text(
             f"customer_id={customer_id}. "
             "Customer scope for customer-scoped tools is resolved automatically from runtime state."
         ),
+        connected_composio_toolkits_context,
         (
             "Live time context (auto-injected this turn):\n"
             f"- server_time_local_iso: {live_time['server_time_local_iso']}\n"
@@ -250,6 +258,66 @@ def _build_late_turn_control_text(
         ),
     ]
     return "\n\n".join(str(part).strip() for part in parts if str(part).strip())
+
+
+async def _build_connected_composio_toolkits_context(runtime: Any, customer_id: str) -> str:
+    cid = str(customer_id or "").strip()
+    if not cid:
+        return ""
+    now = time.monotonic()
+    cache = getattr(runtime, "_composio_prompt_toolkit_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        runtime._composio_prompt_toolkit_cache = cache
+    cached = cache.get(cid)
+    if (
+        isinstance(cached, tuple)
+        and len(cached) == 2
+        and isinstance(cached[0], int | float)
+        and isinstance(cached[1], list)
+        and now - float(cached[0]) < _COMPOSIO_PROMPT_TOOLKIT_CACHE_SECONDS
+    ):
+        toolkits = [str(item) for item in cached[1] if str(item).strip()]
+    else:
+        toolkits = []
+        composio = getattr(runtime, "_composio_service", None)
+        list_connected_accounts = getattr(composio, "list_connected_accounts", None)
+        if bool(getattr(composio, "enabled", False)) and callable(list_connected_accounts):
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        list_connected_accounts,
+                        customer_id=cid,
+                        statuses=["ACTIVE"],
+                        limit=_COMPOSIO_PROMPT_TOOLKIT_LIMIT,
+                    ),
+                    timeout=_COMPOSIO_PROMPT_TOOLKIT_TIMEOUT_SECONDS,
+                )
+                items = response.get("items") if isinstance(response, dict) else []
+                seen: set[str] = set()
+                for item in items[:_COMPOSIO_PROMPT_TOOLKIT_LIMIT] if isinstance(items, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    status = str(item.get("status", "") or "").strip().upper()
+                    slug = str(item.get("toolkit_slug", "") or "").strip().lower()
+                    if (not status or status == "ACTIVE") and slug and slug not in seen:
+                        seen.add(slug)
+                        toolkits.append(slug)
+            except Exception as exc:
+                logger.debug("Composio prompt toolkit lookup failed: %s", exc)
+        assert len(toolkits) <= _COMPOSIO_PROMPT_TOOLKIT_LIMIT
+        cache[cid] = (now, toolkits)
+
+    if not toolkits:
+        return ""
+    assert all(toolkit == toolkit.strip().lower() for toolkit in toolkits)
+    return (
+        "Available via Composio tool for this customer: "
+        f"{', '.join(toolkits)}. "
+        "For private or authenticated resources in these services, prefer "
+        'tool_group_exec(group="composio") with composio_tool_search/composio_tool_execute '
+        "before anonymous web or browser access."
+    )
 
 
 def _prompt_overhead_tokens(messages: list[AnyMessage]) -> int:
@@ -823,6 +891,10 @@ def build_runtime_graph(runtime: Any):
                 else None
             )
             live_time = await runtime._build_live_time_context(customer_id)
+            connected_composio_toolkits_context = await _build_connected_composio_toolkits_context(
+                runtime,
+                customer_id,
+            )
             pending_context_summary = (
                 str(state.get("pending_context_summary", "")).strip()
                 if context_engineer.should_include_optional_context(
@@ -968,12 +1040,18 @@ def build_runtime_graph(runtime: Any):
                     turn_mode=turn_mode,
                     customer_id=customer_id,
                     live_time=live_time,
+                    connected_composio_toolkits_context=connected_composio_toolkits_context,
                 ),
                 "late_control_sections": [
                     "volatile_injected",
                     f"prompt_mode:{prompt_mode}",
                     f"turn_mode:{turn_mode}",
                     "customer_scope",
+                    *(
+                        ["connected_composio_toolkits"]
+                        if connected_composio_toolkits_context
+                        else []
+                    ),
                     "live_time",
                 ],
                 "stable_entries": stable_entries,
