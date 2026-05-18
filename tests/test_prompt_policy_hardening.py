@@ -151,6 +151,10 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "live user-guided turn" in interactive
     assert "attach one concise visible progress sentence" in interactive
     assert "call send_owner_update as the first tool call" in interactive
+    assert "Apply retrieved user preferences, directive facts, and style facts" in interactive
+    assert "store a concise preference with tool_group_exec" in interactive
+    assert "stop making Telegram answers look like Markdown documents" in interactive
+    assert "Lists are fine when they fit the answer naturally." in interactive
     assert "collaborating on an intake workflow draft" in workflow_setup
     assert "attach one concise visible progress sentence" in workflow_setup
     assert "call send_owner_update as the first tool call" in workflow_setup

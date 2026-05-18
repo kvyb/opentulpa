@@ -425,6 +425,7 @@ def build_harness(
     monkeypatch: Any,
     scenario_name: str,
     composio_service: Any | None = None,
+    memory_service: Any | None = None,
 ) -> E2EHarness:
     from opentulpa.api import app as app_module
     from opentulpa.interfaces.telegram import attachments as attachments_module
@@ -481,7 +482,12 @@ def build_harness(
         behavior_log_path=str(behavior_log_path),
     )
     scheduler = SchedulerService(db_path=tmp_path / f"{scenario_name}_scheduler.sqlite")
-    app = create_app(agent_runtime=runtime, scheduler=scheduler, composio_service=composio)
+    app = create_app(
+        agent_runtime=runtime,
+        scheduler=scheduler,
+        composio_service=composio,
+        memory=memory_service,
+    )
     patch_runtime_internal_api(runtime=runtime, app=app, recorder=recorder)
     client = TestClient(app)
     client.__enter__()

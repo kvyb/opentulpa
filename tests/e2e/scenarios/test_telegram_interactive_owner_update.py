@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from harness.runner import E2EHarness, load_jsonl
+from harness.runner import E2EHarness, build_harness, close_harness, load_jsonl
 from langgraph.checkpoint.memory import InMemorySaver
 from mocks.telegram import FakeTelegramClient
 
@@ -52,6 +53,82 @@ def _wait_until(predicate: Any, timeout_seconds: float = 60.0) -> bool:
             return True
         time.sleep(0.2)
     return bool(predicate())
+
+
+class _RecordingMemory:
+    user_id = "default"
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+        self.searches: list[dict[str, Any]] = []
+
+    def add(
+        self,
+        messages: list[dict[str, Any]],
+        user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        infer: bool = True,
+        retries: int = 1,
+    ) -> dict[str, Any]:
+        del infer, retries
+        text = "\n".join(
+            str(message.get("content", "") or "").strip()
+            for message in messages
+            if isinstance(message, dict) and str(message.get("content", "") or "").strip()
+        ).strip()
+        record = {
+            "id": f"mem_{len(self.entries) + 1}",
+            "memory": text,
+            "text": text,
+            "score": 0.99,
+            "metadata": {"kind": "preference_fact", **dict(metadata or {})},
+            "user_id": str(user_id or self.user_id),
+        }
+        self.entries.append(record)
+        return {"results": [record]}
+
+    def add_text(
+        self,
+        text: str,
+        user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        infer: bool = True,
+        retries: int = 1,
+    ) -> dict[str, Any]:
+        return self.add(
+            [{"role": "user", "content": text}],
+            user_id=user_id,
+            metadata=metadata,
+            infer=infer,
+            retries=retries,
+        )
+
+    def search(
+        self,
+        query: str,
+        user_id: str | None = None,
+        limit: int = 5,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        self.searches.append(
+            {
+                "query": str(query or ""),
+                "user_id": str(user_id or self.user_id),
+                "limit": int(limit),
+                "metadata": metadata or {},
+            }
+        )
+        kinds = metadata.get("kind") if isinstance(metadata, dict) else None
+        allowed_kinds = {str(item) for item in kinds} if isinstance(kinds, list) else None
+        out: list[dict[str, Any]] = []
+        for entry in reversed(self.entries):
+            kind = str(entry.get("metadata", {}).get("kind", "") or "")
+            if allowed_kinds is not None and kind not in allowed_kinds:
+                continue
+            out.append(entry)
+            if len(out) >= int(limit):
+                break
+        return out
 
 
 async def _live_time(customer_id: str) -> dict[str, str]:
@@ -389,3 +466,130 @@ def test_live_telegram_interactive_chat_can_use_owner_update_while_searching(
             item for item in internal_calls if item.get("path") == "/internal/web_search"
         ],
     )
+
+
+@pytest.mark.live_llm
+def test_live_telegram_interactive_chat_remembers_and_honors_style_preference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = get_settings()
+    if not str(settings.openai_compatible_api_key or "").strip():
+        pytest.skip("OPENAI_COMPATIBLE_API_KEY (or OPENROUTER_API_KEY) required for live LLM e2e")
+
+    memory = _RecordingMemory()
+    harness = build_harness(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        scenario_name="interactive_style_memory",
+        memory_service=memory,
+    )
+    owner_user_id = 777
+    owner_chat_id = 1777
+
+    def owner_messages_since(start_index: int) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in harness.telegram_client.sent_messages[start_index:]
+            if int(item.get("chat_id", 0)) == owner_chat_id
+            and not str(item.get("business_connection_id", "") or "").strip()
+        ]
+
+    try:
+        fresh_status = harness.post_telegram(
+            body=_telegram_message(
+                chat_id=owner_chat_id,
+                user_id=owner_user_id,
+                username="owner777",
+                text="/fresh",
+            )
+        )
+        assert fresh_status == 200
+        assert _wait_until(
+            lambda: any(
+                int(item.get("chat_id", 0)) == owner_chat_id
+                for item in harness.telegram_client.sent_messages
+            ),
+            timeout_seconds=30.0,
+        )
+
+        internal_start = harness.count_internal_api_calls()
+        style_start = len(harness.telegram_client.sent_messages)
+        style_status = harness.post_telegram(
+            body=_telegram_message(
+                chat_id=owner_chat_id,
+                user_id=owner_user_id,
+                username="owner777",
+                text=(
+                    "Remember this as my normal Telegram chat writing style: write naturally. "
+                    "Do not make answers look like Markdown documents. No headings, no horizontal "
+                    "rules, no bold or italic marker style. Lists are okay when they fit naturally. "
+                    "Reply with one short sentence after you save it."
+                ),
+            )
+        )
+        assert style_status == 200
+        assert _wait_until(
+            lambda: bool(owner_messages_since(style_start)) and bool(memory.entries),
+            timeout_seconds=180.0,
+        ), {
+            "owner_messages": owner_messages_since(style_start),
+            "memory_entries": memory.entries,
+            "internal_calls": harness.internal_api_calls_since(internal_start),
+        }
+
+        stored_text = "\n".join(str(item.get("text", "") or "") for item in memory.entries)
+        assert "Markdown" in stored_text or "markdown" in stored_text
+        assert "natur" in stored_text.lower() or "естествен" in stored_text.lower()
+        assert any(
+            item.get("path") == "/internal/memory/add"
+            for item in harness.internal_api_calls_since(internal_start)
+        )
+
+        second_internal_start = harness.count_internal_api_calls()
+        second_start = len(harness.telegram_client.sent_messages)
+        second_status = harness.post_telegram(
+            body=_telegram_message(
+                chat_id=owner_chat_id,
+                user_id=owner_user_id,
+                username="owner777",
+                text=(
+                    "Назови три идеи TikTok роликов для dark feminine personal brand. "
+                    "Ответь по-русски, коротко, без объяснения моих стилевых правил."
+                ),
+            )
+        )
+        assert second_status == 200
+        assert _wait_until(
+            lambda: bool(owner_messages_since(second_start)),
+            timeout_seconds=180.0,
+        ), {
+            "owner_messages": owner_messages_since(second_start),
+            "memory_entries": memory.entries,
+            "memory_searches": memory.searches,
+        }
+
+        reply_text = str(owner_messages_since(second_start)[-1].get("text", "") or "").strip()
+        second_internal_calls = harness.internal_api_calls_since(second_internal_start)
+        assert reply_text
+        assert any(item.get("path") == "/internal/memory/search" for item in second_internal_calls)
+        assert memory.searches
+        assert not re.search(r"(?m)^\s*#{1,6}\s+", reply_text)
+        assert not re.search(r"(?m)^\s*[-*_]{3,}\s*$", reply_text)
+        assert "**" not in reply_text
+        assert "__" not in reply_text
+
+        harness.recorder.add(
+            "live_interactive_style_memory_e2e",
+            owner_chat_id=owner_chat_id,
+            stored_memories=memory.entries,
+            memory_searches=memory.searches,
+            reply_text=reply_text,
+            internal_memory_calls=[
+                item
+                for item in harness.internal_api_calls_since(internal_start)
+                if item.get("path") in {"/internal/memory/add", "/internal/memory/search"}
+            ],
+        )
+    finally:
+        close_harness(harness)
