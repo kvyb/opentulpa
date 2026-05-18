@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from hmac import compare_digest
@@ -347,6 +348,7 @@ async def _stream_turn(
                 )
             else:
                 final_text = ""
+                delta_seq = 0
                 async for chunk in runtime.astream_text(
                     thread_id=thread_id,
                     customer_id=customer_id,
@@ -364,7 +366,18 @@ async def _stream_turn(
                         await queue.put(("status", {"message": progress}))
                         continue
                     final_text = f"{final_text}{current}"
-                    await queue.put(("delta", {"text": current, "append": True}))
+                    delta_seq += 1
+                    await queue.put(
+                        (
+                            "delta",
+                            {
+                                "text": current,
+                                "append": True,
+                                "seq": delta_seq,
+                                "server_received_at_ms": int(time.time() * 1000),
+                            },
+                        )
+                    )
             final_text = str(final_text or "").strip()
             if (
                 turn_mode == "workflow_setup"

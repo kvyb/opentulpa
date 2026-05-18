@@ -356,24 +356,26 @@ def _build_relevant_skill_discovery_context(
     available_skills: Any,
     selected_names: list[str] | None,
 ) -> str:
-    if not isinstance(available_skills, list) or not selected_names:
+    if not isinstance(available_skills, list):
         return ""
-    wanted = {str(name).strip() for name in selected_names if str(name).strip()}
-    if not wanted:
-        return ""
+    wanted = {str(name).strip() for name in selected_names or [] if str(name).strip()}
+    include_all = not wanted
     lines = [
-        "Skills relevant to this task:",
-        "These are discovery hints only. Use skill_get(name) before relying on a skill's actual instructions.",
+        "Available skills registry:",
+        "This is a compact glossary only. If a skill is needed, call skill_get(name) before relying on its instructions.",
     ]
     seen: set[str] = set()
     for item in available_skills:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name", "")).strip()
-        if not name or name not in wanted or name in seen:
+        if not name or name in seen:
+            continue
+        if not include_all and name not in wanted:
             continue
         seen.add(name)
-        description = " ".join(str(item.get("description", "")).split()).strip()
+        description_words = " ".join(str(item.get("description", "")).split()).strip().split()
+        description = " ".join(description_words[:20]).strip()
         scope = str(item.get("scope", "")).strip() or "user"
         if description:
             lines.append(f"- {name} ({scope}): {description[:220]}")
@@ -834,7 +836,7 @@ def build_runtime_graph(runtime: Any):
                 skill_candidates=available_skills,
                 thread_rollup_sections=rollup_sections,
             )
-            if should_retrieve and latest_user and latest_user != cached_query:
+            if latest_user and latest_user != cached_query:
                 if not available_skills:
                     list_skills = getattr(runtime, "_list_available_skills", None)
                     if callable(list_skills):
@@ -842,18 +844,7 @@ def build_runtime_graph(runtime: Any):
                             available_skills = await list_skills(customer_id)
                         except Exception:
                             available_skills = []
-                selected = await runtime._select_relevant_skills(
-                    customer_id=customer_id,
-                    query=latest_user,
-                    candidates=available_skills,
-                    prompt_mode=prompt_mode,
-                    max_skills=3,
-                )
-                skill_names = [
-                    str(item.get("name", "")).strip()
-                    for item in selected
-                    if isinstance(item, dict) and str(item.get("name", "")).strip()
-                ]
+                skill_names = []
                 skill_query = latest_user
             skill_discovery_context = _build_relevant_skill_discovery_context(
                 available_skills=available_skills,
@@ -868,11 +859,19 @@ def build_runtime_graph(runtime: Any):
                 )
                 else None
             )
-            memory_grounding = await runtime._load_memory_grounding_context(
-                customer_id=customer_id,
-                user_text=latest_user,
-                turn_mode=turn_mode,
-                token_budget=500,
+            memory_grounding = (
+                await runtime._load_memory_grounding_context(
+                    customer_id=customer_id,
+                    user_text=latest_user,
+                    turn_mode=turn_mode,
+                    token_budget=500,
+                )
+                if context_engineer.should_include_optional_context(
+                    kind="memory_grounding",
+                    prompt_mode=prompt_mode,
+                    should_retrieve=should_retrieve,
+                )
+                else ""
             )
             thread_rollup = (
                 "\n\n".join(

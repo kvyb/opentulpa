@@ -34,7 +34,6 @@ _EXECUTION_HINTS = (
     "browse ",
 )
 
-
 def classify_prompt_mode(user_text: str, *, turn_mode: str) -> PromptMode:
     normalized_turn_mode = str(turn_mode or "").strip().lower()
     if normalized_turn_mode == "workflow_setup":

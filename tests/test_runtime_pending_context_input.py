@@ -992,6 +992,41 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
 
 
 @pytest.mark.asyncio
+async def test_pre_resolve_skill_state_does_not_call_llm_selector() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    selector_calls = 0
+
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        assert customer_id == "telegram_test"
+        return [
+            {
+                "name": "browser-use-operator",
+                "description": "Use browser steps for dynamic websites.",
+                "scope": "global",
+            }
+        ]
+
+    async def _selector(**kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal selector_calls
+        selector_calls += 1
+        del kwargs
+        return []
+
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._select_relevant_skills = _selector  # type: ignore[method-assign]
+
+    state = await runtime._pre_resolve_skill_state(
+        customer_id="telegram_test",
+        user_text="use browser if needed",
+        prompt_mode="task_chat",
+    )
+
+    assert selector_calls == 0
+    assert state["active_skill_names"] == []
+    assert state["active_available_skills"][0]["name"] == "browser-use-operator"
+
+
+@pytest.mark.asyncio
 async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     captured: dict[str, Any] = {}
