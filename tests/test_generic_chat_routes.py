@@ -12,10 +12,11 @@ from opentulpa.core.config import get_settings
 
 
 class _StreamingRuntime:
-    def __init__(self) -> None:
+    def __init__(self, *, incremental_chunks: list[str] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
         self.update_sender: Any | None = None
         self.file_sender: Any | None = None
+        self.incremental_chunks = incremental_chunks or ["Hello", " from web."]
 
     async def register_interactive_update_sender(self, *, thread_id: str, sender: Any) -> None:
         assert thread_id
@@ -48,8 +49,8 @@ class _StreamingRuntime:
         if hasattr(file_result, "__await__"):
             await file_result
         if kwargs.get("stream_incremental_deltas"):
-            yield "Hello"
-            yield " from web."
+            for chunk in self.incremental_chunks:
+                yield chunk
             return
         yield "Hello"
         yield "Hello from web."
@@ -77,6 +78,17 @@ def _client(monkeypatch: Any, tmp_path: Any) -> tuple[TestClient, _StreamingRunt
     vault = FileVaultService(root_dir=tmp_path / "vault", db_path=tmp_path / "vault.db")
     app = create_app(agent_runtime=runtime, file_vault_service=vault)
     return TestClient(app), runtime
+
+
+def _client_with_runtime(
+    monkeypatch: Any,
+    tmp_path: Any,
+    runtime: _StreamingRuntime,
+) -> TestClient:
+    monkeypatch.setenv("OPENTULPA_WEB_TOKEN", "web-secret")
+    get_settings.cache_clear()
+    vault = FileVaultService(root_dir=tmp_path / "vault", db_path=tmp_path / "vault.db")
+    return TestClient(create_app(agent_runtime=runtime, file_vault_service=vault))
 
 
 def test_web_chat_rejects_missing_bearer(monkeypatch: Any, tmp_path: Any) -> None:
@@ -134,6 +146,36 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert runtime.calls[0]["thread_id"] == "dashboard-owner-1"
     assert runtime.calls[0]["stream_precommit_seconds"] == 0.0
     assert runtime.calls[0]["stream_incremental_deltas"] is True
+
+
+def test_web_chat_preserves_whitespace_only_incremental_deltas(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    runtime = _StreamingRuntime(incremental_chunks=["Hello", " ", "world", "\n\n", "Again"])
+    client = _client_with_runtime(monkeypatch, tmp_path, runtime)
+
+    with client.stream(
+        "POST",
+        "/web/chat/turns",
+        headers={"authorization": "Bearer web-secret"},
+        json={
+            "customer_id": "telegram_1",
+            "thread_id": "dashboard-owner-1",
+            "text": "hi",
+        },
+    ) as response:
+        text = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert _sse_payloads(text, "delta") == [
+        {"text": "Hello", "append": True},
+        {"text": " ", "append": True},
+        {"text": "world", "append": True},
+        {"text": "\n\n", "append": True},
+        {"text": "Again", "append": True},
+    ]
+    assert _sse_payloads(text, "final") == [{"text": "Hello world\n\nAgain"}]
 
 
 def test_web_chat_resolves_bound_telegram_alias(monkeypatch: Any, tmp_path: Any) -> None:

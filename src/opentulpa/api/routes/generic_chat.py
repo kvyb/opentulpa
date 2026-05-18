@@ -357,7 +357,7 @@ async def _stream_turn(
                     stream_incremental_deltas=True,
                 ):
                     current = str(chunk or "")
-                    if not current.strip():
+                    if not current:
                         continue
                     progress = _progress_message(current.strip())
                     if progress:
