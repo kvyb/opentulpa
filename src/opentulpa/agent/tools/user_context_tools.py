@@ -13,11 +13,12 @@ from opentulpa.agent.tools.core_tools import _tool_error_payload
 def register_user_context_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def user_context_add_files(file_ids: list[str]) -> Any:
-        """Add uploaded files to the durable interactive user context.
+        """Add uploaded files to durable user/chat context knowledge.
 
-        Use this only when the user's recent instructions clearly ask to add files
-        to their reusable context. If intent is unclear, ask what to do with the
-        files instead of guessing from filenames or content.
+        Use this when the user's recent instructions or conversation make it
+        clear that files should be remembered for future interactive chat. If
+        intent is unclear, ask whether to remember them for chat, use them for a
+        workflow/business bot, or answer about them once.
         """
         customer_id = require_customer_id(runtime)
         safe_file_ids = [
@@ -40,7 +41,7 @@ def register_user_context_tools(runtime: Any) -> dict[str, Any]:
 
     @tool
     async def user_context_query(query: str, max_extract_chars: int = 3000) -> Any:
-        """Query the durable interactive user context for grounded evidence."""
+        """Query durable user/chat context knowledge for grounded evidence."""
         customer_id = require_customer_id(runtime)
         safe_query = str(query or "").strip()
         if not safe_query:
