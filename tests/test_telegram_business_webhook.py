@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,6 +77,44 @@ class _FakeIntakeWorkflows:
             }
         )
         return {"ok": False, "summary": "send failed"}
+
+
+class _SlowFakeIntakeWorkflows(_FakeIntakeWorkflows):
+    def __init__(self, *, started: threading.Event, release: threading.Event) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    async def run_workflow(self, *, customer_id: str, workflow_id: str, event_type: str = "manual"):  # type: ignore[no-untyped-def]
+        self.started.set()
+        await asyncio.to_thread(self.release.wait)
+        return await super().run_workflow(
+            customer_id=customer_id,
+            workflow_id=workflow_id,
+            event_type=event_type,
+        )
+
+
+class _RecordingDrain:
+    def __init__(self) -> None:
+        self.draining = False
+        self.entered = threading.Event()
+        self.exited = threading.Event()
+
+    def active_turn(self):  # type: ignore[no-untyped-def]
+        drain = self
+
+        class _Context:
+            async def __aenter__(self):  # type: ignore[no-untyped-def]
+                drain.entered.set()
+                return None
+
+            async def __aexit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+                _ = exc_type, exc, tb
+                drain.exited.set()
+                return False
+
+        return _Context()
 
 
 def test_telegram_business_owner_customer_id_uses_first_allowed_username(
@@ -188,6 +228,72 @@ def test_business_message_webhook_triggers_matching_workflow_and_notifies_owner(
     ]
     assert telegram_client.messages[0]["chat_id"] == "777"
     assert "Telegram Business workflow issue: send failed" in str(telegram_client.messages[0]["text"])
+
+
+def test_business_message_webhook_holds_shutdown_drain_until_workflow_finishes(
+    tmp_path: Path,
+) -> None:
+    app = FastAPI()
+    telegram_client = _RecordingTelegramClient()
+    telegram_business = TelegramBusinessService(db_path=tmp_path / "telegram_business.db")
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    started = threading.Event()
+    release = threading.Event()
+    intake = _SlowFakeIntakeWorkflows(started=started, release=release)
+    drain = _RecordingDrain()
+    settings = SimpleNamespace(
+        telegram_bot_token="bot-token",
+        telegram_webhook_secret="secret-token",
+        telegram_allowed_user_ids=None,
+        telegram_allowed_usernames=None,
+    )
+
+    register_telegram_webhook_routes(
+        app,
+        settings=settings,
+        get_telegram_client=lambda: telegram_client,
+        get_telegram_business=lambda: telegram_business,
+        get_intake_workflows=lambda: intake,
+        get_telegram_chat=lambda: _FakeTelegramChat(),
+        get_agent_runtime=lambda: object(),
+        get_shutdown_drain=lambda: drain,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhook/telegram",
+            json={
+                "update_id": 1,
+                "business_message": {
+                    "business_connection_id": "bc_123",
+                    "message_id": 10,
+                    "date": 1_775_552_400,
+                    "chat": {"id": 555, "type": "private", "username": "alice"},
+                    "from": {"id": 999, "is_bot": False, "username": "alice"},
+                    "text": "Can I book 3pm?",
+                },
+            },
+            headers={"x-telegram-bot-api-secret-token": "secret-token"},
+        )
+
+        assert response.status_code == 200
+        assert drain.entered.wait(timeout=1)
+        assert started.wait(timeout=1)
+        assert not drain.exited.is_set()
+
+        release.set()
+        _wait_for_webhook_tasks(app)
+
+    assert drain.exited.is_set()
+    assert intake.run_calls
 
 
 def test_telegram_webhook_writes_debug_log_events_for_secret_and_business_updates(

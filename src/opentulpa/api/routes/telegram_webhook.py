@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from opentulpa.core.shutdown_drain import ShutdownDrainingError
 from opentulpa.interfaces.telegram.client import (
     parse_telegram_callback_query,
     parse_telegram_update,
@@ -87,11 +88,15 @@ def register_telegram_webhook_routes(
     get_intake_workflows: Callable[[], Any],
     get_telegram_chat: Callable[[], Any],
     get_agent_runtime: Callable[[], Any],
+    get_shutdown_drain: Callable[[], Any] | None = None,
 ) -> None:
     """Register Telegram webhook routes."""
 
     @app.post("/webhook/telegram")
     async def telegram_webhook(request: Request) -> Response:
+        drain = get_shutdown_drain() if get_shutdown_drain is not None else None
+        if drain is not None and bool(getattr(drain, "draining", False)):
+            return JSONResponse(status_code=503, content={"detail": "instance draining"})
         if not settings.telegram_bot_token:
             return JSONResponse(status_code=501, content={"detail": "Telegram not configured"})
         expected_secret = str(settings.telegram_webhook_secret or "").strip()
@@ -115,6 +120,13 @@ def register_telegram_webhook_routes(
             return JSONResponse(status_code=403, content={"detail": "invalid telegram secret"})
         body = await request.json()
         update_keys = _top_level_update_keys(body) if isinstance(body, dict) else []
+        turn_context = None
+        if drain is not None and hasattr(drain, "active_turn"):
+            turn_context = drain.active_turn()
+            try:
+                await turn_context.__aenter__()
+            except ShutdownDrainingError:
+                return JSONResponse(status_code=503, content={"detail": "instance draining"})
         _write_telegram_webhook_event(
             "accepted",
             update_id=body.get("update_id") if isinstance(body, dict) else None,
@@ -125,10 +137,25 @@ def register_telegram_webhook_routes(
         )
 
         # Return 200 before long-running agent work so Telegram does not retry the same update.
-        _track_background_task(app, asyncio.create_task(_telegram_background_handler(body=body)))
+        _track_background_task(
+            app,
+            asyncio.create_task(
+                _telegram_background_handler(body=body, turn_context=turn_context)
+            ),
+        )
         return Response(status_code=200)
 
-    async def _telegram_background_handler(body: dict[str, Any]) -> None:
+    async def _telegram_background_handler(
+        body: dict[str, Any],
+        turn_context: Any | None = None,
+    ) -> None:
+        try:
+            await _run_telegram_background_handler(body)
+        finally:
+            if turn_context is not None:
+                await turn_context.__aexit__(None, None, None)
+
+    async def _run_telegram_background_handler(body: dict[str, Any]) -> None:
         business_result = get_telegram_business().ingest_update(body)
         if bool(business_result.get("handled")):
             _write_telegram_webhook_event(

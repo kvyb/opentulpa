@@ -22,6 +22,7 @@ from opentulpa.context.uploaded_files import (
     build_uploaded_files_context,
     should_skip_auto_summary_for_upload,
 )
+from opentulpa.core.shutdown_drain import ShutdownDrainingError
 from opentulpa.tasks.sandbox import TULPA_STUFF_DIR, is_within
 from opentulpa.web.events import append_web_event
 
@@ -86,6 +87,7 @@ def register_generic_chat_routes(
     get_file_vault: Callable[[], Any],
     get_workflow_setup_service: Callable[[], Any],
     resolve_customer_id: Callable[[str], str] | None = None,
+    get_shutdown_drain: Callable[[], Any] | None = None,
 ) -> None:
     """Register authenticated generic chat endpoints."""
 
@@ -110,10 +112,14 @@ def register_generic_chat_routes(
         runtime = get_agent_runtime()
         if runtime is None or not (hasattr(runtime, "ainvoke_text") or hasattr(runtime, "astream_text")):
             return JSONResponse(status_code=503, content={"detail": "agent runtime unavailable"})
+        drain = get_shutdown_drain() if get_shutdown_drain is not None else None
+        if drain is not None and bool(getattr(drain, "draining", False)):
+            return JSONResponse(status_code=503, content={"detail": "instance draining"})
 
         return StreamingResponse(
             _stream_turn(
                 runtime=runtime,
+                shutdown_drain=drain,
                 workflow_setup_service=get_workflow_setup_service(),
                 file_vault=get_file_vault(),
                 customer_id=_resolve_customer_id(payload.customer_id),
@@ -259,6 +265,7 @@ async def _stream_turn(
     text: str,
     file_ids: list[str],
     include_pending_context: bool,
+    shutdown_drain: Any | None = None,
 ) -> AsyncIterator[str]:
     assert customer_id.strip()
     assert thread_id.strip()
@@ -286,6 +293,17 @@ async def _stream_turn(
         return {"ok": True, "sent": True}
 
     async def _run_turn() -> None:
+        turn_context = shutdown_drain.active_turn() if shutdown_drain is not None else None
+        turn_context_entered = False
+        try:
+            if turn_context is not None:
+                await turn_context.__aenter__()
+                turn_context_entered = True
+        except ShutdownDrainingError:
+            await queue.put(("error", {"message": "instance draining", "type": "ShutdownDrainingError"}))
+            await queue.put(("done", {}))
+            return
+
         append_web_event(
             customer_id=customer_id,
             thread_id=thread_id,
@@ -380,6 +398,8 @@ async def _stream_turn(
                         thread_id=thread_id,
                         sender=_send_file,
                     )
+            if turn_context_entered:
+                await turn_context.__aexit__(None, None, None)
             await queue.put(("done", {}))
 
     yield _sse("status", {"message": "Starting..."})

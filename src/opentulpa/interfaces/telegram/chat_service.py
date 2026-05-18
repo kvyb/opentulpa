@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,6 +17,7 @@ from opentulpa.core.debug_logs import (
     build_debug_logs_archive_bytes,
 )
 from opentulpa.core.ids import new_short_id
+from opentulpa.core.shutdown_drain import ShutdownDrainingError
 from opentulpa.interfaces.telegram.attachments import (
     build_uploaded_files_context,
     extract_attachments,
@@ -321,6 +322,15 @@ def _inject_telegram_reply_context(text: str, reply_context: str) -> str:
     if not clean_context or not clean_text:
         return clean_text
     return f"{clean_context}\n\nCurrent user message:\n{clean_text}"
+
+
+@asynccontextmanager
+async def _active_turn_context(shutdown_drain: Any | None):
+    if shutdown_drain is None or not hasattr(shutdown_drain, "active_turn"):
+        yield
+        return
+    async with shutdown_drain.active_turn():
+        yield
 
 
 def support_bot_commands() -> list[dict[str, str]]:
@@ -1049,6 +1059,7 @@ async def _run_interactive_session(
     agent_runtime: Any,
     workflow_setup_status: Callable[..., dict[str, Any]] | None = None,
     workflow_setup_after_reply: Callable[..., dict[str, Any]] | None = None,
+    shutdown_drain: Any | None = None,
 ) -> None:
     while True:
         ready = await session.wait_for_ready_head()
@@ -1126,26 +1137,53 @@ async def _run_interactive_session(
                 )
                 STATE_STORE.touch_assistant_message(session.chat_id)
 
-            final, suppressed = await stream_langgraph_reply_to_telegram(
-                agent_runtime=agent_runtime,
-                thread_id=session.thread_id,
-                customer_id=session.customer_id,
-                text=effective_text,
+            async with _active_turn_context(shutdown_drain):
+                final, suppressed = await stream_langgraph_reply_to_telegram(
+                    agent_runtime=agent_runtime,
+                    thread_id=session.thread_id,
+                    customer_id=session.customer_id,
+                    text=effective_text,
+                    bot_token=bot_token,
+                    chat_id=session.chat_id,
+                    turn_mode=turn_mode,
+                    interactive_session=session,
+                    final_reply_callback=(
+                        _workflow_setup_late_reply if turn_mode == "workflow_setup" else None
+                    ),
+                )
+                if turn_mode == "workflow_setup" and final and not suppressed:
+                    _apply_workflow_setup_after_reply(
+                        workflow_setup_after_reply=workflow_setup_after_reply,
+                        customer_id=session.customer_id,
+                        thread_id=session.thread_id,
+                        reply_text=final,
+                    )
+                if final and not suppressed:
+                    STATE_STORE.touch_assistant_message(session.chat_id)
+                elif not suppressed:
+                    debug_log(
+                        hypothesis_id="telegram_chat",
+                        location="interfaces/telegram/chat_service.py:_run_interactive_session",
+                        message="fallback_no_final_reply",
+                        data={"chat_id": session.chat_id, "thread_id": session.thread_id},
+                    )
+                    sent = await _send_direct_telegram_reply(
+                        bot_token=bot_token,
+                        chat_id=session.chat_id,
+                        text=(
+                            "I received your message but no final reply was available yet. "
+                            "Ask again or use /status."
+                        ),
+                    )
+                    if sent:
+                        STATE_STORE.touch_assistant_message(session.chat_id)
+        except ShutdownDrainingError:
+            await _send_direct_telegram_reply(
                 bot_token=bot_token,
                 chat_id=session.chat_id,
-                turn_mode=turn_mode,
-                interactive_session=session,
-                final_reply_callback=(
-                    _workflow_setup_late_reply if turn_mode == "workflow_setup" else None
-                ),
+                text="OpenTulpa is finishing a deploy. Please retry in a moment.",
             )
-            if turn_mode == "workflow_setup" and final and not suppressed:
-                _apply_workflow_setup_after_reply(
-                    workflow_setup_after_reply=workflow_setup_after_reply,
-                    customer_id=session.customer_id,
-                    thread_id=session.thread_id,
-                    reply_text=final,
-                )
+            return
         except Exception as exc:
             logger.exception(
                 "Telegram interactive runner failed (chat_id=%s, thread_id=%s): %s",
@@ -1171,22 +1209,6 @@ async def _run_interactive_session(
                     thread_id=session.thread_id,
                     session=session,
                 )
-        if final and not suppressed:
-            STATE_STORE.touch_assistant_message(session.chat_id)
-        elif not suppressed:
-            debug_log(
-                hypothesis_id="telegram_chat",
-                location="interfaces/telegram/chat_service.py:_run_interactive_session",
-                message="fallback_no_final_reply",
-                data={"chat_id": session.chat_id, "thread_id": session.thread_id},
-            )
-            sent = await _send_direct_telegram_reply(
-                bot_token=bot_token,
-                chat_id=session.chat_id,
-                text="I received your message but no final reply was available yet. Ask again or use /status.",
-            )
-            if sent:
-                STATE_STORE.touch_assistant_message(session.chat_id)
         if await session.finish_runner_if_idle():
             return
 
@@ -1210,6 +1232,7 @@ async def handle_telegram_text(
     resolve_telegram_customer_id: Callable[[int], str] | None = None,
     owner_customer_id: str | None = None,
     bind_telegram_customer_id: Callable[..., Any] | None = None,
+    shutdown_drain: Any | None = None,
 ) -> str | None:
     parsed = parse_telegram_update(body)
     if not parsed:
@@ -1475,6 +1498,7 @@ async def handle_telegram_text(
                 agent_runtime=agent_runtime,
                 workflow_setup_status=workflow_setup_status,
                 workflow_setup_after_reply=workflow_setup_after_reply,
+                shutdown_drain=shutdown_drain,
             )
         finally:
             await interactive_inbox.prune_if_idle(session)
@@ -1525,20 +1549,40 @@ async def handle_telegram_text(
                 )
                 STATE_STORE.touch_assistant_message(ctx.chat_id)
 
-            final, suppressed = await stream_langgraph_reply_to_telegram(
-                agent_runtime=agent_runtime,
-                thread_id=thread_id,
-                customer_id=customer_id,
-                text=effective_text,
-                bot_token=bot_token,
-                chat_id=ctx.chat_id,
-                turn_mode=turn_mode,
-                final_reply_callback=(
-                    _workflow_setup_late_reply if turn_mode == "workflow_setup" else None
-                ),
-            )
-            if suppressed:
-                return None
+            async with _active_turn_context(shutdown_drain):
+                final, suppressed = await stream_langgraph_reply_to_telegram(
+                    agent_runtime=agent_runtime,
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    text=effective_text,
+                    bot_token=bot_token,
+                    chat_id=ctx.chat_id,
+                    turn_mode=turn_mode,
+                    final_reply_callback=(
+                        _workflow_setup_late_reply if turn_mode == "workflow_setup" else None
+                    ),
+                )
+                if suppressed:
+                    return None
+                if final:
+                    if turn_mode == "workflow_setup":
+                        _apply_workflow_setup_after_reply(
+                            workflow_setup_after_reply=workflow_setup_after_reply,
+                            customer_id=customer_id,
+                            thread_id=thread_id,
+                            reply_text=final,
+                        )
+                    STATE_STORE.touch_assistant_message(ctx.chat_id)
+                    return None
+                debug_log(
+                    hypothesis_id="telegram_chat",
+                    location="interfaces/telegram/chat_service.py:handle_telegram_text",
+                    message="fallback_no_final_reply",
+                    data={"chat_id": ctx.chat_id, "thread_id": thread_id},
+                )
+                return "I received your message but no final reply was available yet. Ask again or use /status."
+        except ShutdownDrainingError:
+            return "OpenTulpa is finishing a deploy. Please retry in a moment."
         except Exception as exc:
             logger.exception(
                 "Telegram streaming reply failed (chat_id=%s, thread_id=%s): %s",
@@ -1547,39 +1591,25 @@ async def handle_telegram_text(
                 exc,
             )
             return _format_agent_error_for_user(exc)
-        if final:
+
+    try:
+        async with _active_turn_context(shutdown_drain):
+            response = await agent_runtime.ainvoke_text(
+                thread_id=thread_id,
+                customer_id=customer_id,
+                text=effective_text,
+                turn_mode=turn_mode,
+            )
             if turn_mode == "workflow_setup":
                 _apply_workflow_setup_after_reply(
                     workflow_setup_after_reply=workflow_setup_after_reply,
                     customer_id=customer_id,
                     thread_id=thread_id,
-                    reply_text=final,
+                    reply_text=str(response or ""),
                 )
-            STATE_STORE.touch_assistant_message(ctx.chat_id)
-            return None
-        debug_log(
-            hypothesis_id="telegram_chat",
-            location="interfaces/telegram/chat_service.py:handle_telegram_text",
-            message="fallback_no_final_reply",
-            data={"chat_id": ctx.chat_id, "thread_id": thread_id},
-        )
-        return "I received your message but no final reply was available yet. Ask again or use /status."
-
-    try:
-        response = await agent_runtime.ainvoke_text(
-            thread_id=thread_id,
-            customer_id=customer_id,
-            text=effective_text,
-            turn_mode=turn_mode,
-        )
-        if turn_mode == "workflow_setup":
-            _apply_workflow_setup_after_reply(
-                workflow_setup_after_reply=workflow_setup_after_reply,
-                customer_id=customer_id,
-                thread_id=thread_id,
-                reply_text=str(response or ""),
-            )
-        return str(response) if response is not None else None
+            return str(response) if response is not None else None
+    except ShutdownDrainingError:
+        return "OpenTulpa is finishing a deploy. Please retry in a moment."
     except Exception as exc:
         logger.exception(
             "Telegram non-streaming reply failed (chat_id=%s, thread_id=%s): %s",
@@ -1692,6 +1722,7 @@ class TelegramChatService:
         support_user_ids_csv: str | None = None,
         support_usernames_csv: str | None = None,
         agent_runtime: Any | None = None,
+        shutdown_drain: Any | None = None,
     ) -> str | None:
         return await handle_telegram_text(
             body=body,
@@ -1711,4 +1742,5 @@ class TelegramChatService:
             resolve_telegram_customer_id=self.resolve_telegram_customer_id,
             owner_customer_id=self.owner_customer_id,
             bind_telegram_customer_id=self.bind_telegram_customer_id,
+            shutdown_drain=shutdown_drain,
         )

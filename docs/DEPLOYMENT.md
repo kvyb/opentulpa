@@ -195,11 +195,16 @@ Telegram is optional in server mode. For web/API-only deployments, leave Telegra
 ### Recommended settings
 
 - `COMPOSIO_API_KEY` for connector integrations such as Google Sheets and Instagram
+- `OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS=300` to let active web or Telegram turns finish during Railway deploy shutdown
 - Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=z-ai/glm-5.1`, `LLM_REASONING_EFFORT=medium`, `WAKE_EXECUTION_MODEL=z-ai/glm-5.1`, Gemini Flash for memory/media, Gemini Flash Lite for the business knowledge oracle)
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 
 If `OPENAI_COMPATIBLE_BASE_URL` is not OpenRouter, review `opentulpa.config.yaml` before startup. The provider must have valid model IDs for `llm_model`, `wake_execution_model`, `workflow_setup_input_classifier_model`, `memory_llm_model`, `multimodal_llm`, `business_knowledge_oracle_model`, `openai_compatible_embedding_model`, and optional `browser_use_model`. File, image, browser, memory, workflow setup, and source-grounded knowledge features will not work correctly if those roles point at unavailable or incompatible models. When an API key is present, `start.sh` calls the provider's OpenAI-compatible `/models` endpoint and warns if configured model IDs are missing from the catalog; it still cannot infer capabilities such as multimodal support from providers that do not expose those flags.
+
+### Graceful deploys
+
+`railway.toml` enables overlapping deploys and a 300 second drain window. On shutdown, OpenTulpa marks the old process as draining, makes `/healthz` fail so new traffic shifts away, rejects new web chat and Telegram webhook turns on the old process, and waits for active web turns or accepted Telegram webhook work, including Telegram Business intake, to finish. If no turn is active, shutdown completes immediately.
 
 ### Optional settings
 

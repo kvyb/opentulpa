@@ -201,6 +201,20 @@ def _telegram_support_user_ids(settings: Any) -> list[int]:
     return out
 
 
+def _shutdown_grace_seconds() -> int:
+    raw = str(os.environ.get("OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", "") or "").strip()
+    if not raw:
+        return 300
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        print(
+            f"Invalid OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS={raw!r}; using 300",
+            file=sys.stderr,
+        )
+        return 300
+
+
 def _auto_configure_telegram_webhook(settings: Any) -> None:
     bot_token = str(settings.telegram_bot_token or "").strip()
     if not bot_token:
@@ -429,7 +443,14 @@ def main() -> None:
     # OpenTulpa exposes HTTP/SSE routes only. Disabling Uvicorn's websocket
     # backend avoids noisy websockets deprecation warnings on local startup.
     try:
-        uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", ws="none")
+        uvicorn.run(
+            app,
+            host=settings.host,
+            port=settings.port,
+            log_level="info",
+            ws="none",
+            timeout_graceful_shutdown=_shutdown_grace_seconds(),
+        )
     finally:
         if langfuse_tracer is not None:
             langfuse_tracer.shutdown()

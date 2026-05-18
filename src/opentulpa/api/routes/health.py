@@ -6,17 +6,29 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 
 def register_health_routes(
     app: FastAPI,
     *,
     get_agent_runtime: Callable[[], Any],
+    get_shutdown_drain: Callable[[], Any] | None = None,
 ) -> None:
     """Register liveness and runtime-health endpoints."""
 
-    @app.get("/healthz")
-    async def health() -> dict[str, str]:
+    @app.get("/healthz", response_model=None)
+    async def health() -> Any:
+        drain = get_shutdown_drain() if get_shutdown_drain is not None else None
+        status = drain.status() if drain is not None and hasattr(drain, "status") else None
+        if status is not None and bool(getattr(status, "draining", False)):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "draining",
+                    "active_turns": int(getattr(status, "active_turns", 0)),
+                },
+            )
         return {"status": "ok"}
 
     @app.get("/agent/healthz")

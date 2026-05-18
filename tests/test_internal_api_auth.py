@@ -47,6 +47,20 @@ def test_internal_routes_blocked_from_public_clients(
     get_settings.cache_clear()
 
 
+def test_healthz_reports_draining_during_shutdown(tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    with _mk_client(tmp_path, client_host="8.8.8.8") as client:
+        healthz = client.get("/healthz")
+        assert healthz.status_code == 200
+
+        client.app.state.shutdown_drain.start_draining()
+        draining = client.get("/healthz")
+
+    assert draining.status_code == 503
+    assert draining.json() == {"status": "draining", "active_turns": 0}
+    get_settings.cache_clear()
+
+
 def test_webhook_route_public_with_telegram_auth(
     tmp_path: Path,
     monkeypatch: Any,
