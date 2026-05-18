@@ -270,6 +270,8 @@ def create_app(
     skill_service.ensure_default_skill()
     if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
         runtime._link_alias_service = alias_service  # type: ignore[attr-defined]
+    if runtime is not None:
+        runtime._composio_service = composio  # type: ignore[attr-defined]
 
     telegram_client = (
         TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
