@@ -157,6 +157,54 @@ class _DraftThenToolThenAnswerGraph:
         return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
 
 
+class _DraftThenToolThenStreamingAnswerGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(
+            content="",
+            tool_calls=[{"id": "call_1", "name": "memory_search", "args": {"query": "context"}}],
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
+        yield AIMessage(content="Hello"), {"langgraph_node": "agent"}
+        yield AIMessage(content=" world"), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
+
+class _DraftThenToolThenDraftToolThenAnswerGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(
+            content="",
+            tool_calls=[{"id": "call_1", "name": "memory_search", "args": {"query": "context"}}],
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
+        yield AIMessage(
+            content="I need to check one more thing.",
+            tool_calls=[{"id": "call_2", "name": "skill_get", "args": {"name": "followup"}}],
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(content="tool running again"), {"langgraph_node": "tools"}
+        yield AIMessage(content="Final answer."), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
+
 class _EarlyVisibleThenToolThenAnswerGraph:
     async def astream(
         self,
@@ -578,6 +626,94 @@ async def test_astream_text_holds_agent_draft_when_segment_declares_tool_calls(
     assert len(chunks) == 2
     assert chunks[0].startswith(STREAM_PROGRESS_PREFIX)
     assert chunks[1] == "I checked it. 3 priority emails found."
+
+
+@pytest.mark.asyncio
+async def test_astream_text_streams_post_tool_incremental_chunks(
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _DraftThenToolThenStreamingAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_post_tool_stream.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-post-tool-stream",
+        customer_id="telegram_post_tool_stream",
+        text="answer after context",
+        stream_precommit_seconds=0.0,
+        stream_incremental_deltas=True,
+    ):
+        chunks.append(chunk)
+
+    assert len(chunks) == 3
+    assert chunks[0].startswith(STREAM_PROGRESS_PREFIX)
+    assert chunks[1:] == ["Hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_astream_text_keeps_second_tool_draft_buffered_after_tool_phase(
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _DraftThenToolThenDraftToolThenAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_second_tool_draft.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-second-tool-draft",
+        customer_id="telegram_second_tool_draft",
+        text="answer after two tool phases",
+        stream_precommit_seconds=0.0,
+        stream_incremental_deltas=True,
+    ):
+        chunks.append(chunk)
+
+    visible = "\n".join(chunks)
+    assert "I need to check one more thing." not in visible
+    assert chunks[-1] == "Final answer."
 
 
 @pytest.mark.asyncio
