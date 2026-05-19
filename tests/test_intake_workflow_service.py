@@ -852,6 +852,113 @@ async def test_draft_reply_mode_stores_pending_draft_until_approved(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_draft_reply_mode_returns_error_when_draft_cannot_be_created(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_message_text_preview": "Can I book a wash today?",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Can I book a wash today?",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    decision = {
+        "ok": True,
+        "matches_workflow": True,
+        "booking_action": "ignore",
+        "reply_action": "send_reply",
+        "reply_text": "Yes, we can do 17:00 today.",
+        "ready_to_save": False,
+    }
+    runtime = _FakeRuntime([dict(decision), dict(decision), dict(decision)])
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio(summary, conversation),
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        reply_mode="draft",
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        force=True,
+    )
+
+    assert result["ok"] is False
+    assert result["results"] == []
+    assert result["errors"] == [
+        "conv_1: draft reply requires conversation_id and recipient_id"
+    ]
+    assert service.list_drafts(customer_id="telegram_123") == []
+
+
+@pytest.mark.asyncio
+async def test_approved_draft_rejects_stale_inbound_before_sending(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_message_text_preview": "Can I book a wash today?",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Can I book a wash today?",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    composio = _FakeComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=composio,
+    )
+    draft = _create_pending_reply_draft(service)
+    composio.summary = {
+        **summary,
+        "latest_inbound_message_id": "msg_2",
+        "latest_inbound_message_created_time": "2026-04-07T08:01:00+00:00",
+        "latest_inbound_message_text_preview": "Actually can I do 18:00?",
+    }
+    composio.conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_2",
+        latest_message_text="Actually can I do 18:00?",
+        latest_message_time="2026-04-07T08:01:00+00:00",
+    )
+
+    current, error = await service.approve_draft(
+        customer_id="telegram_123",
+        draft_id=draft["draft_id"],
+    )
+
+    assert current is not None
+    assert error == (
+        "draft is stale because a newer inbound message arrived before approval: msg_2"
+    )
+    assert current["status"] == "pending"
+    assert composio.execute_calls == []
+    persisted = service.get_draft(customer_id="telegram_123", draft_id=draft["draft_id"])
+    assert persisted is not None
+    assert persisted["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_sent_draft_cannot_be_edited_or_discarded(tmp_path: Path) -> None:
     summary = {
         "conversation_id": "conv_1",

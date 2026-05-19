@@ -592,6 +592,26 @@ class IntakeWorkflowService:
         latest_time = _parse_datetime(latest_summary.get("latest_inbound_message_created_time"))
         return bool(decided_time and latest_time and latest_time > decided_time)
 
+    @classmethod
+    def _draft_stale_error(
+        cls,
+        *,
+        draft_summary: dict[str, Any],
+        latest_summary: dict[str, Any],
+    ) -> str | None:
+        if not cls._latest_inbound_changed(
+            decided_summary=draft_summary,
+            latest_summary=latest_summary,
+        ):
+            return None
+        latest_id = str(latest_summary.get("latest_inbound_message_id", "") or "").strip()
+        if latest_id:
+            return (
+                "draft is stale because a newer inbound message arrived "
+                f"before approval: {latest_id}"
+            )
+        return "draft is stale because a newer inbound message arrived before approval"
+
     def _recover_interrupted_pending_runs(self) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -2904,15 +2924,18 @@ class IntakeWorkflowService:
         approved_draft_id: str = "",
     ) -> tuple[str | None, dict[str, Any] | None]:
         if self._reply_requires_approval(workflow) and not approved_draft_id:
-            draft = self.create_draft_reply(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                reply_text=reply_text,
-                conversation=conversation,
-                decision=decision,
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-            )
+            try:
+                draft = self.create_draft_reply(
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                    reply_text=reply_text,
+                    conversation=conversation,
+                    decision=decision,
+                    active_booking=active_booking,
+                    recent_completed_booking=recent_completed_booking,
+                )
+            except ValueError as exc:
+                return str(exc), None
             self._emit_observability(
                 event="intake.reply.approval_pending",
                 workflow=workflow,
@@ -3168,16 +3191,20 @@ class IntakeWorkflowService:
             "conversation_id": conversation_id,
             "recipient_id": str(draft.get("recipient_id", "") or ""),
         }
-        conversation = _safe_dict(metadata.get("conversation"))
-        if not conversation:
-            loaded_summary, loaded_conversation, load_error = self._load_source_conversation(
-                workflow=workflow,
-                conversation_id=conversation_id,
-            )
-            if load_error is not None:
-                return load_error, reply_text
-            conversation_summary = {**loaded_summary, **conversation_summary}
-            conversation = loaded_conversation
+        loaded_summary, loaded_conversation, load_error = self._load_source_conversation(
+            workflow=workflow,
+            conversation_id=conversation_id,
+        )
+        if load_error is not None:
+            return load_error, reply_text
+        stale_error = self._draft_stale_error(
+            draft_summary=conversation_summary,
+            latest_summary=loaded_summary,
+        )
+        if stale_error is not None:
+            return stale_error, reply_text
+        conversation_summary = {**loaded_summary, **conversation_summary}
+        conversation = loaded_conversation or _safe_dict(metadata.get("conversation"))
         decision = {
             **_safe_dict(metadata.get("decision")),
             "reply_action": "send_reply",
