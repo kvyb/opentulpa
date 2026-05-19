@@ -488,6 +488,7 @@ async def astream_model(
     model_name: str | None = None,
     stable_prefix_count: int = 0,
     call_context: dict[str, Any] | None = None,
+    stream_config: Any | None = None,
 ) -> Any:
     resolved_model_name = runtime._resolve_model_name_for_runtime_call(
         model, explicit_name=model_name
@@ -527,8 +528,18 @@ async def astream_model(
         error_text: str | None = None
         try:
             accumulated: Any | None = None
+            stream_kwargs = dict(invoke_extras)
+            if stream_config is not None:
+                stream_kwargs["config"] = stream_config
             if supports_astream_kwargs(callback_target, invoke_extras):
-                stream = astream(prepared_messages, **invoke_extras)
+                if supports_astream_kwargs(callback_target, stream_kwargs):
+                    stream = astream(prepared_messages, **stream_kwargs)
+                else:
+                    stream = astream(prepared_messages, **invoke_extras)
+            elif stream_config is not None and supports_astream_kwargs(
+                callback_target, {"config": stream_config}
+            ):
+                stream = astream(prepared_messages, config=stream_config)
             else:
                 stream = astream(prepared_messages)
             async for chunk in stream:

@@ -1615,6 +1615,7 @@ class OpenTulpaLangGraphRuntime:
         model_name: str | None = None,
         stable_prefix_count: int = 0,
         call_context: dict[str, Any] | None = None,
+        stream_config: Any | None = None,
     ) -> Any:
         return await _model_pool.astream_model(
             self,
@@ -1623,6 +1624,7 @@ class OpenTulpaLangGraphRuntime:
             model_name=model_name,
             stable_prefix_count=stable_prefix_count,
             call_context=call_context,
+            stream_config=stream_config,
         )
 
     @staticmethod

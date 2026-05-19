@@ -128,6 +128,9 @@ def _normalize_reply_mode_for_origin(draft: dict[str, Any], *, thread_id: str) -
     if channel == "telegram_business_dm":
         normalized["reply_mode"] = "auto"
         return normalized
+    if str(thread_id or "").strip().lower().startswith("dashboard-owner-"):
+        normalized["reply_mode"] = "draft"
+        return normalized
     reply_mode = str(normalized.get("reply_mode", "") or "").strip().lower()
     if reply_mode not in {"auto", "draft"}:
         normalized["reply_mode"] = _default_reply_mode_for_setup_origin(
