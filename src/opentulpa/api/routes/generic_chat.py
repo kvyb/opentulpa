@@ -16,7 +16,7 @@ from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from opentulpa.agent.runtime import STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL
+from opentulpa.agent.runtime import STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL, AgentStreamEvent
 from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
 from opentulpa.api.file_helpers import sanitize_uploaded_file_record
 from opentulpa.context.uploaded_files import (
@@ -357,7 +357,12 @@ async def _stream_turn(
                     include_pending_context=include_pending_context,
                     stream_precommit_seconds=0.0,
                     stream_incremental_deltas=True,
+                    stream_status_events=True,
                 ):
+                    if isinstance(chunk, AgentStreamEvent):
+                        if chunk.event in {"reasoning", "tool_call"}:
+                            await queue.put((chunk.event, chunk.payload))
+                        continue
                     current = str(chunk or "")
                     if not current:
                         continue

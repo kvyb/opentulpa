@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from opentulpa.agent.runtime import AgentStreamEvent
 from opentulpa.api.app import create_app
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
@@ -49,6 +50,20 @@ class _StreamingRuntime:
         if hasattr(file_result, "__await__"):
             await file_result
         if kwargs.get("stream_incremental_deltas"):
+            if kwargs.get("stream_status_events"):
+                yield AgentStreamEvent(
+                    event="reasoning",
+                    payload={"status": "active", "message": "Reasoning..."},
+                )
+                yield AgentStreamEvent(
+                    event="tool_call",
+                    payload={
+                        "status": "started",
+                        "message": "Searching the web...",
+                        "tool_names": ["web_search"],
+                        "tool_call_count": 1,
+                    },
+                )
             for chunk in self.incremental_chunks:
                 yield chunk
             return
@@ -135,6 +150,17 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert "Checking context." in text
     assert "event: file" in text
     assert "/web/files/file_123/content" in text
+    assert "event: reasoning" in text
+    assert "private reasoning" not in text
+    assert _sse_payloads(text, "reasoning") == [{"status": "active", "message": "Reasoning..."}]
+    assert _sse_payloads(text, "tool_call") == [
+        {
+            "status": "started",
+            "message": "Searching the web...",
+            "tool_names": ["web_search"],
+            "tool_call_count": 1,
+        }
+    ]
     assert "event: delta" in text
     deltas = _sse_payloads(text, "delta")
     assert [delta["text"] for delta in deltas] == ["Hello", " from web."]
@@ -147,6 +173,7 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert runtime.calls[0]["thread_id"] == "dashboard-owner-1"
     assert runtime.calls[0]["stream_precommit_seconds"] == 0.0
     assert runtime.calls[0]["stream_incremental_deltas"] is True
+    assert runtime.calls[0]["stream_status_events"] is True
 
 
 def test_web_chat_preserves_whitespace_only_incremental_deltas(

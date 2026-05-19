@@ -9,10 +9,11 @@ from typing import Any
 import pytest
 
 from opentulpa.agent import runtime as runtime_module
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage
 from opentulpa.agent.runtime import (
     STREAM_EMPTY_REPLY_FALLBACK,
     STREAM_PROGRESS_PREFIX,
+    AgentStreamEvent,
     OpenTulpaLangGraphRuntime,
 )
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
@@ -160,6 +161,32 @@ class _EarlyVisibleThenToolThenAnswerGraph:
     async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
         del config
         return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
+
+class _ReasoningThenToolThenAnswerGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(
+            content="",
+            additional_kwargs={"reasoning_content": "private reasoning must not stream"},
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(
+            content="",
+            tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "private"}}],
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
+        yield AIMessage(content="Done."), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
 
 @pytest.mark.asyncio
 async def test_astream_text_emits_fallback_when_no_visible_output(tmp_path) -> None:
@@ -537,3 +564,48 @@ async def test_astream_text_flushes_post_tool_answer_after_early_visible_chunk(
     assert "turn_stream_buffered_completion_flushed" in events
 
     assert "turn_stream_precommit_discarded" not in events
+
+
+@pytest.mark.asyncio
+async def test_astream_text_emits_safe_reasoning_and_tool_status_events(tmp_path) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _ReasoningThenToolThenAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_safe_status.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str | AgentStreamEvent] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-safe-status",
+        customer_id="telegram_safe_status",
+        text="search",
+        stream_status_events=True,
+    ):
+        chunks.append(chunk)
+
+    events = [chunk for chunk in chunks if isinstance(chunk, AgentStreamEvent)]
+    assert [event.event for event in events] == ["reasoning", "tool_call"]
+    assert events[0].payload == {"status": "active", "message": "Reasoning..."}
+    assert events[1].payload["tool_names"] == ["web_search"]
+    assert events[1].payload["tool_call_count"] == 1
+    assert "private reasoning" not in json.dumps([event.payload for event in events])
+    assert chunks[-1] == "Done."

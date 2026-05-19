@@ -399,6 +399,30 @@ def _extract_response_metadata_trace_fields(response: Any) -> dict[str, Any]:
     return fields
 
 
+def _stream_chunk_has_reasoning(message_chunk: Any) -> bool:
+    additional_kwargs = getattr(message_chunk, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        if str(additional_kwargs.get("reasoning_content") or "").strip():
+            return True
+        reasoning_details = additional_kwargs.get("reasoning_details")
+        if isinstance(reasoning_details, list) and reasoning_details:
+            return True
+        if str(additional_kwargs.get("reasoning") or "").strip():
+            return True
+    response_metadata = getattr(message_chunk, "response_metadata", None)
+    if isinstance(response_metadata, dict):
+        usage = _usage_object_to_dict(response_metadata.get("usage"))
+        completion_details = _usage_object_to_dict(
+            usage.get("completion_tokens_details")
+            or usage.get("completionTokensDetails")
+            or response_metadata.get("completion_tokens_details")
+        )
+        reasoning_tokens = _maybe_int(completion_details.get("reasoning_tokens"))
+        if reasoning_tokens is not None and reasoning_tokens > 0:
+            return True
+    return False
+
+
 def _tool_trace_name(tool: Any) -> str:
     return str(getattr(tool, "name", "") or "").strip()
 
@@ -504,6 +528,14 @@ STREAM_EMPTY_REPLY_FALLBACK = (
     "Please retry, and I will continue from the latest state."
 )
 STREAM_PRECOMMIT_SECONDS = 0.75
+
+
+@dataclass(frozen=True)
+class AgentStreamEvent:
+    event: str
+    payload: dict[str, Any]
+
+
 _PROVISIONAL_REPLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*i can also\s+", re.IGNORECASE),
     re.compile(r"^\s*i can (?:search|check|look|fetch|inspect|try)\b", re.IGNORECASE),
@@ -1613,6 +1645,19 @@ class OpenTulpaLangGraphRuntime:
     def _build_progress_signal(text: str) -> str:
         cleaned = " ".join(str(text or "").split()).strip() or "Working on it…"
         return f"{STREAM_PROGRESS_PREFIX}{cleaned}"
+
+    @staticmethod
+    def _safe_tool_names_for_status(tool_calls: list[Any]) -> list[str]:
+        assert isinstance(tool_calls, list)
+        names: list[str] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name", "")).strip()
+            if name:
+                names.append(name)
+        assert len(names) <= len(tool_calls)
+        return names[:8]
 
     @staticmethod
     def _describe_tool_calls_for_progress(tool_calls: list[Any]) -> str:
@@ -3306,7 +3351,8 @@ class OpenTulpaLangGraphRuntime:
         prompt_mode_override: str | None = None,
         stream_precommit_seconds: float | None = None,
         stream_incremental_deltas: bool = False,
-    ) -> AsyncIterator[str]:
+        stream_status_events: bool = False,
+    ) -> AsyncIterator[str | AgentStreamEvent]:
         await self.start()
         assert self._graph is not None
         normalized_turn_mode = _normalize_turn_mode(turn_mode)
@@ -3449,12 +3495,26 @@ class OpenTulpaLangGraphRuntime:
                     )
                 segment_accumulated = ""
 
+            def _reasoning_event(message_chunk: Any) -> AgentStreamEvent | None:
+                if not stream_status_events or not _stream_chunk_has_reasoning(message_chunk):
+                    return None
+                return AgentStreamEvent(
+                    event="reasoning",
+                    payload={
+                        "status": "active",
+                        "message": "Reasoning...",
+                    },
+                )
+
             async for message_chunk, metadata in self._graph.astream(
                 prepared.graph_input,
                 config=config,
                 stream_mode="messages",
             ):
                 stream_total_chunks += 1
+                reasoning_event = _reasoning_event(message_chunk)
+                if reasoning_event is not None:
+                    yield reasoning_event
                 node_name = str(metadata.get("langgraph_node", "")).strip().lower()
                 if stream_total_chunks % 50 == 0:
                     self.log_behavior_event(
@@ -3527,6 +3587,16 @@ class OpenTulpaLangGraphRuntime:
                 if tool_calls:
                     pending_progress_text = self._describe_tool_calls_for_progress(tool_calls)
                     suppress_live_text_until_completion = True
+                    if stream_status_events:
+                        yield AgentStreamEvent(
+                            event="tool_call",
+                            payload={
+                                "status": "started",
+                                "message": pending_progress_text,
+                                "tool_names": self._safe_tool_names_for_status(tool_calls),
+                                "tool_call_count": len(tool_calls),
+                            },
+                        )
                 if in_tool_phase:
                     in_tool_phase = False
                     stream_key = ""
