@@ -158,10 +158,13 @@ def register_intake_workflow_routes(
     async def internal_intake_drafts_discard(request: Request) -> Any:
         service = get_intake_workflows()
         body = await request.json()
-        draft = service.discard_draft(
-            customer_id=resolve_body_customer_id(body, resolve_customer_id),
-            draft_id=str(body.get("draft_id", "")).strip(),
-        )
+        try:
+            draft = service.discard_draft(
+                customer_id=resolve_body_customer_id(body, resolve_customer_id),
+                draft_id=str(body.get("draft_id", "")).strip(),
+            )
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
         if draft is None:
             return JSONResponse(status_code=404, content={"detail": "draft not found"})
         return {"ok": True, "draft": draft}
