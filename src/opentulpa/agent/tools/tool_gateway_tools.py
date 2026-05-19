@@ -296,6 +296,8 @@ def _looks_like_arg_error(value: Any) -> bool:
 def _repair_command_args(command: str, args: dict[str, Any]) -> dict[str, Any]:
     safe_command = str(command or "").strip()
     repaired = dict(args)
+    if safe_command == "web_image_send" and "url" not in repaired and "image_url" in repaired:
+        repaired["url"] = repaired.pop("image_url")
     if safe_command in {
         "intake_workflow_setup_update",
         "intake_workflow_setup_finalize_confirmation",

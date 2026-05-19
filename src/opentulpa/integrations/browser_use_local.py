@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from opentulpa.core.ids import new_short_id
 from opentulpa.tasks.sandbox import TULPA_STUFF_DIR
@@ -33,6 +34,97 @@ _PROFILE_RETENTION_SECONDS = 14 * 24 * 60 * 60
 _PROFILE_METADATA_FILE = "profile.json"
 _DEFAULT_BROWSER_MODEL = "google/gemini-3-flash-preview"
 _DISALLOWED_BROWSER_MODEL_ALIASES = {"browser-use-llm", "bu-mini", "default"}
+_COLLECT_IMAGE_RESOURCES_SCRIPT = """() => {
+  const currentUrl = String(window.location.href || '');
+  const absolutize = (rawUrl) => {
+    const value = String(rawUrl || '').trim();
+    if (!value || value.startsWith('data:') || value.startsWith('blob:')) return '';
+    try {
+      return new URL(value, document.baseURI || currentUrl).href;
+    } catch (_) {
+      return '';
+    }
+  };
+  const pushCandidate = (items, candidate) => {
+    const url = absolutize(candidate.url);
+    if (!url) return;
+    items.push({ ...candidate, url });
+  };
+  const parseSrcset = (srcset) => String(srcset || '')
+    .split(',')
+    .map((part) => part.trim().split(/\\s+/, 1)[0])
+    .filter(Boolean);
+  const parseBackgroundUrls = (value) => {
+    const urls = [];
+    const text = String(value || '');
+    const regex = /url\\((['"]?)(.*?)\\1\\)/g;
+    let match;
+    while ((match = regex.exec(text)) && urls.length < 20) {
+      urls.push(match[2]);
+    }
+    return urls;
+  };
+
+  const imageCandidates = [];
+  for (const img of Array.from(document.images).slice(0, 80)) {
+    pushCandidate(imageCandidates, {
+      source: 'img_src',
+      url: img.currentSrc || img.src || img.getAttribute('src'),
+      alt: img.alt || '',
+      title: img.title || '',
+      width: img.width || 0,
+      height: img.height || 0,
+      natural_width: img.naturalWidth || 0,
+      natural_height: img.naturalHeight || 0
+    });
+    for (const srcsetUrl of parseSrcset(img.getAttribute('srcset')).slice(0, 5)) {
+      pushCandidate(imageCandidates, {
+        source: 'img_srcset',
+        url: srcsetUrl,
+        alt: img.alt || '',
+        title: img.title || '',
+        width: img.width || 0,
+        height: img.height || 0,
+        natural_width: img.naturalWidth || 0,
+        natural_height: img.naturalHeight || 0
+      });
+    }
+  }
+  for (const source of Array.from(document.querySelectorAll('picture source[srcset]')).slice(0, 40)) {
+    for (const srcsetUrl of parseSrcset(source.getAttribute('srcset')).slice(0, 5)) {
+      pushCandidate(imageCandidates, { source: 'picture_source_srcset', url: srcsetUrl });
+    }
+  }
+  for (const element of Array.from(document.querySelectorAll('[style]')).slice(0, 120)) {
+    for (const backgroundUrl of parseBackgroundUrls(element.style.backgroundImage).slice(0, 3)) {
+      pushCandidate(imageCandidates, {
+        source: 'css_background',
+        url: backgroundUrl,
+        title: element.getAttribute('aria-label') || element.getAttribute('title') || ''
+      });
+    }
+  }
+
+  const networkImageResources = performance.getEntriesByType('resource')
+    .filter((entry) => {
+      const initiator = String(entry.initiatorType || '').toLowerCase();
+      const name = String(entry.name || '');
+      return initiator === 'img'
+        || initiator === 'image'
+        || /\\.(avif|gif|jpe?g|png|svg|webp)([?#].*)?$/i.test(name)
+        || /\\/images?\\//i.test(name);
+    })
+    .slice(-80)
+    .map((entry) => ({
+      source: 'network_resource',
+      url: entry.name,
+      initiator_type: entry.initiatorType || '',
+      transfer_size: Math.max(0, Math.round(entry.transferSize || 0)),
+      decoded_body_size: Math.max(0, Math.round(entry.decodedBodySize || 0))
+    }));
+
+  return { imageCandidates, networkImageResources };
+}"""
 
 
 def _utc_now_iso() -> str:
@@ -53,6 +145,8 @@ class _BrowserUseTaskState:
     output: str | None = None
     output_files: list[dict[str, Any]] = field(default_factory=list)
     steps: list[dict[str, Any]] = field(default_factory=list)
+    image_candidates: list[dict[str, Any]] = field(default_factory=list)
+    network_image_resources: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     created_monotonic: float = field(default_factory=time.monotonic)
     updated_monotonic: float = field(default_factory=time.monotonic)
@@ -742,6 +836,8 @@ class BrowserUseLocalManager:
                 state.output = snapshot["output"]
                 state.is_success = True
                 state.steps = snapshot["steps"]
+                state.image_candidates = snapshot["image_candidates"]
+                state.network_image_resources = snapshot["network_image_resources"]
                 state.error = None
                 state.finished_at = _utc_now_iso()
                 state.updated_monotonic = time.monotonic()
@@ -822,6 +918,10 @@ class BrowserUseLocalManager:
             title = str(await browser_session.get_current_page_title()).strip()
         with suppress(Exception):
             state_text = str(await browser_session.get_state_as_text()).strip()
+        image_candidates, network_image_resources = await self._collect_image_resources(
+            browser_session=browser_session,
+            page_url=current_url or target_url,
+        )
         screenshot_path = await self._try_capture_task_screenshot(
             browser_session=browser_session,
             task_id=task_id,
@@ -836,6 +936,16 @@ class BrowserUseLocalManager:
         if state_text:
             output_parts.append("Visible page state:")
             output_parts.append(state_text[:12000])
+        if image_candidates:
+            output_parts.append("Image candidates:")
+            for candidate in image_candidates[:8]:
+                alt = str(candidate.get("alt") or "").strip()
+                suffix = f" alt={alt[:80]!r}" if alt else ""
+                output_parts.append(f"- {candidate.get('url')}{suffix}")
+        if network_image_resources:
+            output_parts.append("Network image resources:")
+            for resource in network_image_resources[:8]:
+                output_parts.append(f"- {resource.get('url')}")
         step = {
             "number": 1,
             "url": current_url or target_url or None,
@@ -847,7 +957,95 @@ class BrowserUseLocalManager:
             "output": "\n".join(output_parts).strip(),
             "steps": [step],
             "task": task_text,
+            "image_candidates": image_candidates,
+            "network_image_resources": network_image_resources,
         }
+
+    async def _collect_image_resources(
+        self,
+        *,
+        browser_session: Any,
+        page_url: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not hasattr(browser_session, "get_current_page"):
+            return [], []
+        page = None
+        with suppress(Exception):
+            page = await browser_session.get_current_page()
+        if page is None or not hasattr(page, "evaluate"):
+            return [], []
+
+        raw: Any = None
+        with suppress(Exception):
+            raw = await page.evaluate(_COLLECT_IMAGE_RESOURCES_SCRIPT)
+        if not isinstance(raw, dict):
+            return [], []
+
+        image_candidates = self._normalize_image_resource_items(
+            raw.get("imageCandidates"),
+            page_url=page_url,
+            max_items=20,
+        )
+        network_image_resources = self._normalize_image_resource_items(
+            raw.get("networkImageResources"),
+            page_url=page_url,
+            max_items=20,
+        )
+        return image_candidates, network_image_resources
+
+    @classmethod
+    def _normalize_image_resource_items(
+        cls,
+        raw_items: Any,
+        *,
+        page_url: str,
+        max_items: int,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_items, list):
+            return []
+        assert max_items > 0
+        safe_page_url = str(page_url or "").strip()
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_item in raw_items[:100]:
+            if len(normalized) >= max_items:
+                break
+            if not isinstance(raw_item, dict):
+                continue
+            url = str(raw_item.get("url") or "").strip()
+            if not cls._is_http_resource_url(url):
+                continue
+            key = url.split("#", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            item: dict[str, Any] = {
+                "url": url,
+                "source": str(raw_item.get("source") or "").strip()[:40] or None,
+                "page_url": safe_page_url or None,
+            }
+            for text_key in ("alt", "title", "initiator_type"):
+                text_value = str(raw_item.get(text_key) or "").strip()
+                if text_value:
+                    item[text_key] = text_value[:240]
+            for int_key in (
+                "width",
+                "height",
+                "natural_width",
+                "natural_height",
+                "transfer_size",
+                "decoded_body_size",
+            ):
+                numeric_value = raw_item.get(int_key)
+                if isinstance(numeric_value, int | float) and numeric_value >= 0:
+                    item[int_key] = int(numeric_value)
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _is_http_resource_url(url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     async def _try_capture_task_screenshot(self, *, browser_session: Any, task_id: str) -> str:
         if not hasattr(browser_session, "take_screenshot"):
@@ -1159,6 +1357,8 @@ class BrowserUseLocalManager:
             "output": state.output,
             "outputFiles": state.output_files,
             "steps": state.steps,
+            "imageCandidates": state.image_candidates,
+            "networkImageResources": state.network_image_resources,
             "error": state.error,
             "ownerInputPrompt": state.owner_input_prompt,
             "ownerInputType": state.owner_input_type,

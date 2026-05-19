@@ -4,6 +4,7 @@ import pytest
 
 from opentulpa.agent.tools.browser_tools import _build_browser_use_task, _normalize_allowed_domains
 from opentulpa.agent.tools_registry import register_runtime_tools
+from opentulpa.integrations.browser_use_local import BrowserUseLocalManager
 
 
 class _DummyRuntime:
@@ -54,6 +55,28 @@ class _DummyBrowserManager:
             "llm": llm,
             "output": "done",
             "outputFiles": [],
+            "imageCandidates": [
+                {
+                    "url": "https://images.example.com/chipmunk.jpg",
+                    "source": "img_src",
+                    "alt": "chipmunk on a rock",
+                    "width": 800,
+                    "height": 533,
+                    "natural_width": 1600,
+                    "natural_height": 1066,
+                    "page_url": start_url or "https://example.com",
+                }
+            ],
+            "networkImageResources": [
+                {
+                    "url": "https://cdn.example.com/chipmunk.webp",
+                    "source": "network_resource",
+                    "initiator_type": "img",
+                    "transfer_size": 12345,
+                    "decoded_body_size": 45678,
+                    "page_url": start_url or "https://example.com",
+                }
+            ],
             "steps": [
                 {
                     "number": 1,
@@ -164,7 +187,35 @@ def test_browser_use_tool_descriptions_include_login_session_and_secret_boundari
     assert "persisted\nbrowser profile state" in session_description
     assert "Browser Use-backed browser session" in normalized_run_description
     assert "OpenTulpa-captured page evidence" in normalized_run_description
+    assert "image_candidates" in normalized_run_description
     assert "Do not ask the owner to paste credentials into durable memory" in normalized_run_description
+
+
+def test_browser_use_image_resource_normalizer_bounds_and_deduplicates() -> None:
+    items = BrowserUseLocalManager._normalize_image_resource_items(
+        [
+            {"url": "data:image/png;base64,abc", "source": "img_src"},
+            {"url": "https://images.example.com/a.jpg#fragment", "source": "img_src"},
+            {"url": "https://images.example.com/a.jpg", "source": "network_resource"},
+            {"url": "https://images.example.com/b.jpg", "source": "img_src", "width": 640.4},
+        ],
+        page_url="https://example.com/search",
+        max_items=2,
+    )
+
+    assert items == [
+        {
+            "url": "https://images.example.com/a.jpg#fragment",
+            "source": "img_src",
+            "page_url": "https://example.com/search",
+        },
+        {
+            "url": "https://images.example.com/b.jpg",
+            "source": "img_src",
+            "page_url": "https://example.com/search",
+            "width": 640,
+        },
+    ]
 
 
 def test_build_browser_use_task_adds_operator_instruction() -> None:
@@ -172,6 +223,7 @@ def test_build_browser_use_task_adds_operator_instruction() -> None:
 
     assert task.startswith("Use the browser like a careful human operator.")
     assert "Prefer visible page evidence over guesses." in task
+    assert "prefer returned image_candidates or" in task
     assert "Do not keep browsing just to be exhaustive." in task
     assert task.endswith("Task:\nFind the source page")
 
@@ -187,6 +239,20 @@ async def test_browser_use_run_uses_local_manager() -> None:
     assert result.get("task_id") == "task_123"
     assert result.get("status") == "finished"
     assert result.get("output") == "done"
+    assert result["image_candidates"] == [
+        {
+            "url": "https://images.example.com/chipmunk.jpg",
+            "source": "img_src",
+            "alt": "chipmunk on a rock",
+            "page_url": "https://example.com",
+            "width": 800,
+            "height": 533,
+            "natural_width": 1600,
+            "natural_height": 1066,
+        }
+    ]
+    assert result["network_image_resources"][0]["url"] == "https://cdn.example.com/chipmunk.webp"
+    assert result["network_image_resources"][0]["initiator_type"] == "img"
     assert manager.last_customer_id == "u_1"
     assert manager.tasks["task_123"]["task"].startswith(
         "Use the browser like a careful human operator."

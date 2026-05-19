@@ -103,7 +103,7 @@ class Settings(BaseSettings):
         description="Estimated token budget for compressed older-context rollup.",
     )
     agent_context_compaction_source_tokens: int = Field(
-        default=100000,
+        default=12000,
         ge=1000,
         le=500000,
         description="Max oldest-token span folded into rollup in one compaction pass.",
