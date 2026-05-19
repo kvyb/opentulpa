@@ -30,6 +30,9 @@ _DRAFT_SENDABLE_STATUSES = {"pending", "edited"}
 _DEFAULT_SCHEDULE = "*/5 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
 _MAX_LATEST_INBOUND_AGE = timedelta(minutes=1)
+_SCHEDULED_INBOUND_AGE_GRACE = timedelta(minutes=1)
+_DEFAULT_SCHEDULED_INBOUND_AGE = timedelta(minutes=6)
+_MAX_SCHEDULED_INBOUND_AGE = timedelta(hours=1)
 _MAX_TELEGRAM_BUSINESS_WEBHOOK_INBOUND_AGE = timedelta(hours=24)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
 _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
@@ -48,6 +51,36 @@ logger = logging.getLogger(__name__)
 
 def _channel_uses_scheduler(channel: str) -> bool:
     return str(channel or "").strip().lower() != "telegram_business_dm"
+
+
+def _scheduled_poll_interval(schedule: Any) -> timedelta | None:
+    parts = str(schedule or "").strip().split()
+    if len(parts) < 5:
+        return None
+    minute = parts[0].strip()
+    if minute == "*":
+        return timedelta(minutes=1)
+    for prefix in ("*/", "0/"):
+        if not minute.startswith(prefix):
+            continue
+        raw_step = minute[len(prefix) :].strip()
+        if not raw_step.isdigit():
+            return None
+        step = int(raw_step)
+        if step <= 0:
+            return None
+        return timedelta(minutes=step)
+    return None
+
+
+def _scheduled_inbound_max_age(workflow: dict[str, Any]) -> timedelta:
+    interval = _scheduled_poll_interval(workflow.get("schedule"))
+    if interval is None:
+        return _DEFAULT_SCHEDULED_INBOUND_AGE
+    return min(
+        max(interval + _SCHEDULED_INBOUND_AGE_GRACE, _MAX_LATEST_INBOUND_AGE),
+        _MAX_SCHEDULED_INBOUND_AGE,
+    )
 
 
 def _utc_now() -> datetime:
@@ -550,9 +583,18 @@ class IntakeWorkflowService:
         }
 
     @classmethod
-    def _latest_inbound_max_age_for_event(cls, event_type: str) -> timedelta:
+    def _latest_inbound_max_age_for_event(
+        cls,
+        *,
+        event_type: str,
+        workflow: dict[str, Any],
+    ) -> timedelta:
         if cls._is_telegram_business_webhook_event(event_type):
             return _MAX_TELEGRAM_BUSINESS_WEBHOOK_INBOUND_AGE
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        if channel == "instagram_dm" and provider == "composio":
+            return _scheduled_inbound_max_age(workflow)
         return _MAX_LATEST_INBOUND_AGE
 
     @staticmethod
@@ -3373,7 +3415,10 @@ class IntakeWorkflowService:
                     continue
                 if not force and _is_older_than(
                     conversation_summary.get("latest_inbound_message_created_time"),
-                    max_age=self._latest_inbound_max_age_for_event(event_type),
+                    max_age=self._latest_inbound_max_age_for_event(
+                        event_type=event_type,
+                        workflow=workflow,
+                    ),
                 ):
                     self._set_cursor(
                         workflow_id=str(workflow["workflow_id"]),
