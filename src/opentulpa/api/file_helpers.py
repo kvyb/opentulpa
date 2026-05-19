@@ -9,6 +9,8 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
+_WEB_IMAGE_USER_AGENT = "OpenTulpa/0.1 (+https://github.com/kvyb/opentulpa; send-web-image)"
+
 
 def sanitize_uploaded_file_record(
     record: dict[str, Any],
@@ -110,7 +112,7 @@ async def download_image_from_web_url(
 
     safe_limit = max(250_000, min(int(max_bytes), 25_000_000))
     timeout = httpx.Timeout(45.0, connect=10.0, read=45.0)
-    headers = {"User-Agent": "OpenTulpa/0.1 (+send-web-image)"}
+    headers = {"User-Agent": _WEB_IMAGE_USER_AGENT}
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
         try:
             head = await client.head(raw_url)

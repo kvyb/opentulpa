@@ -51,7 +51,11 @@ class _DummyGraph:
 
 
 class _DummyModel:
+    def __init__(self) -> None:
+        self.calls: list[list[Any]] = []
+
     async def ainvoke(self, messages: list[Any]) -> Any:
+        self.calls.append(messages)
         # Return intentionally large output; compaction should still cap it.
         return SimpleNamespace(content=("rollup-summary " * 3000))
 
@@ -67,7 +71,7 @@ class _DummyRuntime:
         self._context_short_term_low_tokens = 20000
         self._context_recent_tokens = 20000
         self._context_rollup_tokens = 5000
-        self._context_compaction_source_tokens = 100000
+        self._context_compaction_source_tokens = 12000
         self._rollups: dict[str, str] = {}
 
     def _load_thread_rollup(self, thread_id: str) -> str | None:
@@ -98,10 +102,39 @@ async def test_maybe_compact_thread_context_enforces_recent_window_and_rollup_ca
     assert remaining_messages
     assert after_tokens <= 20000
     assert runtime._checkpointer.deleted is True
+    assert len(runtime._model.calls) == 1
 
     rollup = runtime._rollups.get("chat-test", "")
     assert rollup
     assert approx_tokens(rollup) <= 5000
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_thread_context_caps_summarizer_input_while_dropping_to_recent_window() -> None:
+    messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(180)]
+    runtime = _DummyRuntime(messages)
+    runtime._context_short_term_high_tokens = 12000
+    runtime._context_short_term_low_tokens = 3500
+    runtime._context_rollup_tokens = 2200
+    runtime._context_compaction_source_tokens = 12000
+
+    await maybe_compact_thread_context(
+        runtime,
+        thread_id="chat-huge",
+        customer_id="telegram_1",
+    )
+
+    remaining_messages = runtime._graph._messages
+    remaining_tokens = sum(
+        approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages
+    )
+    assert remaining_messages
+    assert remaining_tokens <= 3500
+    assert len(runtime._model.calls) == 1
+
+    compaction_input = str(runtime._model.calls[0][1].content)
+    assert "Older conversation segment to fold in:" in compaction_input
+    assert approx_tokens(compaction_input) <= 15000
 
 
 @pytest.mark.asyncio

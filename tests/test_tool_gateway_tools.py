@@ -171,3 +171,28 @@ async def test_tool_group_exec_batch_returns_per_call_errors() -> None:
     assert result["ok"] is False
     assert [item["ok"] for item in result["results"]] == [True, False]
     assert result["results"][1]["error"] == "clock unavailable"
+
+
+@pytest.mark.asyncio
+async def test_tool_group_exec_repairs_web_image_send_image_url_alias() -> None:
+    @tool
+    async def web_image_send(url: str) -> dict[str, Any]:
+        """Send a web image."""
+        return {"sent_url": url}
+
+    tools = register_tool_gateway_tools(None, {"web_image_send": web_image_send})
+
+    result = await tools["tool_group_exec"].ainvoke(
+        {
+            "group": "web",
+            "command": "web_image_send",
+            "args_json": {"image_url": "https://example.com/chipmunk.jpg"},
+        }
+    )
+
+    assert result == {
+        "group": "web",
+        "command": "web_image_send",
+        "ok": True,
+        "result": {"sent_url": "https://example.com/chipmunk.jpg"},
+    }

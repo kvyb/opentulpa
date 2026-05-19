@@ -23,7 +23,7 @@ agent_max_user_reply_chars: 4000
 agent_context_token_limit: 12000
 agent_context_recent_tokens: 3500
 agent_context_rollup_tokens: 2200
-agent_context_compaction_source_tokens: 100000
+agent_context_compaction_source_tokens: 12000
 
 # LLM/provider configuration
 llm_model: z-ai/glm-5.1

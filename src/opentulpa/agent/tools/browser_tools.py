@@ -22,7 +22,8 @@ _BROWSER_USE_TASK_PREFIX = (
     "Open source pages before claiming facts, capture the URL/title/date when relevant, and stop "
     "once you have enough evidence for the user's goal. If blocked by login, CAPTCHA, paywall, or "
     "repeated same-state navigation, stop and report the blocker plus live_url. Do not keep browsing "
-    "just to be exhaustive.\n\n"
+    "just to be exhaustive. When sending or citing images, prefer returned image_candidates or "
+    "network_image_resources URLs from the browser result before constructing any direct image URL.\n\n"
     "Return a concise answer with verified facts, uncertain facts clearly marked, and any blockers."
 )
 
@@ -104,6 +105,12 @@ def _compact_browser_use_task_view(
                     }
                 )
 
+    image_candidates = _compact_browser_resource_items(data.get("imageCandidates"), max_items=12)
+    network_image_resources = _compact_browser_resource_items(
+        data.get("networkImageResources"),
+        max_items=12,
+    )
+
     result: dict[str, Any] = {
         "id": data.get("id"),
         "session_id": data.get("sessionId"),
@@ -118,6 +125,8 @@ def _compact_browser_use_task_view(
         "output": output,
         "output_truncated": truncated_output,
         "output_files": output_files,
+        "image_candidates": image_candidates,
+        "network_image_resources": network_image_resources,
         "steps_count": len(steps_list),
         "owner_input_prompt": data.get("ownerInputPrompt"),
         "owner_input_type": data.get("ownerInputType"),
@@ -144,6 +153,37 @@ def _compact_browser_use_task_view(
         result["steps_preview"] = preview
         result["steps_preview_truncated"] = len(steps_list) > safe_preview
     return result
+
+
+def _compact_browser_resource_items(raw_items: Any, *, max_items: int) -> list[dict[str, Any]]:
+    if not isinstance(raw_items, list):
+        return []
+    assert max_items > 0
+    compact: list[dict[str, Any]] = []
+    for raw_item in raw_items[:max_items]:
+        if not isinstance(raw_item, dict):
+            continue
+        url = str(raw_item.get("url") or "").strip()
+        if not url:
+            continue
+        item: dict[str, Any] = {"url": url}
+        for key in ("source", "alt", "title", "page_url", "initiator_type"):
+            value = raw_item.get(key)
+            if value:
+                item[key] = str(value)[:240]
+        for key in (
+            "width",
+            "height",
+            "natural_width",
+            "natural_height",
+            "transfer_size",
+            "decoded_body_size",
+        ):
+            value = raw_item.get(key)
+            if isinstance(value, int | float):
+                item[key] = int(value)
+        compact.append(item)
+    return compact
 
 
 def register_browser_tools(runtime: Any) -> dict[str, Any]:
@@ -178,7 +218,8 @@ def register_browser_tools(runtime: Any) -> dict[str, Any]:
         kept alive and may use persisted profile state when configured; reuse a prior
         session_id when continuing the same account/site workflow. Do not ask the
         owner to paste credentials into durable memory; use current-turn credentials
-        only for the intended browser work.
+        only for the intended browser work. When image candidates are visible or loaded,
+        the result can include image_candidates and network_image_resources URLs.
         Do not poll browser_use_task_get after this unless browser_use_run returns
         running or the owner explicitly asks for browser status.
         """

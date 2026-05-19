@@ -1246,7 +1246,7 @@ class OpenTulpaLangGraphRuntime:
         context_token_limit: int = 12000,
         context_rollup_tokens: int = 2200,
         context_recent_tokens: int = 3500,
-        context_compaction_source_tokens: int = 100000,
+        context_compaction_source_tokens: int = 12000,
         input_debounce_seconds: float = 0.65,
         proactive_heartbeat_default_hours: int = 3,
         behavior_log_enabled: bool = True,

@@ -28,7 +28,7 @@ _SECRET_PATTERNS = (
 
 
 def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
-    return _ce_trim_text_to_token_budget(text, token_budget=token_budget)
+    return str(_ce_trim_text_to_token_budget(text, token_budget=token_budget))
 
 
 def _rollup_token_budget(runtime: Any) -> int:
@@ -61,7 +61,7 @@ def _short_term_low_token_budget(runtime: Any) -> int:
 def _compaction_source_budget(runtime: Any) -> int:
     return max(
         _rollup_token_budget(runtime),
-        int(getattr(runtime, "_context_compaction_source_tokens", 100000)),
+        int(getattr(runtime, "_context_compaction_source_tokens", 12000)),
     )
 
 
@@ -246,6 +246,8 @@ async def maybe_compact_thread_context(
     short_term_high_budget = _short_term_high_token_budget(runtime)
     short_term_low_budget = _short_term_low_token_budget(runtime)
     source_budget = _compaction_source_budget(runtime)
+    assert short_term_low_budget < short_term_high_budget
+    assert source_budget >= _rollup_token_budget(runtime)
     for _ in range(8):
         try:
             snapshot = await runtime._graph.aget_state(config=config)
@@ -262,8 +264,7 @@ async def maybe_compact_thread_context(
 
             # Compact enough oldest context to move back near low watermark.
             overflow_tokens = total_tokens - short_term_low_budget
-            target_tokens = min(source_budget, overflow_tokens)
-            split_idx = _select_split_index(message_tokens, tokens_to_compact=target_tokens)
+            split_idx = _select_split_index(message_tokens, tokens_to_compact=overflow_tokens)
             if split_idx <= 0:
                 return
 
@@ -272,7 +273,11 @@ async def maybe_compact_thread_context(
                 return
 
             existing_rollup = runtime._load_thread_rollup(tid) or ""
-            updated_rollup = await compress_rollup(runtime, existing_rollup, oldest_segment)
+            # Removed history can be much larger than the source budget. Keep the
+            # live turn bounded by dropping enough messages now, but summarize
+            # only a capped sample so pre-turn compaction cannot consume minutes.
+            summary_source = _trim_text_to_token_budget(oldest_segment, source_budget)
+            updated_rollup = await compress_rollup(runtime, existing_rollup, summary_source)
             if not updated_rollup:
                 return
 

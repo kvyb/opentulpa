@@ -203,7 +203,7 @@ Configured in `src/opentulpa/core/config.py`:
 - `AGENT_CONTEXT_TOKEN_LIMIT` default `12000`
 - `AGENT_CONTEXT_RECENT_TOKENS` default `3500`
 - `AGENT_CONTEXT_ROLLUP_TOKENS` default `2200`
-- `AGENT_CONTEXT_COMPACTION_SOURCE_TOKENS` default `100000`
+- `AGENT_CONTEXT_COMPACTION_SOURCE_TOKENS` default `12000`
 
 Compaction is hysteresis-based: the runtime compacts at the high watermark, then reduces toward a lower target while folding older history into a bounded rollup injected as system context.
 

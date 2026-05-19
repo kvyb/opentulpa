@@ -9,6 +9,7 @@ class FakeTelegramClient:
     def __init__(self, _token: str) -> None:
         self.callback_answers: list[dict[str, Any]] = []
         self.sent_messages: list[dict[str, Any]] = []
+        self.sent_files: list[dict[str, Any]] = []
         self.edited_messages: list[dict[str, Any]] = []
         self.chat_actions: list[dict[str, Any]] = []
         self.command_menu_calls: list[dict[str, Any]] = []
@@ -101,6 +102,32 @@ class FakeTelegramClient:
             "parse_mode": parse_mode,
         }
         return False
+
+    async def send_file(
+        self,
+        *,
+        chat_id: int | str,
+        filename: str,
+        raw_bytes: bytes,
+        kind: str = "document",
+        mime_type: str | None = None,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> bool:
+        self._message_id += 1
+        self.sent_files.append(
+            {
+                "chat_id": chat_id,
+                "filename": str(filename or "file.bin"),
+                "size_bytes": len(raw_bytes),
+                "kind": str(kind or "document"),
+                "mime_type": mime_type,
+                "caption": caption,
+                "parse_mode": parse_mode,
+                "message_id": self._message_id,
+            }
+        )
+        return True
 
     async def edit_message_text(
         self,
