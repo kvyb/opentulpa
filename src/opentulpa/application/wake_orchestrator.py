@@ -114,6 +114,18 @@ class WakeOrchestrator:
             return text
         return text[:1197].rstrip() + "..."
 
+    @staticmethod
+    def _direct_owner_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        direct_slots: list[dict[str, Any]] = []
+        for slot in slots:
+            if str(slot.get("role", "")).strip() == "support":
+                continue
+            with suppress(Exception):
+                chat_id = int(slot["chat_id"])
+                if chat_id > 0:
+                    direct_slots.append(slot)
+        return direct_slots
+
     async def handle_event(self, body: dict[str, Any]) -> None:
         wake_type = str(body.get("type", "")).strip()
         if wake_type not in {"task_event", "routine_event"}:
@@ -286,8 +298,7 @@ class WakeOrchestrator:
             delivery_slots: list[dict[str, Any]] = []
             with suppress(Exception):
                 delivery_slots = self._get_telegram_chat().find_session_slots(customer_id)
-            owner_slots = [slot for slot in delivery_slots if str(slot.get("role", "")).strip() != "support"]
-            delivery_slots = owner_slots or delivery_slots[:1]
+            delivery_slots = self._direct_owner_slots(delivery_slots)
             if not delivery_slots:
                 self._record_routine_execution(
                     customer_id=customer_id,
@@ -394,6 +405,7 @@ class WakeOrchestrator:
         routine_slots: list[dict[str, Any]] = []
         with suppress(Exception):
             routine_slots = self._get_telegram_chat().find_session_slots(customer_id)
+        routine_slots = self._direct_owner_slots(routine_slots)
         if not routine_slots:
             self._record_routine_execution(
                 customer_id=customer_id,

@@ -157,6 +157,48 @@ async def test_routine_event_notifies_and_records_execution() -> None:
 
 
 @pytest.mark.asyncio
+async def test_routine_event_notifies_direct_owner_chats_only() -> None:
+    settings = SimpleNamespace(telegram_bot_token="test-token")
+    context_events = _FakeContextEvents()
+    chat = _FakeTelegramChat()
+    chat.slots = [
+        {"chat_id": 166, "role": "owner"},
+        {"chat_id": -1003941778604, "role": "owner"},
+        {"chat_id": 9900, "role": "support"},
+    ]
+    client = _FakeTelegramClient()
+    runtime = _FakeRuntime(result="routine done")
+
+    orchestrator = WakeOrchestrator(
+        settings=settings,
+        get_context_events=lambda: context_events,
+        get_telegram_chat=lambda: chat,
+        get_telegram_client=lambda: client,
+        get_agent_runtime=lambda: runtime,
+    )
+
+    await orchestrator.handle_event(
+        {
+            "type": "routine_event",
+            "event_type": "scheduled",
+            "customer_id": "telegram_166",
+            "routine_id": "rtn_123",
+            "routine_name": "Test Routine",
+            "notify_user": True,
+            "payload": {
+                "customer_id": "telegram_166",
+                "notify_user": True,
+                "instruction": "Check for AI news and summarize it.",
+            },
+        }
+    )
+
+    assert [item["chat_id"] for item in client.sent] == [166]
+    payload = context_events.events[-1]["payload"]
+    assert payload["notified_chat_ids"] == [166]
+
+
+@pytest.mark.asyncio
 async def test_routine_event_silent_mode_still_executes_and_backlogs() -> None:
     settings = SimpleNamespace(telegram_bot_token="test-token")
     context_events = _FakeContextEvents()
