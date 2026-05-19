@@ -273,11 +273,10 @@ async def maybe_compact_thread_context(
                 return
 
             existing_rollup = runtime._load_thread_rollup(tid) or ""
-            # Removed history can be much larger than the source budget. Keep the
-            # live turn bounded by dropping enough messages now, but summarize
-            # only a capped sample so pre-turn compaction cannot consume minutes.
-            summary_source = _trim_text_to_token_budget(oldest_segment, source_budget)
-            updated_rollup = await compress_rollup(runtime, existing_rollup, summary_source)
+            # Removed history can be much larger than the per-call source budget.
+            # compress_rollup chunks it so every deleted message is folded in
+            # without sending an unbounded prompt to the model.
+            updated_rollup = await compress_rollup(runtime, existing_rollup, oldest_segment)
             if not updated_rollup:
                 return
 

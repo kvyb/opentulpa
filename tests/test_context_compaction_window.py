@@ -102,7 +102,9 @@ async def test_maybe_compact_thread_context_enforces_recent_window_and_rollup_ca
     assert remaining_messages
     assert after_tokens <= 20000
     assert runtime._checkpointer.deleted is True
-    assert len(runtime._model.calls) == 1
+    assert len(runtime._model.calls) >= 1
+    for call in runtime._model.calls:
+        assert approx_tokens(str(call[1].content)) <= 20000
 
     rollup = runtime._rollups.get("chat-test", "")
     assert rollup
@@ -110,7 +112,7 @@ async def test_maybe_compact_thread_context_enforces_recent_window_and_rollup_ca
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_thread_context_caps_summarizer_input_while_dropping_to_recent_window() -> None:
+async def test_maybe_compact_thread_context_chunks_full_removed_context_while_dropping_to_recent_window() -> None:
     messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(180)]
     runtime = _DummyRuntime(messages)
     runtime._context_short_term_high_tokens = 12000
@@ -130,11 +132,15 @@ async def test_maybe_compact_thread_context_caps_summarizer_input_while_dropping
     )
     assert remaining_messages
     assert remaining_tokens <= 3500
-    assert len(runtime._model.calls) == 1
+    assert len(runtime._model.calls) > 1
 
-    compaction_input = str(runtime._model.calls[0][1].content)
-    assert "Older conversation segment to fold in:" in compaction_input
-    assert approx_tokens(compaction_input) <= 15000
+    compaction_inputs = [str(call[1].content) for call in runtime._model.calls]
+    assert all("Older conversation segment to fold in:" in item for item in compaction_inputs)
+    assert all(approx_tokens(item) <= 15000 for item in compaction_inputs)
+    folded_text = "\n".join(compaction_inputs)
+    assert "msg_0" in folded_text
+    assert "msg_80" in folded_text
+    assert "msg_170" in folded_text
 
 
 @pytest.mark.asyncio
