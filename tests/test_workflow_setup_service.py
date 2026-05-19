@@ -154,6 +154,25 @@ def test_workflow_setup_begin_web_create_defaults_to_draft_reply_mode(tmp_path: 
     assert session["draft_upsert"]["reply_mode"] == "draft"
 
 
+def test_workflow_setup_web_update_forces_instagram_reply_mode_to_draft(
+    tmp_path: Path,
+) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(
+        customer_id="usr_default",
+        thread_id="dashboard-owner-dep_123",
+        mode="create",
+    )
+
+    session = setup.update_session(
+        customer_id="usr_default",
+        thread_id="dashboard-owner-dep_123",
+        draft_patch={"channel": "instagram_dm", "reply_mode": "auto"},
+    )
+
+    assert session["draft_upsert"]["reply_mode"] == "draft"
+
+
 def test_workflow_setup_begin_edit_loads_existing_workflow(tmp_path: Path) -> None:
     setup, intake_service, _ = _mk_setup_service(tmp_path)
     workflow = intake_service.upsert_workflow(
@@ -266,6 +285,37 @@ def test_workflow_setup_finalize_confirmation_applies_final_patch_and_commits(
     workflows = intake_service.list_workflows(customer_id="telegram_123", include_disabled=True)
     assert len(workflows) == 1
     assert workflows[0]["assistant_instructions"].endswith("use '-' after one hour.")
+
+
+def test_workflow_setup_web_finalize_forces_instagram_reply_mode_to_draft(
+    tmp_path: Path,
+) -> None:
+    setup, intake_service, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="usr_default", thread_id="dashboard-owner-dep_123", mode="create")
+    setup.update_session(
+        customer_id="usr_default",
+        thread_id="dashboard-owner-dep_123",
+        draft_patch={
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            "reply_mode": "auto",
+        },
+    )
+    setup.mark_proposed(customer_id="usr_default", thread_id="dashboard-owner-dep_123")
+
+    session = setup.finalize_confirmation(
+        customer_id="usr_default",
+        thread_id="dashboard-owner-dep_123",
+        draft_patch={"reply_mode": "auto"},
+    )
+
+    assert session["status"] == "completed"
+    workflows = intake_service.list_workflows(customer_id="usr_default", include_disabled=True)
+    assert len(workflows) == 1
+    assert workflows[0]["reply_mode"] == "draft"
 
 
 def test_workflow_setup_commit_edit_recreates_telegram_workflow(tmp_path: Path) -> None:

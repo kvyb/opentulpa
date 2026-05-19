@@ -745,6 +745,7 @@ def build_runtime_graph(runtime: Any):
 
     async def agent_node(
         state: AgentState,
+        config: Any | None = None,
     ) -> Command[Literal["agent", "validate_tools", "finalize_turn"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
@@ -1342,6 +1343,7 @@ def build_runtime_graph(runtime: Any):
                 model_messages,
                 stable_prefix_count=stable_prefix_count,
                 call_context=call_context,
+                stream_config=config,
             )
         elif callable(ainvoke_fn):
             response = await ainvoke_fn(
