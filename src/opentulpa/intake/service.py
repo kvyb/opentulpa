@@ -3042,25 +3042,25 @@ class IntakeWorkflowService:
         draft = self.get_draft(customer_id=customer_id, draft_id=draft_id)
         if draft is None:
             return None
-        if str(draft.get("status", "") or "") not in _DRAFT_SENDABLE_STATUSES:
-            raise ValueError("only pending drafts can be edited")
         safe_reply = str(reply_text or "").strip()
         if not safe_reply:
             raise ValueError("reply_text is required")
         now = _utc_now_iso()
         with self._conn() as conn:
-            conn.execute(
+            changed = conn.execute(
                 """
                 UPDATE intake_drafts
                 SET reply_text = ?, status = 'edited', updated_at = ?
-                WHERE customer_id = ? AND draft_id = ?
+                WHERE customer_id = ? AND draft_id = ? AND status IN ('pending', 'edited')
                 """,
                 (safe_reply, now, customer_id, draft_id),
-            )
+            ).rowcount
             conn.commit()
         updated = self.get_draft(customer_id=customer_id, draft_id=draft_id)
         if updated is None:
             raise RuntimeError("draft disappeared after edit")
+        if changed != 1:
+            raise ValueError("only pending drafts can be edited")
         return updated
 
     def discard_draft(self, *, customer_id: str, draft_id: str) -> dict[str, Any] | None:
@@ -3069,16 +3069,21 @@ class IntakeWorkflowService:
             return None
         now = _utc_now_iso()
         with self._conn() as conn:
-            conn.execute(
+            changed = conn.execute(
                 """
                 UPDATE intake_drafts
                 SET status = 'discarded', updated_at = ?
-                WHERE customer_id = ? AND draft_id = ?
+                WHERE customer_id = ? AND draft_id = ? AND status IN ('pending', 'edited')
                 """,
                 (now, customer_id, draft_id),
-            )
+            ).rowcount
             conn.commit()
-        return self.get_draft(customer_id=customer_id, draft_id=draft_id)
+        updated = self.get_draft(customer_id=customer_id, draft_id=draft_id)
+        if updated is None:
+            raise RuntimeError("draft disappeared after discard")
+        if changed != 1:
+            raise ValueError("only pending drafts can be discarded")
+        return updated
 
     async def approve_draft(self, *, customer_id: str, draft_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = self.get_draft(customer_id=customer_id, draft_id=draft_id)

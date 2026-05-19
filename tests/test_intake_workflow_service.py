@@ -735,6 +735,43 @@ async def test_intake_workflow_business_facts_do_not_store_large_source_blobs(tm
     assert "too large to store inline" in rendered
 
 
+def _create_pending_reply_draft(service: IntakeWorkflowService) -> dict[str, Any]:
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        reply_mode="draft",
+    )
+    return service.create_draft_reply(
+        workflow=workflow,
+        conversation_summary={
+            "conversation_id": "conv_1",
+            "recipient_id": "cust_1",
+            "latest_inbound_message_id": "msg_1",
+            "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+            "latest_inbound_message_text_preview": "Can I book a wash today?",
+        },
+        reply_text="Yes, we can do 17:00 today.",
+        conversation=_instagram_conversation(
+            conversation_id="conv_1",
+            latest_message_id="msg_1",
+            latest_message_text="Can I book a wash today?",
+            latest_message_time="2026-04-07T08:00:00+00:00",
+        ),
+        decision={
+            "ok": True,
+            "matches_workflow": True,
+            "booking_action": "ignore",
+            "reply_action": "send_reply",
+            "reply_text": "Yes, we can do 17:00 today.",
+            "ready_to_save": False,
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_draft_reply_mode_stores_pending_draft_until_approved(tmp_path: Path) -> None:
     summary = {
@@ -812,6 +849,77 @@ async def test_draft_reply_mode_stores_pending_draft_until_approved(tmp_path: Pa
         assert [event["kind"] for event in events] == ["draft_reply", "assistant_message"]
     finally:
         set_default_web_event_store(None)
+
+
+@pytest.mark.asyncio
+async def test_sent_draft_cannot_be_edited_or_discarded(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Can I book a wash today?",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio(summary, conversation),
+    )
+    draft = _create_pending_reply_draft(service)
+
+    sent, error = await service.approve_draft(
+        customer_id="telegram_123",
+        draft_id=draft["draft_id"],
+    )
+
+    assert error is None
+    assert sent is not None
+    assert sent["status"] == "sent"
+    with pytest.raises(ValueError, match="only pending drafts can be edited"):
+        service.edit_draft(
+            customer_id="telegram_123",
+            draft_id=draft["draft_id"],
+            reply_text="Updated text",
+        )
+    with pytest.raises(ValueError, match="only pending drafts can be discarded"):
+        service.discard_draft(customer_id="telegram_123", draft_id=draft["draft_id"])
+    current = service.get_draft(customer_id="telegram_123", draft_id=draft["draft_id"])
+    assert current is not None
+    assert current["status"] == "sent"
+    assert current["reply_text"] == "Yes, we can do 17:00 today."
+
+
+def test_approved_draft_cannot_be_edited_or_discarded(tmp_path: Path) -> None:
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio({}, {}),
+    )
+    draft = _create_pending_reply_draft(service)
+    with service._conn() as conn:  # noqa: SLF001
+        conn.execute(
+            "UPDATE intake_drafts SET status = 'approved' WHERE draft_id = ?",
+            (draft["draft_id"],),
+        )
+        conn.commit()
+
+    with pytest.raises(ValueError, match="only pending drafts can be edited"):
+        service.edit_draft(
+            customer_id="telegram_123",
+            draft_id=draft["draft_id"],
+            reply_text="Updated text",
+        )
+    with pytest.raises(ValueError, match="only pending drafts can be discarded"):
+        service.discard_draft(customer_id="telegram_123", draft_id=draft["draft_id"])
+    current = service.get_draft(customer_id="telegram_123", draft_id=draft["draft_id"])
+    assert current is not None
+    assert current["status"] == "approved"
+    assert current["reply_text"] == "Yes, we can do 17:00 today."
 
 
 @pytest.mark.asyncio
