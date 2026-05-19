@@ -575,6 +575,7 @@ def create_app(
             and not path.startswith("/webhook/")
             and path != "/web/events"
             and not path.startswith("/web/chat/")
+            and not path.startswith("/web/intake/drafts/")
             and not path.startswith("/web/files/")
             and not path.startswith("/web/local-files/")
             and path not in public_health_paths
@@ -660,6 +661,7 @@ def create_app(
         get_intake_workflows=get_intake_workflows,
         get_workflow_setup_service=get_workflow_setup_service,
         resolve_customer_id=profile_service.resolve_customer_id,
+        web_token=settings.opentulpa_web_token,
     )
     register_telegram_business_routes(
         app,

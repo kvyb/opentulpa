@@ -19,6 +19,7 @@ from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
+from opentulpa.web.events import WebEventStore, set_default_web_event_store
 from tests.workbook_fixtures import (
     SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
     SAMPLE_VEHICLE_SERVICES_XLSX_MIME_TYPE,
@@ -665,12 +666,14 @@ async def test_intake_workflow_upsert_persists_telegram_business_fields(tmp_path
         knowledge_file_ids=[str(record["id"])],
         sink_type="local_csv",
         sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        reply_mode="draft",
     )
 
     assert workflow["channel"] == "telegram_business_dm"
     assert workflow["provider"] == "telegram_bot_api"
     assert workflow["schedule"] == ""
     assert workflow["routine_id"] == ""
+    assert workflow["reply_mode"] == "auto"
     assert workflow["assistant_instructions"] == "Be concise and never promise unavailable slots."
     assert workflow["business_facts"] == {"prices": {"basic_wash": "1000 RUB"}}
     assert workflow["knowledge_file_ids"] == [str(record["id"])]
@@ -730,6 +733,165 @@ async def test_intake_workflow_business_facts_do_not_store_large_source_blobs(tm
     rendered = json.dumps(workflow["business_facts"], ensure_ascii=False)
     assert len(rendered) < 1000
     assert "too large to store inline" in rendered
+
+
+@pytest.mark.asyncio
+async def test_draft_reply_mode_stores_pending_draft_until_approved(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_message_text_preview": "Can I book a wash today?",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Can I book a wash today?",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "booking_action": "ignore",
+                "reply_action": "send_reply",
+                "reply_text": "Yes, we can do 17:00 today.",
+                "ready_to_save": False,
+            }
+        ]
+    )
+    composio = _FakeComposio(summary, conversation)
+    web_events = WebEventStore(tmp_path / "web_events.db")
+    set_default_web_event_store(web_events)
+    try:
+        service, _, _, _, _ = _mk_service(
+            tmp_path,
+            runtime=runtime,
+            composio=composio,
+        )
+
+        workflow = service.upsert_workflow(
+            customer_id="telegram_123",
+            name="Car Wash Intake",
+            intent_description="Handle Instagram DMs that ask to book a car wash service.",
+            required_fields=["day", "time"],
+            sink_type="local_csv",
+            sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+            reply_mode="draft",
+        )
+        result = await service.run_workflow(
+            customer_id="telegram_123",
+            workflow_id=workflow["workflow_id"],
+            force=True,
+        )
+
+        assert result["ok"] is True
+        assert result["results"][0]["status"] == "approval_pending"
+        assert result["results"][0]["replied"] is False
+        assert composio.execute_calls == []
+        drafts = service.list_drafts(customer_id="telegram_123")
+        assert len(drafts) == 1
+        assert drafts[0]["reply_text"] == "Yes, we can do 17:00 today."
+        assert drafts[0]["status"] == "pending"
+        draft_events = web_events.list_events(after_id=0, customer_id="telegram_123")
+        assert draft_events[0]["kind"] == "draft_reply"
+
+        sent, error = await service.approve_draft(
+            customer_id="telegram_123",
+            draft_id=drafts[0]["draft_id"],
+        )
+
+        assert error is None
+        assert sent is not None
+        assert sent["status"] == "sent"
+        assert composio.execute_calls[0]["tool_slug"] == "INSTAGRAM_SEND_TEXT_MESSAGE"
+        assert composio.execute_calls[0]["arguments"]["text"] == "Yes, we can do 17:00 today."
+        events = web_events.list_events(after_id=0, customer_id="telegram_123")
+        assert [event["kind"] for event in events] == ["draft_reply", "assistant_message"]
+    finally:
+        set_default_web_event_store(None)
+
+
+@pytest.mark.asyncio
+async def test_approved_draft_uses_decision_recovery_after_send_failure(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_message_text_preview": "Can I book a wash today?",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Can I book a wash today?",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "booking_action": "ignore",
+                "reply_action": "send_reply",
+                "reply_text": "Yes, we can do 17:00 today.",
+                "ready_to_save": False,
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "booking_action": "ignore",
+                "reply_action": "send_reply",
+                "reply_text": "Yes, we can do 17:00 today. Please send your car model.",
+                "ready_to_save": False,
+            },
+        ]
+    )
+    composio = _FailingReplyOnceComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=composio,
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        reply_mode="draft",
+    )
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        force=True,
+    )
+
+    assert result["results"][0]["status"] == "approval_pending"
+    drafts = service.list_drafts(customer_id="telegram_123")
+    assert len(drafts) == 1
+
+    sent, error = await service.approve_draft(
+        customer_id="telegram_123",
+        draft_id=drafts[0]["draft_id"],
+    )
+
+    assert error is None
+    assert sent is not None
+    assert sent["status"] == "sent"
+    assert sent["reply_text"] == "Yes, we can do 17:00 today. Please send your car model."
+    assert len(runtime.calls) == 2
+    assert runtime.calls[1]["execution_feedback"][0]["phase"] == "reply_execution"
+    assert "Following fields are missing" in runtime.calls[1]["execution_feedback"][0]["error"]
+    assert len(composio.execute_calls) == 2
+    assert composio.execute_calls[0]["arguments"]["text"] == "Yes, we can do 17:00 today."
+    assert (
+        composio.execute_calls[1]["arguments"]["text"]
+        == "Yes, we can do 17:00 today. Please send your car model."
+    )
 
 
 @pytest.mark.asyncio

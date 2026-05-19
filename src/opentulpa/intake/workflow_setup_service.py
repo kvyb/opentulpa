@@ -112,6 +112,31 @@ def _normalize_schedule_for_channel(draft: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _default_reply_mode_for_setup_origin(*, channel: str, thread_id: str) -> str:
+    safe_channel = str(channel or "").strip().lower()
+    if safe_channel == "telegram_business_dm":
+        return "auto"
+    safe_thread = str(thread_id or "").strip().lower()
+    if safe_thread.startswith("dashboard-owner-"):
+        return "draft"
+    return "auto"
+
+
+def _normalize_reply_mode_for_origin(draft: dict[str, Any], *, thread_id: str) -> dict[str, Any]:
+    normalized = dict(draft)
+    channel = str(normalized.get("channel", "") or "").strip().lower()
+    if channel == "telegram_business_dm":
+        normalized["reply_mode"] = "auto"
+        return normalized
+    reply_mode = str(normalized.get("reply_mode", "") or "").strip().lower()
+    if reply_mode not in {"auto", "draft"}:
+        normalized["reply_mode"] = _default_reply_mode_for_setup_origin(
+            channel=channel,
+            thread_id=thread_id,
+        )
+    return normalized
+
+
 def _compact_preflight_for_scratchpad(preflight: dict[str, Any]) -> dict[str, Any]:
     sink_preflight = _safe_dict(preflight.get("sink_preflight"))
     dry_run = _safe_dict(sink_preflight.get("dry_run"))
@@ -171,6 +196,7 @@ class WorkflowSetupService:
                     "schedule": "*/5 * * * *",
                     "notify_user": True,
                     "enabled": True,
+                    "reply_mode": "",
                 }
             )
         )
@@ -330,9 +356,11 @@ class WorkflowSetupService:
                     ),
                     "notify_user": bool(workflow_snapshot.get("notify_user", True)),
                     "enabled": bool(workflow_snapshot.get("enabled", True)),
+                    "reply_mode": str(workflow_snapshot.get("reply_mode", "auto") or "auto"),
                 }
             )
             draft = _normalize_schedule_for_channel(draft)
+        draft = _normalize_reply_mode_for_origin(draft, thread_id=thread_id)
         return self._store.create_session(
             customer_id=customer_id,
             thread_id=thread_id,
@@ -364,6 +392,7 @@ class WorkflowSetupService:
         updated_draft = _normalize_local_csv_draft_sink_config(
             _normalize_schedule_for_channel(updated_draft)
         )
+        updated_draft = _normalize_reply_mode_for_origin(updated_draft, thread_id=thread_id)
         updated_scratchpad = _deep_merge(
             _safe_dict(session.get("scratchpad")), _safe_dict(scratchpad_patch)
         )
@@ -382,7 +411,10 @@ class WorkflowSetupService:
         )
         if session is None:
             raise ValueError("active workflow setup session not found")
-        draft = _safe_dict(session.get("draft_upsert"))
+        draft = _normalize_reply_mode_for_origin(
+            _safe_dict(session.get("draft_upsert")),
+            thread_id=thread_id,
+        )
         session_id = str(session.get("session_id", "") or "").strip()
         draft_hash = self._draft_hash(draft)
         cached_preflight = self._cached_ready_preflight(session, draft_hash=draft_hash)
@@ -434,6 +466,7 @@ class WorkflowSetupService:
                 schedule=str(draft.get("schedule", "*/5 * * * *") or "*/5 * * * *"),
                 notify_user=bool(draft.get("notify_user", True)),
                 enabled=bool(draft.get("enabled", True)),
+                reply_mode=str(draft.get("reply_mode", "auto") or "auto"),
             )
             knowledge_preflight = self._preflight_knowledge_scope(
                 customer_id=customer_id,
@@ -661,7 +694,10 @@ class WorkflowSetupService:
         )
         if session is None:
             raise ValueError("active workflow setup session not found")
-        draft = _safe_dict(session.get("draft_upsert"))
+        draft = _normalize_reply_mode_for_origin(
+            _safe_dict(session.get("draft_upsert")),
+            thread_id=thread_id,
+        )
         current_hash = self._draft_hash(draft)
         confirmed_hash = str(session.get("confirmed_draft_hash", "") or "").strip()
         if not confirmed_hash or current_hash != confirmed_hash:
