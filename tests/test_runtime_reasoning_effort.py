@@ -29,6 +29,7 @@ def test_runtime_passes_reasoning_effort_to_init_chat_model(monkeypatch) -> None
 
     assert calls
     assert calls[0]["reasoning_effort"] == "medium"
+    assert calls[0]["streaming"] is True
 
 
 def test_runtime_caps_gemini_flash_lite_preview_output_tokens(monkeypatch) -> None:
@@ -176,6 +177,7 @@ def test_runtime_uses_openrouter_adapter_for_deepseek_reasoning(monkeypatch) -> 
     assert deepseek_call["api_key"] == "test-key"
     assert deepseek_call["base_url"] == "https://openrouter.ai/api/v1"
     assert deepseek_call["reasoning"] == {"effort": "high", "exclude": False}
+    assert deepseek_call["streaming"] is True
     assert deepseek_call["app_url"] == "https://github.com/kvyb/opentulpa"
     assert deepseek_call["app_title"] == "OpenTulpa"
     assert "reasoning_effort" not in deepseek_call

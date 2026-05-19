@@ -194,6 +194,7 @@ def chat_model_init_kwargs_for_model(
     reasoning_effort: str | None,
 ) -> dict[str, Any]:
     model_kwargs = cap_max_completion_tokens_for_model(dict(base_kwargs), model_name=model_name)
+    model_kwargs.setdefault("streaming", True)
     extra = disable_deepseek_v4_pro_thinking_extra(
         model_name=model_name,
         reasoning_effort=reasoning_effort,
@@ -221,6 +222,7 @@ def init_runtime_chat_model(
             "temperature": base_kwargs.get("temperature"),
             "max_completion_tokens": base_kwargs.get("max_completion_tokens"),
             "reasoning": openrouter_reasoning_config(reasoning_effort),
+            "streaming": bool(base_kwargs.get("streaming", True)),
         }
         if referer := app_headers.get("HTTP-Referer"):
             adapter_kwargs["app_url"] = referer
