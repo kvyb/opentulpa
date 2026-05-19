@@ -68,6 +68,26 @@ def _validate_intake_sink_request(*, sink_type: str, sink_config: dict[str, Any]
     return None
 
 
+def _active_thread_id(runtime: Any, explicit_thread_id: str | None) -> str:
+    safe_thread = str(explicit_thread_id or "").strip()
+    if safe_thread:
+        return safe_thread
+    getter = getattr(runtime, "get_active_thread_id", None)
+    if callable(getter):
+        safe_thread = str(getter() or "").strip()
+    if safe_thread:
+        return safe_thread
+    return str(getattr(runtime, "_active_thread_id", "") or "").strip()
+
+
+def _default_reply_mode_for_origin(*, channel: str, thread_id: str) -> str:
+    safe_channel = str(channel or "").strip().lower()
+    if safe_channel == "telegram_business_dm":
+        return "auto"
+    safe_thread = str(thread_id or "").strip().lower()
+    if safe_thread.startswith("dashboard-owner-"):
+        return "draft"
+    return "auto"
 
 
 def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
@@ -88,6 +108,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         knowledge_file_ids: list[str] | None = None,
         notify_user: bool = True,
         enabled: bool = True,
+        reply_mode: str = "",
         workflow_id: str | None = "",
         thread_id: str = "",
         execution_origin: str | None = None,
@@ -132,6 +153,11 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         - If a sink needs human-readable or localized column names, put those labels in
           sink_config.field_mapping; do not change required_fields ids.
         - source_config is optional.
+        - reply_mode controls lead-facing replies:
+          - auto sends replies immediately.
+          - draft stores replies for owner approval in the web dashboard before sending.
+          - If omitted, dashboard/web-created Instagram intake workflows default to draft.
+          - Telegram-created workflows and Telegram Business workflows use auto; Telegram does not support intake draft approval.
         - If source_config.conversation_id is omitted, the workflow scans recent conversations
           for the configured source instead of pinning one specific thread.
         - By default, do not filter inbound messages by intent before the workflow can reply.
@@ -172,13 +198,21 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         - For generic_composio_write, prefer:
           sink_config={"toolkit": "...", "operation_hint": "...", "field_mapping": {...}, "static_arguments": {...}}
         """
-        _ = thread_id, execution_origin, preapproved, guard_context
+        _ = execution_origin, preapproved, guard_context
         safe_customer = require_customer_id(runtime)
         safe_name = str(name or "").strip()
         safe_intent = str(intent_description or "").strip()
         safe_channel = str(channel or "").strip() or "instagram_dm"
         safe_provider = str(provider or "").strip() or "composio"
         safe_schedule = "" if safe_channel == "telegram_business_dm" else (str(schedule or "").strip() or "*/5 * * * *")
+        safe_thread_id = _active_thread_id(runtime, thread_id)
+        requested_reply_mode = str(reply_mode or "").strip().lower()
+        safe_reply_mode = requested_reply_mode or _default_reply_mode_for_origin(
+            channel=safe_channel,
+            thread_id=safe_thread_id,
+        )
+        if safe_channel == "telegram_business_dm":
+            safe_reply_mode = "auto"
         safe_sink_type = str(sink_type or "").strip()
         safe_workflow_id = _normalize_optional_id(workflow_id)
         safe_required_fields = _unique_string_list(required_fields)
@@ -206,6 +240,8 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
             return {"error": "intake_workflow_upsert failed: sink_type is required"}
         if not safe_sink_config:
             return {"error": "intake_workflow_upsert failed: sink_config is required"}
+        if safe_reply_mode not in {"auto", "draft"}:
+            return {"error": "intake_workflow_upsert failed: reply_mode must be auto|draft"}
         sink_error = _validate_intake_sink_request(
             sink_type=safe_sink_type,
             sink_config=safe_sink_config,
@@ -234,6 +270,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
                 "schedule": safe_schedule,
                 "notify_user": bool(notify_user),
                 "enabled": bool(enabled),
+                "reply_mode": safe_reply_mode,
             },
             timeout=20.0,
         )

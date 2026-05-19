@@ -135,9 +135,23 @@ def test_workflow_setup_begin_create_persists_session(tmp_path: Path) -> None:
     assert session["status"] == "active"
     assert session["mode"] == "create"
     assert session["draft_upsert"]["channel"] == "instagram_dm"
+    assert session["draft_upsert"]["reply_mode"] == "auto"
     assert session["scratchpad"]["mode"] == "create"
     assert session["scratchpad"]["source_file_ids"] == []
     assert session["scratchpad"]["knowledge_source_file_ids"] == []
+
+
+def test_workflow_setup_begin_web_create_defaults_to_draft_reply_mode(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+
+    session = setup.begin_session(
+        customer_id="usr_default",
+        thread_id="dashboard-owner-dep_123",
+        mode="create",
+    )
+
+    assert session["draft_upsert"]["channel"] == "instagram_dm"
+    assert session["draft_upsert"]["reply_mode"] == "draft"
 
 
 def test_workflow_setup_begin_edit_loads_existing_workflow(tmp_path: Path) -> None:

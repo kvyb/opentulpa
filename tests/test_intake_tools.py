@@ -57,6 +57,29 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
     assert payload["provider"] == "composio"
     assert payload["assistant_instructions"] == ""
     assert payload["knowledge_file_ids"] == []
+    assert payload["reply_mode"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_intake_workflow_upsert_defaults_web_origin_to_draft() -> None:
+    runtime = DummyRuntime(
+        [Response(200, {"workflow": {"workflow_id": "iwf_web"}})],
+        thread_id="dashboard-owner-dep_123",
+    )
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["intake_workflow_upsert"].ainvoke(
+        {
+            "name": "Car Wash Intake",
+            "intent_description": "Handle booking requests from Instagram DMs.",
+            "required_fields": ["day", "time"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        }
+    )
+
+    assert result["workflow_id"] == "iwf_web"
+    assert runtime.calls[0][2]["json_body"]["reply_mode"] == "draft"
 
 
 @pytest.mark.asyncio
@@ -86,6 +109,7 @@ async def test_intake_workflow_upsert_accepts_telegram_business_fields() -> None
     assert payload["schedule"] == ""
     assert payload["assistant_instructions"] == "Be concise and friendly."
     assert payload["knowledge_file_ids"] == ["file_1", "file_2"]
+    assert payload["reply_mode"] == "auto"
 
 
 @pytest.mark.asyncio

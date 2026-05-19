@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,12 @@ class _DisabledComposio:
 
     def status(self) -> dict[str, object]:
         return {"ok": True, "enabled": False}
+
+
+class _RejectingDiscardIntakeService:
+    def discard_draft(self, **kwargs: Any) -> dict[str, Any] | None:
+        del kwargs
+        raise ValueError("only pending drafts can be discarded")
 
 
 def _mk_client(
@@ -42,6 +49,18 @@ def _mk_client(
         customer_profile_service=customer_profiles,
     )
     return TestClient(app)
+
+
+def test_intake_draft_discard_route_returns_400_for_non_pending_draft() -> None:
+    app = create_app(intake_workflow_service=_RejectingDiscardIntakeService())  # type: ignore[arg-type]
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/intake/drafts/discard",
+            json={"customer_id": "telegram_123", "draft_id": "dft_sent"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "only pending drafts can be discarded"}
 
 
 def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
