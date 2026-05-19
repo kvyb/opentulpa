@@ -34,6 +34,20 @@ def _telegram_delivery_payload(**fields: Any) -> dict[str, Any]:
     return payload
 
 
+def _chat_delivery_payload(**fields: Any) -> dict[str, Any]:
+    payload = {
+        "ok": True,
+        "delivered_to_chat": True,
+        "model_instruction": (
+            "DELIVERED_TO_CHAT: The file has been sent to the current chat. "
+            "Do not call the file-send tool again for this file. "
+            "Continue with a short final confirmation only."
+        ),
+    }
+    payload.update(fields)
+    return payload
+
+
 def register_file_routes(
     app: FastAPI,
     *,
@@ -186,6 +200,7 @@ def register_file_routes(
 
     @app.post("/internal/files/send_web_image")
     async def internal_files_send_web_image(request: Request) -> Any:
+        vault = get_file_vault()
         body = await request.json()
         customer_id = resolve_body_customer_id(body, resolve_customer_id)
         image_url = str(body.get("url", "")).strip()
@@ -194,8 +209,6 @@ def register_file_routes(
         caption = caption or None
         max_bytes = int(body.get("max_bytes", 10_000_000))
 
-        if not telegram_enabled:
-            return JSONResponse(status_code=501, content={"detail": "Telegram not configured"})
         if not customer_id or not image_url:
             return JSONResponse(
                 status_code=400,
@@ -203,11 +216,10 @@ def register_file_routes(
             )
 
         chat_id: Any = None
-        slots = get_telegram_chat().find_session_slots(customer_id)
-        if slots:
-            chat_id = slots[0].get("chat_id")
-        if chat_id is None:
-            return JSONResponse(status_code=404, content={"detail": "no chat found for customer"})
+        if telegram_enabled:
+            slots = get_telegram_chat().find_session_slots(customer_id)
+            if slots:
+                chat_id = slots[0].get("chat_id")
 
         try:
             downloaded = await download_image_from_web_url(image_url, max_bytes=max_bytes)
@@ -215,6 +227,30 @@ def register_file_routes(
             return JSONResponse(status_code=400, content={"detail": str(exc)})
         except Exception as exc:
             return JSONResponse(status_code=502, content={"detail": f"image fetch failed: {exc}"})
+
+        if chat_id is None:
+            record = vault.ingest_file(
+                customer_id=customer_id,
+                chat_id=None,
+                kind=(
+                    "animation"
+                    if str(downloaded["content_type"]).strip().lower() == "image/gif"
+                    else "photo"
+                ),
+                telegram_file_id=None,
+                original_filename=str(downloaded["filename"]),
+                mime_type=str(downloaded["content_type"]),
+                caption=caption,
+                raw_bytes=downloaded["raw_bytes"],
+            )
+            emitter = getattr(get_agent_runtime(), "emit_interactive_file", None)
+            if not callable(emitter):
+                return JSONResponse(status_code=501, content={"detail": "file delivery unavailable"})
+            emitted = await emitter(file=sanitize_uploaded_file_record(record))
+            if not isinstance(emitted, dict) or not emitted.get("sent"):
+                reason = str((emitted or {}).get("reason") or "file delivery unavailable")
+                return JSONResponse(status_code=501, content={"detail": reason})
+            return _chat_delivery_payload(file_id=record.get("id"))
 
         sent = await get_telegram_client().send_file(
             chat_id=chat_id,

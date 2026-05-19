@@ -118,6 +118,24 @@ class _ToolThenAnswerGraph:
         return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
 
 
+class _ProvisionalThenToolThenAnswerGraph:
+    async def astream(
+        self,
+        _state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: str,
+    ) -> AsyncIterator[tuple[AIMessage, dict[str, str]]]:
+        del config, stream_mode
+        yield AIMessage(content="Sure! Let me find that for you."), {"langgraph_node": "agent"}
+        yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
+        yield AIMessage(content="Here is the final answer."), {"langgraph_node": "agent"}
+
+    async def ainvoke(self, _state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+        del config
+        return {"messages": [HumanMessage(content="user"), AIMessage(content="unused")]}
+
+
 class _DraftThenToolThenAnswerGraph:
     async def astream(
         self,
@@ -477,6 +495,47 @@ async def test_astream_text_emits_wait_signal_before_tool_first_result(
     assert len(chunks) == 2
     assert chunks[0].startswith(STREAM_PROGRESS_PREFIX)
     assert chunks[1] == "Done checking. 3 priority emails found."
+
+
+@pytest.mark.asyncio
+async def test_astream_text_drops_provisional_text_before_tool_with_zero_precommit(
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _ProvisionalThenToolThenAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_zero_precommit_provisional.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-zero-precommit-tool",
+        customer_id="telegram_zero_precommit_tool",
+        text="find it",
+        stream_precommit_seconds=0.0,
+    ):
+        chunks.append(chunk)
+
+    assert chunks == [f"{STREAM_PROGRESS_PREFIX}Working on it…", "Here is the final answer."]
 
 
 @pytest.mark.asyncio

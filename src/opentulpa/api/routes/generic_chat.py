@@ -361,6 +361,8 @@ async def _stream_turn(
                 ):
                     if isinstance(chunk, AgentStreamEvent):
                         if chunk.event in {"reasoning", "tool_call"}:
+                            if chunk.event == "tool_call":
+                                final_text = ""
                             await queue.put((chunk.event, chunk.payload))
                         continue
                     current = str(chunk or "")
@@ -368,6 +370,7 @@ async def _stream_turn(
                         continue
                     progress = _progress_message(current.strip())
                     if progress:
+                        final_text = ""
                         await queue.put(("status", {"message": progress}))
                         continue
                     final_text = f"{final_text}{current}"

@@ -540,6 +540,7 @@ _PROVISIONAL_REPLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*i can also\s+", re.IGNORECASE),
     re.compile(r"^\s*i can (?:search|check|look|fetch|inspect|try)\b", re.IGNORECASE),
     re.compile(r"^\s*let me\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:sure|ok|okay|absolutely|got it)[!,.]?\s+let me\b", re.IGNORECASE),
     re.compile(r"^\s*i(?:'| a)?ll\b", re.IGNORECASE),
     re.compile(r"^\s*i will\b", re.IGNORECASE),
     re.compile(r"^\s*(?:one sec|one second|still working|working on it)\b", re.IGNORECASE),
@@ -1357,6 +1358,8 @@ class OpenTulpaLangGraphRuntime:
         self._interactive_update_senders_lock = asyncio.Lock()
         self._interactive_update_senders: dict[str, Any] = {}
         self._interactive_update_sent_keys: dict[str, set[str]] = {}
+        self._interactive_file_senders_lock = asyncio.Lock()
+        self._interactive_file_senders: dict[str, Any] = {}
         self._active_customer_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
             "opentulpa_active_customer_id",
             default="",
@@ -3632,6 +3635,11 @@ class OpenTulpaLangGraphRuntime:
                             buffered_visible_truncated = truncated
                             buffered_visible_source_chars = len(cleaned.strip())
                             continue
+                        if self._looks_like_provisional_reply(expanded):
+                            buffered_visible = expanded
+                            buffered_visible_truncated = truncated
+                            buffered_visible_source_chars = len(cleaned.strip())
+                            continue
                         buffered_visible = ""
                         buffered_visible_truncated = False
                         buffered_visible_source_chars = 0
@@ -4056,6 +4064,79 @@ class OpenTulpaLangGraphRuntime:
             thread_id=resolved_thread_id,
             customer_id=self.get_active_customer_id(),
             chars=len(safe_text),
+        )
+        return {"ok": True, "sent": True}
+
+    async def register_interactive_file_sender(self, *, thread_id: str, sender: Any) -> None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id or sender is None:
+            return
+        if getattr(self, "_interactive_file_senders_lock", None) is None:
+            self._interactive_file_senders_lock = asyncio.Lock()
+        if getattr(self, "_interactive_file_senders", None) is None:
+            self._interactive_file_senders = {}
+        async with self._interactive_file_senders_lock:
+            self._interactive_file_senders[safe_thread_id] = sender
+
+    async def clear_interactive_file_sender(
+        self,
+        *,
+        thread_id: str,
+        sender: Any | None = None,
+    ) -> None:
+        safe_thread_id = str(thread_id or "").strip()
+        if not safe_thread_id:
+            return
+        lock = getattr(self, "_interactive_file_senders_lock", None)
+        senders = getattr(self, "_interactive_file_senders", None)
+        if lock is None or senders is None:
+            return
+        async with lock:
+            current = senders.get(safe_thread_id)
+            if sender is None or current is sender:
+                senders.pop(safe_thread_id, None)
+
+    async def emit_interactive_file(
+        self,
+        *,
+        file: dict[str, Any],
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_thread_id = str(thread_id or "").strip() or self.get_active_thread_id()
+        if not resolved_thread_id:
+            return {"ok": False, "sent": False, "reason": "missing_thread_id"}
+        if not isinstance(file, dict) or not file:
+            return {"ok": False, "sent": False, "reason": "missing_file"}
+
+        lock = getattr(self, "_interactive_file_senders_lock", None)
+        senders = getattr(self, "_interactive_file_senders", None)
+        if lock is None or senders is None:
+            return {"ok": False, "sent": False, "reason": "interactive_file_unavailable"}
+        async with lock:
+            sender = senders.get(resolved_thread_id)
+        if sender is None:
+            return {"ok": False, "sent": False, "reason": "interactive_file_unavailable"}
+
+        try:
+            result = sender(file)
+            if inspect.isawaitable(result):
+                result = await result
+            sent = bool(result.get("sent", True)) if isinstance(result, dict) else bool(result)
+        except Exception as exc:
+            self.log_behavior_event(
+                event="interactive_file_send_failed",
+                thread_id=resolved_thread_id,
+                customer_id=self.get_active_customer_id(),
+                error=type(exc).__name__,
+            )
+            return {"ok": False, "sent": False, "error": str(exc)}
+        if not sent:
+            return {"ok": False, "sent": False, "reason": "send_failed"}
+        self.log_behavior_event(
+            event="interactive_file_sent",
+            thread_id=resolved_thread_id,
+            customer_id=self.get_active_customer_id(),
+            file_id=str(file.get("id") or ""),
         )
         return {"ok": True, "sent": True}
 
