@@ -97,8 +97,26 @@ def _has_duplicate_allowed_root_prefix(path: str) -> str | None:
     return None
 
 
-def _source_root_for_path(path: str) -> str | None:
+def _normalize_relative_path_for_validation(path: str) -> str:
     text = str(path or "").strip().removeprefix("./")
+    if not text:
+        return ""
+    parts: list[str] = []
+    for part in PurePosixPath(text).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts and parts[-1] != "..":
+                parts.pop()
+            else:
+                parts.append(part)
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _source_root_for_path(path: str) -> str | None:
+    text = _normalize_relative_path_for_validation(path)
     if not text:
         return None
     for prefix in _SOURCE_ROOT_PREFIXES:
@@ -108,7 +126,7 @@ def _source_root_for_path(path: str) -> str | None:
 
 
 def _is_python_source_path(path: str) -> bool:
-    return PurePosixPath(str(path or "").strip()).suffix == ".py"
+    return PurePosixPath(_normalize_relative_path_for_validation(path)).suffix == ".py"
 
 
 def _coerce_json_container(value: Any) -> Any:
@@ -138,20 +156,21 @@ def _path_tool_validation_error(call_name: str, args: Any) -> str | None:
     if call_name not in _PATH_VALIDATED_TOOL_NAMES or not isinstance(args, dict):
         return None
     path_arg = str(args.get("path", "")).strip()
+    normalized_path_arg = _normalize_relative_path_for_validation(path_arg)
     duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
     if duplicate_prefix:
         return (
             "TOOL_VALIDATION_ERROR: path includes a duplicated allowed-root prefix. "
             f"Use `{duplicate_prefix}/...`, not `{duplicate_prefix}/{duplicate_prefix}/...`."
         )
-    if call_name == "tulpa_file_send" and not path_arg.startswith("tulpa_stuff/"):
+    if call_name == "tulpa_file_send" and not normalized_path_arg.startswith("tulpa_stuff/"):
         return (
             "TOOL_VALIDATION_ERROR: tulpa_file_send can only send files under "
             "`tulpa_stuff/...`. If this is a user-deliverable artifact, first write it "
             "there with tulpa_write_file, then send that tulpa_stuff path."
         )
-    source_root = _source_root_for_path(path_arg)
-    if call_name == "tulpa_write_file" and source_root and not _is_python_source_path(path_arg):
+    source_root = _source_root_for_path(normalized_path_arg)
+    if call_name == "tulpa_write_file" and source_root and not _is_python_source_path(normalized_path_arg):
         return (
             "TOOL_VALIDATION_ERROR: non-Python deliverables and artifacts must be written "
             "under `tulpa_stuff/...`, not source roots such as "

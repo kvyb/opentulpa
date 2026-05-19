@@ -1000,6 +1000,23 @@ def test_validate_model_tool_call_rejects_deliverable_write_under_source_root() 
     assert "src/opentulpa/skills" in err
 
 
+def test_validate_model_tool_call_rejects_traversal_deliverable_write_under_source_root() -> None:
+    err = _validate_model_tool_call(
+        call_name="tulpa_write_file",
+        args={
+            "path": "tulpa_stuff/../src/opentulpa/skills/chipmunk_url.txt",
+            "content": "Chipmunk photo URL: https://example.com/chipmunk.jpg",
+        },
+        latest_user_text="write the chipmunk url to a file and send it",
+        turn_mode="interactive",
+        required_args={"tulpa_write_file": ("path", "content")},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+    assert "non-Python deliverables and artifacts" in err
+    assert "src/opentulpa/skills" in err
+
+
 def test_validate_model_tool_call_allows_python_source_write_under_source_root() -> None:
     err = _validate_model_tool_call(
         call_name="tulpa_write_file",
