@@ -338,7 +338,7 @@ async def _stream_turn(
                 text=text,
                 file_ids=file_ids,
             )
-            if turn_mode == "workflow_setup" or not hasattr(runtime, "astream_text"):
+            if not hasattr(runtime, "astream_text"):
                 final_text = await runtime.ainvoke_text(
                     thread_id=thread_id,
                     customer_id=customer_id,

@@ -106,6 +106,18 @@ def _client_with_runtime(
     return TestClient(create_app(agent_runtime=runtime, file_vault_service=vault))
 
 
+def _client_with_runtime_and_app(
+    monkeypatch: Any,
+    tmp_path: Any,
+    runtime: _StreamingRuntime,
+) -> tuple[TestClient, Any]:
+    monkeypatch.setenv("OPENTULPA_WEB_TOKEN", "web-secret")
+    get_settings.cache_clear()
+    vault = FileVaultService(root_dir=tmp_path / "vault", db_path=tmp_path / "vault.db")
+    app = create_app(agent_runtime=runtime, file_vault_service=vault)
+    return TestClient(app), app
+
+
 def test_web_chat_rejects_missing_bearer(monkeypatch: Any, tmp_path: Any) -> None:
     client, _ = _client(monkeypatch, tmp_path)
     response = client.post(
@@ -202,6 +214,38 @@ def test_web_chat_preserves_whitespace_only_incremental_deltas(
     assert [delta["seq"] for delta in deltas] == [1, 2, 3, 4, 5]
     assert all(isinstance(delta["server_received_at_ms"], int) for delta in deltas)
     assert _sse_payloads(text, "final") == [{"text": "Hello world\n\nAgain"}]
+
+
+def test_web_chat_streams_workflow_setup_status_events(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    runtime = _StreamingRuntime(incremental_chunks=["Workflow", " ready."])
+    client, app = _client_with_runtime_and_app(monkeypatch, tmp_path, runtime)
+    app.state.intake_workflow_setup.begin_session(
+        customer_id="telegram_1",
+        thread_id="dashboard-owner-1",
+        mode="create",
+    )
+
+    with client.stream(
+        "POST",
+        "/web/chat/turns",
+        headers={"authorization": "Bearer web-secret"},
+        json={
+            "customer_id": "telegram_1",
+            "thread_id": "dashboard-owner-1",
+            "text": "continue setup",
+        },
+    ) as response:
+        text = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert _sse_payloads(text, "reasoning") == [{"status": "active", "message": "Reasoning..."}]
+    assert _sse_payloads(text, "tool_call")
+    assert _sse_payloads(text, "final") == [{"text": "Workflow ready."}]
+    assert runtime.calls[0]["turn_mode"] == "workflow_setup"
+    assert runtime.calls[0]["stream_status_events"] is True
 
 
 def test_web_chat_resolves_bound_telegram_alias(monkeypatch: Any, tmp_path: Any) -> None:

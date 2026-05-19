@@ -178,6 +178,10 @@ class _ReasoningThenToolThenAnswerGraph:
         ), {"langgraph_node": "agent"}
         yield AIMessage(
             content="",
+            additional_kwargs={"reasoning_content": "second private reasoning chunk"},
+        ), {"langgraph_node": "agent"}
+        yield AIMessage(
+            content="",
             tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "private"}}],
         ), {"langgraph_node": "agent"}
         yield AIMessage(content="tool running"), {"langgraph_node": "tools"}
@@ -608,4 +612,5 @@ async def test_astream_text_emits_safe_reasoning_and_tool_status_events(tmp_path
     assert events[1].payload["tool_names"] == ["web_search"]
     assert events[1].payload["tool_call_count"] == 1
     assert "private reasoning" not in json.dumps([event.payload for event in events])
+    assert "second private" not in json.dumps([event.payload for event in events])
     assert chunks[-1] == "Done."

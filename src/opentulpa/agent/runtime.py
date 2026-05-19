@@ -3460,6 +3460,7 @@ class OpenTulpaLangGraphRuntime:
             stream_visible_yields = 0
             stream_filtered_empty = 0
             stream_filtered_blank_expanded = 0
+            reasoning_status_emitted = False
             first_visible_yield_ms: int | None = None
             buffered_visible = ""
             buffered_visible_truncated = False
@@ -3496,8 +3497,14 @@ class OpenTulpaLangGraphRuntime:
                 segment_accumulated = ""
 
             def _reasoning_event(message_chunk: Any) -> AgentStreamEvent | None:
-                if not stream_status_events or not _stream_chunk_has_reasoning(message_chunk):
+                nonlocal reasoning_status_emitted
+                if (
+                    not stream_status_events
+                    or reasoning_status_emitted
+                    or not _stream_chunk_has_reasoning(message_chunk)
+                ):
                     return None
+                reasoning_status_emitted = True
                 return AgentStreamEvent(
                     event="reasoning",
                     payload={

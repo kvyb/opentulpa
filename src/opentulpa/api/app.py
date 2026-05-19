@@ -615,7 +615,7 @@ def create_app(
         web_token=settings.opentulpa_web_token,
         get_agent_runtime=get_agent_runtime,
         get_file_vault=get_file_vault,
-        get_workflow_setup_service=get_workflow_setup_service,
+        get_workflow_setup_service=lambda: workflow_setup_orchestrator,
         resolve_customer_id=profile_service.resolve_customer_id,
         get_shutdown_drain=get_shutdown_drain,
     )
