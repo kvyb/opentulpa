@@ -3595,7 +3595,7 @@ class OpenTulpaLangGraphRuntime:
                 stream_agent_chunks += 1
                 if in_tool_phase:
                     in_tool_phase = False
-                    suppress_live_text_until_completion = False
+                    suppress_live_text_until_completion = yielded_any
                     stream_key = ""
                     _finalize_segment()
                 tool_calls = getattr(message_chunk, "tool_calls", []) or []
