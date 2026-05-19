@@ -3593,6 +3593,11 @@ class OpenTulpaLangGraphRuntime:
                         break
                     continue
                 stream_agent_chunks += 1
+                if in_tool_phase:
+                    in_tool_phase = False
+                    suppress_live_text_until_completion = False
+                    stream_key = ""
+                    _finalize_segment()
                 tool_calls = getattr(message_chunk, "tool_calls", []) or []
                 if tool_calls:
                     pending_progress_text = self._describe_tool_calls_for_progress(tool_calls)
@@ -3607,10 +3612,6 @@ class OpenTulpaLangGraphRuntime:
                                 "tool_call_count": len(tool_calls),
                             },
                         )
-                if in_tool_phase:
-                    in_tool_phase = False
-                    stream_key = ""
-                    _finalize_segment()
                 chunk_key = str(getattr(message_chunk, "id", "") or "")
                 if chunk_key and stream_key and chunk_key != stream_key:
                     _finalize_segment()
