@@ -676,6 +676,195 @@ async def test_validate_tool_calls_does_not_count_blocked_web_search_as_success(
 
 
 @pytest.mark.asyncio
+async def test_validate_tool_calls_repairs_sendable_file_written_to_source_root() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def _log(state: dict[str, object], event: str, **kwargs: object) -> None:
+        del state
+        events.append((event, kwargs))
+
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={"tulpa_write_file": ("path", "content")},
+        forbidden_tool_args={},
+        log=_log,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="Write the chipmunk URL to a file and send it to me."),
+                AIMessage(
+                    content="I'll save it.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "tulpa_write_file",
+                            "args": {
+                                "path": "src/opentulpa/skills/chipmunk_url.txt",
+                                "content": (
+                                    "Chipmunk photo URL: "
+                                    "https://images.unsplash.com/photo-1425082661507-d6d2f66e4044?w=800"
+                                ),
+                            },
+                        }
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    assert result.update["tool_validation_passed"] is False
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "non-Python deliverables and artifacts" in str(update_messages[0].content)
+    assert "tulpa_stuff" in str(update_messages[0].content)
+    assert isinstance(update_messages[1], SystemMessage)
+    assert "requested tool action was not completed yet" in str(update_messages[1].content)
+    assert "Do not claim success" in str(update_messages[1].content)
+    assert any(event == "graph.validate_tools.failed" for event, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_repairs_file_send_outside_tulpa_stuff() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={"tulpa_file_send": ("path",)},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="Send me the chipmunk URL file."),
+                AIMessage(
+                    content="Sending.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "tulpa_file_send",
+                            "args": {"path": "src/opentulpa/skills/chipmunk_url.txt"},
+                        }
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "tulpa_file_send can only send files under" in str(update_messages[0].content)
+    assert isinstance(update_messages[1], SystemMessage)
+    assert "Do not claim success" in str(update_messages[1].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_repairs_grouped_write_to_source_root() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="Write the chipmunk URL to a file and send it to me."),
+                AIMessage(
+                    content="I'll save it.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "tool_group_exec",
+                            "args": {
+                                "group": "workspace",
+                                "command": "tulpa_write_file",
+                                "args_json": {
+                                    "path": "src/opentulpa/skills/chipmunk_url.txt",
+                                    "content": (
+                                        "Chipmunk photo URL: "
+                                        "https://images.unsplash.com/photo-1425082661507-d6d2f66e4044?w=800"
+                                    ),
+                                },
+                            },
+                        }
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    assert result.update["tool_validation_passed"] is False
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "non-Python deliverables and artifacts" in str(update_messages[0].content)
+    assert "Nested tool_group_exec command `tulpa_write_file`" in str(update_messages[0].content)
+    assert isinstance(update_messages[1], SystemMessage)
+    assert "Do not claim success" in str(update_messages[1].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_repairs_grouped_file_send_outside_tulpa_stuff() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+        loop_limit_final_status_text="loop limit",
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="Send me the chipmunk URL file."),
+                AIMessage(
+                    content="Sending.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "tool_group_exec",
+                            "args": {
+                                "group": "files",
+                                "command": "tulpa_file_send",
+                                "args_json": '{"path": "src/opentulpa/skills/chipmunk_url.txt"}',
+                            },
+                        }
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "tulpa_file_send can only send files under" in str(update_messages[0].content)
+    assert "Nested tool_group_exec command `tulpa_file_send`" in str(update_messages[0].content)
+    assert isinstance(update_messages[1], SystemMessage)
+    assert "Do not claim success" in str(update_messages[1].content)
+
+
+@pytest.mark.asyncio
 async def test_routine_intent_classifier_rejects_chat_only_request() -> None:
     runtime = _RoutineIntentRuntime(
         {
@@ -776,6 +965,54 @@ def test_validate_model_tool_call_rejects_duplicate_tulpa_root_prefix_for_read_f
     assert err is not None
     assert "duplicated allowed-root prefix" in err
     assert "tulpa_stuff/tulpa_stuff" in err
+
+
+def test_validate_model_tool_call_rejects_file_send_outside_tulpa_stuff() -> None:
+    err = _validate_model_tool_call(
+        call_name="tulpa_file_send",
+        args={
+            "path": "src/opentulpa/skills/chipmunk_url.txt",
+        },
+        latest_user_text="send me the file",
+        turn_mode="interactive",
+        required_args={"tulpa_file_send": ("path",)},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+    assert "tulpa_file_send can only send files under" in err
+    assert "tulpa_stuff" in err
+
+
+def test_validate_model_tool_call_rejects_deliverable_write_under_source_root() -> None:
+    err = _validate_model_tool_call(
+        call_name="tulpa_write_file",
+        args={
+            "path": "src/opentulpa/skills/chipmunk_url.txt",
+            "content": "Chipmunk photo URL: https://images.unsplash.com/photo-1425082661507-d6d2f66e4044?w=800",
+        },
+        latest_user_text="write the chipmunk url to a file and send it",
+        turn_mode="interactive",
+        required_args={"tulpa_write_file": ("path", "content")},
+        forbidden_tool_args={},
+    )
+    assert err is not None
+    assert "non-Python deliverables and artifacts" in err
+    assert "src/opentulpa/skills" in err
+
+
+def test_validate_model_tool_call_allows_python_source_write_under_source_root() -> None:
+    err = _validate_model_tool_call(
+        call_name="tulpa_write_file",
+        args={
+            "path": "src/opentulpa/skills/example_skill.py",
+            "content": "def run() -> None:\n    return None\n",
+        },
+        latest_user_text="patch the skill implementation",
+        turn_mode="interactive",
+        required_args={"tulpa_write_file": ("path", "content")},
+        forbidden_tool_args={},
+    )
+    assert err is None
 
 
 def test_validate_model_tool_call_allows_routine_create_during_routine_wake() -> None:

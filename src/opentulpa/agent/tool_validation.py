@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shlex
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 from opentulpa.agent.lc_messages import ToolMessage
@@ -34,6 +36,18 @@ _WORKING_DIR_PREFIXES: dict[str, str] = {
     "tools": "src/opentulpa/tools",
     "skills": "src/opentulpa/skills",
     "opentulpa": "src/opentulpa",
+}
+_SOURCE_ROOT_PREFIXES = (
+    _WORKING_DIR_PREFIXES["integrations"],
+    _WORKING_DIR_PREFIXES["interfaces"],
+    _WORKING_DIR_PREFIXES["tools"],
+    _WORKING_DIR_PREFIXES["skills"],
+)
+_PATH_VALIDATED_TOOL_NAMES = {
+    "tulpa_read_file",
+    "tulpa_write_file",
+    "tulpa_validate_file",
+    "tulpa_file_send",
 }
 
 
@@ -80,6 +94,94 @@ def _has_duplicate_allowed_root_prefix(path: str) -> str | None:
         normalized = str(prefix or "").strip("/")
         if normalized and text.startswith(f"{normalized}/{normalized}/"):
             return normalized
+    return None
+
+
+def _source_root_for_path(path: str) -> str | None:
+    text = str(path or "").strip().removeprefix("./")
+    if not text:
+        return None
+    for prefix in _SOURCE_ROOT_PREFIXES:
+        if text == prefix or text.startswith(f"{prefix}/"):
+            return prefix
+    return None
+
+
+def _is_python_source_path(path: str) -> bool:
+    return PurePosixPath(str(path or "").strip()).suffix == ".py"
+
+
+def _coerce_json_container(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith(("{", "[")):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return value
+    return value
+
+
+def _coerce_json_object(value: Any) -> dict[str, Any] | None:
+    coerced = _coerce_json_container(value)
+    return coerced if isinstance(coerced, dict) else None
+
+
+def _coerce_json_list(value: Any) -> list[Any] | None:
+    coerced = _coerce_json_container(value)
+    return coerced if isinstance(coerced, list) else None
+
+
+def _path_tool_validation_error(call_name: str, args: Any) -> str | None:
+    if call_name not in _PATH_VALIDATED_TOOL_NAMES or not isinstance(args, dict):
+        return None
+    path_arg = str(args.get("path", "")).strip()
+    duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
+    if duplicate_prefix:
+        return (
+            "TOOL_VALIDATION_ERROR: path includes a duplicated allowed-root prefix. "
+            f"Use `{duplicate_prefix}/...`, not `{duplicate_prefix}/{duplicate_prefix}/...`."
+        )
+    if call_name == "tulpa_file_send" and not path_arg.startswith("tulpa_stuff/"):
+        return (
+            "TOOL_VALIDATION_ERROR: tulpa_file_send can only send files under "
+            "`tulpa_stuff/...`. If this is a user-deliverable artifact, first write it "
+            "there with tulpa_write_file, then send that tulpa_stuff path."
+        )
+    source_root = _source_root_for_path(path_arg)
+    if call_name == "tulpa_write_file" and source_root and not _is_python_source_path(path_arg):
+        return (
+            "TOOL_VALIDATION_ERROR: non-Python deliverables and artifacts must be written "
+            "under `tulpa_stuff/...`, not source roots such as "
+            f"`{source_root}/...`. Reserve source roots for implementation `.py` files."
+        )
+    return None
+
+
+def _tool_group_exec_path_validation_error(args: dict[str, Any]) -> str | None:
+    command = str(args.get("command", "") or "").strip()
+    if command:
+        command_args = _coerce_json_object(args.get("args_json"))
+        error = _path_tool_validation_error(command, command_args)
+        if error:
+            return f"{error} Nested tool_group_exec command `{command}` must be repaired."
+        return None
+
+    calls = _coerce_json_list(args.get("calls"))
+    if calls is None:
+        calls = _coerce_json_list(args.get("args_json"))
+    if calls is None:
+        return None
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        item_command = str(item.get("command", "") or "").strip()
+        command_args = _coerce_json_object(item.get("args_json"))
+        error = _path_tool_validation_error(item_command, command_args)
+        if error:
+            return f"{error} Nested tool_group_exec command `{item_command}` must be repaired."
     return None
 
 
@@ -231,14 +333,14 @@ def _validate_model_tool_call(
             f"{normalized_turn_mode}, do not submit owner authentication input."
         )
 
-    if call_name in {"tulpa_read_file", "tulpa_write_file", "tulpa_validate_file", "tulpa_file_send"}:
-        path_arg = str(args.get("path", "")).strip()
-        duplicate_prefix = _has_duplicate_allowed_root_prefix(path_arg)
-        if duplicate_prefix:
-            return (
-                "TOOL_VALIDATION_ERROR: path includes a duplicated allowed-root prefix. "
-                f"Use `{duplicate_prefix}/...`, not `{duplicate_prefix}/{duplicate_prefix}/...`."
-            )
+    if call_name == "tool_group_exec":
+        nested_path_error = _tool_group_exec_path_validation_error(args)
+        if nested_path_error:
+            return nested_path_error
+
+    path_error = _path_tool_validation_error(call_name, args)
+    if path_error:
+        return path_error
 
     if call_name == "routine_create":
         schedule = str(args.get("schedule", "")).strip()
