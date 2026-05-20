@@ -2077,6 +2077,9 @@ async def test_telegram_business_workflow_uses_bound_files_and_replies_via_busin
     assert runtime.calls[0]["workflow"]["knowledge_file_ids"] == [str(knowledge["id"])]
     assert runtime.calls[0]["workflow"]["knowledge_answer"] == ""
     assert "Reference numbers" in runtime.calls[1]["workflow"]["knowledge_answer"]
+    assert runtime.calls[1]["conversation"]["unanswered_customer_messages"] == runtime.calls[0][
+        "conversation"
+    ]["unanswered_customer_messages"]
     sent = telegram_business.client.sent_messages[0]
     assert sent["chat_id"] == "555"
     assert sent["business_connection_id"] == "bc_123"

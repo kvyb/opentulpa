@@ -4120,6 +4120,7 @@ class IntakeWorkflowService:
                     conversation={
                         "summary": conversation_summary,
                         "recent_messages": recent_messages,
+                        "unanswered_customer_messages": unanswered_customer_messages,
                     },
                     active_booking=active_booking,
                     recent_completed_booking=recent_completed_booking,
