@@ -1665,6 +1665,63 @@ class OpenTulpaLangGraphRuntime:
         return f"{STREAM_PROGRESS_PREFIX}{cleaned}"
 
     @staticmethod
+    def _humanize_tool_identifier(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        cleaned = re.sub(r"[_-]+", " ", text).strip()
+        if not cleaned:
+            return ""
+        if cleaned.isupper():
+            cleaned = cleaned.lower()
+        return cleaned[:1].upper() + cleaned[1:]
+
+    @classmethod
+    def _tool_group_exec_progress_label(cls, args: Any) -> str:
+        if not isinstance(args, dict):
+            return ""
+        calls = args.get("calls")
+        if isinstance(calls, list) and calls:
+            labels = [
+                cls._tool_group_exec_progress_label(call)
+                for call in calls[:2]
+                if isinstance(call, dict)
+            ]
+            labels = [label for label in labels if label]
+            if labels:
+                if len(labels) == 1:
+                    return labels[0]
+                return f"{labels[0]}, then {labels[1].lower()}"
+        group = cls._humanize_tool_identifier(args.get("group"))
+        command = cls._humanize_tool_identifier(args.get("command"))
+        if group and command:
+            group_prefix = f"{group.lower()} "
+            if command.lower().startswith(group_prefix):
+                command = command[len(group_prefix) :].strip()
+                if command:
+                    command = command[:1].upper() + command[1:]
+            return f"{group}: {command}"
+        return group or command
+
+    @classmethod
+    def _tool_call_progress_label(cls, call: Any) -> str:
+        if not isinstance(call, dict):
+            return ""
+        name = str(call.get("name", "")).strip()
+        if not name:
+            return ""
+        if name == "tool_group_exec":
+            label = cls._tool_group_exec_progress_label(call.get("args"))
+            if label:
+                return label
+        alias = _PROGRESS_TOOL_NAME_ALIASES.get(name)
+        if alias is not None:
+            return alias
+        return cls._humanize_tool_identifier(
+            name.replace("tulpa_", "").replace("browser_use_", "")
+        )
+
+    @staticmethod
     def _safe_tool_names_for_status(tool_calls: list[Any]) -> list[str]:
         assert isinstance(tool_calls, list)
         names: list[str] = []
@@ -1679,28 +1736,14 @@ class OpenTulpaLangGraphRuntime:
 
     @staticmethod
     def _describe_tool_calls_for_progress(tool_calls: list[Any]) -> str:
-        names: list[str] = []
-        for call in tool_calls:
-            if not isinstance(call, dict):
-                continue
-            name = str(call.get("name", "")).strip()
-            if name:
-                names.append(name)
-        if not names:
+        labels = [
+            OpenTulpaLangGraphRuntime._tool_call_progress_label(call)
+            for call in tool_calls[:2]
+        ]
+        labels = [label for label in labels if label]
+        if not labels:
             return "Working on it…"
-        labels: list[str] = []
-        for name in names[:2]:
-            label = _PROGRESS_TOOL_NAME_ALIASES.get(name)
-            if label is None:
-                label = (
-                    name.replace("tulpa_", "")
-                    .replace("browser_use_", "")
-                    .replace("_", " ")
-                    .strip()
-                    .capitalize()
-                )
-            labels.append(label)
-        if len(names) == 1:
+        if len(labels) == 1:
             return f"{labels[0]}…"
         return f"{labels[0]}, then {labels[1].lower()}…"
 
