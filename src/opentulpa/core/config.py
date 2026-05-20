@@ -85,7 +85,7 @@ class Settings(BaseSettings):
         description="Hard cap for any single user-visible assistant reply before truncation.",
     )
     agent_context_token_limit: int = Field(
-        default=12000,
+        default=20000,
         ge=10000,
         le=1000000,
         description="Short-term high-watermark (estimated tokens) before thread context compaction.",

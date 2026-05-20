@@ -40,7 +40,7 @@ def _short_term_high_token_budget(runtime: Any) -> int:
         getattr(
             runtime,
             "_context_short_term_high_tokens",
-            getattr(runtime, "_context_token_limit", 12000),
+            getattr(runtime, "_context_token_limit", 20000),
         )
     )
     return max(2000, configured)

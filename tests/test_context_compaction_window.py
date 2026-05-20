@@ -12,7 +12,9 @@ from opentulpa.agent.context_compaction import (
     maybe_compact_thread_context,
 )
 from opentulpa.agent.lc_messages import HumanMessage
+from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.utils import approx_tokens
+from opentulpa.core.config import Settings
 
 
 def test_trim_text_to_token_budget_respects_limit() -> None:
@@ -28,6 +30,23 @@ def test_select_split_index_compacts_enough_without_dropping_all() -> None:
     assert split_idx > 0
     assert split_idx < len(tokens)
     assert sum(tokens[:split_idx]) >= 3500
+
+
+def test_context_compaction_default_threshold_is_20000() -> None:
+    assert Settings.model_fields["agent_context_token_limit"].default == 20000
+
+
+def test_runtime_context_token_limit_clamps_at_30000(tmp_path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        context_token_limit=1000000,
+    )
+
+    assert runtime._context_token_limit == 30000
+    assert runtime._context_short_term_high_tokens == 30000
 
 
 @dataclass

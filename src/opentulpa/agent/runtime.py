@@ -21,7 +21,7 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterator
-from contextlib import nullcontext, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1256,7 +1256,7 @@ class OpenTulpaLangGraphRuntime:
         customer_profile_service: CustomerProfileService | None = None,
         thread_rollup_service: ThreadRollupService | None = None,
         link_alias_service: LinkAliasService | None = None,
-        context_token_limit: int = 12000,
+        context_token_limit: int = 20000,
         context_rollup_tokens: int = 2200,
         context_recent_tokens: int = 3500,
         context_compaction_source_tokens: int = 12000,
@@ -1316,7 +1316,7 @@ class OpenTulpaLangGraphRuntime:
         self._thread_rollup_service = thread_rollup_service
         self._link_alias_service = link_alias_service
         self._workflow_setup_service: Any | None = None
-        self._context_token_limit = max(6000, min(24000, int(context_token_limit)))
+        self._context_token_limit = max(6000, min(30000, int(context_token_limit)))
         self._context_short_term_high_tokens = self._context_token_limit
         self._context_short_term_low_tokens = min(
             max(1500, int(context_recent_tokens)),
@@ -1345,6 +1345,8 @@ class OpenTulpaLangGraphRuntime:
         self._llm_call_trace_path = self._behavior_log_path.parent / "llm_call_traces.jsonl"
         self._llm_call_trace_lock = threading.Lock()
         self._llm_call_trace_limit = _LLM_CALL_TRACE_LIMIT
+        self._thread_checkpoint_locks: dict[str, asyncio.Lock] = {}
+        self._thread_checkpoint_locks_guard = asyncio.Lock()
         if self._behavior_log_enabled:
             self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._browser_use_headless = bool(browser_use_headless)
@@ -2791,6 +2793,55 @@ class OpenTulpaLangGraphRuntime:
             customer_id=customer_id,
         )
 
+    async def _thread_checkpoint_lock(self, thread_id: str) -> asyncio.Lock:
+        tid = str(thread_id or "").strip()
+        assert tid
+        if getattr(self, "_thread_checkpoint_locks_guard", None) is None:
+            self._thread_checkpoint_locks_guard = asyncio.Lock()
+        if getattr(self, "_thread_checkpoint_locks", None) is None:
+            self._thread_checkpoint_locks = {}
+        async with self._thread_checkpoint_locks_guard:
+            lock = self._thread_checkpoint_locks.get(tid)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._thread_checkpoint_locks[tid] = lock
+            return lock
+
+    @asynccontextmanager
+    async def _thread_checkpoint_guard(
+        self,
+        *,
+        thread_id: str,
+        customer_id: str,
+        trace_id: str,
+        mode: str,
+    ) -> AsyncIterator[None]:
+        lock = await self._thread_checkpoint_lock(thread_id)
+        started_at = time.monotonic()
+        if lock.locked():
+            self.log_behavior_event(
+                event="turn_waiting_for_context_compaction",
+                trace_id=trace_id,
+                mode=mode,
+                thread_id=thread_id,
+                customer_id=customer_id,
+            )
+        await lock.acquire()
+        waited_ms = int((time.monotonic() - started_at) * 1000)
+        if waited_ms > 0:
+            self.log_behavior_event(
+                event="turn_context_lock_acquired",
+                trace_id=trace_id,
+                mode=mode,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                waited_ms=waited_ms,
+            )
+        try:
+            yield
+        finally:
+            lock.release()
+
     async def _pre_resolve_skill_state(
         self,
         *,
@@ -2964,7 +3015,6 @@ class OpenTulpaLangGraphRuntime:
         forced_skill_names: list[str] | None = None,
         prompt_mode_override: str | None = None,
     ) -> _PreparedTurnContext | None:
-        await self._maybe_compact_thread_context(thread_id=thread_id, customer_id=customer_id)
         user_text = str(text or "")
         self.register_links_from_text(
             customer_id=customer_id,
@@ -3240,18 +3290,28 @@ class OpenTulpaLangGraphRuntime:
                     input_chars=len(str(effective_text or "")),
                     turn_mode=normalized_turn_mode,
                 )
-            prepared = await self._prepare_turn_context(
+            async with self._thread_checkpoint_guard(
                 thread_id=thread_id,
                 customer_id=customer_id,
-                text=str(effective_text or ""),
-                turn_mode=normalized_turn_mode,
-                include_pending_context=include_pending_context,
                 trace_id=turn_trace_id,
-                recursion_limit_override=recursion_limit_override,
-                forced_skill_names=forced_skill_names,
-                prompt_mode_override=prompt_mode_override,
-            )
-            result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
+                mode="ainvoke",
+            ):
+                await self._maybe_compact_thread_context(
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
+                prepared = await self._prepare_turn_context(
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    text=str(effective_text or ""),
+                    turn_mode=normalized_turn_mode,
+                    include_pending_context=include_pending_context,
+                    trace_id=turn_trace_id,
+                    recursion_limit_override=recursion_limit_override,
+                    forced_skill_names=forced_skill_names,
+                    prompt_mode_override=prompt_mode_override,
+                )
+                result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
             final_reply = str(result.get("final_response_text", "")).strip()
             if final_reply:
                 self.register_links_from_text(
@@ -3427,6 +3487,8 @@ class OpenTulpaLangGraphRuntime:
             tags=[normalized_turn_mode, "astream"],
         )
         trace_context.__enter__()
+        checkpoint_lock: asyncio.Lock | None = None
+        checkpoint_lock_acquired = False
         try:
             logger.info(
                 "runtime.astream_text start thread_id=%s customer_id=%s text_chars=%s",
@@ -3442,6 +3504,32 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=customer_id,
                 input_chars=len(str(effective_text or "")),
                 turn_mode=normalized_turn_mode,
+            )
+            checkpoint_lock = await self._thread_checkpoint_lock(thread_id)
+            checkpoint_wait_started_at = time.monotonic()
+            if checkpoint_lock.locked():
+                self.log_behavior_event(
+                    event="turn_waiting_for_context_compaction",
+                    trace_id=turn_trace_id,
+                    mode="astream",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                )
+            await checkpoint_lock.acquire()
+            checkpoint_lock_acquired = True
+            checkpoint_waited_ms = int((time.monotonic() - checkpoint_wait_started_at) * 1000)
+            if checkpoint_waited_ms > 0:
+                self.log_behavior_event(
+                    event="turn_context_lock_acquired",
+                    trace_id=turn_trace_id,
+                    mode="astream",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    waited_ms=checkpoint_waited_ms,
+                )
+            await self._maybe_compact_thread_context(
+                thread_id=thread_id,
+                customer_id=customer_id,
             )
             prepared = await self._prepare_turn_context(
                 thread_id=thread_id,
@@ -3943,6 +4031,8 @@ class OpenTulpaLangGraphRuntime:
             )
             raise
         finally:
+            if checkpoint_lock_acquired and checkpoint_lock is not None:
+                checkpoint_lock.release()
             with suppress(Exception):
                 trace_context.__exit__(None, None, None)
             self.reset_active_turn_mode(turn_mode_scope_token)
