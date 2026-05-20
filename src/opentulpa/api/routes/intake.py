@@ -51,7 +51,7 @@ def register_intake_workflow_routes(
                 knowledge_file_ids=body.get("knowledge_file_ids") if isinstance(body.get("knowledge_file_ids"), list) else None,
                 sink_type=str(body.get("sink_type", "")).strip(),
                 sink_config=body.get("sink_config") if isinstance(body.get("sink_config"), dict) else None,
-                schedule=str(body.get("schedule", "*/5 * * * *")).strip() or "*/5 * * * *",
+                schedule=str(body.get("schedule", "*/2 * * * *")).strip() or "*/2 * * * *",
                 notify_user=bool(body.get("notify_user", True)),
                 enabled=bool(body.get("enabled", True)),
                 reply_mode=str(body.get("reply_mode", "auto")).strip() or "auto",

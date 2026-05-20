@@ -377,7 +377,7 @@ def test_workflow_setup_update_clears_schedule_for_telegram_channel(tmp_path: Pa
         draft_patch={
             "channel": "telegram_business_dm",
             "provider": "telegram_bot_api",
-            "schedule": "*/5 * * * *",
+            "schedule": "*/2 * * * *",
         },
     )
 

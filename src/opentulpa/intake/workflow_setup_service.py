@@ -108,7 +108,7 @@ def _normalize_schedule_for_channel(draft: dict[str, Any]) -> dict[str, Any]:
     if channel == "telegram_business_dm":
         normalized["schedule"] = ""
     else:
-        normalized["schedule"] = str(normalized.get("schedule", "*/5 * * * *") or "*/5 * * * *")
+        normalized["schedule"] = str(normalized.get("schedule", "*/2 * * * *") or "*/2 * * * *")
     return normalized
 
 
@@ -196,7 +196,7 @@ class WorkflowSetupService:
                     "knowledge_file_ids": [],
                     "sink_type": "",
                     "sink_config": {},
-                    "schedule": "*/5 * * * *",
+                    "schedule": "*/2 * * * *",
                     "notify_user": True,
                     "enabled": True,
                     "reply_mode": "",
@@ -355,7 +355,7 @@ class WorkflowSetupService:
                     "sink_type": str(workflow_snapshot.get("sink_type", "") or ""),
                     "sink_config": _safe_dict(workflow_snapshot.get("sink_config")),
                     "schedule": str(
-                        workflow_snapshot.get("schedule", "*/5 * * * *") or "*/5 * * * *"
+                        workflow_snapshot.get("schedule", "*/2 * * * *") or "*/2 * * * *"
                     ),
                     "notify_user": bool(workflow_snapshot.get("notify_user", True)),
                     "enabled": bool(workflow_snapshot.get("enabled", True)),
@@ -466,7 +466,7 @@ class WorkflowSetupService:
                 knowledge_file_ids=_safe_list(draft.get("knowledge_file_ids")),
                 sink_type=str(draft.get("sink_type", "") or ""),
                 sink_config=_safe_dict(draft.get("sink_config")),
-                schedule=str(draft.get("schedule", "*/5 * * * *") or "*/5 * * * *"),
+                schedule=str(draft.get("schedule", "*/2 * * * *") or "*/2 * * * *"),
                 notify_user=bool(draft.get("notify_user", True)),
                 enabled=bool(draft.get("enabled", True)),
                 reply_mode=str(draft.get("reply_mode", "auto") or "auto"),

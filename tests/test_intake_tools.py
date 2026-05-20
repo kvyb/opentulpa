@@ -52,7 +52,7 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
     payload = kwargs["json_body"]
     assert payload["customer_id"] == "telegram_123"
     assert payload["name"] == "Car Wash Intake"
-    assert payload["schedule"] == "*/5 * * * *"
+    assert payload["schedule"] == "*/2 * * * *"
     assert payload["channel"] == "instagram_dm"
     assert payload["provider"] == "composio"
     assert payload["assistant_instructions"] == ""

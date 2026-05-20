@@ -750,6 +750,9 @@ def _build_intake_workflow_system_prompt() -> str:
         "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "Allowed reply_action values: none, send_reply, mark_cancelled.\n\n"
         "Decision policy:\n"
+        "- Treat conversation.unanswered_customer_messages as the active customer turn when present.\n"
+        "- If multiple unanswered customer messages are present, interpret them together before deciding fields, booking action, knowledge needs, and reply text.\n"
+        "- Do not base the decision only on latest_inbound_message_text_preview when unanswered_customer_messages contains more context.\n"
         "- Default mode is not an intent filter: unless workflow.intent_match_required is true, treat messages from the configured source as candidates for this workflow.\n"
         "- In default mode, set matches_workflow=true for greetings, casual openers, ambiguous early-stage messages, and business-adjacent questions when a useful reply can move the conversation forward.\n"
         "- Only when workflow.intent_match_required is true, use matches_workflow=false for messages that are not clearly pursuing the workflow intent.\n"
@@ -950,11 +953,11 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compact_recent_messages(messages: Any) -> list[dict[str, str]]:
+def _compact_recent_messages(messages: Any, *, limit: int = 6) -> list[dict[str, str]]:
     if not isinstance(messages, list):
         return []
     compact: list[dict[str, str]] = []
-    for item in messages[-6:]:
+    for item in messages[-limit:]:
         if not isinstance(item, dict):
             continue
         compact.append(
@@ -968,6 +971,12 @@ def _compact_recent_messages(messages: Any) -> list[dict[str, str]]:
             }
         )
     return compact
+
+
+def _compact_unanswered_customer_messages(messages: Any) -> list[dict[str, str]]:
+    if not isinstance(messages, list):
+        return []
+    return _compact_recent_messages(messages, limit=40)
 
 
 def _compact_booking_for_prompt(booking: dict[str, Any] | None) -> dict[str, Any]:
@@ -1051,6 +1060,9 @@ def _compact_conversation_for_prompt(conversation: dict[str, Any]) -> dict[str, 
     return {
         "summary": compact_summary,
         "recent_messages": _compact_recent_messages(safe_conversation.get("recent_messages")),
+        "unanswered_customer_messages": _compact_unanswered_customer_messages(
+            safe_conversation.get("unanswered_customer_messages")
+        ),
     }
 
 
@@ -1074,6 +1086,7 @@ def _build_intake_workflow_agent_prompt(
         "Primary goal:\n"
         "- Decide whether this conversation is an active match for the workflow.\n"
         "- Extract reliable booking fields.\n"
+        "- Use all unanswered customer messages as one active customer turn when provided.\n"
         "- Inspect external state only when the workflow explicitly requires it before this decision.\n"
         "- Return strict JSON only as the final answer.\n\n"
         "Tool-use guidance:\n"

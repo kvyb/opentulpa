@@ -165,6 +165,7 @@ class _FakeComposio:
         }
         self.execute_calls: list[dict[str, Any]] = []
         self.list_calls = 0
+        self.list_limits: list[int] = []
         self.get_calls = 0
         self.list_sheet_names_calls: list[dict[str, Any]] = []
 
@@ -175,8 +176,9 @@ class _FakeComposio:
         connected_account_id: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
-        del customer_id, connected_account_id, limit
+        del customer_id, connected_account_id
         self.list_calls += 1
+        self.list_limits.append(limit)
         return {"ok": True, "items": [self.summary], "warnings": self.list_warnings}
 
     def get_instagram_conversation(
@@ -610,7 +612,7 @@ async def test_intake_workflow_upsert_creates_routine_and_skill(tmp_path: Path) 
 
     assert workflow["channel"] == "instagram_dm"
     assert workflow["provider"] == "composio"
-    assert workflow["schedule"] == "*/5 * * * *"
+    assert workflow["schedule"] == "*/2 * * * *"
     assert scheduler.get_routine(workflow["routine_id"]) is not None
     skill = skills.get_skill(
         customer_id="telegram_123",
@@ -1403,14 +1405,14 @@ async def test_instagram_scheduled_workflow_uses_poll_interval_for_fresh_inbound
         "conversation_id": "conv_1",
         "recipient_id": "cust_1",
         "latest_inbound_message_id": "msg_1",
-        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_message_created_time": "2026-04-07T08:02:00+00:00",
         "latest_inbound_sender_username": "alice",
     }
     conversation = _instagram_conversation(
         conversation_id="conv_1",
         latest_message_id="msg_1",
         latest_message_text="Need a car wash tomorrow 3pm.",
-        latest_message_time="2026-04-07T08:00:00+00:00",
+        latest_message_time="2026-04-07T08:02:00+00:00",
     )
     runtime = _FakeRuntime(
         [
@@ -1446,15 +1448,369 @@ async def test_instagram_scheduled_workflow_uses_poll_interval_for_fresh_inbound
         workflow_id=workflow["workflow_id"],
     )
 
-    assert workflow["schedule"] == "*/5 * * * *"
+    assert workflow["schedule"] == "*/2 * * * *"
     assert service._latest_inbound_max_age_for_event(  # noqa: SLF001
         event_type="scheduled",
         workflow=workflow,
-    ) == timedelta(minutes=6)
+    ) == timedelta(minutes=5)
     assert result["ok"] is True
     assert result["processed_conversations"] == 1
     assert result["matched_conversations"] == 1
     assert len(runtime.calls) == 1
+    assert composio.list_limits
+    assert set(composio.list_limits) == {20}
+
+
+@pytest.mark.asyncio
+async def test_instagram_decision_uses_unanswered_customer_burst(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: datetime(2026, 4, 7, 8, 4, 45, tzinfo=UTC),
+    )
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_5",
+        "latest_inbound_message_created_time": "2026-04-07T08:04:30+00:00",
+        "latest_inbound_message_text_preview": "Pleeeeease",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = {
+        "data": {
+            "id": "conv_1",
+            "updated_time": "2026-04-07T08:04:30+00:00",
+            "participants": {
+                "data": [
+                    {"id": "business_1", "username": "salon"},
+                    {"id": "cust_1", "username": "alice"},
+                ]
+            },
+            "messages": {
+                "data": [
+                    {
+                        "id": "msg_0",
+                        "created_time": "2026-04-07T07:59:00+00:00",
+                        "message": "What time works on June 8?",
+                        "from": {"id": "business_1", "username": "salon"},
+                    },
+                    {
+                        "id": "msg_1",
+                        "created_time": "2026-04-07T08:00:00+00:00",
+                        "message": "Reach ma ballls",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_1b",
+                        "created_time": "2026-04-07T08:00:30+00:00",
+                        "message": "I mean it",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_1c",
+                        "created_time": "2026-04-07T08:01:00+00:00",
+                        "message": "Please answer",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_1d",
+                        "created_time": "2026-04-07T08:01:30+00:00",
+                        "message": "Need help",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_2",
+                        "created_time": "2026-04-07T08:02:00+00:00",
+                        "message": "Can u do that for me",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_3",
+                        "created_time": "2026-04-07T08:03:00+00:00",
+                        "message": "Still here",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_3b",
+                        "created_time": "2026-04-07T08:03:30+00:00",
+                        "message": "Can you reply",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_4",
+                        "created_time": "2026-04-07T08:04:00+00:00",
+                        "message": "?",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                    {
+                        "id": "msg_5",
+                        "created_time": "2026-04-07T08:04:30+00:00",
+                        "message": "Pleeeeease",
+                        "from": {"id": "cust_1", "username": "alice"},
+                    },
+                ]
+            },
+        }
+    }
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer sent a burst of unanswered messages.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Use full unanswered burst.",
+            }
+        ]
+    )
+    composio = _FakeComposio(summary, conversation)
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Intake",
+        intent_description="Handle Instagram DMs that ask to book salon appointments.",
+        required_fields=["time", "phone"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["ok"] is True
+    assert len(runtime.calls) == 1
+    burst = runtime.calls[0]["conversation"]["unanswered_customer_messages"]
+    assert [item["text"] for item in burst] == [
+        "Reach ma ballls",
+        "I mean it",
+        "Please answer",
+        "Need help",
+        "Can u do that for me",
+        "Still here",
+        "Can you reply",
+        "?",
+        "Pleeeeease",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_instagram_stale_decision_refreshes_before_replying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: datetime(2026, 4, 7, 8, 4, 30, tzinfo=UTC),
+    )
+    initial_summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:02:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    initial_conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Need a car wash tomorrow 3pm.",
+        latest_message_time="2026-04-07T08:02:00+00:00",
+    )
+    composio = _FakeComposio(initial_summary, initial_conversation)
+
+    class _Runtime(_FakeRuntime):
+        async def decide_intake_workflow(self, **kwargs: Any) -> dict[str, Any]:
+            decision = await super().decide_intake_workflow(**kwargs)
+            if len(self.calls) == 1:
+                composio.summary = {
+                    **initial_summary,
+                    "latest_inbound_message_id": "msg_2",
+                    "latest_inbound_message_created_time": "2026-04-07T08:04:00+00:00",
+                    "latest_inbound_message_text_preview": "Actually make it 4pm.",
+                }
+                composio.conversation = _instagram_conversation(
+                    conversation_id="conv_1",
+                    latest_message_id="msg_2",
+                    latest_message_text="Actually make it 4pm.",
+                    latest_message_time="2026-04-07T08:04:00+00:00",
+                )
+            return decision
+
+    runtime = _Runtime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a car wash booking.",
+                "extracted_fields": {},
+                "missing_fields": ["time"],
+                "reply_action": "send_reply",
+                "reply_text": "What time works?",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Ask for missing time.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer changed the requested time.",
+                "extracted_fields": {"time": "4pm"},
+                "missing_fields": [],
+                "reply_action": "send_reply",
+                "reply_text": "Great, I have 4pm.",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Reply to the latest inbound message.",
+            },
+        ]
+    )
+    service, _, _, _, _ = _mk_service(tmp_path, runtime=runtime, composio=composio)
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        reply_mode="auto",
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+    cursor = service._get_cursor(  # noqa: SLF001
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    )
+
+    assert workflow["schedule"] == "*/2 * * * *"
+    assert result["processed_conversations"] == 1
+    assert result["results"][0]["status"] == "ignored"
+    assert result["results"][0]["replied"] is True
+    assert cursor["last_seen_inbound_message_id"] == "msg_2"
+    assert composio.execute_calls == [
+        {
+            "customer_id": "telegram_123",
+            "tool_slug": "INSTAGRAM_SEND_TEXT_MESSAGE",
+            "arguments": {
+                "recipient_id": "cust_1",
+                "conversation_id": "conv_1",
+                "text": "Great, I have 4pm.",
+                "reply_to_message_id": "msg_2",
+            },
+            "connected_account_id": None,
+            "text": None,
+        }
+    ]
+    assert len(runtime.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_instagram_apply_stale_wait_does_not_advance_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: datetime(2026, 4, 7, 8, 4, 30, tzinfo=UTC),
+    )
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:02:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Need a car wash tomorrow 3pm.",
+        latest_message_time="2026-04-07T08:02:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a car wash booking.",
+                "extracted_fields": {},
+                "missing_fields": ["vehicle"],
+                "reply_action": "send_reply",
+                "reply_text": "What vehicle should we book?",
+                "ready_to_save": False,
+                "booking_action": "ignore",
+                "save_payload": {},
+                "reason": "Ask for missing vehicle.",
+            }
+        ]
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio(summary, conversation),
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["vehicle"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+        reply_mode="auto",
+    )
+    stale_checks = 0
+
+    def _fake_stale_check(**kwargs: Any) -> tuple[bool, dict[str, Any], str | None]:
+        nonlocal stale_checks
+        stale_checks += 1
+        raw_summary = kwargs.get("decided_summary")
+        decided_summary = dict(raw_summary if isinstance(raw_summary, dict) else {})
+        if stale_checks == 1:
+            return False, decided_summary, None
+        latest_summary = dict(decided_summary)
+        latest_summary["latest_inbound_message_id"] = "msg_2"
+        latest_summary["latest_inbound_message_created_time"] = "2026-04-07T08:04:00+00:00"
+        return True, latest_summary, None
+
+    monkeypatch.setattr(service, "_conversation_became_stale", _fake_stale_check)
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["results"] == [
+        {
+            "conversation_id": "conv_1",
+            "matched": True,
+            "status": "stale_waiting_for_next_poll",
+            "replied": False,
+        }
+    ]
+    assert stale_checks == 2
+    assert service._get_cursor(  # noqa: SLF001
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    ) == {}
 
 
 @pytest.mark.asyncio
