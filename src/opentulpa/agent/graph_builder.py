@@ -809,7 +809,7 @@ def build_runtime_graph(runtime: Any):
         )
         invoked_skill_context = cached_invoked_context or legacy_cached_context
         available_skills = cached_available if isinstance(cached_available, list) else []
-        prompt_budget = max(4000, int(getattr(runtime, "_context_token_limit", 12000)))
+        prompt_budget = max(4000, int(getattr(runtime, "_context_token_limit", 20000)))
         low_budget = max(1500, int(getattr(runtime, "_context_short_term_low_tokens", 3500)))
         optional_context_budget = max(1000, min(3600, int(low_budget * 0.7)))
         frozen_prompt_context_raw = state.get("frozen_prompt_context")
