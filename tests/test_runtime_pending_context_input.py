@@ -660,6 +660,47 @@ def test_pending_context_surfaces_routine_execution_summary() -> None:
     assert "notification_status=sent" in text
 
 
+def test_tool_group_exec_progress_label_uses_group_and_command() -> None:
+    message = OpenTulpaLangGraphRuntime._describe_tool_calls_for_progress(
+        [
+            {
+                "name": "tool_group_exec",
+                "args": {
+                    "group": "composio",
+                    "command": "GITHUB_LIST_PULL_REQUESTS",
+                    "args_json": {"owner": "kvyb"},
+                },
+            }
+        ]
+    )
+
+    assert message == "Composio: Github list pull requests…"
+    assert "tool group exec" not in message.lower()
+
+
+def test_batched_tool_group_exec_progress_label_uses_first_two_commands() -> None:
+    message = OpenTulpaLangGraphRuntime._describe_tool_calls_for_progress(
+        [
+            {
+                "name": "tool_group_exec",
+                "args": {
+                    "calls": [
+                        {"group": "web", "command": "web_search", "args_json": {"query": "x"}},
+                        {
+                            "group": "web",
+                            "command": "fetch_url_content",
+                            "args_json": {"url": "https://example.com"},
+                        },
+                    ]
+                },
+            }
+        ]
+    )
+
+    assert message == "Web: Search, then web: fetch url content…"
+    assert "exec exec" not in message.lower()
+
+
 @pytest.mark.asyncio
 async def test_ainvoke_text_does_not_reuse_prior_turn_assistant_reply() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
