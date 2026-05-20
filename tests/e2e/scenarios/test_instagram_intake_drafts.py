@@ -6,9 +6,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from harness.runner import build_harness, close_harness
-from mocks.composio_instagram import build_instagram_conversation
+from mocks.composio_instagram import FakeComposioInstagramService, build_instagram_conversation
 
 from opentulpa.api.app import create_app
+from opentulpa.intake import service as intake_service_module
 from opentulpa.integrations.composio import ComposioService
 from opentulpa.scheduler.service import SchedulerService
 
@@ -133,6 +134,72 @@ def _post_json(client: TestClient, path: str, body: dict[str, Any]) -> dict[str,
     payload = response.json()
     assert payload.get("ok") is True
     return payload
+
+
+def _scheduled_instagram_burst_conversation() -> dict[str, Any]:
+    conversation_id = "conv_live_llm_burst_1"
+    recipient_id = "178900177"
+    created_latest = "2026-04-14T10:24:30+0000"
+    return {
+        "summary": {
+            "conversation_id": conversation_id,
+            "recipient_id": recipient_id,
+            "latest_message_id": "mid_burst_5",
+            "latest_message_created_time": created_latest,
+            "latest_inbound_message_id": "mid_burst_5",
+            "latest_inbound_message_created_time": created_latest,
+            "latest_inbound_message_text_preview": "Pleeeeease",
+            "message_count": 6,
+        },
+        "conversation": {
+            "id": conversation_id,
+            "participants": {
+                "data": [
+                    {"id": "page_live_llm_burst", "username": "salon_test"},
+                    {"id": recipient_id, "username": "lead_burst_e2e"},
+                ]
+            },
+            "messages": {
+                "data": [
+                    {
+                        "id": "mid_prev_out_1",
+                        "created_time": "2026-04-14T10:19:30+0000",
+                        "from": {"id": "page_live_llm_burst", "username": "salon_test"},
+                        "to": {"data": [{"id": recipient_id}]},
+                        "message": "We can book your blow dry on June 8. What time works, and what phone number should we use?",
+                    },
+                    {
+                        "id": "mid_burst_1",
+                        "created_time": "2026-04-14T10:20:00+0000",
+                        "from": {"id": recipient_id, "username": "lead_burst_e2e"},
+                        "to": {"data": [{"id": "page_live_llm_burst"}]},
+                        "message": "Reach ma ballls",
+                    },
+                    {
+                        "id": "mid_burst_2",
+                        "created_time": "2026-04-14T10:22:00+0000",
+                        "from": {"id": recipient_id, "username": "lead_burst_e2e"},
+                        "to": {"data": [{"id": "page_live_llm_burst"}]},
+                        "message": "Can u do that for me",
+                    },
+                    {
+                        "id": "mid_burst_3",
+                        "created_time": "2026-04-14T10:23:30+0000",
+                        "from": {"id": recipient_id, "username": "lead_burst_e2e"},
+                        "to": {"data": [{"id": "page_live_llm_burst"}]},
+                        "message": "?",
+                    },
+                    {
+                        "id": "mid_burst_5",
+                        "created_time": created_latest,
+                        "from": {"id": recipient_id, "username": "lead_burst_e2e"},
+                        "to": {"data": [{"id": "page_live_llm_burst"}]},
+                        "message": "Pleeeeease",
+                    },
+                ]
+            },
+        },
+    }
 
 
 def test_instagram_intake_draft_approval_resumes_and_repairs_composio_payload(
@@ -354,5 +421,99 @@ def test_live_llm_instagram_intake_draft_approval_repairs_composio_payload(
         assert send_calls[0]["arguments"]["text"] == drafts[0]["reply_text"]
         assert send_calls[-1]["arguments"]["text"] == approved["reply_text"]
         assert "conversation_id" not in send_calls[-1]["arguments"]
+    finally:
+        close_harness(harness)
+
+
+@pytest.mark.live_llm
+def test_live_llm_instagram_scheduled_burst_replies_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intake_service_module,
+        "_utc_now",
+        lambda: intake_service_module.datetime(2026, 4, 14, 10, 24, 45, tzinfo=intake_service_module.UTC),
+    )
+    conversation_item = _scheduled_instagram_burst_conversation()
+    composio = FakeComposioInstagramService(reply_fail_once_for_invalid_mid=False)
+    composio.conversations["conv_live_llm_burst_1"] = conversation_item
+    harness = build_harness(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        scenario_name="instagram_scheduled_burst_live_llm",
+        composio_service=composio,
+    )
+    try:
+        workflow_payload = _post_json(
+            harness.client,
+            "/internal/intake/workflows/upsert",
+            {
+                "customer_id": "cust_e2e_burst",
+                "name": "Live LLM E2E Instagram Burst",
+                "channel": "instagram_dm",
+                "provider": "composio",
+                "source_config": {
+                    "connected_account_id": "acct_e2e_burst",
+                    "scan_limit": 20,
+                },
+                "intent_description": (
+                    "Reply to Instagram DMs for salon booking requests. Treat multiple "
+                    "customer messages after the last assistant reply as one active turn."
+                ),
+                "required_fields": ["time", "phone"],
+                "field_guidance": {
+                    "time": "Requested appointment time on June 8.",
+                    "phone": "Customer phone number.",
+                },
+                "assistant_instructions": (
+                    "Live E2E contract: answer as the salon. Use the whole active customer "
+                    "turn, not only the latest short message. Since time and phone are still "
+                    "missing, send one concise reply asking for both. Do not save a booking."
+                ),
+                "sink_type": "local_csv",
+                "sink_config": {"file_path": "tulpa_stuff/e2e/live_llm_burst.csv"},
+                "reply_mode": "auto",
+                "notify_user": False,
+                "enabled": True,
+            },
+        )
+        workflow = workflow_payload["workflow"]
+        assert workflow["schedule"] == "*/2 * * * *"
+
+        first = _post_json(
+            harness.client,
+            "/internal/intake/workflows/run",
+            {
+                "customer_id": "cust_e2e_burst",
+                "workflow_id": workflow["workflow_id"],
+                "event_type": "scheduled",
+            },
+        )
+        second = _post_json(
+            harness.client,
+            "/internal/intake/workflows/run",
+            {
+                "customer_id": "cust_e2e_burst",
+                "workflow_id": workflow["workflow_id"],
+                "event_type": "scheduled",
+            },
+        )
+
+        send_calls = [
+            call
+            for call in composio.calls
+            if call["method"] == "execute_tool"
+            and call["tool_slug"] == "INSTAGRAM_SEND_TEXT_MESSAGE"
+        ]
+        assert first["processed_conversations"] == 1
+        assert first["matched_conversations"] == 1
+        assert first["results"][0]["replied"] is True
+        assert second["processed_conversations"] == 0
+        assert len(send_calls) == 1
+        reply_text = str(send_calls[0]["arguments"]["text"])
+        assert reply_text.strip()
+        assert send_calls[0]["arguments"]["recipient_id"] == "178900177"
+        assert send_calls[0]["arguments"]["reply_to_message_id"] == "mid_burst_5"
     finally:
         close_harness(harness)

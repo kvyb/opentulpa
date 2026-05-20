@@ -438,12 +438,12 @@ async def test_routine_create_allows_scheduled_instagram_intake_workflow() -> No
             "channel": "instagram_dm",
             "provider": "composio",
             "routine_id": "",
-            "schedule": "*/5 * * * *",
+            "schedule": "*/2 * * * *",
         }
     )
     args = {
         "name": "Instagram intake poller",
-        "schedule": "*/5 * * * *",
+        "schedule": "*/2 * * * *",
         "implementation_command": "python3 -m opentulpa.intake_runner --workflow-id iwf_insta",
         "instruction": "Run intake workflow iwf_insta.",
     }

@@ -742,6 +742,7 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
         conversation={
             "summary": {"conversation_id": "conv_1"},
             "recent_messages": [{"sender_role": "customer", "text": "thanks"}],
+            "unanswered_customer_messages": [{"sender_role": "customer", "text": "thanks"}],
         },
         active_booking=None,
         recent_completed_booking=None,
@@ -763,6 +764,7 @@ async def test_decide_intake_workflow_uses_stronger_policy_prompt() -> None:
     assert messages[0].content[0]["cache_control"] == {"type": "ephemeral"}
     assert isinstance(messages[1].content, str)
     assert "Default mode is not an intent filter" in system_text
+    assert "conversation.unanswered_customer_messages as the active customer turn" in system_text
     assert "workflow.intent_match_required is true" in system_text
     assert "If customer messages conflict, prefer the latest customer-provided value" in system_text
     assert "Ask at most one compact question at a time" in system_text

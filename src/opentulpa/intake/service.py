@@ -27,11 +27,11 @@ _ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
 _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_write"}
 _ALLOWED_REPLY_MODES = {"auto", "draft"}
 _DRAFT_SENDABLE_STATUSES = {"pending", "edited"}
-_DEFAULT_SCHEDULE = "*/5 * * * *"
+_DEFAULT_SCHEDULE = "*/2 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
 _MAX_LATEST_INBOUND_AGE = timedelta(minutes=1)
 _SCHEDULED_INBOUND_AGE_GRACE = timedelta(minutes=1)
-_DEFAULT_SCHEDULED_INBOUND_AGE = timedelta(minutes=6)
+_DEFAULT_SCHEDULED_INBOUND_AGE = timedelta(minutes=5)
 _MAX_SCHEDULED_INBOUND_AGE = timedelta(hours=1)
 _MAX_TELEGRAM_BUSINESS_WEBHOOK_INBOUND_AGE = timedelta(hours=24)
 _MAX_DECISION_RECOVERY_ATTEMPTS = 2
@@ -39,12 +39,18 @@ _TELEGRAM_BUSINESS_WEBHOOK_DEBOUNCE_SECONDS = 1.5
 _TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS = 5.0
 _TELEGRAM_BUSINESS_STALE_REQUEUE_SECONDS = 3.0
 _TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE = "telegram_business_webhook_settled"
+_UNANSWERED_CUSTOMER_BURST_WINDOW = timedelta(minutes=5)
+_INSTAGRAM_STALE_DECISION_REFRESH_ATTEMPTS = 2
+_RECENT_MESSAGE_HISTORY_LIMIT = 80
 _PENDING_RUN_POLL_SECONDS = 0.2
 _PENDING_RUN_MAX_CONCURRENCY = 4
 _BUSINESS_FACTS_MAX_KEYS = 32
 _BUSINESS_FACTS_MAX_LIST_ITEMS = 20
 _BUSINESS_FACTS_MAX_STRING_CHARS = 500
 _BUSINESS_FACTS_MAX_JSON_CHARS = 12000
+_DEFAULT_INSTAGRAM_SCAN_LIMIT = 20
+_MAX_INSTAGRAM_SCAN_LIMIT = 20
+_STALE_TERMINAL_STATUSES = {"stale_requeued", "stale_waiting_for_next_poll"}
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +84,7 @@ def _scheduled_inbound_max_age(workflow: dict[str, Any]) -> timedelta:
     if interval is None:
         return _DEFAULT_SCHEDULED_INBOUND_AGE
     return min(
-        max(interval + _SCHEDULED_INBOUND_AGE_GRACE, _MAX_LATEST_INBOUND_AGE),
+        max(interval + _SCHEDULED_INBOUND_AGE_GRACE, _DEFAULT_SCHEDULED_INBOUND_AGE),
         _MAX_SCHEDULED_INBOUND_AGE,
     )
 
@@ -598,7 +604,7 @@ class IntakeWorkflowService:
         return _MAX_LATEST_INBOUND_AGE
 
     @staticmethod
-    def _uses_telegram_business_stale_guard(
+    def _uses_latest_inbound_stale_guard(
         *,
         workflow: dict[str, Any],
         event_type: str,
@@ -608,11 +614,19 @@ class IntakeWorkflowService:
             return False
         channel = str(workflow.get("channel", "") or "").strip().lower()
         provider = str(workflow.get("provider", "") or "").strip().lower()
-        return (
+        if (
             channel == "telegram_business_dm"
             and provider == "telegram_bot_api"
             and IntakeWorkflowService._is_telegram_business_webhook_event(event_type)
-        )
+        ):
+            return True
+        return channel == "instagram_dm" and provider == "composio"
+
+    @staticmethod
+    def _refreshes_stale_decision_inline(*, workflow: dict[str, Any]) -> bool:
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        return channel == "instagram_dm" and provider == "composio"
 
     @staticmethod
     def _pending_due_at(delay_seconds: float) -> str:
@@ -1093,11 +1107,16 @@ class IntakeWorkflowService:
             )
         if not stale:
             return None
-        self._requeue_stale_telegram_business_run(
-            workflow=workflow,
-            conversation_id=conversation_id,
-            latest_summary=latest_summary,
-        )
+        channel = str(workflow.get("channel", "") or "").strip().lower()
+        provider = str(workflow.get("provider", "") or "").strip().lower()
+        requeued = channel == "telegram_business_dm" and provider == "telegram_bot_api"
+        if requeued:
+            self._requeue_stale_telegram_business_run(
+                workflow=workflow,
+                conversation_id=conversation_id,
+                latest_summary=latest_summary,
+            )
+        status = "stale_requeued" if requeued else "stale_waiting_for_next_poll"
         self._emit_observability(
             event="intake.conversation.stale",
             workflow=workflow,
@@ -1105,11 +1124,12 @@ class IntakeWorkflowService:
             latest_inbound_message_id=str(
                 latest_summary.get("latest_inbound_message_id", "") or ""
             ).strip(),
+            requeued=requeued,
         )
         return {
             "conversation_id": conversation_id,
             "matched": bool(matched),
-            "status": "stale_requeued",
+            "status": status,
             "replied": False,
         }
 
@@ -2612,7 +2632,7 @@ class IntakeWorkflowService:
                     }
                 )
             normalized.sort(key=lambda item: str(item.get("created_time", "")))
-            return normalized[-12:]
+            return normalized[-_RECENT_MESSAGE_HISTORY_LIMIT:]
         payload = _safe_dict(conversation.get("data")) if "data" in conversation else _safe_dict(conversation)
         participants = _safe_list(_safe_dict(payload.get("participants")).get("data"))
         messages = _safe_list(_safe_dict(payload.get("messages")).get("data"))
@@ -2641,7 +2661,35 @@ class IntakeWorkflowService:
                 }
             )
         normalized.sort(key=lambda item: str(item.get("created_time", "")))
-        return normalized[-12:]
+        return normalized[-_RECENT_MESSAGE_HISTORY_LIMIT:]
+
+    def _unanswered_customer_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not messages:
+            return []
+        last_assistant_index = -1
+        for index, item in enumerate(messages):
+            if str(item.get("sender_role", "") or "").strip() == "assistant":
+                last_assistant_index = index
+        unanswered = [
+            item
+            for item in messages[last_assistant_index + 1 :]
+            if str(item.get("sender_role", "") or "").strip() == "customer"
+        ]
+        if len(unanswered) <= 1:
+            return unanswered
+
+        latest_time = _parse_datetime(unanswered[-1].get("created_time"))
+        if latest_time is None:
+            return unanswered
+        cutoff = latest_time - _UNANSWERED_CUSTOMER_BURST_WINDOW
+        return [
+            item
+            for item in unanswered
+            if (parsed := _parse_datetime(item.get("created_time"))) is None or parsed >= cutoff
+        ]
 
     def _source_matches_workflow(
         self,
@@ -2828,7 +2876,16 @@ class IntakeWorkflowService:
                 return [], f"Workflow {workflow['name']} failed: Composio is not available.", []
             source_config = _safe_dict(workflow.get("source_config"))
             connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
-            scan_limit = max(1, min(int(source_config.get("scan_limit", 10) or 10), 25))
+            scan_limit = max(
+                1,
+                min(
+                    int(
+                        source_config.get("scan_limit", _DEFAULT_INSTAGRAM_SCAN_LIMIT)
+                        or _DEFAULT_INSTAGRAM_SCAN_LIMIT
+                    ),
+                    _MAX_INSTAGRAM_SCAN_LIMIT,
+                ),
+            )
             configured_conversation_ids = _unique_string_list(
                 source_config.get("conversation_ids")
                 if isinstance(source_config.get("conversation_ids"), list)
@@ -3505,23 +3562,123 @@ class IntakeWorkflowService:
                         error=error,
                     )
                     continue
-                intent_match_required = _workflow_requires_intent_match(workflow)
-                decision_matches = bool(decision.get("matches_workflow"))
-                effective_matches = decision_matches or not intent_match_required
-                if self._uses_telegram_business_stale_guard(
+                skip_conversation = False
+                if self._uses_latest_inbound_stale_guard(
                     workflow=workflow,
                     event_type=event_type,
                     force=force,
                 ):
-                    stale_result = self._requeue_if_conversation_stale(
-                        workflow=workflow,
-                        conversation_id=conversation_id,
-                        conversation_summary=cursor_summary,
-                        matched=effective_matches,
-                    )
-                    if stale_result is not None:
-                        result_items.append(stale_result)
-                        continue
+                    for attempt in range(_INSTAGRAM_STALE_DECISION_REFRESH_ATTEMPTS + 1):
+                        stale, latest_summary, stale_error = self._conversation_became_stale(
+                            workflow=workflow,
+                            conversation_id=conversation_id,
+                            decided_summary=cursor_summary,
+                        )
+                        if stale_error:
+                            self._emit_observability(
+                                event="intake.conversation.error",
+                                workflow=workflow,
+                                conversation_summary=cursor_summary,
+                                phase="stale_check",
+                                error=stale_error,
+                            )
+                        if not stale:
+                            break
+                        can_refresh_inline = self._refreshes_stale_decision_inline(
+                            workflow=workflow
+                        )
+                        if not can_refresh_inline or attempt >= _INSTAGRAM_STALE_DECISION_REFRESH_ATTEMPTS:
+                            intent_match_required = _workflow_requires_intent_match(workflow)
+                            decision_matches = bool(decision.get("matches_workflow"))
+                            effective_matches = decision_matches or not intent_match_required
+                            stale_result = self._requeue_if_conversation_stale(
+                                workflow=workflow,
+                                conversation_id=conversation_id,
+                                conversation_summary=cursor_summary,
+                                matched=effective_matches,
+                            )
+                            if stale_result is not None:
+                                result_items.append(stale_result)
+                                skip_conversation = True
+                            break
+                        self._emit_observability(
+                            event="intake.conversation.stale_refresh",
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            latest_inbound_message_id=str(
+                                latest_summary.get("latest_inbound_message_id", "") or ""
+                            ).strip(),
+                            attempt=attempt + 1,
+                        )
+                        try:
+                            detailed_summary, conversation, detail_error = self._load_source_conversation(
+                                workflow=workflow,
+                                conversation_id=conversation_id,
+                            )
+                        except Exception as exc:
+                            detailed_summary = {}
+                            detail_error = str(exc)
+                        if detail_error:
+                            error_text = str(detail_error)
+                            errors.append(f"{conversation_id}: {error_text}")
+                            self._emit_observability(
+                                event="intake.conversation.error",
+                                workflow=workflow,
+                                conversation_summary=cursor_summary,
+                                phase="stale_refresh",
+                                error=error_text,
+                            )
+                            skip_conversation = True
+                            break
+                        cursor_summary = self._enrich_conversation_summary(
+                            workflow=workflow,
+                            conversation_summary=detailed_summary or latest_summary,
+                        )
+                        latest_inbound_id = str(
+                            cursor_summary.get("latest_inbound_message_id", "") or ""
+                        ).strip()
+                        latest_inbound_time = str(
+                            cursor_summary.get("latest_inbound_message_created_time", "") or ""
+                        ).strip()
+                        conversation_updated_time = str(
+                            cursor_summary.get("conversation_updated_time", "") or ""
+                        ).strip()
+                        latest_outbound_id = str(
+                            cursor_summary.get("latest_outbound_message_id", "") or ""
+                        ).strip()
+                        active_booking = self._get_active_booking(
+                            customer_id=str(workflow["customer_id"]),
+                            workflow_id=str(workflow["workflow_id"]),
+                            conversation_id=conversation_id,
+                        )
+                        recent_completed_booking = self._get_recent_completed_booking(
+                            customer_id=str(workflow["customer_id"]),
+                            workflow_id=str(workflow["workflow_id"]),
+                            conversation_id=conversation_id,
+                        )
+                        decision, error = await self._decide_workflow_action(
+                            workflow=workflow,
+                            conversation_summary=cursor_summary,
+                            conversation=conversation,
+                            active_booking=active_booking,
+                            recent_completed_booking=recent_completed_booking,
+                        )
+                        if error:
+                            errors.append(f"{conversation_id}: {error}")
+                            self._emit_observability(
+                                event="intake.conversation.error",
+                                workflow=workflow,
+                                conversation_summary=cursor_summary,
+                                phase="decision",
+                                error=error,
+                            )
+                            skip_conversation = True
+                            break
+                if skip_conversation:
+                    continue
+                intent_match_required = _workflow_requires_intent_match(workflow)
+                decision_matches = bool(decision.get("matches_workflow"))
+                effective_matches = decision_matches or not intent_match_required
                 if not effective_matches:
                     reply_action = str(decision.get("reply_action", "none") or "none").strip().lower()
                     reply_text = str(decision.get("reply_text", "") or "").strip()
@@ -3541,7 +3698,7 @@ class IntakeWorkflowService:
                                 reply_text=reply_text,
                             )
                     if reply_action == "send_reply" and reply_text:
-                        if self._uses_telegram_business_stale_guard(
+                        if self._uses_latest_inbound_stale_guard(
                             workflow=workflow,
                             event_type=event_type,
                             force=force,
@@ -3715,7 +3872,7 @@ class IntakeWorkflowService:
                         active_booking=active_booking,
                         recent_completed_booking=recent_completed_booking,
                         decision=decision,
-                        stale_guard=self._uses_telegram_business_stale_guard(
+                        stale_guard=self._uses_latest_inbound_stale_guard(
                             workflow=workflow,
                             event_type=event_type,
                             force=force,
@@ -3764,7 +3921,7 @@ class IntakeWorkflowService:
                         error=apply_error,
                     )
                     continue
-                if str(applied.get("status", "") or "").strip() == "stale_requeued":
+                if str(applied.get("status", "") or "").strip() in _STALE_TERMINAL_STATUSES:
                     result_items.append(applied)
                     continue
                 self._set_cursor(
@@ -3835,6 +3992,7 @@ class IntakeWorkflowService:
             conversation=conversation,
             recipient_id=str(conversation_summary.get("recipient_id", "") or "").strip() or None,
         )
+        unanswered_customer_messages = self._unanswered_customer_messages(recent_messages)
         workflow_context = {
             "workflow_id": workflow.get("workflow_id"),
             "name": workflow.get("name"),
@@ -3875,6 +4033,7 @@ class IntakeWorkflowService:
                 conversation={
                     "summary": conversation_summary,
                     "recent_messages": recent_messages,
+                    "unanswered_customer_messages": unanswered_customer_messages,
                 },
                 active_booking=active_booking,
                 recent_completed_booking=recent_completed_booking,
@@ -3961,6 +4120,7 @@ class IntakeWorkflowService:
                     conversation={
                         "summary": conversation_summary,
                         "recent_messages": recent_messages,
+                        "unanswered_customer_messages": unanswered_customer_messages,
                     },
                     active_booking=active_booking,
                     recent_completed_booking=recent_completed_booking,

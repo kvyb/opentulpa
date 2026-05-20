@@ -98,7 +98,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         required_fields: list[str],
         sink_type: str,
         sink_config: dict[str, Any],
-        schedule: str = "*/5 * * * *",
+        schedule: str = "*/2 * * * *",
         channel: str = "instagram_dm",
         provider: str = "composio",
         source_config: dict[str, Any] | None | str = None,
@@ -204,7 +204,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         safe_intent = str(intent_description or "").strip()
         safe_channel = str(channel or "").strip() or "instagram_dm"
         safe_provider = str(provider or "").strip() or "composio"
-        safe_schedule = "" if safe_channel == "telegram_business_dm" else (str(schedule or "").strip() or "*/5 * * * *")
+        safe_schedule = "" if safe_channel == "telegram_business_dm" else (str(schedule or "").strip() or "*/2 * * * *")
         safe_thread_id = _active_thread_id(runtime, thread_id)
         requested_reply_mode = str(reply_mode or "").strip().lower()
         safe_reply_mode = requested_reply_mode or _default_reply_mode_for_origin(
