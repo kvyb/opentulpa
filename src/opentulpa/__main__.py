@@ -404,6 +404,7 @@ def main() -> None:
             context_recent_tokens=settings.agent_context_recent_tokens,
             context_rollup_tokens=settings.agent_context_rollup_tokens,
             context_compaction_source_tokens=settings.agent_context_compaction_source_tokens,
+            context_compaction_model_name=settings.agent_context_compaction_model,
             proactive_heartbeat_default_hours=settings.proactive_heartbeat_default_hours,
             behavior_log_enabled=settings.agent_behavior_log_enabled,
             behavior_log_path=settings.agent_behavior_log_path,

@@ -52,6 +52,10 @@ class _StreamingRuntime:
         if kwargs.get("stream_incremental_deltas"):
             if kwargs.get("stream_status_events"):
                 yield AgentStreamEvent(
+                    event="status",
+                    payload={"status": "active", "message": "Compacting chat history..."},
+                )
+                yield AgentStreamEvent(
                     event="reasoning",
                     payload={"status": "active", "message": "Reasoning..."},
                 )
@@ -162,6 +166,9 @@ def test_web_chat_streams_owner_updates_files_and_final(monkeypatch: Any, tmp_pa
     assert "Checking context." in text
     assert "event: file" in text
     assert "/web/files/file_123/content" in text
+    assert {"status": "active", "message": "Compacting chat history..."} in _sse_payloads(
+        text, "status"
+    )
     assert "event: reasoning" in text
     assert "private reasoning" not in text
     assert _sse_payloads(text, "reasoning") == [{"status": "active", "message": "Reasoning..."}]

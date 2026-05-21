@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,7 @@ from opentulpa.agent.context_compaction import (
     _select_split_index,
     _trim_text_to_token_budget,
     maybe_compact_thread_context,
+    persist_rollup_memory,
 )
 from opentulpa.agent.lc_messages import HumanMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -34,6 +36,10 @@ def test_select_split_index_compacts_enough_without_dropping_all() -> None:
 
 def test_context_compaction_default_threshold_is_20000() -> None:
     assert Settings.model_fields["agent_context_token_limit"].default == 20000
+    assert (
+        Settings.model_fields["agent_context_compaction_model"].default
+        == "google/gemini-3-flash-preview"
+    )
 
 
 def test_runtime_context_token_limit_clamps_at_30000(tmp_path) -> None:
@@ -84,6 +90,8 @@ class _DummyRuntime:
         self._graph = _DummyGraph(messages)
         self._checkpointer = _DummyCheckpointer()
         self._model = _DummyModel()
+        self._context_compaction_model = self._model
+        self._context_compaction_model_name = "google/gemini-3-flash-preview"
         self.recursion_limit = 30
         self._context_token_limit = 40000
         self._context_short_term_high_tokens = 40000
@@ -92,12 +100,38 @@ class _DummyRuntime:
         self._context_rollup_tokens = 5000
         self._context_compaction_source_tokens = 12000
         self._rollups: dict[str, str] = {}
+        self.memory_add_calls: list[dict[str, Any]] = []
+        self.memory_persist_started = False
+        self.memory_persist_continue: asyncio.Event | None = None
 
     def _load_thread_rollup(self, thread_id: str) -> str | None:
         return self._rollups.get(thread_id)
 
     def _save_thread_rollup(self, thread_id: str, rollup: str) -> None:
         self._rollups[thread_id] = str(rollup or "").strip()
+
+    async def _request_with_backoff(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        timeout: float,
+        retries: int,
+    ) -> dict[str, Any]:
+        self.memory_persist_started = True
+        self.memory_add_calls.append(
+            {
+                "method": method,
+                "path": path,
+                "json_body": json_body,
+                "timeout": timeout,
+                "retries": retries,
+            }
+        )
+        if self.memory_persist_continue is not None:
+            await self.memory_persist_continue.wait()
+        return {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -128,6 +162,107 @@ async def test_maybe_compact_thread_context_enforces_recent_window_and_rollup_ca
     rollup = runtime._rollups.get("chat-test", "")
     assert rollup
     assert approx_tokens(rollup) <= 5000
+
+
+@pytest.mark.asyncio
+async def test_compaction_schedules_rollup_memory_persist_off_hot_path() -> None:
+    messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(70)]
+    runtime = _DummyRuntime(messages)
+    runtime.memory_persist_continue = asyncio.Event()
+
+    await maybe_compact_thread_context(
+        runtime,
+        thread_id="chat-background",
+        customer_id="telegram_1",
+    )
+
+    assert runtime._rollups.get("chat-background")
+    assert runtime._checkpointer.deleted is True
+    assert runtime._context_compaction_background_tasks
+
+    for _ in range(20):
+        if runtime.memory_persist_started:
+            break
+        await asyncio.sleep(0)
+    assert runtime.memory_persist_started is True
+    assert runtime.memory_add_calls
+    body = runtime.memory_add_calls[0]["json_body"]
+    assert "infer" not in body
+    assert body["metadata"] == {
+        "kind": "thread_context_rollup",
+        "thread_id": "chat-background",
+    }
+
+    runtime.memory_persist_continue.set()
+    await asyncio.gather(*runtime._context_compaction_background_tasks)
+    assert not runtime._context_compaction_background_tasks
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_drains_compaction_memory_tasks_before_teardown() -> None:
+    events: list[str] = []
+
+    class _Manager:
+        async def shutdown(self) -> None:
+            events.append("manager_shutdown")
+
+    async def _background_persist() -> None:
+        await asyncio.sleep(0)
+        events.append("persist_done")
+
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    task = asyncio.create_task(_background_persist())
+    runtime._context_compaction_background_tasks = {task}
+    runtime._browser_use_local_manager = _Manager()
+    runtime._langfuse_tracer = None
+    runtime._checkpointer_cm = None
+    runtime._checkpointer = object()
+    runtime._graph = object()
+    runtime._model_with_tools = object()
+    runtime._workflow_setup_model_with_tools = object()
+    runtime._wake_execution_model_with_tools = object()
+
+    await runtime.shutdown()
+
+    assert events == ["persist_done", "manager_shutdown"]
+    assert runtime._context_compaction_background_tasks == set()
+    assert runtime._browser_use_local_manager is None
+    assert runtime._checkpointer is None
+    assert runtime._graph is None
+
+
+@pytest.mark.asyncio
+async def test_persist_rollup_memory_leaves_mem0_inference_enabled() -> None:
+    runtime = _DummyRuntime([])
+
+    await persist_rollup_memory(
+        runtime,
+        customer_id="telegram_1",
+        thread_id="chat-direct",
+        rollup="durable summary",
+    )
+
+    assert runtime.memory_add_calls
+    assert runtime.memory_add_calls[0]["path"] == "/internal/memory/add"
+    assert "infer" not in runtime.memory_add_calls[0]["json_body"]
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_thread_context_uses_configured_compaction_model() -> None:
+    messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(70)]
+    runtime = _DummyRuntime(messages)
+    compaction_model = _DummyModel()
+    runtime._context_compaction_model = compaction_model
+    runtime._context_compaction_model_name = "google/gemini-3-flash-preview"
+
+    await maybe_compact_thread_context(
+        runtime,
+        thread_id="chat-compaction-model",
+        customer_id="telegram_1",
+    )
+
+    assert compaction_model.calls
+    assert not runtime._model.calls
 
 
 @pytest.mark.asyncio

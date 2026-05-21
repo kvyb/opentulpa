@@ -108,6 +108,10 @@ class Settings(BaseSettings):
         le=500000,
         description="Max oldest-token span folded into rollup in one compaction pass.",
     )
+    agent_context_compaction_model: str = Field(
+        default="google/gemini-3-flash-preview",
+        description="Model used to compact old thread history before normal chat turns.",
+    )
     link_alias_db_path: str = Field(
         default=".opentulpa/link_aliases.db",
         description="SQLite path for customer-scoped long-link alias registry.",

@@ -360,7 +360,7 @@ async def _stream_turn(
                     stream_status_events=True,
                 ):
                     if isinstance(chunk, AgentStreamEvent):
-                        if chunk.event in {"reasoning", "tool_call"}:
+                        if chunk.event in {"reasoning", "status", "tool_call"}:
                             if chunk.event == "tool_call":
                                 final_text = ""
                             await queue.put((chunk.event, chunk.payload))

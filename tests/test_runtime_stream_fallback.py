@@ -809,3 +809,57 @@ async def test_astream_text_emits_safe_reasoning_and_tool_status_events(tmp_path
     assert "private reasoning" not in json.dumps([event.payload for event in events])
     assert "second private" not in json.dumps([event.payload for event in events])
     assert chunks[-1] == "Done."
+
+
+@pytest.mark.asyncio
+async def test_astream_text_emits_compaction_status_before_compacting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._graph = _ReasoningThenToolThenAnswerGraph()
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.0)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime._behavior_log_enabled = True
+    runtime._behavior_log_path = tmp_path / "agent_behavior_compaction_status.jsonl"
+    runtime._behavior_log_lock = threading.Lock()
+    compact_calls: list[tuple[str, str]] = []
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _needs_compaction(_runtime: Any, *, thread_id: str) -> bool:
+        assert _runtime is runtime
+        assert thread_id == "chat-compaction-status"
+        return True
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        compact_calls.append((thread_id, customer_id))
+        return None
+
+    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
+        del customer_id, user_text
+        return {}
+
+    monkeypatch.setattr(runtime_module, "_thread_context_needs_compaction", _needs_compaction)
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+
+    chunks: list[str | AgentStreamEvent] = []
+    async for chunk in runtime.astream_text(
+        thread_id="chat-compaction-status",
+        customer_id="telegram_compaction_status",
+        text="search",
+        stream_status_events=True,
+    ):
+        chunks.append(chunk)
+
+    events = [chunk for chunk in chunks if isinstance(chunk, AgentStreamEvent)]
+    assert events[0] == AgentStreamEvent(
+        event="status",
+        payload={"status": "active", "message": "Compacting chat history..."},
+    )
+    assert compact_calls == [("chat-compaction-status", "telegram_compaction_status")]
