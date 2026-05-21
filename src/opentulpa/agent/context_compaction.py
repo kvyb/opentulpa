@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from contextlib import suppress
 from typing import Any
@@ -25,6 +27,8 @@ _SECRET_PATTERNS = (
     r"\bmlsn\.[A-Za-z0-9._-]+",
     r"\bGOCSPX-[A-Za-z0-9._-]+",
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
@@ -115,6 +119,39 @@ def _select_split_index(message_tokens: list[int], *, tokens_to_compact: int) ->
     return max(0, split_idx)
 
 
+async def thread_context_needs_compaction(runtime: Any, *, thread_id: str) -> bool:
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return False
+    graph = getattr(runtime, "_graph", None)
+    if graph is None:
+        return False
+    checkpointer = getattr(runtime, "_checkpointer", None)
+    if checkpointer is None or not hasattr(checkpointer, "adelete_thread"):
+        return False
+
+    config = {"configurable": {"thread_id": tid}, "recursion_limit": runtime.recursion_limit}
+    try:
+        snapshot = await graph.aget_state(config=config)
+        values = getattr(snapshot, "values", {}) or {}
+        state_messages = values.get("messages", [])
+        if not isinstance(state_messages, list) or not state_messages:
+            return False
+        message_texts = [_message_to_text(m) for m in state_messages]
+        message_tokens = [_approx_tokens(t) for t in message_texts]
+        total_tokens = sum(message_tokens)
+        short_term_high_budget = _short_term_high_token_budget(runtime)
+        if total_tokens < short_term_high_budget:
+            return False
+        overflow_tokens = total_tokens - _short_term_low_token_budget(runtime)
+        split_idx = _select_split_index(message_tokens, tokens_to_compact=overflow_tokens)
+        if split_idx <= 0:
+            return False
+        return bool("\n\n".join(message_texts[:split_idx]).strip())
+    except Exception:
+        return False
+
+
 def split_text_chunks(text: str, *, approx_tokens_per_chunk: int = 25000) -> list[str]:
     raw = str(text or "").strip()
     if not raw:
@@ -178,16 +215,18 @@ async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: s
             ),
         ]
         ainvoke_model = getattr(runtime, "ainvoke_model", None)
+        model = getattr(runtime, "_context_compaction_model", runtime._model)
         if callable(ainvoke_model):
             response = await ainvoke_model(
-                runtime._model,
+                model,
                 messages,
                 call_context={
                     "call_site": "context_compaction",
+                    "model_name": getattr(runtime, "_context_compaction_model_name", ""),
                 },
             )
         else:
-            response = await runtime._model.ainvoke(messages)
+            response = await model.ainvoke(messages)
         running = _sanitize_rollup_text(_content_to_text(getattr(response, "content", "")).strip() or running)
         running = _trim_text_to_token_budget(running, rollup_budget)
     return _trim_text_to_token_budget(_sanitize_rollup_text(running), rollup_budget)
@@ -226,6 +265,38 @@ async def persist_rollup_memory(
             timeout=10.0,
             retries=1,
         )
+
+
+def schedule_rollup_memory_persist(
+    runtime: Any,
+    *,
+    customer_id: str,
+    thread_id: str,
+    rollup: str,
+) -> None:
+    cid = str(customer_id or "").strip()
+    tid = str(thread_id or "").strip()
+    if not cid or not tid or not str(rollup or "").strip():
+        return
+
+    async def _persist() -> None:
+        try:
+            await persist_rollup_memory(
+                runtime,
+                customer_id=cid,
+                thread_id=tid,
+                rollup=rollup,
+            )
+        except Exception:
+            logger.exception("Failed to persist compacted thread rollup memory.")
+
+    task = asyncio.create_task(_persist())
+    background_tasks = getattr(runtime, "_context_compaction_background_tasks", None)
+    if not isinstance(background_tasks, set):
+        background_tasks = set()
+        runtime._context_compaction_background_tasks = background_tasks
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 
 async def maybe_compact_thread_context(
@@ -281,7 +352,7 @@ async def maybe_compact_thread_context(
                 return
 
             runtime._save_thread_rollup(tid, updated_rollup)
-            await persist_rollup_memory(
+            schedule_rollup_memory_persist(
                 runtime,
                 customer_id=customer_id,
                 thread_id=tid,

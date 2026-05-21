@@ -50,6 +50,9 @@ from opentulpa.agent.context_compaction import (
 from opentulpa.agent.context_compaction import (
     split_text_chunks as _split_text_chunks,
 )
+from opentulpa.agent.context_compaction import (
+    thread_context_needs_compaction as _thread_context_needs_compaction,
+)
 from opentulpa.agent.context_engineer import ContextEngineer
 from opentulpa.agent.context_engineer import (
     trim_text_to_token_budget as _trim_text_to_token_budget,
@@ -528,6 +531,7 @@ STREAM_EMPTY_REPLY_FALLBACK = (
     "Please retry, and I will continue from the latest state."
 )
 STREAM_PRECOMMIT_SECONDS = 0.75
+CONTEXT_COMPACTION_BACKGROUND_DRAIN_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -1260,6 +1264,7 @@ class OpenTulpaLangGraphRuntime:
         context_rollup_tokens: int = 2200,
         context_recent_tokens: int = 3500,
         context_compaction_source_tokens: int = 12000,
+        context_compaction_model_name: str | None = "google/gemini-3-flash-preview",
         input_debounce_seconds: float = 0.65,
         proactive_heartbeat_default_hours: int = 3,
         behavior_log_enabled: bool = True,
@@ -1309,6 +1314,11 @@ class OpenTulpaLangGraphRuntime:
         self._workflow_setup_input_classifier_model_name = _normalize_model_name(
             workflow_setup_classifier_model
         )
+        self._context_compaction_model_name = (
+            _normalize_model_name(str(context_compaction_model_name).strip())
+            if str(context_compaction_model_name or "").strip()
+            else self.model_name
+        )
         self.checkpoint_db_path = checkpoint_db_path
         self.recursion_limit = recursion_limit
         self._context_events = context_events
@@ -1347,6 +1357,7 @@ class OpenTulpaLangGraphRuntime:
         self._llm_call_trace_limit = _LLM_CALL_TRACE_LIMIT
         self._thread_checkpoint_locks: dict[str, asyncio.Lock] = {}
         self._thread_checkpoint_locks_guard = asyncio.Lock()
+        self._context_compaction_background_tasks: set[asyncio.Task[Any]] = set()
         if self._behavior_log_enabled:
             self._behavior_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._browser_use_headless = bool(browser_use_headless)
@@ -1497,6 +1508,32 @@ class OpenTulpaLangGraphRuntime:
                     self.model_name,
                 )
                 self._workflow_setup_input_classifier_model = self._model
+        if self._context_compaction_model_name == self.model_name:
+            self._context_compaction_model = self._model
+        elif self._context_compaction_model_name == self._wake_classifier_model_name:
+            self._context_compaction_model = self._wake_classifier_model
+        elif self._context_compaction_model_name == self._wake_execution_model_name:
+            self._context_compaction_model = self._wake_execution_model
+        elif self._context_compaction_model_name == self._telegram_media_model_name:
+            self._context_compaction_model = self._telegram_media_model
+        elif self._context_compaction_model_name == self._workflow_setup_input_classifier_model_name:
+            self._context_compaction_model = self._workflow_setup_input_classifier_model
+        else:
+            try:
+                self._context_compaction_model = _init_runtime_chat_model(
+                    self._context_compaction_model_name,
+                    base_kwargs=model_init_kwargs,
+                    openrouter_base_url=self.openrouter_base_url,
+                    reasoning_effort=self._reasoning_effort,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize context compaction model '%s'; "
+                    "falling back to main model '%s'.",
+                    self._context_compaction_model_name,
+                    self.model_name,
+                )
+                self._context_compaction_model = self._model
 
         self._checkpointer_cm: Any | None = None
         self._checkpointer: Any | None = None
@@ -2986,7 +3023,34 @@ class OpenTulpaLangGraphRuntime:
             if preflight_error:
                 logger.warning("browser_use local preflight warning: %s", preflight_error)
 
+    async def _drain_context_compaction_background_tasks(self) -> None:
+        task_set = getattr(self, "_context_compaction_background_tasks", None)
+        if not isinstance(task_set, set):
+            return
+        pending = {task for task in task_set if not task.done()}
+        task_set.intersection_update(pending)
+        if not pending:
+            task_set.clear()
+            return
+        done, still_pending = await asyncio.wait(
+            pending,
+            timeout=CONTEXT_COMPACTION_BACKGROUND_DRAIN_SECONDS,
+        )
+        for task in done:
+            with suppress(BaseException):
+                task.result()
+        task_set.difference_update(done)
+        if still_pending:
+            logger.warning(
+                "context_compaction background persistence drain timed out pending_tasks=%s",
+                len(still_pending),
+            )
+            for task in still_pending:
+                task.cancel()
+            task_set.difference_update(still_pending)
+
     async def shutdown(self) -> None:
+        await self._drain_context_compaction_background_tasks()
         manager = self._browser_use_local_manager
         if manager is not None:
             with suppress(Exception):
@@ -3569,6 +3633,25 @@ class OpenTulpaLangGraphRuntime:
                     thread_id=thread_id,
                     customer_id=customer_id,
                     waited_ms=checkpoint_waited_ms,
+                )
+            if stream_status_events and await _thread_context_needs_compaction(
+                self,
+                thread_id=thread_id,
+            ):
+                self.log_behavior_event(
+                    event="turn_context_compaction_status_emitted",
+                    trace_id=turn_trace_id,
+                    mode="astream",
+                    thread_id=thread_id,
+                    customer_id=customer_id,
+                    turn_mode=normalized_turn_mode,
+                )
+                yield AgentStreamEvent(
+                    event="status",
+                    payload={
+                        "status": "active",
+                        "message": "Compacting chat history...",
+                    },
                 )
             await self._maybe_compact_thread_context(
                 thread_id=thread_id,
