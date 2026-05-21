@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 from collections.abc import Callable
 from typing import Any
 
@@ -22,13 +21,7 @@ def register_intake_workflow_routes(
 ) -> None:
     """Register internal intake workflow endpoints."""
 
-    def _authorized_web_request(request: Request) -> bool:
-        expected = str(web_token or "").strip()
-        if not expected:
-            return False
-        header = str(request.headers.get("authorization", "") or "").strip()
-        scheme, _, token = header.partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(token.strip(), expected)
+    _ = web_token
 
     @app.post("/internal/intake/workflows/upsert")
     async def internal_intake_workflows_upsert(request: Request) -> Any:
@@ -113,99 +106,6 @@ def register_intake_workflow_routes(
         )
         status_code = 200 if bool(result.get("ok", False)) else 400
         return JSONResponse(status_code=status_code, content=result)
-
-    @app.post("/internal/intake/drafts/list")
-    async def internal_intake_drafts_list(request: Request) -> Any:
-        service = get_intake_workflows()
-        body = await request.json()
-        drafts = service.list_drafts(
-            customer_id=resolve_body_customer_id(body, resolve_customer_id),
-            workflow_id=str(body.get("workflow_id", "")).strip() or None,
-            status=str(body.get("status", "pending")).strip().lower(),
-            limit=int(body.get("limit", 50) or 50),
-        )
-        return {"ok": True, "drafts": drafts}
-
-    @app.post("/internal/intake/drafts/get")
-    async def internal_intake_drafts_get(request: Request) -> Any:
-        service = get_intake_workflows()
-        body = await request.json()
-        draft = service.get_draft(
-            customer_id=resolve_body_customer_id(body, resolve_customer_id),
-            draft_id=str(body.get("draft_id", "")).strip(),
-        )
-        if draft is None:
-            return JSONResponse(status_code=404, content={"detail": "draft not found"})
-        return {"ok": True, "draft": draft}
-
-    @app.post("/internal/intake/drafts/edit")
-    async def internal_intake_drafts_edit(request: Request) -> Any:
-        service = get_intake_workflows()
-        body = await request.json()
-        try:
-            draft = service.edit_draft(
-                customer_id=resolve_body_customer_id(body, resolve_customer_id),
-                draft_id=str(body.get("draft_id", "")).strip(),
-                reply_text=str(body.get("reply_text", "") or ""),
-            )
-        except Exception as exc:
-            return JSONResponse(status_code=400, content={"detail": str(exc)})
-        if draft is None:
-            return JSONResponse(status_code=404, content={"detail": "draft not found"})
-        return {"ok": True, "draft": draft}
-
-    @app.post("/internal/intake/drafts/discard")
-    async def internal_intake_drafts_discard(request: Request) -> Any:
-        service = get_intake_workflows()
-        body = await request.json()
-        try:
-            draft = service.discard_draft(
-                customer_id=resolve_body_customer_id(body, resolve_customer_id),
-                draft_id=str(body.get("draft_id", "")).strip(),
-            )
-        except Exception as exc:
-            return JSONResponse(status_code=400, content={"detail": str(exc)})
-        if draft is None:
-            return JSONResponse(status_code=404, content={"detail": "draft not found"})
-        return {"ok": True, "draft": draft}
-
-    @app.post("/internal/intake/drafts/approve")
-    async def internal_intake_drafts_approve(request: Request) -> Any:
-        service = get_intake_workflows()
-        body = await request.json()
-        draft, error = await service.approve_draft(
-            customer_id=resolve_body_customer_id(body, resolve_customer_id),
-            draft_id=str(body.get("draft_id", "")).strip(),
-        )
-        if draft is None:
-            return JSONResponse(status_code=404, content={"detail": "draft not found"})
-        if error is not None:
-            return JSONResponse(status_code=400, content={"detail": error, "draft": draft})
-        return {"ok": True, "draft": draft}
-
-    @app.post("/web/intake/drafts/list")
-    async def web_intake_drafts_list(request: Request) -> Any:
-        if not _authorized_web_request(request):
-            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        return await internal_intake_drafts_list(request)
-
-    @app.post("/web/intake/drafts/edit")
-    async def web_intake_drafts_edit(request: Request) -> Any:
-        if not _authorized_web_request(request):
-            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        return await internal_intake_drafts_edit(request)
-
-    @app.post("/web/intake/drafts/discard")
-    async def web_intake_drafts_discard(request: Request) -> Any:
-        if not _authorized_web_request(request):
-            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        return await internal_intake_drafts_discard(request)
-
-    @app.post("/web/intake/drafts/approve")
-    async def web_intake_drafts_approve(request: Request) -> Any:
-        if not _authorized_web_request(request):
-            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-        return await internal_intake_drafts_approve(request)
 
     @app.post("/internal/intake/setup/begin")
     async def internal_intake_setup_begin(request: Request) -> Any:

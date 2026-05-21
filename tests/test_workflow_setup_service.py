@@ -141,7 +141,7 @@ def test_workflow_setup_begin_create_persists_session(tmp_path: Path) -> None:
     assert session["scratchpad"]["knowledge_source_file_ids"] == []
 
 
-def test_workflow_setup_begin_web_create_defaults_to_draft_reply_mode(tmp_path: Path) -> None:
+def test_workflow_setup_begin_web_create_defaults_to_auto_reply_mode(tmp_path: Path) -> None:
     setup, _, _ = _mk_setup_service(tmp_path)
 
     session = setup.begin_session(
@@ -151,10 +151,10 @@ def test_workflow_setup_begin_web_create_defaults_to_draft_reply_mode(tmp_path: 
     )
 
     assert session["draft_upsert"]["channel"] == "instagram_dm"
-    assert session["draft_upsert"]["reply_mode"] == "draft"
+    assert session["draft_upsert"]["reply_mode"] == "auto"
 
 
-def test_workflow_setup_web_update_forces_instagram_reply_mode_to_draft(
+def test_workflow_setup_web_update_keeps_explicit_instagram_reply_mode(
     tmp_path: Path,
 ) -> None:
     setup, _, _ = _mk_setup_service(tmp_path)
@@ -170,7 +170,7 @@ def test_workflow_setup_web_update_forces_instagram_reply_mode_to_draft(
         draft_patch={"channel": "instagram_dm", "reply_mode": "auto"},
     )
 
-    assert session["draft_upsert"]["reply_mode"] == "draft"
+    assert session["draft_upsert"]["reply_mode"] == "auto"
 
 
 def test_workflow_setup_begin_edit_loads_existing_workflow(tmp_path: Path) -> None:
@@ -287,7 +287,7 @@ def test_workflow_setup_finalize_confirmation_applies_final_patch_and_commits(
     assert workflows[0]["assistant_instructions"].endswith("use '-' after one hour.")
 
 
-def test_workflow_setup_web_finalize_forces_instagram_reply_mode_to_draft(
+def test_workflow_setup_web_finalize_keeps_explicit_instagram_reply_mode(
     tmp_path: Path,
 ) -> None:
     setup, intake_service, _ = _mk_setup_service(tmp_path)
@@ -315,7 +315,7 @@ def test_workflow_setup_web_finalize_forces_instagram_reply_mode_to_draft(
     assert session["status"] == "completed"
     workflows = intake_service.list_workflows(customer_id="usr_default", include_disabled=True)
     assert len(workflows) == 1
-    assert workflows[0]["reply_mode"] == "draft"
+    assert workflows[0]["reply_mode"] == "auto"
 
 
 def test_workflow_setup_commit_edit_recreates_telegram_workflow(tmp_path: Path) -> None:
