@@ -61,7 +61,7 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_intake_workflow_upsert_defaults_web_origin_to_draft() -> None:
+async def test_intake_workflow_upsert_defaults_web_origin_to_auto() -> None:
     runtime = DummyRuntime(
         [Response(200, {"workflow": {"workflow_id": "iwf_web"}})],
         thread_id="dashboard-owner-dep_123",
@@ -79,7 +79,7 @@ async def test_intake_workflow_upsert_defaults_web_origin_to_draft() -> None:
     )
 
     assert result["workflow_id"] == "iwf_web"
-    assert runtime.calls[0][2]["json_body"]["reply_mode"] == "draft"
+    assert runtime.calls[0][2]["json_body"]["reply_mode"] == "auto"
 
 
 @pytest.mark.asyncio

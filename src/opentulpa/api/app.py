@@ -575,7 +575,6 @@ def create_app(
             and not path.startswith("/webhook/")
             and path != "/web/events"
             and not path.startswith("/web/chat/")
-            and not path.startswith("/web/intake/drafts/")
             and not path.startswith("/web/files/")
             and not path.startswith("/web/local-files/")
             and path not in public_health_paths

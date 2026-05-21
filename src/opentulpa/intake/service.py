@@ -20,13 +20,11 @@ from opentulpa.intake.workflow_skill import build_intake_workflow_skill, workflo
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.persistence.sqlite import connect_sqlite
 from opentulpa.scheduler.models import Routine
-from opentulpa.web.events import append_web_event
 
 _ALLOWED_CHANNELS = {"instagram_dm", "telegram_business_dm"}
 _ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
 _ALLOWED_SINK_TYPES = {"google_sheets_composio", "local_csv", "generic_composio_write"}
-_ALLOWED_REPLY_MODES = {"auto", "draft"}
-_DRAFT_SENDABLE_STATUSES = {"pending", "edited"}
+_ALLOWED_REPLY_MODES = {"auto"}
 _DEFAULT_SCHEDULE = "*/2 * * * *"
 _DEFAULT_EDIT_WINDOW = timedelta(hours=2)
 _MAX_LATEST_INBOUND_AGE = timedelta(minutes=1)
@@ -648,26 +646,6 @@ class IntakeWorkflowService:
         latest_time = _parse_datetime(latest_summary.get("latest_inbound_message_created_time"))
         return bool(decided_time and latest_time and latest_time > decided_time)
 
-    @classmethod
-    def _draft_stale_error(
-        cls,
-        *,
-        draft_summary: dict[str, Any],
-        latest_summary: dict[str, Any],
-    ) -> str | None:
-        if not cls._latest_inbound_changed(
-            decided_summary=draft_summary,
-            latest_summary=latest_summary,
-        ):
-            return None
-        latest_id = str(latest_summary.get("latest_inbound_message_id", "") or "").strip()
-        if latest_id:
-            return (
-                "draft is stale because a newer inbound message arrived "
-                f"before approval: {latest_id}"
-            )
-        return "draft is stale because a newer inbound message arrived before approval"
-
     def _recover_interrupted_pending_runs(self) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -1217,22 +1195,6 @@ class IntakeWorkflowService:
                 CREATE INDEX IF NOT EXISTS idx_intake_pending_runs_due
                     ON intake_pending_runs(status, due_at);
 
-                CREATE TABLE IF NOT EXISTS intake_drafts (
-                    draft_id TEXT PRIMARY KEY,
-                    customer_id TEXT NOT NULL,
-                    workflow_id TEXT NOT NULL,
-                    conversation_id TEXT NOT NULL,
-                    recipient_id TEXT NOT NULL,
-                    platform TEXT NOT NULL,
-                    reply_text TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    sent_at TEXT,
-                    metadata_json TEXT NOT NULL DEFAULT '{}'
-                );
-                CREATE INDEX IF NOT EXISTS idx_intake_drafts_scope
-                    ON intake_drafts(customer_id, workflow_id, status, updated_at DESC);
                 """
             )
             self._ensure_cursor_columns(conn)
@@ -1331,7 +1293,7 @@ class IntakeWorkflowService:
         safe_assistant_instructions = str(assistant_instructions or "").strip()
         safe_business_facts = _normalize_business_facts(business_facts)
         safe_knowledge_file_ids = _unique_string_list(knowledge_file_ids)
-        safe_reply_mode = str(reply_mode or "auto").strip().lower() or "auto"
+        safe_reply_mode = "auto"
         if not safe_customer:
             raise ValueError("customer_id is required")
         if not safe_name:
@@ -1340,8 +1302,6 @@ class IntakeWorkflowService:
             raise ValueError("channel must be instagram_dm|telegram_business_dm")
         if safe_provider not in _ALLOWED_PROVIDERS:
             raise ValueError("provider must be composio|telegram_bot_api")
-        if safe_reply_mode not in _ALLOWED_REPLY_MODES:
-            raise ValueError("reply_mode must be auto|draft")
         if safe_channel == "instagram_dm" and safe_provider != "composio":
             raise ValueError("instagram_dm workflows require provider=composio")
         if safe_channel == "telegram_business_dm" and safe_provider != "telegram_bot_api":
@@ -1613,7 +1573,7 @@ class IntakeWorkflowService:
             "notify_user": bool(row["notify_user"]),
             "enabled": bool(row["enabled"]),
             "routine_id": str(row["routine_id"]),
-            "reply_mode": str(row["reply_mode"] or "auto"),
+            "reply_mode": "auto",
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
@@ -1636,111 +1596,6 @@ class IntakeWorkflowService:
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
         }
-
-    def _hydrate_draft_row(self, row: sqlite3.Row) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        with suppress(json.JSONDecodeError):
-            loaded = json.loads(str(row["metadata_json"] or "{}"))
-            if isinstance(loaded, dict):
-                metadata = loaded
-        return {
-            "draft_id": str(row["draft_id"]),
-            "customer_id": str(row["customer_id"]),
-            "workflow_id": str(row["workflow_id"]),
-            "conversation_id": str(row["conversation_id"]),
-            "recipient_id": str(row["recipient_id"]),
-            "platform": str(row["platform"]),
-            "reply_text": str(row["reply_text"]),
-            "status": str(row["status"]),
-            "created_at": str(row["created_at"] or ""),
-            "updated_at": str(row["updated_at"] or ""),
-            "sent_at": str(row["sent_at"] or ""),
-            "metadata": metadata,
-        }
-
-    def _draft_metadata(
-        self,
-        *,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        conversation: dict[str, Any] | None = None,
-        decision: dict[str, Any] | None = None,
-        active_booking: dict[str, Any] | None = None,
-        recent_completed_booking: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        summary = self._enrich_conversation_summary(
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-        )
-        return {
-            "workflow": {
-                "workflow_id": str(workflow.get("workflow_id", "") or ""),
-                "customer_id": str(workflow.get("customer_id", "") or ""),
-                "channel": str(workflow.get("channel", "") or ""),
-                "provider": str(workflow.get("provider", "") or ""),
-                "source_config": _safe_dict(workflow.get("source_config")),
-            },
-            "workflow_name": str(workflow.get("name", "") or ""),
-            "workflow_id": str(workflow.get("workflow_id", "") or ""),
-            "conversation_id": str(summary.get("conversation_id", "") or ""),
-            "recipient_id": str(summary.get("recipient_id", "") or ""),
-            "platform": self._source_platform(workflow),
-            "reply_mode": "draft",
-            "latest_inbound_message_id": str(
-                summary.get("latest_inbound_message_id", "") or ""
-            ).strip(),
-            "latest_inbound_text": str(
-                summary.get("latest_inbound_message_text_preview", "") or ""
-            ).strip(),
-            "latest_inbound_sender_username": str(
-                summary.get("latest_inbound_sender_username", "") or ""
-            ).strip(),
-            "conversation_summary": summary,
-            "conversation": _safe_dict(conversation),
-            "decision": _safe_dict(decision),
-            "active_booking": _safe_dict(active_booking),
-            "recent_completed_booking": _safe_dict(recent_completed_booking),
-        }
-
-    def _append_draft_web_event(self, draft: dict[str, Any]) -> None:
-        metadata = {
-            **_safe_dict(draft.get("metadata")),
-            "draft_id": str(draft.get("draft_id", "") or ""),
-            "workflow_id": str(draft.get("workflow_id", "") or ""),
-            "conversation_id": str(draft.get("conversation_id", "") or ""),
-            "recipient_id": str(draft.get("recipient_id", "") or ""),
-            "platform": str(draft.get("platform", "") or ""),
-            "status": str(draft.get("status", "") or ""),
-            "reply_mode": "draft",
-        }
-        append_web_event(
-            customer_id=str(draft.get("customer_id", "") or ""),
-            thread_id=f"intake_{draft.get('workflow_id', '')}_{draft.get('conversation_id', '')}",
-            source=str(draft.get("platform", "") or "intake"),
-            kind="draft_reply",
-            text=str(draft.get("reply_text", "") or ""),
-            metadata_json=_json_dumps(metadata),
-        )
-
-    def _append_sent_web_event(self, draft: dict[str, Any]) -> None:
-        metadata = {
-            **_safe_dict(draft.get("metadata")),
-            "draft_id": str(draft.get("draft_id", "") or ""),
-            "workflow_id": str(draft.get("workflow_id", "") or ""),
-            "conversation_id": str(draft.get("conversation_id", "") or ""),
-            "recipient_id": str(draft.get("recipient_id", "") or ""),
-            "platform": str(draft.get("platform", "") or ""),
-            "status": "sent",
-            "reply_mode": "draft",
-        }
-        append_web_event(
-            customer_id=str(draft.get("customer_id", "") or ""),
-            thread_id=f"intake_{draft.get('workflow_id', '')}_{draft.get('conversation_id', '')}",
-            source=str(draft.get("platform", "") or "intake"),
-            kind="assistant_message",
-            text=str(draft.get("reply_text", "") or ""),
-            metadata_json=_json_dumps(metadata),
-        )
 
     @staticmethod
     def _workflow_to_upsert_draft(workflow: dict[str, Any]) -> dict[str, Any]:
@@ -1768,7 +1623,7 @@ class IntakeWorkflowService:
             "schedule": str(workflow.get("schedule", _DEFAULT_SCHEDULE) or _DEFAULT_SCHEDULE),
             "notify_user": bool(workflow.get("notify_user", True)),
             "enabled": bool(workflow.get("enabled", True)),
-            "reply_mode": str(workflow.get("reply_mode", "auto") or "auto"),
+            "reply_mode": "auto",
         }
 
     def preflight_workflow_payload(
@@ -2225,7 +2080,6 @@ class IntakeWorkflowService:
                 "DELETE FROM intake_pending_runs WHERE workflow_id = ?",
                 (workflow["workflow_id"],),
             )
-            conn.execute("DELETE FROM intake_drafts WHERE workflow_id = ?", (workflow["workflow_id"],))
             conn.commit()
         if self._scheduler is not None:
             with suppress(Exception):
@@ -3010,370 +2864,18 @@ class IntakeWorkflowService:
             )
         return f"unsupported reply source {channel}/{provider}"
 
-    async def _send_or_request_approval(
+    async def _send_intake_reply(
         self,
         *,
         workflow: dict[str, Any],
         conversation_summary: dict[str, Any],
         reply_text: str,
-        conversation: dict[str, Any] | None = None,
-        decision: dict[str, Any] | None = None,
-        active_booking: dict[str, Any] | None = None,
-        recent_completed_booking: dict[str, Any] | None = None,
-        approved_draft_id: str = "",
-    ) -> tuple[str | None, dict[str, Any] | None]:
-        if self._reply_requires_approval(workflow) and not approved_draft_id:
-            try:
-                draft = self.create_draft_reply(
-                    workflow=workflow,
-                    conversation_summary=conversation_summary,
-                    reply_text=reply_text,
-                    conversation=conversation,
-                    decision=decision,
-                    active_booking=active_booking,
-                    recent_completed_booking=recent_completed_booking,
-                )
-            except ValueError as exc:
-                return str(exc), None
-            self._emit_observability(
-                event="intake.reply.approval_pending",
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                draft_id=str(draft.get("draft_id", "") or ""),
-            )
-            return None, draft
+    ) -> str | None:
         return await self._send_source_reply(
             workflow=workflow,
             conversation_summary=conversation_summary,
             reply_text=reply_text,
-        ), None
-
-    @staticmethod
-    def _reply_requires_approval(workflow: dict[str, Any]) -> bool:
-        channel = str(workflow.get("channel", "") or "").strip().lower()
-        if channel == "telegram_business_dm":
-            return False
-        return str(workflow.get("reply_mode", "auto") or "auto").strip().lower() == "draft"
-
-    def create_draft_reply(
-        self,
-        *,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        reply_text: str,
-        conversation: dict[str, Any] | None = None,
-        decision: dict[str, Any] | None = None,
-        active_booking: dict[str, Any] | None = None,
-        recent_completed_booking: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        safe_reply = str(reply_text or "").strip()
-        conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip()
-        recipient_id = str(conversation_summary.get("recipient_id", "") or "").strip()
-        if not safe_reply:
-            raise ValueError("draft reply requires non-empty reply_text")
-        if not conversation_id or not recipient_id:
-            raise ValueError("draft reply requires conversation_id and recipient_id")
-        now = _utc_now_iso()
-        draft = {
-            "draft_id": new_short_id("dft"),
-            "customer_id": str(workflow["customer_id"]),
-            "workflow_id": str(workflow["workflow_id"]),
-            "conversation_id": conversation_id,
-            "recipient_id": recipient_id,
-            "platform": self._source_platform(workflow),
-            "reply_text": safe_reply,
-            "status": "pending",
-            "created_at": now,
-            "updated_at": now,
-            "sent_at": "",
-            "metadata": self._draft_metadata(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                conversation=conversation,
-                decision=decision,
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-            ),
-        }
-        with self._conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO intake_drafts (
-                    draft_id, customer_id, workflow_id, conversation_id, recipient_id, platform,
-                    reply_text, status, created_at, updated_at, sent_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    draft["draft_id"],
-                    draft["customer_id"],
-                    draft["workflow_id"],
-                    draft["conversation_id"],
-                    draft["recipient_id"],
-                    draft["platform"],
-                    draft["reply_text"],
-                    draft["status"],
-                    draft["created_at"],
-                    draft["updated_at"],
-                    draft["sent_at"],
-                    _json_dumps(draft["metadata"]),
-                ),
-            )
-            conn.commit()
-        self._append_draft_web_event(draft)
-        return draft
-
-    def list_drafts(
-        self,
-        *,
-        customer_id: str,
-        workflow_id: str | None = None,
-        status: str = "pending",
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        safe_customer = str(customer_id or "").strip()
-        if not safe_customer:
-            return []
-        safe_limit = max(1, min(int(limit), 200))
-        query = "SELECT * FROM intake_drafts WHERE customer_id = ?"
-        params: list[Any] = [safe_customer]
-        if workflow_id:
-            query += " AND workflow_id = ?"
-            params.append(str(workflow_id).strip())
-        if status:
-            query += " AND status = ?"
-            params.append(str(status).strip().lower())
-        query += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(safe_limit)
-        with self._conn() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [self._hydrate_draft_row(row) for row in rows]
-
-    def get_draft(self, *, customer_id: str, draft_id: str) -> dict[str, Any] | None:
-        safe_customer = str(customer_id or "").strip()
-        safe_draft = str(draft_id or "").strip()
-        if not safe_customer or not safe_draft:
-            return None
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM intake_drafts WHERE customer_id = ? AND draft_id = ?",
-                (safe_customer, safe_draft),
-            ).fetchone()
-        return self._hydrate_draft_row(row) if row is not None else None
-
-    def edit_draft(self, *, customer_id: str, draft_id: str, reply_text: str) -> dict[str, Any] | None:
-        draft = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-        if draft is None:
-            return None
-        safe_reply = str(reply_text or "").strip()
-        if not safe_reply:
-            raise ValueError("reply_text is required")
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            changed = conn.execute(
-                """
-                UPDATE intake_drafts
-                SET reply_text = ?, status = 'edited', updated_at = ?
-                WHERE customer_id = ? AND draft_id = ? AND status IN ('pending', 'edited')
-                """,
-                (safe_reply, now, customer_id, draft_id),
-            ).rowcount
-            conn.commit()
-        updated = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-        if updated is None:
-            raise RuntimeError("draft disappeared after edit")
-        if changed != 1:
-            raise ValueError("only pending drafts can be edited")
-        return updated
-
-    def discard_draft(self, *, customer_id: str, draft_id: str) -> dict[str, Any] | None:
-        draft = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-        if draft is None:
-            return None
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            changed = conn.execute(
-                """
-                UPDATE intake_drafts
-                SET status = 'discarded', updated_at = ?
-                WHERE customer_id = ? AND draft_id = ? AND status IN ('pending', 'edited')
-                """,
-                (now, customer_id, draft_id),
-            ).rowcount
-            conn.commit()
-        updated = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-        if updated is None:
-            raise RuntimeError("draft disappeared after discard")
-        if changed != 1:
-            raise ValueError("only pending drafts can be discarded")
-        return updated
-
-    async def approve_draft(self, *, customer_id: str, draft_id: str) -> tuple[dict[str, Any] | None, str | None]:
-        draft = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-        if draft is None:
-            return None, None
-        original_status = str(draft.get("status", "") or "")
-        if original_status not in _DRAFT_SENDABLE_STATUSES:
-            return draft, "only pending drafts can be approved"
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            claimed = conn.execute(
-                """
-                UPDATE intake_drafts
-                SET status = 'approved', updated_at = ?
-                WHERE customer_id = ? AND draft_id = ? AND status IN ('pending', 'edited')
-                """,
-                (now, customer_id, draft_id),
-            ).rowcount
-            conn.commit()
-        if claimed != 1:
-            current = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-            return current or draft, "draft is already being processed"
-        error: str | None = None
-        sent_reply_text = str(draft.get("reply_text", "") or "")
-        workflow = self.get_workflow(
-            customer_id=customer_id,
-            workflow_id=str(draft.get("workflow_id", "") or ""),
         )
-        metadata = _safe_dict(draft.get("metadata"))
-        workflow_snapshot = _safe_dict(metadata.get("workflow"))
-        if workflow_snapshot:
-            workflow = {**(workflow or {}), **workflow_snapshot}
-        if workflow is None:
-            error = "draft workflow was not found"
-        else:
-            error, sent_reply_text = await self._resume_approved_draft_send(
-                draft=draft,
-                workflow=workflow,
-                metadata=metadata,
-            )
-        if error is not None:
-            with self._conn() as conn:
-                conn.execute(
-                    """
-                    UPDATE intake_drafts
-                    SET status = ?, updated_at = ?
-                    WHERE customer_id = ? AND draft_id = ? AND status = 'approved'
-                    """,
-                    (original_status, _utc_now_iso(), customer_id, draft_id),
-                )
-                conn.commit()
-            return draft, error
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            conn.execute(
-                """
-                UPDATE intake_drafts
-                SET reply_text = ?, status = 'sent', updated_at = ?, sent_at = ?
-                WHERE customer_id = ? AND draft_id = ?
-                """,
-                (sent_reply_text, now, now, customer_id, draft_id),
-            )
-            conn.commit()
-        sent = self.get_draft(customer_id=customer_id, draft_id=draft_id)
-        if sent is None:
-            raise RuntimeError("draft disappeared after approval")
-        self._append_sent_web_event(sent)
-        return sent, None
-
-    async def _resume_approved_draft_send(
-        self,
-        *,
-        draft: dict[str, Any],
-        workflow: dict[str, Any],
-        metadata: dict[str, Any],
-    ) -> tuple[str | None, str]:
-        draft_id = str(draft.get("draft_id", "") or "").strip()
-        reply_text = str(draft.get("reply_text", "") or "").strip()
-        conversation_id = str(draft.get("conversation_id", "") or "").strip()
-        conversation_summary = {
-            **_safe_dict(metadata.get("conversation_summary")),
-            "conversation_id": conversation_id,
-            "recipient_id": str(draft.get("recipient_id", "") or ""),
-        }
-        loaded_summary, loaded_conversation, load_error = self._load_source_conversation(
-            workflow=workflow,
-            conversation_id=conversation_id,
-        )
-        if load_error is not None:
-            return load_error, reply_text
-        stale_error = self._draft_stale_error(
-            draft_summary=conversation_summary,
-            latest_summary=loaded_summary,
-        )
-        if stale_error is not None:
-            return stale_error, reply_text
-        conversation_summary = {**loaded_summary, **conversation_summary}
-        conversation = loaded_conversation or _safe_dict(metadata.get("conversation"))
-        decision = {
-            **_safe_dict(metadata.get("decision")),
-            "reply_action": "send_reply",
-            "reply_text": reply_text,
-        }
-        decision.setdefault("booking_action", "ignore")
-        decision.setdefault("ready_to_save", False)
-        direct_error = await self._send_source_reply(
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            reply_text=reply_text,
-        )
-        if direct_error is None:
-            return None, reply_text
-        recovery_feedback = [
-            self._build_recovery_feedback(
-                phase="reply_execution",
-                error=direct_error,
-                decision=decision,
-            )
-        ]
-        active_booking = self._get_active_booking(
-            customer_id=str(workflow["customer_id"]),
-            workflow_id=str(workflow["workflow_id"]),
-            conversation_id=conversation_id,
-        )
-        recent_completed_booking = self._get_recent_completed_booking(
-            customer_id=str(workflow["customer_id"]),
-            workflow_id=str(workflow["workflow_id"]),
-            conversation_id=conversation_id,
-        )
-        apply_error = direct_error
-        for _attempt in range(_MAX_DECISION_RECOVERY_ATTEMPTS):
-            next_decision, decide_error = await self._decide_workflow_action(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                conversation=conversation,
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-                execution_feedback=recovery_feedback,
-            )
-            if decide_error:
-                return decide_error, reply_text
-            applied, apply_error, feedback = await self._apply_decision(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                conversation=conversation,
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-                decision=next_decision,
-                approved_draft_id=draft_id,
-            )
-            if apply_error is None:
-                if bool(applied.get("replied", False)):
-                    return None, str(next_decision.get("reply_text", "") or reply_text)
-                return "approved draft recovery completed without sending a reply", reply_text
-            if feedback is None:
-                break
-            recovery_feedback.append(feedback)
-            active_booking = self._get_active_booking(
-                customer_id=str(workflow["customer_id"]),
-                workflow_id=str(workflow["workflow_id"]),
-                conversation_id=conversation_id,
-            )
-            recent_completed_booking = self._get_recent_completed_booking(
-                customer_id=str(workflow["customer_id"]),
-                workflow_id=str(workflow["workflow_id"]),
-                conversation_id=conversation_id,
-            )
-        return apply_error, reply_text
 
     async def run_workflow(
         self,
@@ -3727,17 +3229,10 @@ class IntakeWorkflowService:
                             booking_id="",
                             reply_text=reply_text,
                         )
-                        reply_error, draft = await self._send_or_request_approval(
+                        reply_error = await self._send_intake_reply(
                             workflow=workflow,
                             conversation_summary=cursor_summary,
                             reply_text=reply_text,
-                            conversation=conversation,
-                            decision={
-                                "booking_action": "ignore",
-                                "reply_action": "send_reply",
-                                "reply_text": reply_text,
-                                "ready_to_save": False,
-                            },
                         )
                         if reply_error is not None:
                             errors.append(f"{conversation_id}: {reply_error}")
@@ -3754,45 +3249,6 @@ class IntakeWorkflowService:
                                 conversation_summary=cursor_summary,
                                 phase="reply_execution",
                                 error=reply_error,
-                            )
-                            continue
-                        if draft is not None:
-                            self._emit_observability(
-                                event="intake.apply.ok",
-                                workflow=workflow,
-                                conversation_summary=cursor_summary,
-                                status="approval_pending",
-                                booking_action="ignore",
-                                reply_action=reply_action,
-                                ready_to_save=False,
-                                draft_id=str(draft.get("draft_id", "") or ""),
-                            )
-                            self._set_cursor(
-                                workflow_id=str(workflow["workflow_id"]),
-                                conversation_id=conversation_id,
-                                latest_inbound_message_id=latest_inbound_id,
-                                latest_inbound_message_time=latest_inbound_time,
-                                conversation_updated_time=conversation_updated_time,
-                                latest_outbound_message_id=latest_outbound_id,
-                                agent_action_at=_utc_now_iso(),
-                            )
-                            result_items.append(
-                                {
-                                    "conversation_id": conversation_id,
-                                    "matched": False,
-                                    "status": "approval_pending",
-                                    "draft_id": str(draft.get("draft_id", "") or ""),
-                                    "replied": False,
-                                }
-                            )
-                            self._emit_observability(
-                                event="intake.conversation.complete",
-                                workflow=workflow,
-                                conversation_summary=cursor_summary,
-                                matched=False,
-                                status="approval_pending",
-                                replied=False,
-                                draft_id=str(draft.get("draft_id", "") or ""),
                             )
                             continue
                         self._emit_observability(
@@ -4175,7 +3631,6 @@ class IntakeWorkflowService:
         recent_completed_booking: dict[str, Any] | None,
         decision: dict[str, Any],
         stale_guard: bool = False,
-        approved_draft_id: str = "",
     ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
         booking_action = str(decision.get("booking_action", "ignore") or "ignore").strip().lower()
         ready_to_save = bool(decision.get("ready_to_save"))
@@ -4261,15 +3716,10 @@ class IntakeWorkflowService:
                     booking_id="",
                     reply_text=reply_text,
                 )
-                reply_error, draft = await self._send_or_request_approval(
+                reply_error = await self._send_intake_reply(
                     workflow=workflow,
                     conversation_summary=conversation_summary,
                     reply_text=reply_text,
-                    conversation=conversation,
-                    decision=decision,
-                    active_booking=active_booking,
-                    recent_completed_booking=recent_completed_booking,
-                    approved_draft_id=approved_draft_id,
                 )
                 if reply_error is not None:
                     self._emit_observability(
@@ -4292,25 +3742,6 @@ class IntakeWorkflowService:
                         error=reply_error,
                         decision=decision,
                     )
-                if draft is not None:
-                    draft_id = str(draft.get("draft_id", "") or "")
-                    self._emit_observability(
-                        event="intake.apply.ok",
-                        workflow=workflow,
-                        conversation_summary=conversation_summary,
-                        status="approval_pending",
-                        booking_action=booking_action,
-                        reply_action=reply_action,
-                        ready_to_save=ready_to_save,
-                        draft_id=draft_id,
-                    )
-                    return {
-                        "conversation_id": str(conversation_summary.get("conversation_id", "") or ""),
-                        "matched": True,
-                        "status": "approval_pending",
-                        "draft_id": draft_id,
-                        "replied": False,
-                    }, None, None
                 self._emit_observability(
                     event="intake.reply.ok",
                     workflow=workflow,
@@ -4675,15 +4106,10 @@ class IntakeWorkflowService:
                 booking_id=str(target_booking.get("booking_id", "") or "").strip(),
                 reply_text=reply_text,
             )
-            reply_error, draft = await self._send_or_request_approval(
+            reply_error = await self._send_intake_reply(
                 workflow=workflow,
                 conversation_summary=conversation_summary,
                 reply_text=reply_text,
-                conversation=conversation,
-                decision=decision,
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-                approved_draft_id=approved_draft_id,
             )
             if reply_error is not None:
                 self._emit_observability(
@@ -4706,30 +4132,6 @@ class IntakeWorkflowService:
                     error=reply_error,
                     decision=decision,
                 )
-            if draft is not None:
-                draft_id = str(draft.get("draft_id", "") or "")
-                self._emit_observability(
-                    event="intake.apply.ok",
-                    workflow=workflow,
-                    conversation_summary=conversation_summary,
-                    status="approval_pending",
-                    booking_id=str(target_booking.get("booking_id", "") or "").strip(),
-                    sink_write_status=str(target_booking.get("sink_write_status", "") or "").strip(),
-                    booking_action=booking_action,
-                    reply_action=reply_action,
-                    ready_to_save=ready_to_save,
-                    saved_summary=saved_summary,
-                    draft_id=draft_id,
-                )
-                return {
-                    "conversation_id": str(conversation_summary.get("conversation_id", "") or ""),
-                    "matched": True,
-                    "status": "approval_pending",
-                    "booking_id": str(target_booking.get("booking_id", "") or ""),
-                    "saved_summary": saved_summary,
-                    "draft_id": draft_id,
-                    "replied": False,
-                }, None, None
             self._emit_observability(
                 event="intake.reply.ok",
                 workflow=workflow,
