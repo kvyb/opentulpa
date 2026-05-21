@@ -41,9 +41,12 @@ def test_internal_routes_blocked_from_public_clients(
 
         healthz = client.get("/healthz")
         assert healthz.status_code == 200
+        assert "started_at" in healthz.json()
 
         agent_healthz = client.get("/agent/healthz")
         assert agent_healthz.status_code == 200
+        assert agent_healthz.json()["backend"] == "langgraph"
+        assert "started_at" in agent_healthz.json()
     get_settings.cache_clear()
 
 
@@ -57,7 +60,9 @@ def test_healthz_reports_draining_during_shutdown(tmp_path: Path) -> None:
         draining = client.get("/healthz")
 
     assert draining.status_code == 503
-    assert draining.json() == {"status": "draining", "active_turns": 0}
+    assert draining.json()["status"] == "draining"
+    assert draining.json()["active_turns"] == 0
+    assert "started_at" in draining.json()
     get_settings.cache_clear()
 
 
