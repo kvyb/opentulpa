@@ -161,7 +161,6 @@ def _prompt_cache_prefix_count_for_turn(
     safe_history_count = min(max(0, int(older_history_count)), committed_history_count)
     return max(0, int(stable_prefix_count)) + safe_history_count, "committed_older_history"
 
-
 def _build_workflow_setup_prompt_context(
     runtime: Any,
     *,
