@@ -1353,6 +1353,7 @@ class OpenTulpaLangGraphRuntime:
         self._customer_profile_service = customer_profile_service
         self._thread_rollup_service = thread_rollup_service
         self._link_alias_service = link_alias_service
+        self._composio_service: Any | None = None
         self._workflow_setup_service: Any | None = None
         self._context_token_limit = max(6000, min(30000, int(context_token_limit)))
         self._context_short_term_high_tokens = self._context_token_limit
@@ -1572,6 +1573,34 @@ class OpenTulpaLangGraphRuntime:
         self._wake_execution_model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
+
+    @property
+    def link_alias_service(self) -> LinkAliasService | None:
+        return self._link_alias_service
+
+    @property
+    def composio_service(self) -> Any | None:
+        return self._composio_service
+
+    @property
+    def workflow_setup_service(self) -> Any | None:
+        return self._workflow_setup_service
+
+    def configure_api_services(
+        self,
+        *,
+        link_alias_service: LinkAliasService | None = None,
+        composio_service: Any | None = None,
+        workflow_setup_service: Any | None = None,
+    ) -> None:
+        assert composio_service is None or hasattr(composio_service, "status")
+        assert workflow_setup_service is None or hasattr(workflow_setup_service, "get_thread_session")
+        if link_alias_service is not None and self._link_alias_service is None:
+            self._link_alias_service = link_alias_service
+        if composio_service is not None:
+            self._composio_service = composio_service
+        if workflow_setup_service is not None:
+            self._workflow_setup_service = workflow_setup_service
 
     def prompt_cache_profile(self, *, model_name: str | None = None) -> dict[str, Any]:
         target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
