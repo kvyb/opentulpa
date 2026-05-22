@@ -113,16 +113,14 @@ class TulpaRouterLoader:
                 continue
             try:
                 module = self._import_module(module_name)
-                router = getattr(module, "router", None)
-                has_internal = isinstance(router, APIRouter)
-                if not has_internal:
+                router_obj = getattr(module, "router", None)
+                if not isinstance(router_obj, APIRouter):
                     raise TypeError("missing APIRouter 'router' export")
-                if has_internal:
-                    self.mount_router.include_router(
-                        router,
-                        prefix=f"/{module_name}",
-                        tags=["tulpa"],
-                    )
+                self.mount_router.include_router(
+                    router_obj,
+                    prefix=f"/{module_name}",
+                    tags=["tulpa"],
+                )
                 loaded.append(module_name)
             except ModuleNotFoundError as exc:  # pragma: no cover - runtime guard
                 missing = str(getattr(exc, "name", "")).strip() or str(exc)
@@ -171,9 +169,7 @@ def _is_safe_module_level_statement(stmt: ast.stmt) -> bool:
         return _is_router_assignment(stmt) or _is_safe_constant_assignment(stmt)
     if isinstance(stmt, ast.AnnAssign):
         return _is_safe_literal(stmt.value)
-    if isinstance(stmt, ast.If) and _is_main_guard(stmt.test):
-        return True
-    return False
+    return isinstance(stmt, ast.If) and _is_main_guard(stmt.test)
 
 
 def _is_safe_constant_assignment(stmt: ast.Assign) -> bool:

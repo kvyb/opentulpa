@@ -7,12 +7,12 @@ import contextlib
 import json
 import logging
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from opentulpa.persistence.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ class WakeQueueService:
                 (json.dumps(payload), now, now, now),
             )
             conn.commit()
-            return int(cur.lastrowid)
+            return int(cur.lastrowid or 0)
 
     def stats(self) -> dict[str, Any]:
         with self._conn() as conn:
@@ -167,7 +167,7 @@ class WakeQueueService:
                 (now, row["id"]),
             )
             conn.commit()
-            return row
+            return cast("sqlite3.Row | None", row)
 
     def _mark_done(self, item_id: int) -> None:
         with self._conn() as conn:

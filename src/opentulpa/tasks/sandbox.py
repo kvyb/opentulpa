@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -321,7 +321,8 @@ def get_tulpa_catalog() -> dict[str, Any]:
     if not CATALOG_PATH.exists():
         _write_catalog(_default_catalog())
     try:
-        return json_load(CATALOG_PATH.read_text(encoding="utf-8"))
+        data = json_load(CATALOG_PATH.read_text(encoding="utf-8"))
+        return cast("dict[str, Any]", data) if isinstance(data, dict) else _default_catalog()
     except Exception:
         return _default_catalog()
 

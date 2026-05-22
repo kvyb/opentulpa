@@ -19,7 +19,7 @@ ProcessOutputEventCallback = Callable[[dict[str, Any]], None]
 _PROCESS_OUTPUT_EVENT_STATE = threading.local()
 
 
-class _ProcessOutputTee(io.TextIOBase):
+class _ProcessOutputTee:
     def __init__(
         self,
         wrapped: Any,
@@ -43,7 +43,7 @@ class _ProcessOutputTee(io.TextIOBase):
         return str(getattr(self._wrapped, "errors", None) or "replace")
 
     def fileno(self) -> int:
-        return self._wrapped.fileno()
+        return int(self._wrapped.fileno())
 
     def isatty(self) -> bool:
         return bool(getattr(self._wrapped, "isatty", lambda: False)())

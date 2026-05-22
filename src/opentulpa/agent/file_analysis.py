@@ -107,7 +107,7 @@ def _spreadsheet_cell_to_text(value: Any) -> str:
 def extract_xlsx_text(raw_bytes: bytes, *, max_chars: int = 140000) -> str:
     """Return a bounded, retrieval-friendly workbook preview."""
     try:
-        from openpyxl import load_workbook
+        from openpyxl import load_workbook  # type: ignore[import-untyped]
     except Exception as exc:
         raise RuntimeError("XLSX parser unavailable. Install openpyxl.") from exc
     try:

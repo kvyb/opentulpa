@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
@@ -185,8 +185,11 @@ def _latest_turn_frontier_start_index(
     if isinstance(last, ToolMessage):
         tool_call_id = str(getattr(last, "tool_call_id", "") or "").strip()
         previous_index = last_index - 1
-        if previous_index >= 0 and isinstance(latest_turn_messages[previous_index], AIMessage):
-            call_ids = set(ContextEngineer._tool_call_ids(latest_turn_messages[previous_index]))
+        if previous_index >= 0:
+            previous = latest_turn_messages[previous_index]
+            if not isinstance(previous, AIMessage):
+                return last_index
+            call_ids = set(ContextEngineer._tool_call_ids(previous))
             if not tool_call_id or tool_call_id in call_ids:
                 return previous_index
         return last_index
@@ -241,7 +244,11 @@ def _split_qwen_cacheable_history(
         _qwen_cacheable_history_message(stable_candidates[:stable_count])
     ]
     frontier_history = [*stable_candidates[stable_count:], *latest_turn_messages[frontier_start:]]
-    return cacheable_history, frontier_history, "committed_tail_sized_history"
+    return (
+        cast("list[AnyMessage]", cacheable_history),
+        cast("list[AnyMessage]", frontier_history),
+        "committed_tail_sized_history",
+    )
 
 
 def _qwen_message_role(message: AnyMessage) -> str:
@@ -1359,9 +1366,9 @@ def build_runtime_graph(runtime: Any):
                     title="Compressed older in-thread context.",
                     body=history_working_set.summary_text,
                 )
-            selected_summary_entries: list[tuple[str, SystemMessage]] = []
+            projected_summary_entries: list[tuple[str, SystemMessage]] = []
             if summary_entry is not None:
-                selected_summary_entries, _ = _select_optional_prompt_entries(
+                projected_summary_entries, _ = _select_optional_prompt_entries(
                     [summary_entry],
                     initial_used_tokens=used_optional_tokens,
                     optional_context_budget=optional_context_budget,
@@ -1369,18 +1376,18 @@ def build_runtime_graph(runtime: Any):
             prompt_messages = [
                 *prompt_messages_base,
                 *(message for _, message in selected_frozen_late_entries),
-                *(message for _, message in selected_summary_entries),
+                *(message for _, message in projected_summary_entries),
             ]
             prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
-            while selected_summary_entries and prompt_overhead_tokens > max_overhead_tokens:
-                selected_summary_entries.pop()
+            while projected_summary_entries and prompt_overhead_tokens > max_overhead_tokens:
+                projected_summary_entries.pop()
                 prompt_messages = [
                     *prompt_messages_base,
                     *(message for _, message in selected_frozen_late_entries),
-                    *(message for _, message in selected_summary_entries),
+                    *(message for _, message in projected_summary_entries),
                 ]
                 prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
-            if selected_summary_entries:
+            if projected_summary_entries:
                 history_budget = max(800, prompt_budget - prompt_overhead_tokens)
                 history_working_set = context_engineer.build_history_working_set(
                     sanitized_history,
@@ -1721,7 +1728,7 @@ def build_runtime_graph(runtime: Any):
         loop_limit_final_status_text=LOOP_LIMIT_FINAL_STATUS_TEXT,
     )
 
-    async def tools_node(state: AgentState) -> Command[Literal["agent", "__end__"]]:
+    async def tools_node(state: AgentState) -> Command[Literal["agent", "finalize_turn", "__end__"]]:
         messages = state.get("messages", [])
         if not messages:
             return Command(update={"turn_status": "running"}, goto="agent")
@@ -2032,7 +2039,7 @@ def build_runtime_graph(runtime: Any):
     )
     builder.add_node(
         "validate_tools",
-        validate_tool_calls_node,
+        cast(Any, validate_tool_calls_node),
         retry_policy=RetryPolicy(max_attempts=2),
         destinations=("tools", "agent"),
     )

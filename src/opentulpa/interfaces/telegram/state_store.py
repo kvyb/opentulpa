@@ -30,7 +30,8 @@ class TelegramStateStore:
         if not self.state_path.exists():
             return self._default_state()
         try:
-            return json.loads(self.state_path.read_text(encoding="utf-8"))
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else self._default_state()
         except Exception:
             return self._default_state()
 

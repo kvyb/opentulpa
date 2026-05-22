@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -14,6 +12,7 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 from opentulpa.core.ids import new_short_id
+from opentulpa.persistence.sqlite import connect_sqlite
 
 
 def _utc_now_iso() -> str:

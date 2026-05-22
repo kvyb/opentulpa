@@ -7,8 +7,6 @@ import contextlib
 import json
 import logging
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -16,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from opentulpa.core.ids import new_short_id
+from opentulpa.persistence.sqlite import connect_sqlite
 from opentulpa.tasks.sandbox import (
     append_task_event_log,
     list_artifacts,

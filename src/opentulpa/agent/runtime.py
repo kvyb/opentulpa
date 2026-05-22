@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from langchain.chat_models import init_chat_model
@@ -1320,17 +1320,17 @@ class OpenTulpaLangGraphRuntime:
         self._max_completion_tokens = max(128, min(int(max_completion_tokens), 32768))
         self._max_user_reply_chars = max(500, min(int(max_user_reply_chars), 20000))
         self._wake_classifier_model_name = (
-            _normalize_model_name(wake_classifier_model_name)
+            _normalize_model_name(str(wake_classifier_model_name))
             if str(wake_classifier_model_name or "").strip()
             else self.model_name
         )
         self._wake_execution_model_name = (
-            _normalize_model_name(wake_execution_model_name)
+            _normalize_model_name(str(wake_execution_model_name))
             if str(wake_execution_model_name or "").strip()
             else self.model_name
         )
         self._telegram_media_model_name = (
-            _normalize_model_name(telegram_media_model_name)
+            _normalize_model_name(str(telegram_media_model_name))
             if str(telegram_media_model_name or "").strip()
             else "google/gemini-3.1-flash-lite-preview"
         )
@@ -2400,7 +2400,8 @@ class OpenTulpaLangGraphRuntime:
         kind = str(item.get("kind", "") or "").strip().lower()
         priority = int(MEMORY_KIND_PRIORITY.get(kind, 50))
         try:
-            score = float(item.get("score"))
+            raw_score = item.get("score")
+            score = float(raw_score) if raw_score is not None else 0.0
         except (TypeError, ValueError):
             score = 0.0
         return priority, -score
@@ -2752,7 +2753,7 @@ class OpenTulpaLangGraphRuntime:
             "server_time_utc_iso": now_utc.isoformat(),
             "server_utc_offset": server_offset_text,
             "user_time_local_iso": user_local.isoformat(),
-            "user_utc_offset": user_offset_text,
+            "user_utc_offset": str(user_offset_text or server_offset_text),
             "user_time_source": source,
         }
 
@@ -3189,8 +3190,9 @@ class OpenTulpaLangGraphRuntime:
                 skill_state = await self._pre_resolve_skill_state(
                     customer_id=customer_id,
                     user_text=user_text,
+                    prompt_mode=prompt_mode,
                 )
-        config = {
+        config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
         }
@@ -3218,7 +3220,7 @@ class OpenTulpaLangGraphRuntime:
             }
             config_metadata.update(_tool_schema_trace_fields(self, turn_mode))
             config["metadata"] = config_metadata
-            config["tags"] = list(config["metadata"]["langfuse_tags"])
+            config["tags"] = list(config_metadata["langfuse_tags"])
             graph_langfuse_callback_attached = True
         else:
             graph_langfuse_callback_attached = False
@@ -3263,12 +3265,19 @@ class OpenTulpaLangGraphRuntime:
             "opentulpa_trace_id": str(trace_id or "").strip(),
         }
         metadata.update(_tool_schema_trace_fields(self, str(turn_mode or "").strip()))
-        return build_callbacks(
-            user_id=str(customer_id or "").strip() or None,
-            trace_id=str(trace_id or "").strip() or None,
-            session_id=str(thread_id or "").strip() or None,
-            metadata=metadata,
-            tags=[item for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip()) if item],
+        return cast(
+            "list[Any]",
+            build_callbacks(
+                user_id=str(customer_id or "").strip() or None,
+                trace_id=str(trace_id or "").strip() or None,
+                session_id=str(thread_id or "").strip() or None,
+                metadata=metadata,
+                tags=[
+                    item
+                    for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip())
+                    if item
+                ],
+            ),
         )
 
     def _model_with_callbacks(
@@ -4807,7 +4816,7 @@ class OpenTulpaLangGraphRuntime:
             raw_token, previous = token
             previous = str(previous or "").strip()
         try:
-            ctx.reset(raw_token)
+            ctx.reset(cast("contextvars.Token[str]", raw_token))
         except ValueError:
             ctx.set(previous)
         self._active_customer_id = str(ctx.get() or "").strip()
@@ -4839,7 +4848,7 @@ class OpenTulpaLangGraphRuntime:
             raw_token, previous = token
             previous = str(previous or "").strip()
         try:
-            ctx.reset(raw_token)
+            ctx.reset(cast("contextvars.Token[str]", raw_token))
         except ValueError:
             ctx.set(previous)
         self._active_thread_id = str(ctx.get() or "").strip()
@@ -4871,7 +4880,7 @@ class OpenTulpaLangGraphRuntime:
             raw_token, previous = token
             previous = str(previous or "").strip() or "interactive"
         try:
-            ctx.reset(raw_token)
+            ctx.reset(cast("contextvars.Token[str]", raw_token))
         except ValueError:
             ctx.set(previous)
         self._active_turn_mode = _normalize_turn_mode(str(ctx.get() or "interactive"))
