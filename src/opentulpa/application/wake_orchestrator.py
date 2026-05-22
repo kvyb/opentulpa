@@ -136,67 +136,48 @@ class WakeOrchestrator:
             return
         await self._handle_routine_event(body)
 
-    async def _handle_task_event(self, body: dict[str, Any]) -> None:
-        customer_id = self._customer_id(body.get("customer_id", ""))
-        event_type = str(body.get("event_type", "")).strip()
-        payload = self._payload(body.get("payload"))
-        if not customer_id or event_type not in {"done", "failed", "needs_input", "worker_stopped"}:
-            return
+    def _backlog_task_event(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self._backlog(
+            customer_id=customer_id,
+            source="task",
+            event_type=event_type,
+            payload=payload,
+        )
 
-        runtime = self._get_agent_runtime()
-        should_notify = event_type == "needs_input"
-        if not should_notify and runtime and hasattr(runtime, "classify_wake_event"):
-            decision = await runtime.classify_wake_event(
-                customer_id=customer_id,
-                event_label=f"task/{event_type}",
-                payload={
-                    "task_id": str(body.get("task_id", "")),
-                    "payload": payload,
-                },
-            )
-            should_notify = bool(decision.get("notify_user", False))
+    async def _task_event_should_notify(
+        self,
+        *,
+        runtime: Any,
+        customer_id: str,
+        task_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        if event_type == "needs_input":
+            return True
+        if not runtime or not hasattr(runtime, "classify_wake_event"):
+            return False
+        decision = await runtime.classify_wake_event(
+            customer_id=customer_id,
+            event_label=f"task/{event_type}",
+            payload={"task_id": task_id, "payload": payload},
+        )
+        return bool(decision.get("notify_user", False))
 
-        backlog_payload = {"task_id": str(body.get("task_id", "")), **payload}
-        if not should_notify:
-            self._backlog(
-                customer_id=customer_id,
-                source="task",
-                event_type=event_type,
-                payload=backlog_payload,
-            )
-            return
-        if not self._settings.telegram_bot_token:
-            self._backlog(
-                customer_id=customer_id,
-                source="task",
-                event_type=event_type,
-                payload=backlog_payload,
-            )
-            return
-        try:
-            replies = await self._get_telegram_chat().relay_task_event(
-                customer_id=customer_id,
-                task_id=str(body.get("task_id", "")),
-                event_type=event_type,
-                payload=payload,
-                agent_runtime=runtime,
-            )
-        except Exception:
-            self._backlog(
-                customer_id=customer_id,
-                source="task",
-                event_type=event_type,
-                payload=backlog_payload,
-            )
-            return
-        if not replies:
-            self._backlog(
-                customer_id=customer_id,
-                source="task",
-                event_type=event_type,
-                payload=backlog_payload,
-            )
-            return
+    async def _send_task_event_replies(
+        self,
+        *,
+        customer_id: str,
+        task_id: str,
+        event_type: str,
+        replies: list[dict[str, Any]],
+    ) -> None:
         for item in replies:
             sent = await self._get_telegram_client().send_message(
                 chat_id=item["chat_id"],
@@ -206,139 +187,209 @@ class WakeOrchestrator:
             if sent:
                 append_web_event(
                     customer_id=customer_id,
-                    thread_id=str(body.get("task_id", "") or "").strip(),
+                    thread_id=task_id,
                     source="task",
                     kind="proactive_message",
                     text=str(item.get("text", "") or ""),
                     metadata_json=json.dumps({"event_type": event_type}, ensure_ascii=False),
                 )
 
-    async def _handle_routine_event(self, body: dict[str, Any]) -> None:
+    async def _handle_task_event(self, body: dict[str, Any]) -> None:
+        customer_id = self._customer_id(body.get("customer_id", ""))
+        event_type = str(body.get("event_type", "")).strip()
         payload = self._payload(body.get("payload"))
-        customer_id = self._customer_id(body.get("customer_id") or payload.get("customer_id") or "")
-        if not customer_id:
+        if not customer_id or event_type not in {"done", "failed", "needs_input", "worker_stopped"}:
             return
-        event_type = str(body.get("event_type") or payload.get("event_type") or "scheduled").strip()
-        notify_raw = body.get("notify_user", payload.get("notify_user", True))
-        notify_user = not (
-            notify_raw is False or str(notify_raw).strip().lower() in {"0", "false", "no", "off"}
-        )
-        routine_id = str(body.get("routine_id") or payload.get("routine_id") or "").strip()
-        routine_name = str(body.get("routine_name") or payload.get("routine_name") or "").strip()
-        queue_payload = {
-            "routine_id": routine_id,
-            "routine_name": routine_name,
-            "event_type": event_type,
-            "notify_user": bool(notify_user),
-            "payload": payload,
-        }
 
         runtime = self._get_agent_runtime()
-        if runtime is None:
-            self._backlog(
+        task_id = str(body.get("task_id", ""))
+        backlog_payload = {"task_id": str(body.get("task_id", "")), **payload}
+        if not await self._task_event_should_notify(
+            runtime=runtime,
+            customer_id=customer_id,
+            task_id=task_id,
+            event_type=event_type,
+            payload=payload,
+        ):
+            self._backlog_task_event(
                 customer_id=customer_id,
-                source="routine",
                 event_type=event_type,
-                payload=queue_payload,
+                payload=backlog_payload,
             )
             return
+        if not self._settings.telegram_bot_token:
+            self._backlog_task_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=backlog_payload,
+            )
+            return
+        try:
+            replies = await self._get_telegram_chat().relay_task_event(
+                customer_id=customer_id,
+                task_id=task_id,
+                event_type=event_type,
+                payload=payload,
+                agent_runtime=runtime,
+            )
+        except Exception:
+            self._backlog_task_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=backlog_payload,
+            )
+            return
+        if not replies:
+            self._backlog_task_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=backlog_payload,
+            )
+            return
+        await self._send_task_event_replies(
+            customer_id=customer_id,
+            task_id=task_id,
+            event_type=event_type,
+            replies=replies,
+        )
 
-        if str(payload.get("workflow_type", "")).strip() == "intake_workflow":
-            workflow_id = str(payload.get("workflow_id", "")).strip()
-            if not workflow_id or self._get_intake_workflows is None:
-                queue_payload["execution_status"] = "invalid"
-                queue_payload["execution_error"] = "intake workflow payload missing workflow_id"
-                self._backlog(
-                    customer_id=customer_id,
-                    source="routine",
-                    event_type=event_type,
-                    payload=queue_payload,
-                )
-                return
-            try:
-                result = await self._get_intake_workflows().run_workflow(
-                    customer_id=customer_id,
-                    workflow_id=workflow_id,
-                    event_type=event_type,
-                )
-            except Exception as exc:
-                queue_payload["execution_status"] = "failed"
-                queue_payload["execution_error"] = str(exc)[:500]
-                self._backlog(
-                    customer_id=customer_id,
-                    source="routine",
-                    event_type=event_type,
-                    payload=queue_payload,
-                )
-                return
-            execution_summary = str(result.get("summary", "") or "").strip() or NO_NOTIFY_TOKEN
-            queue_payload["execution_status"] = "executed" if bool(result.get("ok", False)) else "failed"
-            queue_payload["execution_summary"] = execution_summary[:2000]
-            queue_payload["execution_result"] = result
-            if queue_payload["execution_status"] != "executed":
-                queue_payload["execution_error"] = (
-                    " | ".join(str(item) for item in _safe_error_list(result.get("errors")))[:500]
-                    or "workflow execution failed"
-                )
-            if not notify_user or not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
-                self._record_routine_execution(
-                    customer_id=customer_id,
-                    event_type=event_type,
-                    payload=queue_payload,
-                    notification_status="skipped",
-                    notification_error=(
-                        "notify_user=false"
-                        if not notify_user
-                        else "telegram_bot_token_missing"
-                        if not self._settings.telegram_bot_token
-                        else "no_notify_token"
-                    ),
-                )
-                return
-            delivery_slots: list[dict[str, Any]] = []
-            with suppress(Exception):
-                delivery_slots = self._get_telegram_chat().find_session_slots(customer_id)
-            delivery_slots = self._direct_owner_slots(delivery_slots)
-            if not delivery_slots:
-                self._record_routine_execution(
-                    customer_id=customer_id,
-                    event_type=event_type,
-                    payload=queue_payload,
-                    notification_status="backlogged",
-                    notification_error="no_telegram_session_slots",
-                )
-                return
-            notified_owner_chat_ids: list[int] = []
-            for slot in delivery_slots:
-                chat_id = int(slot["chat_id"])
-                await self._get_telegram_client().send_message(
-                    chat_id=chat_id,
-                    text=execution_summary,
-                    parse_mode="HTML",
-                )
-                with suppress(Exception):
-                    self._get_telegram_chat().touch_assistant_message(chat_id)
-                notified_owner_chat_ids.append(chat_id)
+    def _backlog_routine_event(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self._backlog(
+            customer_id=customer_id,
+            source="routine",
+            event_type=event_type,
+            payload=payload,
+        )
+
+    def _record_invalid_routine_event(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        error: str,
+    ) -> None:
+        payload["execution_status"] = "invalid"
+        payload["execution_error"] = error
+        self._backlog_routine_event(
+            customer_id=customer_id,
+            event_type=event_type,
+            payload=payload,
+        )
+
+    async def _record_routine_notification_result(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        notify_user: bool,
+        execution_summary: str,
+    ) -> None:
+        if not notify_user or not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
             self._record_routine_execution(
                 customer_id=customer_id,
                 event_type=event_type,
-                payload=queue_payload,
-                notification_status="sent",
-                notified_chat_ids=notified_owner_chat_ids,
+                payload=payload,
+                notification_status="skipped",
+                notification_error=(
+                    "notify_user=false"
+                    if not notify_user
+                    else "telegram_bot_token_missing"
+                    if not self._settings.telegram_bot_token
+                    else "no_notify_token"
+                ),
             )
             return
-
-        routine_instruction = str(payload.get("instruction", "")).strip()
-        if not routine_instruction:
-            queue_payload["execution_status"] = "invalid"
-            queue_payload["execution_error"] = "routine payload missing required instruction"
-            self._backlog(
+        notified_chat_ids = await self._notify_routine_owner_slots(
+            customer_id=customer_id,
+            text=execution_summary,
+        )
+        if not notified_chat_ids:
+            self._record_routine_execution(
                 customer_id=customer_id,
-                source="routine",
+                event_type=event_type,
+                payload=payload,
+                notification_status="backlogged",
+                notification_error="no_telegram_session_slots",
+            )
+            return
+        self._record_routine_execution(
+            customer_id=customer_id,
+            event_type=event_type,
+            payload=payload,
+            notification_status="sent",
+            notified_chat_ids=notified_chat_ids,
+        )
+
+    async def _handle_intake_workflow_routine_event(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        workflow_id: str,
+        notify_user: bool,
+        queue_payload: dict[str, Any],
+    ) -> None:
+        if not workflow_id or self._get_intake_workflows is None:
+            self._record_invalid_routine_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=queue_payload,
+                error="intake workflow payload missing workflow_id",
+            )
+            return
+        try:
+            result = await self._get_intake_workflows().run_workflow(
+                customer_id=customer_id,
+                workflow_id=workflow_id,
+                event_type=event_type,
+            )
+        except Exception as exc:
+            queue_payload["execution_status"] = "failed"
+            queue_payload["execution_error"] = str(exc)[:500]
+            self._backlog_routine_event(
+                customer_id=customer_id,
                 event_type=event_type,
                 payload=queue_payload,
             )
             return
+        execution_summary = str(result.get("summary", "") or "").strip() or NO_NOTIFY_TOKEN
+        queue_payload["execution_status"] = "executed" if bool(result.get("ok", False)) else "failed"
+        queue_payload["execution_summary"] = execution_summary[:2000]
+        queue_payload["execution_result"] = result
+        if queue_payload["execution_status"] != "executed":
+            queue_payload["execution_error"] = (
+                " | ".join(str(item) for item in _safe_error_list(result.get("errors")))[:500]
+                or "workflow execution failed"
+            )
+        await self._record_routine_notification_result(
+            customer_id=customer_id,
+            event_type=event_type,
+            payload=queue_payload,
+            notify_user=notify_user,
+            execution_summary=execution_summary,
+        )
+
+    async def _handle_agent_routine_event(
+        self,
+        *,
+        customer_id: str,
+        event_type: str,
+        routine_id: str,
+        routine_name: str,
+        routine_instruction: str,
+        notify_user: bool,
+        payload: dict[str, Any],
+        queue_payload: dict[str, Any],
+        runtime: Any,
+    ) -> None:
         execution_prompt = (
             "System update: a scheduled routine fired.\n"
             "Execute this routine now using tools/skills as needed.\n"
@@ -367,73 +418,104 @@ class WakeOrchestrator:
         except Exception as exc:
             queue_payload["execution_status"] = "failed"
             queue_payload["execution_error"] = str(exc)[:500]
-            self._backlog(
+            self._backlog_routine_event(
                 customer_id=customer_id,
-                source="routine",
                 event_type=event_type,
                 payload=queue_payload,
             )
             return
-
         execution_summary = str(execution_text or "").strip()
         if not execution_summary:
             execution_summary = "Routine executed, but no summary was produced."
         queue_payload["execution_status"] = "executed"
         queue_payload["execution_summary"] = execution_summary[:2000]
-
-        if not notify_user:
-            self._record_routine_execution(
-                customer_id=customer_id,
-                event_type=event_type,
-                payload=queue_payload,
-                notification_status="skipped",
-                notification_error="notify_user=false",
-            )
-            return
-        if not self._settings.telegram_bot_token or execution_summary == NO_NOTIFY_TOKEN:
-            self._record_routine_execution(
-                customer_id=customer_id,
-                event_type=event_type,
-                payload=queue_payload,
-                notification_status="skipped",
-                notification_error=(
-                    "telegram_bot_token_missing" if not self._settings.telegram_bot_token else "no_notify_token"
-                ),
-            )
-            return
-
-        routine_slots: list[dict[str, Any]] = []
-        with suppress(Exception):
-            routine_slots = self._get_telegram_chat().find_session_slots(customer_id)
-        routine_slots = self._direct_owner_slots(routine_slots)
-        if not routine_slots:
-            self._record_routine_execution(
-                customer_id=customer_id,
-                event_type=event_type,
-                payload=queue_payload,
-                notification_status="backlogged",
-                notification_error="no_telegram_session_slots",
-            )
-            return
-
-        notified_routine_chat_ids: list[int] = []
-        for slot in routine_slots:
-            chat_id = int(slot["chat_id"])
-            await self._get_telegram_client().send_message(
-                chat_id=chat_id,
-                text=execution_summary,
-                parse_mode="HTML",
-            )
-            with suppress(Exception):
-                self._get_telegram_chat().touch_assistant_message(chat_id)
-            notified_routine_chat_ids.append(chat_id)
-        self._record_routine_execution(
+        await self._record_routine_notification_result(
             customer_id=customer_id,
             event_type=event_type,
             payload=queue_payload,
-            notification_status="sent",
-            notified_chat_ids=notified_routine_chat_ids,
+            notify_user=notify_user,
+            execution_summary=execution_summary,
         )
+
+    async def _handle_routine_event(self, body: dict[str, Any]) -> None:
+        payload = self._payload(body.get("payload"))
+        customer_id = self._customer_id(body.get("customer_id") or payload.get("customer_id") or "")
+        if not customer_id:
+            return
+        event_type = str(body.get("event_type") or payload.get("event_type") or "scheduled").strip()
+        notify_raw = body.get("notify_user", payload.get("notify_user", True))
+        notify_user = not (
+            notify_raw is False or str(notify_raw).strip().lower() in {"0", "false", "no", "off"}
+        )
+        routine_id = str(body.get("routine_id") or payload.get("routine_id") or "").strip()
+        routine_name = str(body.get("routine_name") or payload.get("routine_name") or "").strip()
+        queue_payload = {
+            "routine_id": routine_id,
+            "routine_name": routine_name,
+            "event_type": event_type,
+            "notify_user": bool(notify_user),
+            "payload": payload,
+        }
+
+        runtime = self._get_agent_runtime()
+        if runtime is None:
+            self._backlog_routine_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=queue_payload,
+            )
+            return
+
+        if str(payload.get("workflow_type", "")).strip() == "intake_workflow":
+            workflow_id = str(payload.get("workflow_id", "")).strip()
+            await self._handle_intake_workflow_routine_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                workflow_id=workflow_id,
+                notify_user=notify_user,
+                queue_payload=queue_payload,
+            )
+            return
+
+        routine_instruction = str(payload.get("instruction", "")).strip()
+        if not routine_instruction:
+            self._record_invalid_routine_event(
+                customer_id=customer_id,
+                event_type=event_type,
+                payload=queue_payload,
+                error="routine payload missing required instruction",
+            )
+            return
+        await self._handle_agent_routine_event(
+            customer_id=customer_id,
+            event_type=event_type,
+            routine_id=routine_id,
+            routine_name=routine_name,
+            routine_instruction=routine_instruction,
+            notify_user=notify_user,
+            payload=payload,
+            queue_payload=queue_payload,
+            runtime=runtime,
+        )
+
+    async def _notify_routine_owner_slots(self, *, customer_id: str, text: str) -> list[int]:
+        routine_slots: list[dict[str, Any]] = []
+        with suppress(Exception):
+            routine_slots = self._get_telegram_chat().find_session_slots(customer_id)
+        notified_chat_ids: list[int] = []
+        for slot in self._direct_owner_slots(routine_slots):
+            chat_id = int(slot["chat_id"])
+            sent = await self._get_telegram_client().send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+            )
+            if not sent:
+                continue
+            with suppress(Exception):
+                self._get_telegram_chat().touch_assistant_message(chat_id)
+            notified_chat_ids.append(chat_id)
+        return notified_chat_ids
 
 
 def _safe_error_list(value: Any) -> list[str]:

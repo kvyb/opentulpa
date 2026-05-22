@@ -1192,11 +1192,13 @@ def _build_intake_workflow_context_prompt(
 
 def _build_intake_workflow_state_prompt(
     *,
+    workflow: dict[str, Any],
     conversation: dict[str, Any],
     active_booking: dict[str, Any] | None,
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
 ) -> str:
+    compact_workflow = _compact_workflow_for_prompt(workflow)
     compact_conversation = _compact_conversation_for_prompt(conversation)
     compact_active_booking = _compact_booking_for_prompt(active_booking)
     compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
@@ -1204,6 +1206,7 @@ def _build_intake_workflow_state_prompt(
     return (
         "INTAKE_CONVERSATION_STATE\n"
         "Volatile conversation state for the current inbound message.\n"
+        f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
         f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
         f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
         f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
@@ -3216,10 +3219,10 @@ class OpenTulpaLangGraphRuntime:
                     prompt_mode=prompt_mode,
                 )
             except TypeError:
-                skill_state = await self._pre_resolve_skill_state(
+                resolver = cast(Any, self._pre_resolve_skill_state)
+                skill_state = await resolver(
                     customer_id=customer_id,
                     user_text=user_text,
-                    prompt_mode=prompt_mode,
                 )
         config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id},
@@ -4670,15 +4673,19 @@ class OpenTulpaLangGraphRuntime:
                     model=model,
                     schema=_IntakeWorkflowDecision,
                     messages=[
-                        SystemMessage(content=_build_intake_workflow_system_prompt()),
                         SystemMessage(
-                            content=_build_intake_workflow_context_prompt(
-                                customer_id=customer_id,
-                                workflow=workflow,
+                            content=(
+                                _build_intake_workflow_system_prompt()
+                                + "\n\n"
+                                + _build_intake_workflow_context_prompt(
+                                    customer_id=customer_id,
+                                    workflow=workflow,
+                                )
                             )
                         ),
                         HumanMessage(
                             content=_build_intake_workflow_state_prompt(
+                                workflow=workflow,
                                 conversation=conversation,
                                 active_booking=active_booking,
                                 recent_completed_booking=recent_completed_booking,
@@ -4686,7 +4693,7 @@ class OpenTulpaLangGraphRuntime:
                             )
                         ),
                     ],
-                    stable_prefix_count=2,
+                    stable_prefix_count=1,
                     call_context={
                         "call_site": "intake_workflow_decision",
                         "trace_id": structured_trace_id,
