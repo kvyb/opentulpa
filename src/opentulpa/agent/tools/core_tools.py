@@ -74,8 +74,16 @@ def _trim_tool_text(value: Any, *, limit: int = 160) -> str:
     return text[: max(0, limit - 15)].rstrip() + " ...[truncated]"
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_or_empty(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
 def _compact_file_record_for_tool(raw: Any) -> dict[str, Any]:
-    record = raw if isinstance(raw, dict) else {}
+    record = _dict_or_empty(raw)
     summary = str(record.get("summary", "") or "").strip()
     if " | content_preview=" in summary:
         summary = summary.split(" | content_preview=", 1)[0].strip()
@@ -89,8 +97,8 @@ def _compact_file_record_for_tool(raw: Any) -> dict[str, Any]:
 
 
 def _compact_row_view(raw: Any, *, value_limit: int = 120, max_values: int = 8) -> dict[str, Any]:
-    row = raw if isinstance(raw, dict) else {}
-    values = row.get("values") if isinstance(row.get("values"), list) else []
+    row = _dict_or_empty(raw)
+    values = _list_or_empty(row.get("values"))
     return {
         key: value
         for key, value in {
@@ -105,21 +113,17 @@ def _compact_row_view(raw: Any, *, value_limit: int = 120, max_values: int = 8) 
 def _compact_uploaded_file_inspection(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
-    inspection = payload.get("inspection") if isinstance(payload.get("inspection"), dict) else {}
-    structure = inspection.get("structure") if isinstance(inspection.get("structure"), dict) else {}
-    raw_sheets = structure.get("sheets") if isinstance(structure.get("sheets"), list) else []
+    inspection = _dict_or_empty(payload.get("inspection"))
+    structure = _dict_or_empty(inspection.get("structure"))
+    raw_sheets = _list_or_empty(structure.get("sheets"))
     sheet_inventory: list[dict[str, Any]] = []
     relevant_sheets: list[dict[str, Any]] = []
     for raw_sheet in raw_sheets:
         if not isinstance(raw_sheet, dict):
             continue
-        matches = raw_sheet.get("matches") if isinstance(raw_sheet.get("matches"), list) else []
-        sample_rows = raw_sheet.get("sample_rows") if isinstance(raw_sheet.get("sample_rows"), list) else []
-        table_candidates = (
-            raw_sheet.get("table_candidates")
-            if isinstance(raw_sheet.get("table_candidates"), list)
-            else []
-        )
+        matches = _list_or_empty(raw_sheet.get("matches"))
+        sample_rows = _list_or_empty(raw_sheet.get("sample_rows"))
+        table_candidates = _list_or_empty(raw_sheet.get("table_candidates"))
         compact_sheet = {
             "index": raw_sheet.get("index"),
             "name": str(raw_sheet.get("name", "") or "").strip(),
@@ -144,7 +148,7 @@ def _compact_uploaded_file_inspection(payload: Any) -> Any:
                         "sample_rows": [
                             _compact_row_view(row, value_limit=80, max_values=6)
                             for row in (
-                                item.get("sample_rows") if isinstance(item, dict) and isinstance(item.get("sample_rows"), list) else []
+                                _list_or_empty(item.get("sample_rows")) if isinstance(item, dict) else []
                             )[:1]
                         ],
                     }.items()

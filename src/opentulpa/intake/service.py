@@ -2479,10 +2479,10 @@ class IntakeWorkflowService:
         channel = str(workflow.get("channel", "") or "").strip().lower()
         if channel == "telegram_business_dm":
             messages = _safe_list(conversation.get("messages"))
-            normalized: list[dict[str, Any]] = []
+            telegram_normalized: list[dict[str, Any]] = []
             for item in messages:
                 msg = _safe_dict(item)
-                normalized.append(
+                telegram_normalized.append(
                     {
                         "id": str(msg.get("message_id", msg.get("id", "")) or "").strip(),
                         "created_time": str(msg.get("date_iso", msg.get("created_time", "")) or "").strip(),
@@ -2492,8 +2492,8 @@ class IntakeWorkflowService:
                         "text": str(msg.get("text", "") or "").strip(),
                     }
                 )
-            normalized.sort(key=lambda item: str(item.get("created_time", "")))
-            return normalized[-_RECENT_MESSAGE_HISTORY_LIMIT:]
+            telegram_normalized.sort(key=lambda item: str(item.get("created_time", "")))
+            return telegram_normalized[-_RECENT_MESSAGE_HISTORY_LIMIT:]
         payload = _safe_dict(conversation.get("data")) if "data" in conversation else _safe_dict(conversation)
         participants = _safe_list(_safe_dict(payload.get("participants")).get("data"))
         messages = _safe_list(_safe_dict(payload.get("messages")).get("data"))
@@ -2824,6 +2824,8 @@ class IntakeWorkflowService:
         channel = str(workflow.get("channel", "") or "").strip().lower()
         provider = str(workflow.get("provider", "") or "").strip().lower()
         if channel == "instagram_dm" and provider == "composio":
+            if self._composio is None:
+                return {}, {}, "Composio is not configured"
             source_config = _safe_dict(workflow.get("source_config"))
             connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
             try:
@@ -2836,6 +2838,8 @@ class IntakeWorkflowService:
                 return {}, {}, str(exc)
             return _safe_dict(detailed.get("summary")), _safe_dict(detailed.get("conversation")), None
         if channel == "telegram_business_dm" and provider == "telegram_bot_api":
+            if self._telegram_business is None:
+                return {}, {}, "Telegram Business service is not configured"
             source_config = _safe_dict(workflow.get("source_config"))
             business_connection_id = str(source_config.get("business_connection_id", "") or "").strip()
             detailed = self._telegram_business.get_conversation(
@@ -4186,6 +4190,8 @@ class IntakeWorkflowService:
             arguments["reply_to_message_id"] = latest_inbound
         source_config = _safe_dict(workflow.get("source_config"))
         connected_account_id = str(source_config.get("connected_account_id", "") or "").strip() or None
+        if self._composio is None:
+            return "Composio is not configured"
         try:
             result = self._composio.execute_tool(
                 customer_id=str(workflow["customer_id"]),

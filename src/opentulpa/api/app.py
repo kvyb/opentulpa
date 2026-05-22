@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from opentulpa.integrations.composio import ComposioService
 
 
-def _require(value: Any, name: str) -> Any:
+def _require[T](value: T | None, name: str) -> T:
     if value is None:
         raise RuntimeError(f"{name} not initialized")
     return value

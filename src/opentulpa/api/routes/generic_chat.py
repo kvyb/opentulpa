@@ -421,7 +421,7 @@ async def _stream_turn(
                         thread_id=thread_id,
                         sender=_send_file,
                     )
-            if turn_context_entered:
+            if turn_context_entered and turn_context is not None:
                 await turn_context.__aexit__(None, None, None)
             await queue.put(("done", {}))
 

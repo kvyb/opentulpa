@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any
 
-from mem0 import Memory
+from mem0 import Memory  # type: ignore[import-untyped]
 
 _MEM0_NOOP_MESSAGES = frozenset(
     {
@@ -176,8 +176,8 @@ class MemoryService:
             text = item.strip()
             if not text:
                 return None
-            metadata: dict[str, Any] = {}
-            kind = cls._infer_memory_kind(text=text, metadata=metadata) or "thread_context_rollup"
+            string_metadata: dict[str, Any] = {}
+            kind = cls._infer_memory_kind(text=text, metadata=string_metadata) or "thread_context_rollup"
             return {
                 "id": "",
                 "text": text,
@@ -193,8 +193,8 @@ class MemoryService:
             }
         if not isinstance(item, dict):
             return None
-        metadata = item.get("metadata")
-        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        raw_metadata = item.get("metadata")
+        metadata: dict[str, Any] = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         text = str(
             item.get("memory")
             or item.get("text")
@@ -256,7 +256,7 @@ class MemoryService:
         priority = MEMORY_KIND_PRIORITY.get(kind, 50)
         raw_score = record.get("score")
         try:
-            score = float(raw_score)
+            score = float(raw_score) if raw_score is not None else 0.0
         except (TypeError, ValueError):
             score = 0.0
         return priority, -score

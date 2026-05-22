@@ -14,7 +14,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -193,7 +193,7 @@ class OpenAICompatibleKnowledgeOracleClient:
                 source_pack=source_pack,
                 query=query,
                 workflow_context=workflow_context,
-                max_output_tokens=int(request_body["max_tokens"]),
+                max_output_tokens=int(str(request_body.get("max_tokens") or "0")),
                 response_payload=response_payload,
                 response_text=answer_text,
                 error=error_text,
@@ -239,7 +239,7 @@ class OpenAICompatibleKnowledgeOracleClient:
                 source_pack="",
                 query=query,
                 workflow_context={},
-                max_output_tokens=int(request_body["max_tokens"]),
+                max_output_tokens=int(str(request_body.get("max_tokens") or "0")),
                 response_payload=response_payload,
                 response_text=response_text,
                 error=error_text,
@@ -1145,14 +1145,17 @@ class BusinessKnowledgeService:
         file_id: str,
     ) -> sqlite3.Row | None:
         with self._conn() as conn:
-            return conn.execute(
-                """
-                SELECT *
-                FROM knowledge_sources
-                WHERE customer_id=? AND scope_type=? AND scope_id=? AND file_id=?
-                """,
-                (customer_id, scope_type, scope_id, file_id),
-            ).fetchone()
+            return cast(
+                "sqlite3.Row | None",
+                conn.execute(
+                    """
+                    SELECT *
+                    FROM knowledge_sources
+                    WHERE customer_id=? AND scope_type=? AND scope_id=? AND file_id=?
+                    """,
+                    (customer_id, scope_type, scope_id, file_id),
+                ).fetchone(),
+            )
 
     def _load_sections(
         self,

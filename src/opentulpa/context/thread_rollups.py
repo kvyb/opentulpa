@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from opentulpa.persistence.sqlite import connect_sqlite
 
 
 class ThreadRollupService:

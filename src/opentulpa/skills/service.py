@@ -10,14 +10,17 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from opentulpa.persistence.sqlite import connect_sqlite
 
 try:
-    import fcntl
+    import fcntl as _fcntl
 except ImportError:  # pragma: no cover
-    fcntl = None
+    _fcntl_module: Any = None
+else:
+    _fcntl_module = _fcntl
+fcntl: Any = _fcntl_module
 
 _DEFAULT_SKILL_CREATOR_DESCRIPTION = (
     "Use this skill when the user asks for recurring behavior/capabilities so the "
@@ -404,14 +407,17 @@ class SkillStoreService:
         customer_id: str,
         name: str,
     ) -> sqlite3.Row | None:
-        return conn.execute(
-            f"""
-            SELECT {_SKILL_ROW_COLUMNS}
-            FROM skills
-            WHERE scope=? AND customer_id=? AND name=?
-            """,
-            (scope, customer_id, name),
-        ).fetchone()
+        return cast(
+            "sqlite3.Row | None",
+            conn.execute(
+                f"""
+                SELECT {_SKILL_ROW_COLUMNS}
+                FROM skills
+                WHERE scope=? AND customer_id=? AND name=?
+                """,
+                (scope, customer_id, name),
+            ).fetchone(),
+        )
 
     def _fetch_listing_rows(
         self,
@@ -478,8 +484,11 @@ class SkillStoreService:
 
     @staticmethod
     def _should_prefer_item(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
-        return (candidate["scope"] == "user" and current["scope"] == "global") or (
-            candidate["updated_at"] > current["updated_at"]
+        return (
+            str(candidate.get("scope", "")) == "user"
+            and str(current.get("scope", "")) == "global"
+        ) or (
+            str(candidate.get("updated_at", "")) > str(current.get("updated_at", ""))
         )
 
     @staticmethod

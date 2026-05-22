@@ -3,8 +3,6 @@
 import json
 import logging
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -12,10 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
+from apscheduler.triggers.date import DateTrigger  # type: ignore[import-untyped]
 
+from opentulpa.persistence.sqlite import connect_sqlite
 from opentulpa.scheduler.models import Routine
 
 logger = logging.getLogger(__name__)

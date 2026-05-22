@@ -11,7 +11,7 @@ import re
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class _NoopContext:
     def __enter__(self) -> Any:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
         return False
 
 
@@ -306,10 +306,10 @@ class _TraceUsageAccumulator:
     cost: dict[str, float] = field(default_factory=dict)
 
     def add(self, *, usage: dict[str, int], cost: dict[str, float]) -> None:
-        for key, value in usage.items():
-            self.usage[key] = int(self.usage.get(key, 0)) + int(value)
-        for key, value in cost.items():
-            self.cost[key] = float(self.cost.get(key, 0.0)) + float(value)
+        for key, usage_value in usage.items():
+            self.usage[key] = int(self.usage.get(key, 0)) + int(usage_value)
+        for key, cost_value in cost.items():
+            self.cost[key] = float(self.cost.get(key, 0.0)) + float(cost_value)
 
 
 @dataclass
@@ -361,7 +361,7 @@ class _LangfuseToolSpan:
             self._observation = self._ctx.__enter__()
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
         if exc is not None:
             self._status = "error"
             self._result = {"error": f"{type(exc).__name__}: {exc}"}
@@ -513,7 +513,7 @@ class LangfuseTracer:
             or None,
         }
         base.update(dict(metadata or {}))
-        return _json_safe(base)
+        return cast("dict[str, Any]", _json_safe(base))
 
     def tags(self, tags: list[str] | tuple[str, ...] | None = None) -> list[str]:
         resolved = ["opentulpa"]

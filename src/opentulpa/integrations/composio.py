@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from opentulpa.core.public_urls import build_public_composio_callback_url
 
@@ -730,13 +730,16 @@ class ComposioService:
         user_id: str,
         text: str | None = None,
     ) -> dict[str, Any]:
-        return self._sdk().tools.execute(
-            slug=slug,
-            arguments=arguments,
-            connected_account_id=connected_account_id,
-            user_id=user_id,
-            text=text,
-            dangerously_skip_version_check=True,
+        return cast(
+            "dict[str, Any]",
+            self._sdk().tools.execute(
+                slug=slug,
+                arguments=arguments,
+                connected_account_id=connected_account_id,
+                user_id=user_id,
+                text=text,
+                dangerously_skip_version_check=True,
+            ),
         )
 
     def _fetch_instagram_conversation(
@@ -819,7 +822,7 @@ class ComposioService:
             verified_recipient = participant_ids[1]
 
         own_participant_ids = [item for item in participant_ids if item != verified_recipient] if verified_recipient else []
-        normalized_messages = []
+        normalized_messages: list[dict[str, Any]] = []
         for item in messages:
             msg = _safe_dict(item)
             sender = _safe_dict(msg.get("from"))
