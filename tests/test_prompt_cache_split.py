@@ -7,6 +7,7 @@ import pytest
 from opentulpa.agent.graph_builder import (
     _build_connected_composio_toolkits_context,
     _build_late_turn_control_text,
+    _prompt_cache_prefix_count_for_turn,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.prompt_policy import build_system_prompt_message
@@ -340,6 +341,46 @@ def test_prepare_messages_for_qwen_uses_tool_result_after_ai_tool_call() -> None
     assert cache_block["text"] == '{"ok": true}'
     assert cache_block["cache_control"] == {"type": "ephemeral"}
     assert prepared[4].content == "Current user turn"
+
+
+def test_qwen_cache_prefix_uses_stable_prefix_for_fresh_user_turn() -> None:
+    count, mode = _prompt_cache_prefix_count_for_turn(
+        prompt_cache_strategy="explicit_tail_breakpoint",
+        stable_prefix_count=2,
+        older_history_count=6,
+        latest_turn_messages=[HumanMessage(content="New user turn")],
+    )
+
+    assert count == 2
+    assert mode == "stable_prefix_fresh_user_turn"
+
+
+def test_qwen_cache_prefix_uses_older_history_after_tool_loop_starts() -> None:
+    count, mode = _prompt_cache_prefix_count_for_turn(
+        prompt_cache_strategy="explicit_tail_breakpoint",
+        stable_prefix_count=2,
+        older_history_count=6,
+        latest_turn_messages=[
+            HumanMessage(content="New user turn"),
+            AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+            ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
+        ],
+    )
+
+    assert count == 8
+    assert mode == "full_older_history"
+
+
+def test_non_qwen_cache_prefix_keeps_full_older_history() -> None:
+    count, mode = _prompt_cache_prefix_count_for_turn(
+        prompt_cache_strategy="breakpoint",
+        stable_prefix_count=2,
+        older_history_count=6,
+        latest_turn_messages=[HumanMessage(content="New user turn")],
+    )
+
+    assert count == 8
+    assert mode == "full_older_history"
 
 
 class _CaptureResponse:
