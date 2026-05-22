@@ -432,9 +432,8 @@ def test_tool_span_inherits_active_trace_context() -> None:
         trace_id="turn_1",
         user_id="cust_1",
         session_id="thread_1",
-    ):
-        with tracer.tool_span(trace_id="turn_1", tool_name="send_message"):
-            pass
+    ), tracer.tool_span(trace_id="turn_1", tool_name="send_message"):
+        pass
 
     root, tool = client.observations
     assert "trace_context" not in root.kwargs
@@ -524,6 +523,7 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.recursion_limit = 8
     runtime._langfuse_tracer = _FakeCallbackTracer()
+    runtime._tools = {}
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
     runtime._build_pending_context_summary = lambda **kwargs: ("", None)  # type: ignore[assignment]
@@ -552,6 +552,8 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
     assert runtime._langfuse_tracer.calls[0]["user_id"] == "telegram_test"
     assert runtime._langfuse_tracer.calls[0]["trace_id"] == "turn_test"
     assert runtime._langfuse_tracer.calls[0]["session_id"] == "chat_test"
+    assert len(prepared.config["metadata"]["bound_tool_schema_hash"]) == 64
+    assert len(runtime._langfuse_tracer.calls[0]["metadata"]["bound_tool_schema_hash"]) == 64
 
 
 @pytest.mark.asyncio
@@ -583,6 +585,8 @@ async def test_ainvoke_model_attaches_langfuse_callbacks_with_with_config(tmp_pa
     assert model.configs[0]["callbacks"] == ["langfuse-callback"]
     assert runtime._langfuse_tracer.calls[0]["trace_id"] == "turn_test"
     assert runtime._langfuse_tracer.calls[0]["metadata"]["call_site"] == "graph_agent"
+    assert len(runtime._langfuse_tracer.calls[0]["metadata"]["bound_tool_schema_hash"]) == 64
+    assert len(model.configs[0]["metadata"]["bound_tool_schema_hash"]) == 64
     assert runtime._langfuse_tracer.generations == []
 
 

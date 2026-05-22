@@ -3194,7 +3194,7 @@ class OpenTulpaLangGraphRuntime:
         )
         if callbacks:
             config["callbacks"] = callbacks
-            config["metadata"] = {
+            config_metadata = {
                 "langfuse_user_id": str(customer_id or "").strip(),
                 "langfuse_session_id": str(thread_id or "").strip(),
                 "langfuse_tags": [
@@ -3207,6 +3207,8 @@ class OpenTulpaLangGraphRuntime:
                 "turn_mode": str(turn_mode or "").strip(),
                 "prompt_mode": str(prompt_mode or "").strip(),
             }
+            config_metadata.update(_tool_schema_trace_fields(self, turn_mode))
+            config["metadata"] = config_metadata
             config["tags"] = list(config["metadata"]["langfuse_tags"])
             graph_langfuse_callback_attached = True
         else:
@@ -3251,6 +3253,7 @@ class OpenTulpaLangGraphRuntime:
             "model_name": str(model_name or "").strip(),
             "opentulpa_trace_id": str(trace_id or "").strip(),
         }
+        metadata.update(_tool_schema_trace_fields(self, str(turn_mode or "").strip()))
         return build_callbacks(
             user_id=str(customer_id or "").strip() or None,
             trace_id=str(trace_id or "").strip() or None,
@@ -3307,6 +3310,12 @@ class OpenTulpaLangGraphRuntime:
                 "call_site": str(context.get("call_site") or "").strip()
                 or "runtime_model_invoke",
             }
+            metadata.update(
+                _tool_schema_trace_fields(
+                    self,
+                    str(context.get("turn_mode") or "").strip(),
+                )
+            )
             configured_model = with_config(
                 {
                     "callbacks": callbacks,
