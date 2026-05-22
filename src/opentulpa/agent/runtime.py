@@ -1176,23 +1176,34 @@ def _build_intake_workflow_agent_prompt(
     )
 
 
-def _build_intake_workflow_human_prompt(
+def _build_intake_workflow_context_prompt(
     *,
     customer_id: str,
     workflow: dict[str, Any],
+) -> str:
+    compact_workflow = _compact_workflow_for_prompt(workflow)
+    return (
+        "INTAKE_WORKFLOW_CONTEXT\n"
+        "Stable owner-defined workflow configuration for this intake run.\n"
+        f"customer_id={customer_id}\n"
+        f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}"
+    )
+
+
+def _build_intake_workflow_state_prompt(
+    *,
     conversation: dict[str, Any],
     active_booking: dict[str, Any] | None,
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
 ) -> str:
-    compact_workflow = _compact_workflow_for_prompt(workflow)
     compact_conversation = _compact_conversation_for_prompt(conversation)
     compact_active_booking = _compact_booking_for_prompt(active_booking)
     compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
     compact_feedback = _compact_execution_feedback(execution_feedback)
     return (
-        f"customer_id={customer_id}\n"
-        f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
+        "INTAKE_CONVERSATION_STATE\n"
+        "Volatile conversation state for the current inbound message.\n"
         f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
         f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
         f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
@@ -3128,8 +3139,6 @@ class OpenTulpaLangGraphRuntime:
             "tool_error_count": 0,
             "workflow_setup_no_progress_retry_count": 0,
             "workflow_setup_repair_instruction": "",
-            "frozen_prompt_context": None,
-            "frozen_history_projection": None,
             "stream_model_calls": False,
             **skill_state,
         }
@@ -4624,10 +4633,14 @@ class OpenTulpaLangGraphRuntime:
                     schema=_IntakeWorkflowDecision,
                     messages=[
                         SystemMessage(content=_build_intake_workflow_system_prompt()),
-                        HumanMessage(
-                            content=_build_intake_workflow_human_prompt(
+                        SystemMessage(
+                            content=_build_intake_workflow_context_prompt(
                                 customer_id=customer_id,
                                 workflow=workflow,
+                            )
+                        ),
+                        HumanMessage(
+                            content=_build_intake_workflow_state_prompt(
                                 conversation=conversation,
                                 active_booking=active_booking,
                                 recent_completed_booking=recent_completed_booking,
@@ -4635,7 +4648,7 @@ class OpenTulpaLangGraphRuntime:
                             )
                         ),
                     ],
-                    stable_prefix_count=1,
+                    stable_prefix_count=2,
                     call_context={
                         "call_site": "intake_workflow_decision",
                         "trace_id": structured_trace_id,

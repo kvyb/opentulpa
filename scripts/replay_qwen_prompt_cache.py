@@ -14,11 +14,12 @@ import httpx
 
 from opentulpa.agent.graph_builder import (
     CACHE_STICKY_ROUTING_ANCHOR,
-    _committed_history_message_count,
-    _message_tokens,
+    _compact_qwen_frontier_history,
+    _split_qwen_cacheable_history,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.model_pool import infer_stable_system_prefix_count
+from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 
 
@@ -223,6 +224,20 @@ def _cache_breakpoint_index(messages: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def _is_dynamic_system_message(message: Any) -> bool:
+    if not isinstance(message, SystemMessage):
+        return False
+    text = str(getattr(message, "content", "") or "")
+    return (
+        PROMPT_DYNAMIC_BOUNDARY in text
+        or text.startswith("WORKFLOW_SETUP_CONTROL_CARD")
+        or text.startswith("Compressed older")
+        or text.startswith("Active persistent")
+        or text.startswith("Relevant ")
+        or text.startswith("Known long-link")
+    )
+
+
 def _usage_value(usage: dict[str, Any], *keys: str) -> int:
     for key in keys:
         value = usage.get(key)
@@ -258,6 +273,10 @@ def _openrouter_call(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     max_tokens: int,
+    retry_attempts: int,
+    retry_delay_seconds: float,
+    retry_backoff_multiplier: float,
+    retry_max_delay_seconds: float,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     assert api_key.strip(), "api key must not be empty"
@@ -278,9 +297,20 @@ def _openrouter_call(
         "HTTP-Referer": "https://opentulpa.com",
     }
     with httpx.Client(timeout=timeout_seconds) as client:
-        response = client.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()
+        next_delay = max(0.0, retry_delay_seconds)
+        for attempt in range(1, max(1, retry_attempts) + 1):
+            response = client.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
+            if response.status_code < 400:
+                return response.json()
+            print(f"provider_error attempt={attempt} status={response.status_code} {response.text[:500]}")
+            if response.status_code != 429 or attempt >= max(1, retry_attempts):
+                response.raise_for_status()
+            time.sleep(next_delay)
+            next_delay = min(
+                max(0.0, retry_max_delay_seconds),
+                max(0.0, next_delay * max(1.0, retry_backoff_multiplier)),
+            )
+    raise RuntimeError("OpenRouter call ended without a response")
 
 
 def _select_observations(observations: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
@@ -315,7 +345,8 @@ def _build_replay_payload(
     observation: dict[str, Any],
     *,
     model: str,
-    commit_token_step: int,
+    target_tail_tokens: int,
+    cache_salt: str,
 ) -> dict[str, Any]:
     raw_messages = _parse_langfuse_messages(observation)
     assert raw_messages is not None, "selected observation must have parseable messages"
@@ -330,16 +361,53 @@ def _build_replay_payload(
         )
     ):
         stable_prefix_count += 1
-    history_messages = lc_messages[stable_prefix_count:-1]
-    committed_history_count = _committed_history_message_count(
-        [_message_tokens([message]) for message in history_messages],
-        commit_token_step=commit_token_step,
+    prefix_messages = lc_messages[:stable_prefix_count]
+    if not (
+        prefix_messages
+        and isinstance(prefix_messages[-1], HumanMessage)
+        and str(prefix_messages[-1].content or "").startswith(CACHE_STICKY_ROUTING_ANCHOR)
+    ):
+        prefix_messages = [*prefix_messages, HumanMessage(content=CACHE_STICKY_ROUTING_ANCHOR)]
+    salt = str(cache_salt or "").strip()
+    if salt and prefix_messages and isinstance(prefix_messages[0], SystemMessage):
+        prefix_messages = [
+            SystemMessage(
+                content=(
+                    f"{str(prefix_messages[0].content or '').rstrip()}\n\n"
+                    f"BENCHMARK_CACHE_SALT: {salt}"
+                )
+            ),
+            *prefix_messages[1:],
+        ]
+    if salt and prefix_messages and isinstance(prefix_messages[-1], HumanMessage):
+        prefix_messages = [
+            *prefix_messages[:-1],
+            HumanMessage(content=f"{CACHE_STICKY_ROUTING_ANCHOR}\nBenchmark cache salt: {salt}"),
+        ]
+    replay_tail = lc_messages[stable_prefix_count:]
+    frozen_late_messages: list[Any] = []
+    dynamic_late_messages = [message for message in replay_tail if _is_dynamic_system_message(message)]
+    history_messages = [
+        message for message in replay_tail if not _is_dynamic_system_message(message)
+    ]
+    cacheable_history, frontier_history, cache_policy = _split_qwen_cacheable_history(
+        older_history_messages=[],
+        latest_turn_messages=history_messages,
+        target_tail_tokens=target_tail_tokens,
     )
-    cacheable_prefix_count = stable_prefix_count + committed_history_count
+    frontier_history = _compact_qwen_frontier_history(frontier_history)
+    cacheable_prefix_count = len(prefix_messages) + len(cacheable_history)
+    reordered_messages = [
+        *prefix_messages,
+        *cacheable_history,
+        *frozen_late_messages,
+        *frontier_history,
+        *dynamic_late_messages,
+    ]
     prepared = runtime.prepare_messages_for_prompt_cache(
-        lc_messages,
+        reordered_messages,
         model_name=model,
-        stable_prefix_count=stable_prefix_count,
+        stable_prefix_count=len(prefix_messages),
         cacheable_prefix_count=cacheable_prefix_count,
     )
     openai_messages = _to_openai_messages(prepared)
@@ -349,10 +417,10 @@ def _build_replay_payload(
     return {
         "messages": openai_messages,
         "tools": tools,
-        "stable_prefix_count": stable_prefix_count,
+        "stable_prefix_count": len(prefix_messages),
         "cacheable_prefix_count": cacheable_prefix_count,
         "cache_breakpoint_index": breakpoint_index,
-        "cache_policy": "committed",
+        "cache_policy": cache_policy,
     }
 
 
@@ -363,8 +431,15 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--passes", type=int, default=2)
     parser.add_argument("--model", default="qwen/qwen3.7-max")
-    parser.add_argument("--commit-token-step", type=int, default=4000)
+    parser.add_argument("--target-tail-tokens", type=int, default=300)
+    parser.add_argument("--cache-salt", default="")
     parser.add_argument("--max-tokens", type=int, default=1)
+    parser.add_argument("--delay-seconds", type=float, default=0.0)
+    parser.add_argument("--retry-attempts", type=int, default=1)
+    parser.add_argument("--retry-delay-seconds", type=float, default=60.0)
+    parser.add_argument("--retry-backoff-multiplier", type=float, default=1.0)
+    parser.add_argument("--retry-max-delay-seconds", type=float, default=300.0)
+    parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--out", type=Path, default=Path(".tmp/qwen-cache-replay/latest.json"))
     args = parser.parse_args()
@@ -398,22 +473,61 @@ def main() -> None:
     print("pass observation model prompt cached write cost breakpoint cacheable messages tools")
     for pass_index in range(args.passes):
         for observation in selected:
+            if results and args.delay_seconds > 0:
+                time.sleep(float(args.delay_seconds))
             payload = _build_replay_payload(
                 runtime,
                 observation,
                 model=args.model,
-                commit_token_step=int(args.commit_token_step),
+                target_tail_tokens=int(args.target_tail_tokens),
+                cache_salt=str(args.cache_salt or ""),
             )
             started = time.perf_counter()
-            response = _openrouter_call(
-                api_key=api_key,
-                base_url=base_url,
-                model=args.model,
-                messages=payload["messages"],
-                tools=payload["tools"],
-                max_tokens=args.max_tokens,
-                timeout_seconds=args.timeout_seconds,
-            )
+            try:
+                response = _openrouter_call(
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=args.model,
+                    messages=payload["messages"],
+                    tools=payload["tools"],
+                    max_tokens=args.max_tokens,
+                    retry_attempts=int(args.retry_attempts),
+                    retry_delay_seconds=float(args.retry_delay_seconds),
+                    retry_backoff_multiplier=float(args.retry_backoff_multiplier),
+                    retry_max_delay_seconds=float(args.retry_max_delay_seconds),
+                    timeout_seconds=args.timeout_seconds,
+                )
+            except httpx.HTTPStatusError as exc:
+                if not args.continue_on_error:
+                    raise
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                status_code = exc.response.status_code if exc.response is not None else 0
+                error_text = exc.response.text[:500] if exc.response is not None else str(exc)
+                result = {
+                    "pass": pass_index + 1,
+                    "observation_id": observation.get("id"),
+                    "trace_id": observation.get("traceId"),
+                    "source_model": observation.get("model"),
+                    "target_model": args.model,
+                    "input_usage": observation.get("inputUsage"),
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "cost_usd": 0.0,
+                    "elapsed_ms": elapsed_ms,
+                    "error_status": status_code,
+                    "error": error_text,
+                    **payload,
+                }
+                result.pop("messages")
+                result.pop("tools")
+                results.append(result)
+                print(
+                    f"{result['pass']} {result['observation_id']} {observation.get('model')} "
+                    f"ERROR status={status_code} {elapsed_ms}ms"
+                )
+                continue
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
             result = {
@@ -426,7 +540,12 @@ def main() -> None:
                 "prompt_tokens": _usage_value(usage, "prompt_tokens", "input_tokens"),
                 "completion_tokens": _usage_value(usage, "completion_tokens", "output_tokens"),
                 "cached_tokens": _usage_value(usage, "cached_tokens", "input_cache_read"),
-                "cache_write_tokens": _usage_value(usage, "cache_write_tokens", "input_cache_write"),
+                "cache_write_tokens": _usage_value(
+                    usage,
+                    "cache_write_tokens",
+                    "input_cache_write",
+                    "input_cache_creation",
+                ),
                 "cost_usd": _usage_cost(usage),
                 "elapsed_ms": elapsed_ms,
                 **payload,
@@ -444,8 +563,8 @@ def main() -> None:
     summary = {
         "started_at": started_at,
         "model": args.model,
-        "cache_policy": "committed",
-        "commit_token_step": args.commit_token_step,
+        "cache_policy": "tail_sized",
+        "target_tail_tokens": args.target_tail_tokens,
         "source": str(args.observations_file) if args.observations_file else {"trace_id": args.trace_id},
         "selected_observation_ids": [item.get("id") for item in selected],
         "results": results,

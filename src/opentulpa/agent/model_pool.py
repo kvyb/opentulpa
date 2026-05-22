@@ -12,7 +12,7 @@ from langchain.chat_models import init_chat_model
 from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
@@ -352,7 +352,7 @@ def prompt_cache_breakpoint_message_index(
 ) -> int | None:
     if effective_prefix_count <= 0:
         return None
-    target_roles = (SystemMessage, HumanMessage, AIMessage, ToolMessage)
+    target_roles = (SystemMessage, HumanMessage, AIMessage)
     for idx in range(min(effective_prefix_count, len(messages)) - 1, -1, -1):
         message = messages[idx]
         if not isinstance(message, target_roles):

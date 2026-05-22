@@ -1165,7 +1165,7 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
+async def test_agent_uses_server_time_tool_guidance_instead_of_live_time_context() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     captured_messages: list[list[Any]] = []
     captured_prefix_counts: list[int] = []
@@ -1249,23 +1249,24 @@ async def test_agent_freezes_live_time_context_across_tool_loop() -> None:
 
     assert result["final_response_text"] == "Done."
     assert len(captured_messages) == 2
-    assert live_time_calls == 1
+    assert live_time_calls == 0
     assert captured_prefix_counts[0] == 2
     assert captured_prefix_counts[1] == captured_prefix_counts[0]
     assert isinstance(captured_messages[0][1], HumanMessage)
     assert "OpenTulpa cache anchor v1" in str(captured_messages[0][1].content)
 
-    def _live_time_block(messages: list[Any]) -> str:
+    def _time_tool_guidance(messages: list[Any]) -> str:
         return next(
             str(getattr(msg, "content", ""))
             for msg in messages
-            if "Live time context (auto-injected this turn):" in str(getattr(msg, "content", ""))
+            if 'tool_group_exec(group="memory", command="server_time", args_json={})'
+            in str(getattr(msg, "content", ""))
         )
 
-    first_live_time = _live_time_block(captured_messages[0])
-    second_live_time = _live_time_block(captured_messages[1])
-    assert "2026-04-09T10:01:00+08:00" in first_live_time
-    assert second_live_time == first_live_time
+    first_time_guidance = _time_tool_guidance(captured_messages[0])
+    second_time_guidance = _time_tool_guidance(captured_messages[1])
+    assert "Live time context (auto-injected this turn)" not in first_time_guidance
+    assert second_time_guidance == first_time_guidance
     assert captured_messages[0][:captured_prefix_counts[0]] == captured_messages[1][:captured_prefix_counts[1]]
 
 
@@ -1572,3 +1573,72 @@ def test_memory_grounding_block_stays_compact() -> None:
     assert "Preferences and directives:" in block
     assert "Technical or code facts:" in block
     assert _approx_tokens(block) <= 520
+
+
+def test_graph_input_preserves_frozen_prompt_state_between_turns() -> None:
+    graph_input = OpenTulpaLangGraphRuntime._build_graph_input(
+        user_text="next turn",
+        customer_id="telegram_test",
+        thread_id="chat_test",
+        turn_mode="interactive",
+        prompt_mode="task_chat",
+        pending_context_summary="",
+        trace_id="trace_test",
+        skill_state={},
+    )
+
+    assert "frozen_prompt_context" not in graph_input
+    assert "frozen_history_projection" not in graph_input
+    assert graph_input["messages"] == [HumanMessage(content="next turn")]
+
+
+@pytest.mark.asyncio
+async def test_graph_preserves_frozen_history_projection_across_user_turns() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_projection_starts: list[int | None] = []
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        return AIMessage(content="ok")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    graph = build_runtime_graph(runtime)
+    config = {"configurable": {"thread_id": "chat_projection"}, "recursion_limit": 8}
+
+    first = await graph.ainvoke(
+        OpenTulpaLangGraphRuntime._build_graph_input(
+            user_text="first",
+            customer_id="telegram_test",
+            thread_id="chat_projection",
+            turn_mode="interactive",
+            prompt_mode="task_chat",
+            pending_context_summary="",
+            trace_id="trace_first",
+            skill_state={},
+        ),
+        config=config,
+    )
+    captured_projection_starts.append(first.get("frozen_history_projection", {}).get("turn_start_index"))
+
+    second = await graph.ainvoke(
+        OpenTulpaLangGraphRuntime._build_graph_input(
+            user_text="second",
+            customer_id="telegram_test",
+            thread_id="chat_projection",
+            turn_mode="interactive",
+            prompt_mode="task_chat",
+            pending_context_summary="",
+            trace_id="trace_second",
+            skill_state={},
+        ),
+        config=config,
+    )
+    captured_projection_starts.append(second.get("frozen_history_projection", {}).get("turn_start_index"))
+
+    assert captured_projection_starts == [0, 0]

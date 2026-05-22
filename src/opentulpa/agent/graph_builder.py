@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timedelta
@@ -115,20 +116,50 @@ LOOP_LIMIT_REPAIR_INSTRUCTION = (
 CACHE_STICKY_ROUTING_ANCHOR = (
     "OpenTulpa cache anchor v1. Real conversation messages follow; do not answer this marker."
 )
+QWEN_CACHE_VOLATILE_HISTORY_TAIL_TOKENS = 300
+QWEN_CACHE_INITIAL_COMMIT_TOKENS = 1024
 QWEN_CACHE_HISTORY_COMMIT_TOKENS = 4000
 
 
-def _committed_history_message_count(
+def _tail_sized_history_message_count(
     token_counts: list[int],
     *,
+    target_tail_tokens: int = QWEN_CACHE_VOLATILE_HISTORY_TAIL_TOKENS,
+) -> int:
+    safe_counts = [max(0, int(token_count)) for token_count in token_counts]
+    if not safe_counts:
+        return 0
+    included = 0
+    remaining_tokens = sum(safe_counts)
+    safe_target = max(0, int(target_tail_tokens))
+    for token_count in safe_counts:
+        if remaining_tokens <= safe_target:
+            break
+        included += 1
+        remaining_tokens -= token_count
+    return included
+
+
+def _committed_tail_sized_history_message_count(
+    token_counts: list[int],
+    *,
+    target_tail_tokens: int = QWEN_CACHE_VOLATILE_HISTORY_TAIL_TOKENS,
+    initial_commit_tokens: int = QWEN_CACHE_INITIAL_COMMIT_TOKENS,
     commit_token_step: int = QWEN_CACHE_HISTORY_COMMIT_TOKENS,
 ) -> int:
-    safe_step = max(1, int(commit_token_step))
-    safe_counts = [max(0, int(token_count)) for token_count in token_counts]
-    total_tokens = sum(safe_counts)
-    committed_tokens = (total_tokens // safe_step) * safe_step
-    if committed_tokens <= 0:
+    tail_sized_count = _tail_sized_history_message_count(
+        token_counts,
+        target_tail_tokens=target_tail_tokens,
+    )
+    if tail_sized_count <= 0:
         return 0
+    safe_counts = [max(0, int(token_count)) for token_count in token_counts[:tail_sized_count]]
+    total_tokens = sum(safe_counts)
+    safe_initial = max(1, int(initial_commit_tokens))
+    if total_tokens < safe_initial:
+        return 0
+    safe_step = max(1, int(commit_token_step))
+    committed_tokens = safe_initial + ((total_tokens - safe_initial) // safe_step) * safe_step
     included = 0
     included_tokens = 0
     for token_count in safe_counts:
@@ -140,29 +171,138 @@ def _committed_history_message_count(
     return included
 
 
-def _prompt_cache_prefix_count_for_turn(
-    *,
-    prompt_cache_strategy: str,
-    stable_prefix_count: int,
-    older_history_count: int,
-    older_history_token_counts: list[int] | None = None,
+def _latest_turn_frontier_start_index(
     latest_turn_messages: list[AnyMessage],
-) -> tuple[int, str]:
-    full_count = max(0, int(stable_prefix_count)) + max(0, int(older_history_count))
-    if str(prompt_cache_strategy or "") != "explicit_committed_breakpoint":
-        return full_count, "full_older_history"
-    is_fresh_user_turn = (
-        len(latest_turn_messages) == 1 and isinstance(latest_turn_messages[0], HumanMessage)
+) -> int:
+    if not latest_turn_messages:
+        return 0
+    last_index = len(latest_turn_messages) - 1
+    last = latest_turn_messages[last_index]
+    if isinstance(last, HumanMessage):
+        return last_index
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return last_index
+    if isinstance(last, ToolMessage):
+        tool_call_id = str(getattr(last, "tool_call_id", "") or "").strip()
+        previous_index = last_index - 1
+        if previous_index >= 0 and isinstance(latest_turn_messages[previous_index], AIMessage):
+            call_ids = set(ContextEngineer._tool_call_ids(latest_turn_messages[previous_index]))
+            if not tool_call_id or tool_call_id in call_ids:
+                return previous_index
+        return last_index
+    return len(latest_turn_messages)
+
+
+def _qwen_cache_safe_history_count(
+    messages: list[AnyMessage],
+    requested_count: int,
+) -> int:
+    safe_count = max(0, min(int(requested_count), len(messages)))
+    while safe_count > 0:
+        last = messages[safe_count - 1]
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            safe_count -= 1
+            continue
+        if isinstance(last, ToolMessage):
+            tool_call_id = str(getattr(last, "tool_call_id", "") or "").strip()
+            for previous in reversed(messages[: safe_count - 1]):
+                if not isinstance(previous, AIMessage):
+                    continue
+                call_ids = set(ContextEngineer._tool_call_ids(previous))
+                if not call_ids:
+                    continue
+                if not tool_call_id or tool_call_id in call_ids:
+                    return safe_count
+                break
+            safe_count -= 1
+            continue
+        if _content_to_text(getattr(last, "content", "")).strip():
+            return safe_count
+        safe_count -= 1
+    return 0
+
+
+def _split_qwen_cacheable_history(
+    *,
+    older_history_messages: list[AnyMessage],
+    latest_turn_messages: list[AnyMessage],
+    target_tail_tokens: int = QWEN_CACHE_VOLATILE_HISTORY_TAIL_TOKENS,
+) -> tuple[list[AnyMessage], list[AnyMessage], str]:
+    frontier_start = _latest_turn_frontier_start_index(latest_turn_messages)
+    stable_candidates = [*older_history_messages, *latest_turn_messages[:frontier_start]]
+    stable_count = _committed_tail_sized_history_message_count(
+        [_message_tokens([message]) for message in stable_candidates],
+        target_tail_tokens=target_tail_tokens,
     )
-    if is_fresh_user_turn and older_history_count <= 0:
-        return max(0, int(stable_prefix_count)), "stable_prefix_fresh_user_turn"
-    if older_history_token_counts is None:
-        return full_count, "full_older_history"
-    committed_history_count = _committed_history_message_count(older_history_token_counts)
-    if committed_history_count <= 0:
-        return max(0, int(stable_prefix_count)), "stable_prefix_committed_only"
-    safe_history_count = min(max(0, int(older_history_count)), committed_history_count)
-    return max(0, int(stable_prefix_count)) + safe_history_count, "committed_older_history"
+    stable_count = _qwen_cache_safe_history_count(stable_candidates, stable_count)
+    if stable_count <= 0:
+        return [], [*stable_candidates, *latest_turn_messages[frontier_start:]], "stable_prefix_tail_only"
+    cacheable_history = [
+        _qwen_cacheable_history_message(stable_candidates[:stable_count])
+    ]
+    frontier_history = [*stable_candidates[stable_count:], *latest_turn_messages[frontier_start:]]
+    return cacheable_history, frontier_history, "committed_tail_sized_history"
+
+
+def _qwen_message_role(message: AnyMessage) -> str:
+    if isinstance(message, HumanMessage):
+        return "user"
+    if isinstance(message, AIMessage):
+        return "assistant"
+    if isinstance(message, ToolMessage):
+        return "tool"
+    if isinstance(message, SystemMessage):
+        return "system"
+    return type(message).__name__
+
+
+def _qwen_cacheable_history_item(message: AnyMessage) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "role": _qwen_message_role(message),
+        "content": _content_to_text(getattr(message, "content", "")).strip(),
+    }
+    if isinstance(message, HumanMessage):
+        text = item["content"]
+        if text.startswith("INTERNAL_ONBOARDING_SEED."):
+            item["role"] = "system"
+            item["note"] = "internal_onboarding_seed"
+    if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
+        item["tool_calls"] = getattr(message, "tool_calls", []) or []
+    if isinstance(message, ToolMessage):
+        item["tool_call_id"] = str(getattr(message, "tool_call_id", "") or "").strip()
+    return item
+
+
+def _qwen_cacheable_history_message(messages: list[AnyMessage]) -> HumanMessage:
+    payload = [_qwen_cacheable_history_item(message) for message in messages]
+    return HumanMessage(
+        content=(
+            "QWEN_CACHEABLE_COMMITTED_HISTORY\n"
+            "Stable completed prior conversation/tool history. Use as context; live frontier follows later.\n"
+            f"{json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}"
+        )
+    )
+
+
+def _qwen_volatile_history_message(messages: list[AnyMessage]) -> HumanMessage:
+    payload = [_qwen_cacheable_history_item(message) for message in messages]
+    return HumanMessage(
+        content=(
+            "QWEN_VOLATILE_RECENT_HISTORY\n"
+            "Recent uncommitted conversation/tool history. Use as context; current live frontier follows.\n"
+            f"{json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}"
+        )
+    )
+
+
+def _compact_qwen_frontier_history(messages: list[AnyMessage]) -> list[AnyMessage]:
+    frontier_start = _latest_turn_frontier_start_index(messages)
+    if frontier_start <= 0:
+        return messages
+    return [
+        _qwen_volatile_history_message(messages[:frontier_start]),
+        *messages[frontier_start:],
+    ]
 
 
 def _build_workflow_setup_prompt_context(
@@ -282,31 +422,34 @@ def _frozen_prompt_context_matches(
 
 def _build_late_turn_control_text(
     *,
-    prompt_mode: str,
-    turn_mode: str,
     customer_id: str,
-    live_time: dict[str, str],
-    connected_composio_toolkits_context: str = "",
 ) -> str:
     parts: list[str] = [
         PROMPT_DYNAMIC_BOUNDARY,
-        _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
-        _content_to_text(_build_turn_mode_system_message(turn_mode).content),
         (
             f"customer_id={customer_id}. "
             "Customer scope for customer-scoped tools is resolved automatically from runtime state."
         ),
-        connected_composio_toolkits_context,
         (
-            "Live time context (auto-injected this turn):\n"
-            f"- server_time_local_iso: {live_time['server_time_local_iso']}\n"
-            f"- server_time_utc_iso: {live_time['server_time_utc_iso']}\n"
-            f"- server_utc_offset: {live_time['server_utc_offset']}\n"
-            f"- user_time_local_iso: {live_time['user_time_local_iso']}\n"
-            f"- user_utc_offset: {live_time['user_utc_offset']}\n"
-            f"- user_time_source: {live_time['user_time_source']}\n"
-            "Use these concrete values for all relative-time reasoning in this turn."
+            "Time context is available through tool_group_exec(group=\"memory\", command=\"server_time\", args_json={}). "
+            "Call it before interpreting relative dates, times, reminders, schedules, deadlines, or timezone-sensitive wording. "
+            "Do not infer current time from stale conversation history."
         ),
+    ]
+    return "\n\n".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _build_current_turn_context_text(
+    *,
+    prompt_mode: str,
+    turn_mode: str,
+    connected_composio_toolkits_context: str = "",
+) -> str:
+    parts: list[str] = [
+        "OPENTULPA_CURRENT_TURN_CONTEXT",
+        _content_to_text(_build_prompt_mode_message(prompt_mode).content),  # type: ignore[arg-type]
+        _content_to_text(_build_turn_mode_system_message(turn_mode).content),
+        connected_composio_toolkits_context,
     ]
     return "\n\n".join(str(part).strip() for part in parts if str(part).strip())
 
@@ -941,7 +1084,6 @@ def build_runtime_graph(runtime: Any):
                 )
                 else None
             )
-            live_time = await runtime._build_live_time_context(customer_id)
             connected_composio_toolkits_context = await _build_connected_composio_toolkits_context(
                 runtime,
                 customer_id,
@@ -1079,6 +1221,15 @@ def build_runtime_graph(runtime: Any):
                 if grounding_entry is not None:
                     late_entries.append(grounding_entry)
 
+            workflow_setup_control_context = (
+                _build_workflow_setup_prompt_context(
+                    runtime,
+                    customer_id=customer_id,
+                    thread_id=thread_id,
+                )
+                if turn_mode == "workflow_setup"
+                else ""
+            )
             frozen_prompt_context = {
                 "signature": {
                     "latest_user": latest_user,
@@ -1087,26 +1238,30 @@ def build_runtime_graph(runtime: Any):
                     "turn_mode": turn_mode,
                 },
                 "late_control_content": _build_late_turn_control_text(
+                    customer_id=customer_id,
+                ),
+                "current_turn_context_content": _build_current_turn_context_text(
                     prompt_mode=prompt_mode,
                     turn_mode=turn_mode,
-                    customer_id=customer_id,
-                    live_time=live_time,
                     connected_composio_toolkits_context=connected_composio_toolkits_context,
                 ),
                 "late_control_sections": [
                     "volatile_injected",
+                    "customer_scope",
+                    "time_tool_guidance",
+                ],
+                "current_turn_context_sections": [
                     f"prompt_mode:{prompt_mode}",
                     f"turn_mode:{turn_mode}",
-                    "customer_scope",
                     *(
                         ["connected_composio_toolkits"]
                         if connected_composio_toolkits_context
                         else []
                     ),
-                    "live_time",
                 ],
                 "stable_entries": stable_entries,
                 "late_entries": late_entries,
+                "workflow_setup_control_context": workflow_setup_control_context,
             }
             prompt_context_update["frozen_prompt_context"] = frozen_prompt_context
 
@@ -1118,6 +1273,14 @@ def build_runtime_graph(runtime: Any):
         late_control_sections = [
             str(section).strip()
             for section in (frozen_prompt_context.get("late_control_sections") or [])
+            if str(section).strip()
+        ]
+        current_turn_context_content = str(
+            frozen_prompt_context.get("current_turn_context_content", "")
+        ).strip()
+        current_turn_context_sections = [
+            str(section).strip()
+            for section in (frozen_prompt_context.get("current_turn_context_sections") or [])
             if str(section).strip()
         ]
 
@@ -1279,15 +1442,16 @@ def build_runtime_graph(runtime: Any):
         ]
         dynamic_late_messages: list[AnyMessage] = []
         dynamic_late_sections: list[str] = []
+        if current_turn_context_content:
+            dynamic_late_messages.append(SystemMessage(content=current_turn_context_content))
+            dynamic_late_sections.extend(current_turn_context_sections)
         if _loop_limit_near(state):
             dynamic_late_messages.append(SystemMessage(content=LOOP_LIMIT_REPAIR_INSTRUCTION))
             dynamic_late_sections.append("loop_limit_repair")
         if turn_mode == "workflow_setup":
-            workflow_setup_context = _build_workflow_setup_prompt_context(
-                runtime,
-                customer_id=customer_id,
-                thread_id=thread_id,
-            )
+            workflow_setup_context = str(
+                frozen_prompt_context.get("workflow_setup_control_context", "") or ""
+            ).strip()
             if workflow_setup_context:
                 dynamic_late_messages.append(SystemMessage(content=workflow_setup_context))
                 dynamic_late_sections.append("workflow_setup_control_card")
@@ -1317,6 +1481,7 @@ def build_runtime_graph(runtime: Any):
             except Exception:
                 cache_profile = {}
         stable_prefix_count = len(prefix_messages)
+        prompt_cache_strategy = str(cache_profile.get("strategy", ""))
         actual_history_messages = [*older_history_messages, *latest_turn_messages]
         raw_chat_history_count = sum(
             1 for msg in actual_history_messages if isinstance(msg, (HumanMessage, AIMessage))
@@ -1328,22 +1493,34 @@ def build_runtime_graph(runtime: Any):
         dynamic_late_tokens = _message_tokens(dynamic_late_messages)
         older_history_tokens = _message_tokens(older_history_messages)
         latest_turn_tokens = _message_tokens(latest_turn_messages)
-        requested_cacheable_prefix_count, cacheable_prefix_mode = _prompt_cache_prefix_count_for_turn(
-            prompt_cache_strategy=str(cache_profile.get("strategy", "")),
-            stable_prefix_count=stable_prefix_count,
-            older_history_count=len(older_history_messages),
-            older_history_token_counts=[
-                _message_tokens([message]) for message in older_history_messages
-            ],
-            latest_turn_messages=latest_turn_messages,
-        )
-        model_messages: list[AnyMessage] = [
-            *prefix_messages,
-            *older_history_messages,
-            *frozen_late_messages,
-            *latest_turn_messages,
-            *dynamic_late_messages,
-        ]
+        cacheable_history_messages: list[AnyMessage] = older_history_messages
+        frontier_history_messages: list[AnyMessage] = latest_turn_messages
+        if prompt_cache_strategy == "explicit_committed_breakpoint":
+            cacheable_history_messages, frontier_history_messages, cacheable_prefix_mode = (
+                _split_qwen_cacheable_history(
+                    older_history_messages=older_history_messages,
+                    latest_turn_messages=latest_turn_messages,
+                )
+            )
+            frontier_history_messages = _compact_qwen_frontier_history(frontier_history_messages)
+            requested_cacheable_prefix_count = stable_prefix_count + len(cacheable_history_messages)
+            model_messages: list[AnyMessage] = [
+                *prefix_messages,
+                *cacheable_history_messages,
+                *frozen_late_messages,
+                *frontier_history_messages,
+                *dynamic_late_messages,
+            ]
+        else:
+            requested_cacheable_prefix_count = stable_prefix_count + len(older_history_messages)
+            cacheable_prefix_mode = "full_older_history"
+            model_messages = [
+                *prefix_messages,
+                *older_history_messages,
+                *frozen_late_messages,
+                *latest_turn_messages,
+                *dynamic_late_messages,
+            ]
         cacheable_prefix_count = requested_cacheable_prefix_count
         cache_breakpoint_index: int | None = None
         if bool(cache_profile.get("supports_breakpoints", False)):
@@ -1379,6 +1556,8 @@ def build_runtime_graph(runtime: Any):
             cache_breakpoint_index=cache_breakpoint_index,
             frozen_late_tokens=frozen_late_tokens,
             dynamic_late_tokens=dynamic_late_tokens,
+            cacheable_history_tokens=_message_tokens(cacheable_history_messages),
+            frontier_history_tokens=_message_tokens(frontier_history_messages),
             older_history_tokens=older_history_tokens,
             latest_turn_tokens=latest_turn_tokens,
             turn_mode=turn_mode,
@@ -1405,6 +1584,8 @@ def build_runtime_graph(runtime: Any):
             "cache_breakpoint_index": cache_breakpoint_index,
             "frozen_late_tokens": frozen_late_tokens,
             "dynamic_late_tokens": dynamic_late_tokens,
+            "cacheable_history_tokens": _message_tokens(cacheable_history_messages),
+            "frontier_history_tokens": _message_tokens(frontier_history_messages),
             "older_history_tokens": older_history_tokens,
             "latest_turn_tokens": latest_turn_tokens,
             "prompt_overhead_tokens": prompt_overhead_tokens,

@@ -7,8 +7,9 @@ import pytest
 from opentulpa.agent.graph_builder import (
     _build_connected_composio_toolkits_context,
     _build_late_turn_control_text,
-    _committed_history_message_count,
-    _prompt_cache_prefix_count_for_turn,
+    _qwen_cache_safe_history_count,
+    _split_qwen_cacheable_history,
+    _tail_sized_history_message_count,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.model_pool import prompt_cache_breakpoint_message_index
@@ -80,22 +81,14 @@ async def test_connected_composio_toolkits_context_is_dynamic_and_cached() -> No
 
 def test_late_turn_control_can_include_connected_composio_toolkits() -> None:
     text = _build_late_turn_control_text(
-        prompt_mode="default",
-        turn_mode="interactive",
         customer_id="telegram_1",
-        connected_composio_toolkits_context="Available via Composio tool for this customer: github.",
-        live_time={
-            "server_time_local_iso": "2026-05-18T10:00:00+08:00",
-            "server_time_utc_iso": "2026-05-18T02:00:00+00:00",
-            "server_utc_offset": "+08:00",
-            "user_time_local_iso": "2026-05-18T10:00:00+08:00",
-            "user_utc_offset": "+08:00",
-            "user_time_source": "server_default",
-        },
     )
 
     assert PROMPT_DYNAMIC_BOUNDARY in text
-    assert "Available via Composio tool for this customer: github." in text
+    assert 'tool_group_exec(group="memory", command="server_time", args_json={})' in text
+    assert "Live time context (auto-injected this turn)" not in text
+    assert "Prompt mode:" not in text
+    assert "Turn mode:" not in text
 
 
 def test_model_invoke_extras_empty_when_caching_disabled() -> None:
@@ -313,38 +306,6 @@ def test_prepare_messages_for_qwen_wraps_latest_cacheable_history_before_current
     assert prepared[5].content == "Current user turn"
 
 
-def test_prepare_messages_for_qwen_uses_tool_result_after_ai_tool_call() -> None:
-    rt = OpenTulpaLangGraphRuntime(
-        app_url="http://127.0.0.1:8000",
-        openrouter_api_key="k",
-        model_name="qwen/qwen3.7-max",
-        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
-        prompt_caching_enabled=True,
-    )
-    messages = [
-        SystemMessage(content="Stable system prompt"),
-        HumanMessage(content="OpenTulpa cache anchor v1"),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
-        ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
-        HumanMessage(content="Current user turn"),
-    ]
-
-    prepared = rt.prepare_messages_for_prompt_cache(
-        messages,
-        stable_prefix_count=2,
-        cacheable_prefix_count=4,
-    )
-
-    assert prepared[0].content == "Stable system prompt"
-    assert prepared[1].content == "OpenTulpa cache anchor v1"
-    assert prepared[2].content == ""
-    assert isinstance(prepared[3].content, list)
-    cache_block = prepared[3].content[0]
-    assert cache_block["text"] == '{"ok": true}'
-    assert cache_block["cache_control"] == {"type": "ephemeral"}
-    assert prepared[4].content == "Current user turn"
-
-
 def test_prompt_cache_breakpoint_index_matches_actual_cacheable_message() -> None:
     messages = [
         SystemMessage(content="Stable system prompt"),
@@ -358,78 +319,77 @@ def test_prompt_cache_breakpoint_index_matches_actual_cacheable_message() -> Non
     assert index == 1
 
 
-def test_qwen_cache_prefix_uses_stable_prefix_for_first_user_turn() -> None:
-    count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="explicit_committed_breakpoint",
-        stable_prefix_count=2,
-        older_history_count=0,
-        latest_turn_messages=[HumanMessage(content="New user turn")],
+def test_qwen_tail_sized_history_count_keeps_only_small_suffix_volatile() -> None:
+    assert _tail_sized_history_message_count([]) == 0
+    assert _tail_sized_history_message_count([120, 120]) == 0
+    assert _tail_sized_history_message_count([1000, 1000, 1000, 150, 120]) == 3
+    assert _tail_sized_history_message_count([5000, 1000]) == 2
+
+
+def test_qwen_history_split_keeps_current_user_in_frontier() -> None:
+    cacheable, frontier, mode = _split_qwen_cacheable_history(
+        older_history_messages=[],
+        latest_turn_messages=[HumanMessage(content="Current user turn")],
     )
 
-    assert count == 2
-    assert mode == "stable_prefix_fresh_user_turn"
+    assert cacheable == []
+    assert len(frontier) == 1
+    assert mode == "stable_prefix_tail_only"
 
 
-def test_qwen_cache_prefix_keeps_older_history_on_later_fresh_turn() -> None:
-    count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="explicit_committed_breakpoint",
-        stable_prefix_count=2,
-        older_history_count=6,
-        older_history_token_counts=[1000, 1000, 1000, 1000, 1000, 1000],
-        latest_turn_messages=[HumanMessage(content="New user turn")],
+def test_qwen_history_split_caches_workflow_tool_loop_head() -> None:
+    latest_turn = [
+        HumanMessage(content="INTERNAL_ONBOARDING_SEED " + ("setup facts " * 1400)),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+        ToolMessage(content="{\"ok\": true, \"result\": \"" + ("draft " * 1200) + "\"}", tool_call_id="call_1"),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
+        ToolMessage(content="{\"ok\": true, \"result\": \"" + ("preflight " * 1200) + "\"}", tool_call_id="call_2"),
+    ]
+
+    cacheable, frontier, mode = _split_qwen_cacheable_history(
+        older_history_messages=[],
+        latest_turn_messages=latest_turn,
     )
 
-    assert count == 6
-    assert mode == "committed_older_history"
+    assert len(cacheable) == 1
+    assert isinstance(cacheable[0], HumanMessage)
+    assert str(cacheable[0].content).startswith("QWEN_CACHEABLE_COMMITTED_HISTORY")
+    assert "INTERNAL_ONBOARDING_SEED" in str(cacheable[0].content)
+    assert frontier == latest_turn[1:]
+    assert mode == "committed_tail_sized_history"
 
 
-def test_qwen_cache_prefix_waits_for_committed_history_bucket() -> None:
-    count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="explicit_committed_breakpoint",
-        stable_prefix_count=2,
-        older_history_count=3,
-        older_history_token_counts=[900, 1000, 1200],
-        latest_turn_messages=[HumanMessage(content="New user turn")],
+def test_qwen_history_split_does_not_end_cacheable_prefix_on_pending_tool_call() -> None:
+    latest_turn = [
+        HumanMessage(content="INTERNAL_ONBOARDING_SEED. " + ("setup facts " * 900)),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+        ToolMessage(content="{\"ok\": true, \"result\": \"" + ("draft " * 500) + "\"}", tool_call_id="call_1"),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
+    ]
+
+    cacheable, frontier, mode = _split_qwen_cacheable_history(
+        older_history_messages=[],
+        latest_turn_messages=latest_turn,
+        target_tail_tokens=0,
     )
 
-    assert count == 2
-    assert mode == "stable_prefix_committed_only"
+    assert isinstance(cacheable[0], HumanMessage)
+    assert str(cacheable[0].content).startswith("QWEN_CACHEABLE_COMMITTED_HISTORY")
+    assert "internal_onboarding_seed" in str(cacheable[0].content)
+    assert frontier == latest_turn[1:]
+    assert mode == "committed_tail_sized_history"
 
 
-def test_qwen_cache_prefix_uses_older_history_after_tool_loop_starts() -> None:
-    count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="explicit_committed_breakpoint",
-        stable_prefix_count=2,
-        older_history_count=6,
-        older_history_token_counts=[1000, 1000, 1000, 1000, 1000, 1000],
-        latest_turn_messages=[
-            HumanMessage(content="New user turn"),
-            AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
-            ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
-        ],
-    )
+def test_qwen_safe_history_count_rolls_back_pending_tool_call() -> None:
+    latest_turn = [
+        HumanMessage(content="setup facts"),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+        ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
+    ]
 
-    assert count == 6
-    assert mode == "committed_older_history"
-
-
-def test_qwen_committed_history_count_advances_in_token_buckets() -> None:
-    assert _committed_history_message_count([900, 1000, 1200]) == 0
-    assert _committed_history_message_count([1000, 1000, 1000, 1000, 1000]) == 4
-    assert _committed_history_message_count([5000, 1000]) == 1
-    assert _committed_history_message_count([2000, 2000, 2000, 2000]) == 4
-
-
-def test_non_qwen_cache_prefix_keeps_full_older_history() -> None:
-    count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="breakpoint",
-        stable_prefix_count=2,
-        older_history_count=6,
-        latest_turn_messages=[HumanMessage(content="New user turn")],
-    )
-
-    assert count == 8
-    assert mode == "full_older_history"
+    assert _qwen_cache_safe_history_count(latest_turn, 4) == 3
+    assert _qwen_cache_safe_history_count(latest_turn, 2) == 1
 
 
 class _CaptureResponse:
