@@ -117,7 +117,7 @@ def _build_workflow_setup_prompt_context(
     customer_id: str,
     thread_id: str,
 ) -> str:
-    service = getattr(runtime, "_workflow_setup_service", None)
+    service = getattr(runtime, "workflow_setup_service", None)
     if service is None or not hasattr(service, "get_thread_session"):
         return ""
     try:
@@ -142,7 +142,7 @@ def _thread_has_active_workflow_setup(
     customer_id: str,
     thread_id: str,
 ) -> bool:
-    service = getattr(runtime, "_workflow_setup_service", None)
+    service = getattr(runtime, "workflow_setup_service", None)
     if service is None or not hasattr(service, "get_thread_session"):
         return False
     try:
@@ -280,7 +280,7 @@ async def _build_connected_composio_toolkits_context(runtime: Any, customer_id: 
         toolkits = [str(item) for item in cached[1] if str(item).strip()]
     else:
         toolkits = []
-        composio = getattr(runtime, "_composio_service", None)
+        composio = getattr(runtime, "composio_service", None)
         list_connected_accounts = getattr(composio, "list_connected_accounts", None)
         if bool(getattr(composio, "enabled", False)) and callable(list_connected_accounts):
             try:

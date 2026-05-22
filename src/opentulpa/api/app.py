@@ -102,6 +102,25 @@ def _load_composio_service_class() -> type[Any]:
     return ComposioService
 
 
+def _configure_runtime_api_services(
+    runtime: Any | None,
+    *,
+    link_alias_service: LinkAliasService,
+    composio_service: Any,
+    workflow_setup_service: WorkflowSetupService,
+) -> None:
+    if runtime is None:
+        return
+    configure = getattr(runtime, "configure_api_services", None)
+    if not callable(configure):
+        return
+    configure(
+        link_alias_service=link_alias_service,
+        composio_service=composio_service,
+        workflow_setup_service=workflow_setup_service,
+    )
+
+
 def _is_trusted_server_client(host: str) -> bool:
     value = str(host or "").strip().lower()
     if not value:
@@ -282,10 +301,6 @@ def create_app(
     else:
         composio = _DisabledComposioService()
     skill_service.ensure_default_skill()
-    if runtime is not None and getattr(runtime, "_link_alias_service", None) is None:
-        runtime._link_alias_service = alias_service  # type: ignore[attr-defined]
-    if runtime is not None:
-        runtime._composio_service = composio  # type: ignore[attr-defined]
 
     telegram_client = (
         TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
@@ -465,8 +480,12 @@ def create_app(
         intake_workflows=intake_service,
         knowledge_service=knowledge,
     )
-    if runtime is not None:
-        runtime._workflow_setup_service = workflow_setup_service  # type: ignore[attr-defined]
+    _configure_runtime_api_services(
+        runtime,
+        link_alias_service=alias_service,
+        composio_service=composio,
+        workflow_setup_service=workflow_setup_service,
+    )
     workflow_setup_orchestrator = WorkflowSetupOrchestrator(
         setup_service=workflow_setup_service,
     )
