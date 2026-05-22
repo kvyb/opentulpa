@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from opentulpa.api.routes.generic_chat import register_generic_chat_routes
 from opentulpa.api.routes.intake import register_intake_workflow_routes
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.intake.service import IntakeWorkflowService
@@ -32,6 +33,13 @@ def _app(service: IntakeWorkflowService, vault: FileVaultService) -> FastAPI:
         get_workflow_setup_service=lambda: None,
         get_file_vault=lambda: vault,
         web_token="secret",
+    )
+    register_generic_chat_routes(
+        app,
+        web_token="secret",
+        get_agent_runtime=lambda: None,
+        get_file_vault=lambda: vault,
+        get_workflow_setup_service=lambda: None,
     )
     return app
 
@@ -105,15 +113,27 @@ def test_web_workflow_list_and_get_include_knowledge_files(tmp_path: Path) -> No
             params={"customer_id": "dashboard"},
             headers={"authorization": "Bearer secret"},
         )
+        content_response = client.get(
+            get_response.json()["workflow"]["knowledge_files"][0]["content_path"],
+            headers={"authorization": "Bearer secret"},
+        )
+        metadata_response = client.get(
+            get_response.json()["workflow"]["knowledge_files"][0]["metadata_path"],
+            headers={"authorization": "Bearer secret"},
+        )
 
     assert list_response.status_code == 200
     assert get_response.status_code == 200
+    assert content_response.status_code == 200
+    assert metadata_response.status_code == 200
     listed = list_response.json()["workflows"][0]
     fetched = get_response.json()["workflow"]
     assert listed["workflow_id"] == workflow["workflow_id"]
     assert fetched["knowledge_files"][0]["original_filename"] == "services.txt"
-    assert fetched["knowledge_files"][0]["content_path"].endswith("/content")
-    assert fetched["knowledge_files"][0]["metadata_path"].endswith("/metadata")
+    assert fetched["knowledge_files"][0]["content_path"].endswith("/content?customer_id=dashboard")
+    assert fetched["knowledge_files"][0]["metadata_path"].endswith("/metadata?customer_id=dashboard")
+    assert content_response.text == "Basic wash\nFull detail"
+    assert metadata_response.json()["file"]["content_path"].endswith("/content?customer_id=dashboard")
 
 
 def test_web_workflow_put_validates_and_persists(tmp_path: Path) -> None:

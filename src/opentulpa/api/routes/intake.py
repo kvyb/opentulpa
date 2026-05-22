@@ -63,8 +63,12 @@ def register_intake_workflow_routes(
                         "caption": clean.get("caption"),
                         "summary": clean.get("summary"),
                         "created_at": clean.get("created_at"),
-                        "content_path": f"/web/files/{quote(file_id)}/content",
-                        "metadata_path": f"/web/files/{quote(file_id)}/metadata",
+                        "content_path": (
+                            f"/web/files/{quote(file_id)}/content?customer_id={quote(customer_id, safe='')}"
+                        ),
+                        "metadata_path": (
+                            f"/web/files/{quote(file_id)}/metadata?customer_id={quote(customer_id, safe='')}"
+                        ),
                     }
                 )
         item["knowledge_files"] = knowledge_files

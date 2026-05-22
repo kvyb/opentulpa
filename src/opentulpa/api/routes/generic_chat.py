@@ -499,9 +499,11 @@ async def _postprocess_uploaded_file(
 def _web_file_metadata(record: dict[str, Any]) -> dict[str, Any]:
     clean = sanitize_uploaded_file_record(record, include_excerpt=False)
     file_id = str(clean.get("id") or "").strip()
+    customer_id = str(clean.get("customer_id") or "").strip()
     if file_id:
-        clean["content_path"] = f"/web/files/{quote(file_id)}/content"
-        clean["metadata_path"] = f"/web/files/{quote(file_id)}/metadata"
+        query = f"?customer_id={quote(customer_id, safe='')}" if customer_id else ""
+        clean["content_path"] = f"/web/files/{quote(file_id)}/content{query}"
+        clean["metadata_path"] = f"/web/files/{quote(file_id)}/metadata{query}"
     return clean
 
 
