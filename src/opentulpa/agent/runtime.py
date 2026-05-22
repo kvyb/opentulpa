@@ -505,6 +505,23 @@ def _prompt_cache_trace_fields(
         stable_messages = serialized_messages[:stable_count]
         fields["stable_prefix_hash"] = _hash_json(stable_messages)
         fields["stable_prefix_chars"] = sum(len(str(item.get("text", "") or "")) for item in stable_messages)
+    cache_breakpoint_indexes: list[int] = []
+    for index, message in enumerate(serialized_messages):
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(item, dict) and isinstance(item.get("cache_control"), dict)
+            for item in content
+        ):
+            cache_breakpoint_indexes.append(index)
+    if cache_breakpoint_indexes:
+        breakpoint_index = cache_breakpoint_indexes[-1]
+        cacheable_messages = serialized_messages[: breakpoint_index + 1]
+        fields["cache_breakpoint_index"] = breakpoint_index
+        fields["cache_breakpoint_count"] = len(cache_breakpoint_indexes)
+        fields["cache_breakpoint_prefix_hash"] = _hash_json(cacheable_messages)
+        fields["cache_breakpoint_prefix_chars"] = sum(
+            len(str(item.get("text", "") or "")) for item in cacheable_messages
+        )
 
     first_system = next(
         (item for item in serialized_messages if str(item.get("role", "") or "") == "system"),
@@ -1633,12 +1650,14 @@ class OpenTulpaLangGraphRuntime:
         *,
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        cacheable_prefix_count: int | None = None,
     ) -> list[Any]:
         return _model_pool.prepare_messages_for_prompt_cache(
             self,
             messages,
             model_name=model_name,
             stable_prefix_count=stable_prefix_count,
+            cacheable_prefix_count=cacheable_prefix_count,
         )
 
     async def ainvoke_model(
@@ -1648,6 +1667,7 @@ class OpenTulpaLangGraphRuntime:
         *,
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        cacheable_prefix_count: int | None = None,
         call_context: dict[str, Any] | None = None,
     ) -> Any:
         return await _model_pool.ainvoke_model(
@@ -1656,6 +1676,7 @@ class OpenTulpaLangGraphRuntime:
             messages,
             model_name=model_name,
             stable_prefix_count=stable_prefix_count,
+            cacheable_prefix_count=cacheable_prefix_count,
             call_context=call_context,
         )
 
@@ -1666,6 +1687,7 @@ class OpenTulpaLangGraphRuntime:
         *,
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        cacheable_prefix_count: int | None = None,
         call_context: dict[str, Any] | None = None,
         stream_config: Any | None = None,
     ) -> Any:
@@ -1675,6 +1697,7 @@ class OpenTulpaLangGraphRuntime:
             messages,
             model_name=model_name,
             stable_prefix_count=stable_prefix_count,
+            cacheable_prefix_count=cacheable_prefix_count,
             call_context=call_context,
             stream_config=stream_config,
         )
@@ -2032,6 +2055,7 @@ class OpenTulpaLangGraphRuntime:
         schema: type[StructuredModelT],
         model_name: str | None = None,
         stable_prefix_count: int = 0,
+        cacheable_prefix_count: int | None = None,
         call_context: dict[str, Any] | None = None,
     ) -> tuple[StructuredModelT | None, str | None]:
         return await _model_pool.invoke_structured_model(
@@ -2041,6 +2065,7 @@ class OpenTulpaLangGraphRuntime:
             schema=schema,
             model_name=model_name,
             stable_prefix_count=stable_prefix_count,
+            cacheable_prefix_count=cacheable_prefix_count,
             call_context=call_context,
             clean_json_text_block=_clean_json_text_block,
         )

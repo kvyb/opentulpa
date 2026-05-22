@@ -192,10 +192,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="z-ai/glm-5.1",
+        default="qwen/qwen3.7-max",
         description=(
             "Model identifier accepted by the configured provider. "
-            "Recommended default is the OpenRouter slug z-ai/glm-5.1 for main chat turns."
+            "Recommended default is the OpenRouter slug qwen/qwen3.7-max for main chat turns."
         ),
     )
     memory_llm_model: str = Field(
@@ -221,10 +221,10 @@ class Settings(BaseSettings):
         ),
     )
     wake_execution_model: str | None = Field(
-        default="z-ai/glm-5.1",
+        default="qwen/qwen3.7-max",
         description=(
             "Model used for wake/routine execution turns that need stronger reasoning "
-            "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.1."
+            "and tool use. Recommended default aligns this with the main chat model: qwen/qwen3.7-max."
         ),
     )
     multimodal_llm: str = Field(
@@ -241,7 +241,7 @@ class Settings(BaseSettings):
         ),
     )
     workflow_setup_input_classifier_model: str = Field(
-        default="z-ai/glm-5.1",
+        default="qwen/qwen3.7-max",
         description=(
             "Model used to classify messages sent while workflow setup is already running "
             "as status nudges versus real setup edits."
