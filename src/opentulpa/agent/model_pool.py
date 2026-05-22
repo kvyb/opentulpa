@@ -176,6 +176,13 @@ def uses_openrouter_reasoning_adapter(*, model_name: str | None, base_url: str |
     )
 
 
+def uses_openrouter_chat_adapter(*, model_name: str | None, base_url: str | None) -> bool:
+    slug = str(model_name or "").strip().lower()
+    return looks_like_openrouter_base_url(base_url) and (
+        "deepseek" in slug or slug.startswith("qwen/") or "qwen" in slug
+    )
+
+
 def openrouter_reasoning_config(reasoning_effort: str | None) -> dict[str, Any]:
     effort = str(reasoning_effort or "").strip() or "none"
     return {"effort": effort, "exclude": False}
@@ -222,7 +229,11 @@ def init_runtime_chat_model(
     init_chat_model_func: Any = init_chat_model,
     chat_openrouter_cls: Any = ChatOpenRouter,
 ) -> Any:
-    if uses_openrouter_reasoning_adapter(model_name=model_name, base_url=openrouter_base_url):
+    if uses_openrouter_chat_adapter(model_name=model_name, base_url=openrouter_base_url):
+        uses_reasoning = uses_openrouter_reasoning_adapter(
+            model_name=model_name,
+            base_url=openrouter_base_url,
+        )
         app_headers = openrouter_app_headers(base_url=openrouter_base_url)
         adapter_kwargs: dict[str, Any] = {
             "model": model_name,
@@ -230,9 +241,10 @@ def init_runtime_chat_model(
             "base_url": openrouter_base_url or base_kwargs.get("base_url"),
             "temperature": base_kwargs.get("temperature"),
             "max_completion_tokens": base_kwargs.get("max_completion_tokens"),
-            "reasoning": openrouter_reasoning_config(reasoning_effort),
             "streaming": bool(base_kwargs.get("streaming", True)),
         }
+        if uses_reasoning:
+            adapter_kwargs["reasoning"] = openrouter_reasoning_config(reasoning_effort)
         if referer := app_headers.get("HTTP-Referer"):
             adapter_kwargs["app_url"] = referer
         if title := app_headers.get("X-OpenRouter-Title"):
