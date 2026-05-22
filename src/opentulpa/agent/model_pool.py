@@ -65,7 +65,7 @@ def provider_prompt_cache_profile(
     if slug.startswith("qwen/") or "qwen" in slug:
         return {
             "enabled": True,
-            "strategy": "explicit_tail_breakpoint",
+            "strategy": "explicit_committed_breakpoint",
             "supports_top_level": False,
             "supports_breakpoints": True,
             "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
@@ -355,12 +355,12 @@ def prepare_messages_for_prompt_cache(
 ) -> list[Any]:
     profile = runtime.prompt_cache_profile(model_name=model_name)
     strategy = str(profile.get("strategy") or "")
-    if strategy not in {"breakpoint", "explicit_tail_breakpoint"}:
+    if strategy not in {"breakpoint", "explicit_committed_breakpoint"}:
         return messages
     cache_control = dict(profile.get("cache_control") or {})
     if not cache_control:
         return messages
-    if strategy == "explicit_tail_breakpoint":
+    if strategy == "explicit_committed_breakpoint":
         effective_prefix_count = (
             int(cacheable_prefix_count)
             if cacheable_prefix_count is not None and int(cacheable_prefix_count) > 0

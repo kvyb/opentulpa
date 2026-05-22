@@ -1151,4 +1151,4 @@ def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:
     assert gemini["strategy"] == "breakpoint"
     assert auto["strategy"] == "automatic"
     assert zai["strategy"] == "automatic"
-    assert qwen["strategy"] == "explicit_tail_breakpoint"
+    assert qwen["strategy"] == "explicit_committed_breakpoint"

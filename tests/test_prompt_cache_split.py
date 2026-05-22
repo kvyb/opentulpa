@@ -7,6 +7,7 @@ import pytest
 from opentulpa.agent.graph_builder import (
     _build_connected_composio_toolkits_context,
     _build_late_turn_control_text,
+    _committed_history_message_count,
     _prompt_cache_prefix_count_for_turn,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -197,7 +198,7 @@ def test_prompt_cache_profile_zai_glm_is_automatic() -> None:
     assert profile["supports_breakpoints"] is False
 
 
-def test_prompt_cache_profile_qwen_uses_explicit_tail_breakpoint() -> None:
+def test_prompt_cache_profile_qwen_uses_explicit_committed_breakpoint() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -208,7 +209,7 @@ def test_prompt_cache_profile_qwen_uses_explicit_tail_breakpoint() -> None:
 
     profile = rt.prompt_cache_profile()
 
-    assert profile["strategy"] == "explicit_tail_breakpoint"
+    assert profile["strategy"] == "explicit_committed_breakpoint"
     assert profile["supports_top_level"] is False
     assert profile["supports_breakpoints"] is True
 
@@ -343,11 +344,11 @@ def test_prepare_messages_for_qwen_uses_tool_result_after_ai_tool_call() -> None
     assert prepared[4].content == "Current user turn"
 
 
-def test_qwen_cache_prefix_uses_stable_prefix_for_fresh_user_turn() -> None:
+def test_qwen_cache_prefix_uses_stable_prefix_for_first_user_turn() -> None:
     count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="explicit_tail_breakpoint",
+        prompt_cache_strategy="explicit_committed_breakpoint",
         stable_prefix_count=2,
-        older_history_count=6,
+        older_history_count=0,
         latest_turn_messages=[HumanMessage(content="New user turn")],
     )
 
@@ -355,11 +356,38 @@ def test_qwen_cache_prefix_uses_stable_prefix_for_fresh_user_turn() -> None:
     assert mode == "stable_prefix_fresh_user_turn"
 
 
-def test_qwen_cache_prefix_uses_older_history_after_tool_loop_starts() -> None:
+def test_qwen_cache_prefix_keeps_older_history_on_later_fresh_turn() -> None:
     count, mode = _prompt_cache_prefix_count_for_turn(
-        prompt_cache_strategy="explicit_tail_breakpoint",
+        prompt_cache_strategy="explicit_committed_breakpoint",
         stable_prefix_count=2,
         older_history_count=6,
+        older_history_token_counts=[1000, 1000, 1000, 1000, 1000, 1000],
+        latest_turn_messages=[HumanMessage(content="New user turn")],
+    )
+
+    assert count == 6
+    assert mode == "committed_older_history"
+
+
+def test_qwen_cache_prefix_waits_for_committed_history_bucket() -> None:
+    count, mode = _prompt_cache_prefix_count_for_turn(
+        prompt_cache_strategy="explicit_committed_breakpoint",
+        stable_prefix_count=2,
+        older_history_count=3,
+        older_history_token_counts=[900, 1000, 1200],
+        latest_turn_messages=[HumanMessage(content="New user turn")],
+    )
+
+    assert count == 2
+    assert mode == "stable_prefix_committed_only"
+
+
+def test_qwen_cache_prefix_uses_older_history_after_tool_loop_starts() -> None:
+    count, mode = _prompt_cache_prefix_count_for_turn(
+        prompt_cache_strategy="explicit_committed_breakpoint",
+        stable_prefix_count=2,
+        older_history_count=6,
+        older_history_token_counts=[1000, 1000, 1000, 1000, 1000, 1000],
         latest_turn_messages=[
             HumanMessage(content="New user turn"),
             AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
@@ -367,8 +395,15 @@ def test_qwen_cache_prefix_uses_older_history_after_tool_loop_starts() -> None:
         ],
     )
 
-    assert count == 8
-    assert mode == "full_older_history"
+    assert count == 6
+    assert mode == "committed_older_history"
+
+
+def test_qwen_committed_history_count_advances_in_token_buckets() -> None:
+    assert _committed_history_message_count([900, 1000, 1200]) == 0
+    assert _committed_history_message_count([1000, 1000, 1000, 1000, 1000]) == 4
+    assert _committed_history_message_count([5000, 1000]) == 1
+    assert _committed_history_message_count([2000, 2000, 2000, 2000]) == 4
 
 
 def test_non_qwen_cache_prefix_keeps_full_older_history() -> None:
