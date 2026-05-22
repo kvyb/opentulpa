@@ -1277,6 +1277,8 @@ def build_runtime_graph(runtime: Any):
         dynamic_late_tokens = _message_tokens(dynamic_late_messages)
         older_history_tokens = _message_tokens(older_history_messages)
         latest_turn_tokens = _message_tokens(latest_turn_messages)
+        cacheable_prefix_count = len(prefix_messages) + len(older_history_messages)
+        cacheable_prefix_tokens = stable_prefix_tokens + older_history_tokens
         model_messages: list[AnyMessage] = [
             *prefix_messages,
             *older_history_messages,
@@ -1302,6 +1304,8 @@ def build_runtime_graph(runtime: Any):
             prompt_cache_top_level=bool(cache_profile.get("supports_top_level", False)),
             stable_prefix_count=stable_prefix_count,
             stable_prefix_tokens=stable_prefix_tokens,
+            cacheable_prefix_count=cacheable_prefix_count,
+            cacheable_prefix_tokens=cacheable_prefix_tokens,
             frozen_late_tokens=frozen_late_tokens,
             dynamic_late_tokens=dynamic_late_tokens,
             older_history_tokens=older_history_tokens,
@@ -1323,6 +1327,8 @@ def build_runtime_graph(runtime: Any):
             "prompt_sections": prompt_section_names,
             "stable_prefix_count": stable_prefix_count,
             "stable_prefix_tokens": stable_prefix_tokens,
+            "cacheable_prefix_count": cacheable_prefix_count,
+            "cacheable_prefix_tokens": cacheable_prefix_tokens,
             "frozen_late_tokens": frozen_late_tokens,
             "dynamic_late_tokens": dynamic_late_tokens,
             "older_history_tokens": older_history_tokens,
@@ -1342,6 +1348,7 @@ def build_runtime_graph(runtime: Any):
                 model_with_tools,
                 model_messages,
                 stable_prefix_count=stable_prefix_count,
+                cacheable_prefix_count=cacheable_prefix_count,
                 call_context=call_context,
                 stream_config=config,
             )
@@ -1350,6 +1357,7 @@ def build_runtime_graph(runtime: Any):
                 model_with_tools,
                 model_messages,
                 stable_prefix_count=stable_prefix_count,
+                cacheable_prefix_count=cacheable_prefix_count,
                 call_context=call_context,
             )
         else:
