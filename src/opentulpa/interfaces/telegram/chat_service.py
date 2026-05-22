@@ -23,6 +23,10 @@ from opentulpa.interfaces.telegram.attachments import (
     extract_attachments,
     ingest_attachments,
 )
+from opentulpa.interfaces.telegram.chat_routing import (
+    TelegramAccessDecision,
+    TelegramCommandRoute,
+)
 from opentulpa.interfaces.telegram.client import TelegramClient, parse_telegram_update
 from opentulpa.interfaces.telegram.constants import STATE_PATH
 from opentulpa.interfaces.telegram.env_management import (
@@ -1275,9 +1279,13 @@ async def handle_telegram_text(
         support_user_ids_csv=support_user_ids_csv,
         support_usernames_csv=support_usernames_csv,
     )
-    if not normal_allowed and not support_allowed:
-        return "This bot is restricted and your Telegram account is not allowed."
-    if normal_allowed and not support_allowed:
+    access = TelegramAccessDecision.from_flags(
+        normal_allowed=normal_allowed,
+        support_allowed=support_allowed,
+    )
+    if access.restricted_reply is not None:
+        return access.restricted_reply
+    if access.should_auto_bind_allowed_username:
         _maybe_auto_bind_allowed_username(
             owner_customer_id=owner_customer_id,
             allowed_usernames_csv=allowed_usernames_csv,
@@ -1285,7 +1293,7 @@ async def handle_telegram_text(
             user_id=ctx.user_id,
             bind_telegram_customer_id=bind_telegram_customer_id,
         )
-    if support_allowed:
+    if access.should_configure_support_commands:
         await _maybe_configure_support_commands_for_chat(
             bot_token=bot_token,
             chat_id=ctx.chat_id,
@@ -1302,20 +1310,25 @@ async def handle_telegram_text(
     _ = int(admin_user_id) == int(ctx.user_id)
 
     command_name = _telegram_command_name(ctx.text)
-    if _is_support_command(command_name):
-        if not support_allowed:
-            return "This support command is restricted to configured support operators."
+    command_route = TelegramCommandRoute.from_command(
+        command_name=command_name,
+        support_allowed=support_allowed,
+        is_support_command=_is_support_command(command_name),
+    )
+    if command_route.kind == "restricted_support_command":
+        return "This support command is restricted to configured support operators."
+    if command_route.kind == "support_command":
         return await _handle_support_command(
             command_name=command_name,
             ctx=ctx,
             customer_listing=support_customer_listing,
         )
-    if command_name in {"/start", "/help"}:
+    if command_route.kind == "start_help":
         return _start_help_text()
-    if command_name == "/status":
+    if command_route.kind == "status":
         agent_up = bool(agent_runtime and getattr(agent_runtime, "healthy", lambda: False)())
         return status_text(agent_up)
-    if command_name == "/fresh":
+    if command_route.kind == "fresh":
         if support_allowed:
             binding = _current_support_binding(ctx.chat_id)
             bound_customer = str((binding or {}).get("bound_customer_id", "") or "").strip()
@@ -1355,7 +1368,7 @@ async def handle_telegram_text(
             f"New thread: {thread_id}. "
             "Your long-term memory is unchanged."
         )
-    if command_name == "/debug_logs":
+    if command_route.kind == "debug_logs":
         return await _send_debug_logs_file(chat_id=ctx.chat_id, bot_token=bot_token)
 
     support_binding = None
