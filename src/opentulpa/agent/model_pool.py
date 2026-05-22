@@ -65,7 +65,7 @@ def provider_prompt_cache_profile(
     if slug.startswith("qwen/") or "qwen" in slug:
         return {
             "enabled": True,
-            "strategy": "explicit_tail_breakpoint",
+            "strategy": "explicit_committed_breakpoint",
             "supports_top_level": False,
             "supports_breakpoints": True,
             "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
@@ -345,6 +345,25 @@ def infer_stable_system_prefix_count(messages: list[Any]) -> int:
     return count
 
 
+def prompt_cache_breakpoint_message_index(
+    messages: list[Any],
+    *,
+    effective_prefix_count: int,
+) -> int | None:
+    if effective_prefix_count <= 0:
+        return None
+    target_roles = (SystemMessage, HumanMessage, AIMessage, ToolMessage)
+    for idx in range(min(effective_prefix_count, len(messages)) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, target_roles):
+            continue
+        if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
+            continue
+        if getattr(message, "content", None):
+            return idx
+    return None
+
+
 def prepare_messages_for_prompt_cache(
     runtime: Any,
     messages: list[Any],
@@ -355,12 +374,12 @@ def prepare_messages_for_prompt_cache(
 ) -> list[Any]:
     profile = runtime.prompt_cache_profile(model_name=model_name)
     strategy = str(profile.get("strategy") or "")
-    if strategy not in {"breakpoint", "explicit_tail_breakpoint"}:
+    if strategy not in {"breakpoint", "explicit_committed_breakpoint"}:
         return messages
     cache_control = dict(profile.get("cache_control") or {})
     if not cache_control:
         return messages
-    if strategy == "explicit_tail_breakpoint":
+    if strategy == "explicit_committed_breakpoint":
         effective_prefix_count = (
             int(cacheable_prefix_count)
             if cacheable_prefix_count is not None and int(cacheable_prefix_count) > 0
@@ -377,17 +396,10 @@ def prepare_messages_for_prompt_cache(
     if effective_prefix_count <= 0:
         return messages
     patched: list[Any] = list(messages)
-    target_index: int | None = None
-    target_roles = (SystemMessage, HumanMessage, AIMessage, ToolMessage)
-    for idx in range(min(effective_prefix_count, len(patched)) - 1, -1, -1):
-        message = patched[idx]
-        if not isinstance(message, target_roles):
-            continue
-        if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
-            continue
-        if getattr(message, "content", None):
-            target_index = idx
-            break
+    target_index = prompt_cache_breakpoint_message_index(
+        patched,
+        effective_prefix_count=effective_prefix_count,
+    )
     if target_index is None:
         return messages
     patched[target_index] = message_with_cache_breakpoint(

@@ -12,6 +12,11 @@ from typing import Any
 
 import httpx
 
+from opentulpa.agent.graph_builder import (
+    CACHE_STICKY_ROUTING_ANCHOR,
+    _committed_history_message_count,
+    _message_tokens,
+)
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.model_pool import infer_stable_system_prefix_count
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -136,7 +141,7 @@ def _to_lc_messages(raw_messages: list[dict[str, Any]]) -> list[Any]:
     converted: list[Any] = []
     for raw in raw_messages:
         role = str(raw.get("role") or "")
-        content = raw.get("content") or ""
+        content = _strip_cache_control(raw.get("content") or "")
         if role == "system":
             converted.append(SystemMessage(content=content))
         elif role == "user":
@@ -155,6 +160,18 @@ def _message_content_for_openai(content: Any) -> Any:
     if content is None:
         return ""
     return content
+
+
+def _strip_cache_control(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_cache_control(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _strip_cache_control(item)
+            for key, item in value.items()
+            if key != "cache_control"
+        }
+    return value
 
 
 def _to_openai_messages(messages: Iterable[Any]) -> list[dict[str, Any]]:
@@ -298,13 +315,27 @@ def _build_replay_payload(
     observation: dict[str, Any],
     *,
     model: str,
+    commit_token_step: int,
 ) -> dict[str, Any]:
     raw_messages = _parse_langfuse_messages(observation)
     assert raw_messages is not None, "selected observation must have parseable messages"
     raw_messages, tools = _split_messages_and_tools(raw_messages)
     lc_messages = _to_lc_messages(raw_messages)
     stable_prefix_count = infer_stable_system_prefix_count(lc_messages)
-    cacheable_prefix_count = max(stable_prefix_count, len(lc_messages) - 1)
+    if (
+        stable_prefix_count < len(lc_messages)
+        and isinstance(lc_messages[stable_prefix_count], HumanMessage)
+        and str(lc_messages[stable_prefix_count].content or "").startswith(
+            CACHE_STICKY_ROUTING_ANCHOR
+        )
+    ):
+        stable_prefix_count += 1
+    history_messages = lc_messages[stable_prefix_count:-1]
+    committed_history_count = _committed_history_message_count(
+        [_message_tokens([message]) for message in history_messages],
+        commit_token_step=commit_token_step,
+    )
+    cacheable_prefix_count = stable_prefix_count + committed_history_count
     prepared = runtime.prepare_messages_for_prompt_cache(
         lc_messages,
         model_name=model,
@@ -321,6 +352,7 @@ def _build_replay_payload(
         "stable_prefix_count": stable_prefix_count,
         "cacheable_prefix_count": cacheable_prefix_count,
         "cache_breakpoint_index": breakpoint_index,
+        "cache_policy": "committed",
     }
 
 
@@ -331,6 +363,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--passes", type=int, default=2)
     parser.add_argument("--model", default="qwen/qwen3.7-max")
+    parser.add_argument("--commit-token-step", type=int, default=4000)
     parser.add_argument("--max-tokens", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--out", type=Path, default=Path(".tmp/qwen-cache-replay/latest.json"))
@@ -365,7 +398,12 @@ def main() -> None:
     print("pass observation model prompt cached write cost breakpoint cacheable messages tools")
     for pass_index in range(args.passes):
         for observation in selected:
-            payload = _build_replay_payload(runtime, observation, model=args.model)
+            payload = _build_replay_payload(
+                runtime,
+                observation,
+                model=args.model,
+                commit_token_step=int(args.commit_token_step),
+            )
             started = time.perf_counter()
             response = _openrouter_call(
                 api_key=api_key,
@@ -406,6 +444,8 @@ def main() -> None:
     summary = {
         "started_at": started_at,
         "model": args.model,
+        "cache_policy": "committed",
+        "commit_token_step": args.commit_token_step,
         "source": str(args.observations_file) if args.observations_file else {"trace_id": args.trace_id},
         "selected_observation_ids": [item.get("id") for item in selected],
         "results": results,
