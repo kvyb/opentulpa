@@ -12,7 +12,7 @@ from langchain.chat_models import init_chat_model
 from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,15 @@ def provider_prompt_cache_profile(
         return {
             "enabled": True,
             "strategy": "breakpoint",
+            "supports_top_level": False,
+            "supports_breakpoints": True,
+            "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
+            "model_name": model_name,
+        }
+    if slug.startswith("qwen/") or "qwen" in slug:
+        return {
+            "enabled": True,
+            "strategy": "explicit_tail_breakpoint",
             "supports_top_level": False,
             "supports_breakpoints": True,
             "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
@@ -167,6 +176,13 @@ def uses_openrouter_reasoning_adapter(*, model_name: str | None, base_url: str |
     )
 
 
+def uses_openrouter_chat_adapter(*, model_name: str | None, base_url: str | None) -> bool:
+    slug = str(model_name or "").strip().lower()
+    return looks_like_openrouter_base_url(base_url) and (
+        "deepseek" in slug or slug.startswith("qwen/") or "qwen" in slug
+    )
+
+
 def openrouter_reasoning_config(reasoning_effort: str | None) -> dict[str, Any]:
     effort = str(reasoning_effort or "").strip() or "none"
     return {"effort": effort, "exclude": False}
@@ -213,7 +229,11 @@ def init_runtime_chat_model(
     init_chat_model_func: Any = init_chat_model,
     chat_openrouter_cls: Any = ChatOpenRouter,
 ) -> Any:
-    if uses_openrouter_reasoning_adapter(model_name=model_name, base_url=openrouter_base_url):
+    if uses_openrouter_chat_adapter(model_name=model_name, base_url=openrouter_base_url):
+        uses_reasoning = uses_openrouter_reasoning_adapter(
+            model_name=model_name,
+            base_url=openrouter_base_url,
+        )
         app_headers = openrouter_app_headers(base_url=openrouter_base_url)
         adapter_kwargs: dict[str, Any] = {
             "model": model_name,
@@ -221,9 +241,10 @@ def init_runtime_chat_model(
             "base_url": openrouter_base_url or base_kwargs.get("base_url"),
             "temperature": base_kwargs.get("temperature"),
             "max_completion_tokens": base_kwargs.get("max_completion_tokens"),
-            "reasoning": openrouter_reasoning_config(reasoning_effort),
             "streaming": bool(base_kwargs.get("streaming", True)),
         }
+        if uses_reasoning:
+            adapter_kwargs["reasoning"] = openrouter_reasoning_config(reasoning_effort)
         if referer := app_headers.get("HTTP-Referer"):
             adapter_kwargs["app_url"] = referer
         if title := app_headers.get("X-OpenRouter-Title"):
@@ -330,24 +351,41 @@ def prepare_messages_for_prompt_cache(
     *,
     model_name: str | None = None,
     stable_prefix_count: int = 0,
+    cacheable_prefix_count: int | None = None,
 ) -> list[Any]:
     profile = runtime.prompt_cache_profile(model_name=model_name)
-    if profile.get("strategy") != "breakpoint":
+    strategy = str(profile.get("strategy") or "")
+    if strategy not in {"breakpoint", "explicit_tail_breakpoint"}:
         return messages
     cache_control = dict(profile.get("cache_control") or {})
     if not cache_control:
         return messages
-    effective_stable_prefix_count = (
-        int(stable_prefix_count)
-        if int(stable_prefix_count) > 0
-        else infer_stable_system_prefix_count(messages)
-    )
-    if effective_stable_prefix_count <= 0:
+    if strategy == "explicit_tail_breakpoint":
+        effective_prefix_count = (
+            int(cacheable_prefix_count)
+            if cacheable_prefix_count is not None and int(cacheable_prefix_count) > 0
+            else int(stable_prefix_count)
+            if int(stable_prefix_count) > 0
+            else infer_stable_system_prefix_count(messages)
+        )
+    else:
+        effective_prefix_count = (
+            int(stable_prefix_count)
+            if int(stable_prefix_count) > 0
+            else infer_stable_system_prefix_count(messages)
+        )
+    if effective_prefix_count <= 0:
         return messages
     patched: list[Any] = list(messages)
     target_index: int | None = None
-    for idx in range(min(effective_stable_prefix_count, len(patched)) - 1, -1, -1):
-        if getattr(patched[idx], "content", None):
+    target_roles = (SystemMessage, HumanMessage, AIMessage, ToolMessage)
+    for idx in range(min(effective_prefix_count, len(patched)) - 1, -1, -1):
+        message = patched[idx]
+        if not isinstance(message, target_roles):
+            continue
+        if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
+            continue
+        if getattr(message, "content", None):
             target_index = idx
             break
     if target_index is None:
@@ -413,6 +451,7 @@ async def ainvoke_model(
     *,
     model_name: str | None = None,
     stable_prefix_count: int = 0,
+    cacheable_prefix_count: int | None = None,
     call_context: dict[str, Any] | None = None,
 ) -> Any:
     resolved_model_name = runtime._resolve_model_name_for_runtime_call(
@@ -422,6 +461,7 @@ async def ainvoke_model(
         list(messages),
         model_name=resolved_model_name,
         stable_prefix_count=stable_prefix_count,
+        cacheable_prefix_count=cacheable_prefix_count,
     )
     base_invoke_extras = runtime.model_invoke_extras(model_name=resolved_model_name)
     attempts = runtime._model_request_attempts(model_name=resolved_model_name)
@@ -473,7 +513,10 @@ async def ainvoke_model(
                 stable_prefix_count=stable_prefix_count,
                 response=response,
                 error=error_text,
-                call_context=attempt_context,
+                call_context={
+                    **attempt_context,
+                    "cacheable_prefix_count": cacheable_prefix_count,
+                },
             )
     if last_exc is not None:
         raise last_exc
@@ -487,6 +530,7 @@ async def astream_model(
     *,
     model_name: str | None = None,
     stable_prefix_count: int = 0,
+    cacheable_prefix_count: int | None = None,
     call_context: dict[str, Any] | None = None,
     stream_config: Any | None = None,
 ) -> Any:
@@ -497,6 +541,7 @@ async def astream_model(
         list(messages),
         model_name=resolved_model_name,
         stable_prefix_count=stable_prefix_count,
+        cacheable_prefix_count=cacheable_prefix_count,
     )
     base_invoke_extras = runtime.model_invoke_extras(model_name=resolved_model_name)
     attempts = runtime._model_request_attempts(model_name=resolved_model_name)
@@ -522,6 +567,7 @@ async def astream_model(
                 messages,
                 model_name=resolved_model_name,
                 stable_prefix_count=stable_prefix_count,
+                cacheable_prefix_count=cacheable_prefix_count,
                 call_context=call_context,
             )
         response: Any | None = None
@@ -575,7 +621,10 @@ async def astream_model(
                 stable_prefix_count=stable_prefix_count,
                 response=response,
                 error=error_text,
-                call_context=attempt_context,
+                call_context={
+                    **attempt_context,
+                    "cacheable_prefix_count": cacheable_prefix_count,
+                },
             )
     if last_exc is not None:
         raise last_exc
@@ -590,6 +639,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
     schema: type[StructuredModelT],
     model_name: str | None = None,
     stable_prefix_count: int = 0,
+    cacheable_prefix_count: int | None = None,
     call_context: dict[str, Any] | None = None,
     clean_json_text_block: Any,
 ) -> tuple[StructuredModelT | None, str | None]:
@@ -601,6 +651,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
         list(messages),
         model_name=resolved_model_name,
         stable_prefix_count=stable_prefix_count,
+        cacheable_prefix_count=cacheable_prefix_count,
     )
     base_invoke_extras = runtime.model_invoke_extras(model_name=resolved_model_name)
     attempts = runtime._model_request_attempts(model_name=resolved_model_name)
@@ -694,7 +745,10 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                         stable_prefix_count=stable_prefix_count,
                         response=payload,
                         error=None,
-                        call_context=attempt_context,
+                        call_context={
+                            **attempt_context,
+                            "cacheable_prefix_count": cacheable_prefix_count,
+                        },
                     )
                     trace_recorded = True
                     return payload, None
@@ -720,7 +774,10 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                         stable_prefix_count=stable_prefix_count,
                         response=parsed,
                         error=None,
-                        call_context=attempt_context,
+                        call_context={
+                            **attempt_context,
+                            "cacheable_prefix_count": cacheable_prefix_count,
+                        },
                     )
                     trace_recorded = True
                     return parsed, None
@@ -752,7 +809,10 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                         stable_prefix_count=stable_prefix_count,
                         response=payload,
                         error=error_text,
-                        call_context=attempt_context,
+                        call_context={
+                            **attempt_context,
+                            "cacheable_prefix_count": cacheable_prefix_count,
+                        },
                     )
         if error_text:
             last_error = error_text

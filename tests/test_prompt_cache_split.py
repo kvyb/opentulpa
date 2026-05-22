@@ -8,7 +8,7 @@ from opentulpa.agent.graph_builder import (
     _build_connected_composio_toolkits_context,
     _build_late_turn_control_text,
 )
-from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.prompt_policy import build_system_prompt_message
 from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -196,6 +196,22 @@ def test_prompt_cache_profile_zai_glm_is_automatic() -> None:
     assert profile["supports_breakpoints"] is False
 
 
+def test_prompt_cache_profile_qwen_uses_explicit_tail_breakpoint() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="qwen/qwen3.7-max",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+
+    profile = rt.prompt_cache_profile()
+
+    assert profile["strategy"] == "explicit_tail_breakpoint"
+    assert profile["supports_top_level"] is False
+    assert profile["supports_breakpoints"] is True
+
+
 def test_prepare_messages_for_prompt_cache_wraps_stable_system_message_for_gemini_by_default() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
@@ -257,6 +273,73 @@ def test_prepare_messages_for_prompt_cache_prefers_stable_prefix_when_provided()
     assert stable_block["text"] == "Stable skills context"
     assert stable_block["cache_control"] == {"type": "ephemeral"}
     assert prepared[2].content == "Dynamic user question"
+
+
+def test_prepare_messages_for_qwen_wraps_latest_cacheable_history_before_current_turn() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="qwen/qwen3.7-max",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+    messages = [
+        SystemMessage(content="Stable system prompt"),
+        HumanMessage(content="OpenTulpa cache anchor v1"),
+        AIMessage(content="Prior assistant answer"),
+        ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
+        HumanMessage(content="Prior user turn"),
+        HumanMessage(content="Current user turn"),
+    ]
+
+    prepared = rt.prepare_messages_for_prompt_cache(
+        messages,
+        stable_prefix_count=2,
+        cacheable_prefix_count=5,
+    )
+
+    assert prepared[0].content == "Stable system prompt"
+    assert prepared[1].content == "OpenTulpa cache anchor v1"
+    assert prepared[2].content == "Prior assistant answer"
+    assert prepared[3].content == '{"ok": true}'
+    assert isinstance(prepared[4].content, list)
+    cache_block = prepared[4].content[0]
+    assert cache_block["type"] == "text"
+    assert cache_block["text"] == "Prior user turn"
+    assert cache_block["cache_control"] == {"type": "ephemeral"}
+    assert prepared[5].content == "Current user turn"
+
+
+def test_prepare_messages_for_qwen_uses_tool_result_after_ai_tool_call() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="qwen/qwen3.7-max",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+    messages = [
+        SystemMessage(content="Stable system prompt"),
+        HumanMessage(content="OpenTulpa cache anchor v1"),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+        ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
+        HumanMessage(content="Current user turn"),
+    ]
+
+    prepared = rt.prepare_messages_for_prompt_cache(
+        messages,
+        stable_prefix_count=2,
+        cacheable_prefix_count=4,
+    )
+
+    assert prepared[0].content == "Stable system prompt"
+    assert prepared[1].content == "OpenTulpa cache anchor v1"
+    assert prepared[2].content == ""
+    assert isinstance(prepared[3].content, list)
+    cache_block = prepared[3].content[0]
+    assert cache_block["text"] == '{"ok": true}'
+    assert cache_block["cache_control"] == {"type": "ephemeral"}
+    assert prepared[4].content == "Current user turn"
 
 
 class _CaptureResponse:

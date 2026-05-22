@@ -184,6 +184,46 @@ def test_runtime_uses_openrouter_adapter_for_deepseek_reasoning(monkeypatch) -> 
     assert all(call["model"] != "deepseek/deepseek-v4-pro" for call in init_calls)
 
 
+def test_runtime_uses_openrouter_adapter_for_qwen_prompt_cache(monkeypatch) -> None:
+    init_calls: list[dict[str, Any]] = []
+    openrouter_calls: list[dict[str, Any]] = []
+
+    def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
+        init_calls.append({"model": model, **kwargs})
+        return object()
+
+    class _FakeChatOpenRouter:
+        def __init__(self, **kwargs: Any) -> None:
+            openrouter_calls.append(kwargs)
+
+    monkeypatch.setattr(runtime_module, "init_chat_model", _fake_init_chat_model)
+    monkeypatch.setattr(runtime_module, "ChatOpenRouter", _FakeChatOpenRouter)
+    monkeypatch.delenv("OPENROUTER_APP_TITLE", raising=False)
+
+    runtime_module.OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="test-key",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        model_name="qwen/qwen3.7-max",
+        reasoning_effort="medium",
+        wake_classifier_model_name="google/gemini-3-flash-preview",
+        wake_execution_model_name="google/gemini-3-flash-preview",
+        telegram_media_model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=".opentulpa/test.sqlite",
+    )
+
+    assert openrouter_calls
+    qwen_call = openrouter_calls[0]
+    assert qwen_call["model"] == "qwen/qwen3.7-max"
+    assert qwen_call["api_key"] == "test-key"
+    assert qwen_call["base_url"] == "https://openrouter.ai/api/v1"
+    assert qwen_call["streaming"] is True
+    assert qwen_call["app_url"] == "https://github.com/kvyb/opentulpa"
+    assert qwen_call["app_title"] == "OpenTulpa"
+    assert "reasoning" not in qwen_call
+    assert all(call["model"] != "qwen/qwen3.7-max" for call in init_calls)
+
+
 def test_runtime_uses_openrouter_adapter_to_disable_deepseek_reasoning(monkeypatch) -> None:
     openrouter_calls: list[dict[str, Any]] = []
 
