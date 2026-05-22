@@ -15,6 +15,11 @@ from opentulpa.business_knowledge.service import BusinessKnowledgeService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.intake import service as intake_service_module
 from opentulpa.intake.service import IntakeWorkflowService
+from opentulpa.intake.workflow_boundaries import (
+    ConversationCursorSignals,
+    DecisionActions,
+    WorkflowRunAccumulator,
+)
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
 from opentulpa.scheduler.service import SchedulerService
@@ -113,6 +118,85 @@ class _FakeRuntime:
         if customer_id:
             fields.setdefault("customer_id", customer_id)
         self.log_behavior_event(event=event, **fields)
+
+
+def test_decision_actions_normalize_and_validate_supported_decision() -> None:
+    actions = DecisionActions.from_decision(
+        {
+            "booking_action": " CREATE_NEW_BOOKING ",
+            "ready_to_save": True,
+            "reply_action": " SEND_REPLY ",
+            "reply_text": " Booked. ",
+            "sink_action": " UPSERT_PARTIAL ",
+            "sink_payload": {"name": "Alice"},
+        }
+    )
+
+    assert actions.booking_action == "create_new_booking"
+    assert actions.ready_to_save is True
+    assert actions.reply_action == "send_reply"
+    assert actions.reply_text == "Booked."
+    assert actions.sink_action == "upsert_partial"
+    assert actions.sink_payload == {"name": "Alice"}
+    assert actions.validation_error() is None
+
+
+def test_decision_actions_preserve_existing_validation_errors() -> None:
+    unsupported_sink = DecisionActions.from_decision({"sink_action": "delete"})
+    unsupported_booking = DecisionActions.from_decision({"booking_action": "reschedule"})
+    sink_without_booking = DecisionActions.from_decision(
+        {"booking_action": "ignore", "sink_action": "upsert_partial"}
+    )
+
+    assert unsupported_sink.validation_error() == "unsupported sink_action=delete"
+    assert unsupported_booking.validation_error() == "unsupported booking_action=reschedule"
+    assert sink_without_booking.validation_error() == "sink_action requires an active booking action"
+
+
+def test_conversation_cursor_signals_normalize_cursor_fields() -> None:
+    signals = ConversationCursorSignals.from_summary(
+        {
+            "conversation_id": " conv_1 ",
+            "latest_inbound_message_id": " msg_1 ",
+            "latest_inbound_message_created_time": " 2026-04-07T08:00:00+00:00 ",
+            "conversation_updated_time": " 2026-04-07T08:00:30+00:00 ",
+            "latest_outbound_message_id": " out_1 ",
+        }
+    )
+
+    assert signals.conversation_id == "conv_1"
+    assert signals.latest_inbound_message_id == "msg_1"
+    assert signals.latest_inbound_message_time == "2026-04-07T08:00:00+00:00"
+    assert signals.conversation_updated_time == "2026-04-07T08:00:30+00:00"
+    assert signals.latest_outbound_message_id == "out_1"
+
+
+def test_workflow_run_accumulator_preserves_response_summary_precedence() -> None:
+    accumulator = WorkflowRunAccumulator(
+        processed=2,
+        matched=1,
+        saved_notifications=["saved booking"],
+        errors=["conv_2: failed"],
+        result_items=[{"conversation_id": "conv_1"}],
+    )
+
+    response = accumulator.build_response(
+        workflow={"name": "Car Wash"},
+        workflow_id="wf_1",
+        event_type="manual",
+        source_warnings=[{"warning": "slow"}],
+        empty_summary_token=NO_NOTIFY_TOKEN,
+    )
+
+    assert response["ok"] is False
+    assert response["workflow_id"] == "wf_1"
+    assert response["event_type"] == "manual"
+    assert response["processed_conversations"] == 2
+    assert response["matched_conversations"] == 1
+    assert response["results"] == [{"conversation_id": "conv_1"}]
+    assert response["errors"] == ["conv_2: failed"]
+    assert response["source_warnings"] == [{"warning": "slow"}]
+    assert response["summary"] == "Workflow Car Wash hit errors: conv_2: failed"
 
 
 class _DelayedRuntime(_FakeRuntime):
@@ -558,6 +642,45 @@ def _mk_service(
         get_agent_runtime=lambda: runtime,
     )
     return service, scheduler, skills, telegram_business, file_vault
+
+
+def test_resolve_booking_target_promotes_new_booking_to_active_update(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Need a car wash tomorrow 3pm.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio(summary, conversation),
+    )
+    active_booking = {
+        "booking_id": "bkg_active",
+        "workflow_id": "wf_1",
+        "customer_id": "telegram_123",
+        "conversation_id": "conv_1",
+        "extracted_fields": {"service": "wash"},
+    }
+
+    target = service._resolve_booking_target(  # noqa: SLF001
+        workflow={"workflow_id": "wf_1", "customer_id": "telegram_123"},
+        conversation_summary={"conversation_id": "conv_1"},
+        booking_action="create_new_booking",
+        active_booking=active_booking,
+        recent_completed_booking=None,
+    )
+
+    assert target.booking_action == "update_active"
+    assert target.booking == active_booking
+    assert target.booking is not active_booking
 
 
 def _telegram_business_inbound(
