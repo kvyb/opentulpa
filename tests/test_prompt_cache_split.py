@@ -7,12 +7,15 @@ import pytest
 from opentulpa.agent.graph_builder import (
     _build_connected_composio_toolkits_context,
     _build_late_turn_control_text,
-    _qwen_cache_safe_history_count,
-    _split_qwen_cacheable_history,
-    _tail_sized_history_message_count,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.model_pool import prompt_cache_breakpoint_message_index
+from opentulpa.agent.prompt_cache_policy import (
+    build_prompt_cache_plan,
+    qwen_cache_safe_history_count,
+    split_qwen_cacheable_history,
+    tail_sized_history_message_count,
+)
 from opentulpa.agent.prompt_policy import build_system_prompt_message
 from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -320,14 +323,14 @@ def test_prompt_cache_breakpoint_index_matches_actual_cacheable_message() -> Non
 
 
 def test_qwen_tail_sized_history_count_keeps_only_small_suffix_volatile() -> None:
-    assert _tail_sized_history_message_count([]) == 0
-    assert _tail_sized_history_message_count([120, 120]) == 0
-    assert _tail_sized_history_message_count([1000, 1000, 1000, 150, 120]) == 3
-    assert _tail_sized_history_message_count([5000, 1000]) == 2
+    assert tail_sized_history_message_count([]) == 0
+    assert tail_sized_history_message_count([120, 120]) == 0
+    assert tail_sized_history_message_count([1000, 1000, 1000, 150, 120]) == 3
+    assert tail_sized_history_message_count([5000, 1000]) == 2
 
 
 def test_qwen_history_split_keeps_current_user_in_frontier() -> None:
-    cacheable, frontier, mode = _split_qwen_cacheable_history(
+    cacheable, frontier, mode = split_qwen_cacheable_history(
         older_history_messages=[],
         latest_turn_messages=[HumanMessage(content="Current user turn")],
     )
@@ -346,7 +349,7 @@ def test_qwen_history_split_caches_workflow_tool_loop_head() -> None:
         ToolMessage(content="{\"ok\": true, \"result\": \"" + ("preflight " * 1200) + "\"}", tool_call_id="call_2"),
     ]
 
-    cacheable, frontier, mode = _split_qwen_cacheable_history(
+    cacheable, frontier, mode = split_qwen_cacheable_history(
         older_history_messages=[],
         latest_turn_messages=latest_turn,
     )
@@ -367,7 +370,7 @@ def test_qwen_history_split_does_not_end_cacheable_prefix_on_pending_tool_call()
         AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
     ]
 
-    cacheable, frontier, mode = _split_qwen_cacheable_history(
+    cacheable, frontier, mode = split_qwen_cacheable_history(
         older_history_messages=[],
         latest_turn_messages=latest_turn,
         target_tail_tokens=0,
@@ -388,8 +391,45 @@ def test_qwen_safe_history_count_rolls_back_pending_tool_call() -> None:
         AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
     ]
 
-    assert _qwen_cache_safe_history_count(latest_turn, 4) == 3
-    assert _qwen_cache_safe_history_count(latest_turn, 2) == 1
+    assert qwen_cache_safe_history_count(latest_turn, 4) == 3
+    assert qwen_cache_safe_history_count(latest_turn, 2) == 1
+
+
+def test_prompt_cache_plan_encapsulates_qwen_message_order_and_counts() -> None:
+    prefix = [
+        SystemMessage(content="Stable system prompt"),
+        HumanMessage(content="OpenTulpa cache anchor v1"),
+    ]
+    older = [HumanMessage(content="older " * 900)]
+    latest = [
+        HumanMessage(content="INTERNAL_ONBOARDING_SEED. " + ("setup facts " * 900)),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+    ]
+    dynamic = [SystemMessage(content="dynamic late")]
+
+    plan = build_prompt_cache_plan(
+        prefix_messages=prefix,
+        older_history_messages=older,
+        frozen_late_messages=[],
+        latest_turn_messages=latest,
+        dynamic_late_messages=dynamic,
+        cache_profile={"strategy": "explicit_committed_breakpoint", "supports_breakpoints": True},
+    )
+
+    assert plan.model_messages[:2] == prefix
+    assert plan.requested_cacheable_prefix_count == 3
+    assert plan.cacheable_prefix_count == 3
+    assert plan.cache_breakpoint_index == 2
+    assert plan.cacheable_prefix_mode == "committed_tail_sized_history"
+    assert len(plan.cacheable_history_messages) == 1
+    assert str(plan.cacheable_history_messages[0].content).startswith(
+        "QWEN_CACHEABLE_COMMITTED_HISTORY"
+    )
+    assert str(plan.frontier_history_messages[0].content).startswith(
+        "QWEN_VOLATILE_RECENT_HISTORY"
+    )
+    assert plan.frontier_history_messages[1:] == latest[1:]
+    assert plan.model_messages[-1] == dynamic[0]
 
 
 class _CaptureResponse:
