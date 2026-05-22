@@ -11,6 +11,7 @@ from opentulpa.agent.graph_builder import (
     _prompt_cache_prefix_count_for_turn,
 )
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.model_pool import prompt_cache_breakpoint_message_index
 from opentulpa.agent.prompt_policy import build_system_prompt_message
 from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
@@ -342,6 +343,19 @@ def test_prepare_messages_for_qwen_uses_tool_result_after_ai_tool_call() -> None
     assert cache_block["text"] == '{"ok": true}'
     assert cache_block["cache_control"] == {"type": "ephemeral"}
     assert prepared[4].content == "Current user turn"
+
+
+def test_prompt_cache_breakpoint_index_matches_actual_cacheable_message() -> None:
+    messages = [
+        SystemMessage(content="Stable system prompt"),
+        HumanMessage(content="OpenTulpa cache anchor v1"),
+        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
+        HumanMessage(content="Current user turn"),
+    ]
+
+    index = prompt_cache_breakpoint_message_index(messages, effective_prefix_count=3)
+
+    assert index == 1
 
 
 def test_qwen_cache_prefix_uses_stable_prefix_for_first_user_turn() -> None:

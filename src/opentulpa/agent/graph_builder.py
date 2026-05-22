@@ -26,6 +26,9 @@ from opentulpa.agent.lc_messages import (
     SystemMessage,
     ToolMessage,
 )
+from opentulpa.agent.model_pool import (
+    prompt_cache_breakpoint_message_index as _prompt_cache_breakpoint_message_index,
+)
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
@@ -160,6 +163,7 @@ def _prompt_cache_prefix_count_for_turn(
         return max(0, int(stable_prefix_count)), "stable_prefix_committed_only"
     safe_history_count = min(max(0, int(older_history_count)), committed_history_count)
     return max(0, int(stable_prefix_count)) + safe_history_count, "committed_older_history"
+
 
 def _build_workflow_setup_prompt_context(
     runtime: Any,
@@ -1324,7 +1328,7 @@ def build_runtime_graph(runtime: Any):
         dynamic_late_tokens = _message_tokens(dynamic_late_messages)
         older_history_tokens = _message_tokens(older_history_messages)
         latest_turn_tokens = _message_tokens(latest_turn_messages)
-        cacheable_prefix_count, cacheable_prefix_mode = _prompt_cache_prefix_count_for_turn(
+        requested_cacheable_prefix_count, cacheable_prefix_mode = _prompt_cache_prefix_count_for_turn(
             prompt_cache_strategy=str(cache_profile.get("strategy", "")),
             stable_prefix_count=stable_prefix_count,
             older_history_count=len(older_history_messages),
@@ -1333,23 +1337,23 @@ def build_runtime_graph(runtime: Any):
             ],
             latest_turn_messages=latest_turn_messages,
         )
-        cacheable_prefix_tokens = (
-            stable_prefix_tokens
-            + _message_tokens(
-                older_history_messages[
-                    : max(0, cacheable_prefix_count - stable_prefix_count)
-                ]
-            )
-            if cacheable_prefix_count > stable_prefix_count
-            else stable_prefix_tokens
-        )
         model_messages: list[AnyMessage] = [
             *prefix_messages,
             *older_history_messages,
-            *latest_turn_messages,
             *frozen_late_messages,
+            *latest_turn_messages,
             *dynamic_late_messages,
         ]
+        cacheable_prefix_count = requested_cacheable_prefix_count
+        cache_breakpoint_index: int | None = None
+        if bool(cache_profile.get("supports_breakpoints", False)):
+            cache_breakpoint_index = _prompt_cache_breakpoint_message_index(
+                model_messages,
+                effective_prefix_count=requested_cacheable_prefix_count,
+            )
+            if cache_breakpoint_index is not None:
+                cacheable_prefix_count = cache_breakpoint_index + 1
+        cacheable_prefix_tokens = _message_tokens(model_messages[:cacheable_prefix_count])
         _log(
             state,
             "graph.agent.prompt_ready",
@@ -1368,9 +1372,11 @@ def build_runtime_graph(runtime: Any):
             prompt_cache_top_level=bool(cache_profile.get("supports_top_level", False)),
             stable_prefix_count=stable_prefix_count,
             stable_prefix_tokens=stable_prefix_tokens,
+            requested_cacheable_prefix_count=requested_cacheable_prefix_count,
             cacheable_prefix_count=cacheable_prefix_count,
             cacheable_prefix_tokens=cacheable_prefix_tokens,
             cacheable_prefix_mode=cacheable_prefix_mode,
+            cache_breakpoint_index=cache_breakpoint_index,
             frozen_late_tokens=frozen_late_tokens,
             dynamic_late_tokens=dynamic_late_tokens,
             older_history_tokens=older_history_tokens,
@@ -1392,9 +1398,11 @@ def build_runtime_graph(runtime: Any):
             "prompt_sections": prompt_section_names,
             "stable_prefix_count": stable_prefix_count,
             "stable_prefix_tokens": stable_prefix_tokens,
+            "requested_cacheable_prefix_count": requested_cacheable_prefix_count,
             "cacheable_prefix_count": cacheable_prefix_count,
             "cacheable_prefix_tokens": cacheable_prefix_tokens,
             "cacheable_prefix_mode": cacheable_prefix_mode,
+            "cache_breakpoint_index": cache_breakpoint_index,
             "frozen_late_tokens": frozen_late_tokens,
             "dynamic_late_tokens": dynamic_late_tokens,
             "older_history_tokens": older_history_tokens,
