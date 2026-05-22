@@ -44,6 +44,10 @@ class _PromptComposioRuntime:
     def __init__(self, composio: _PromptComposio | None) -> None:
         self._composio_service = composio
 
+    @property
+    def composio_service(self) -> _PromptComposio | None:
+        return self._composio_service
+
 
 def test_prompt_dynamic_boundary_marker_is_single_line_prefix() -> None:
     assert PROMPT_DYNAMIC_BOUNDARY.startswith("[OPENTULPA_PROMPT_DYNAMIC_BOUNDARY]")
