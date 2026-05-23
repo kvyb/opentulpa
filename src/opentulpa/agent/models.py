@@ -48,3 +48,4 @@ class AgentState(TypedDict, total=False):
     stream_model_calls: bool
     remaining_steps: RemainingSteps
     loop_limit_status_update_sent: bool
+    tool_preamble_update_sent: bool

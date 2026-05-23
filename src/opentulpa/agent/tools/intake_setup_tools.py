@@ -65,6 +65,10 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         """Patch the workflow setup draft and scratchpad for the current thread.
 
         Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
+        Put workflow fields directly inside draft_patch; do not nest them under draft, draft_upsert,
+        workflow, or workflow_upsert.
+        If the owner changes source/channel later, latest explicit owner request wins: update
+        draft_patch.channel and draft_patch.provider in the same call before proposing.
         For local_csv workflows, use draft_patch.sink_config={"file_path": "..."}.
         For google_sheets_composio workflows, put spreadsheet targets in
         draft_patch.sink_config.static_arguments, for example spreadsheetId and sheetName;
@@ -193,6 +197,8 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         scratchpad_patch; this tool will persist them, preflight, mark the current
         draft as proposed, confirm it, and commit it. Do not call the separate
         preflight/mark_proposed/confirm_current/commit tools after this succeeds.
+        Put workflow fields directly inside draft_patch; do not nest them under draft,
+        draft_upsert, workflow, or workflow_upsert.
         """
         customer_id = require_customer_id(runtime)
         thread_id = require_thread_id(runtime)

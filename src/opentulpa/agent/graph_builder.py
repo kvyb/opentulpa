@@ -104,6 +104,10 @@ LOOP_LIMIT_FINAL_STATUS_TEXT = (
     "I stopped tool work because this turn reached its tool-step budget. The latest "
     "tool result is the current state; send a short follow-up to continue from there."
 )
+WORKFLOW_SETUP_TOOL_PROGRESS_TEXT = (
+    "I’m setting up the workflow now. I’ll send the proposal or exact blocker when "
+    "validation finishes."
+)
 LOOP_LIMIT_REPAIR_INSTRUCTION = (
     "LOOP_LIMIT_APPROACHING: This turn is near its graph step limit. Do not call more tools. "
     "Write a concise user-facing status update now with what is done, the current blocker, "
@@ -665,12 +669,12 @@ def build_runtime_graph(runtime: Any):
         *,
         message: AIMessage,
         turn_mode: str,
-    ) -> None:
+    ) -> bool:
         if turn_mode not in {"interactive", "workflow_setup"}:
-            return
+            return False
+        if bool(state.get("tool_preamble_update_sent")):
+            return False
         text = _content_to_text(getattr(message, "content", "")).strip()
-        if not text:
-            return
         tool_calls = getattr(message, "tool_calls", []) or []
         tool_names = [
             str(call.get("name", "")).strip()
@@ -686,7 +690,23 @@ def build_runtime_graph(runtime: Any):
                 chars=len(text),
                 turn_mode=turn_mode,
             )
-            return
+            return False
+        if not text:
+            intake_setup_call = any(
+                name.startswith("intake_workflow_setup_")
+                or (
+                    name == "tool_group_exec"
+                    and isinstance(call, dict)
+                    and isinstance(call.get("args"), dict)
+                    and str(call["args"].get("group", "")).strip() == "intake"
+                )
+                for call in tool_calls
+                for name in [str(call.get("name", "")).strip()]
+                if isinstance(call, dict)
+            )
+            if turn_mode != "workflow_setup" or not intake_setup_call:
+                return False
+            text = WORKFLOW_SETUP_TOOL_PROGRESS_TEXT
         emitter = getattr(runtime, "emit_interactive_update", None)
         if not callable(emitter):
             _log(
@@ -697,7 +717,7 @@ def build_runtime_graph(runtime: Any):
                 chars=len(text),
                 turn_mode=turn_mode,
             )
-            return
+            return False
         max_chars = 1200
         visible_text = text if len(text) <= max_chars else f"{text[: max_chars - 3].rstrip()}..."
         tool_call_ids = [
@@ -731,6 +751,7 @@ def build_runtime_graph(runtime: Any):
                 turn_mode=turn_mode,
                 tool_names=tool_names[:5],
             )
+            return bool(isinstance(result, dict) and result.get("sent"))
         except Exception as exc:
             _log(
                 state,
@@ -741,6 +762,7 @@ def build_runtime_graph(runtime: Any):
                 chars=len(visible_text),
                 turn_mode=turn_mode,
             )
+            return False
 
     async def agent_node(
         state: AgentState,
@@ -1521,7 +1543,9 @@ def build_runtime_graph(runtime: Any):
             execution_origin=execution_origin,
             turn_mode=turn_mode,
         )
-        await _emit_tool_call_preamble_update(state, message=last, turn_mode=turn_mode)
+        tool_preamble_update_sent = await _emit_tool_call_preamble_update(
+            state, message=last, turn_mode=turn_mode
+        )
 
         tool_messages: list[ToolMessage] = []
         tool_outcomes: list[dict[str, Any]] = []
@@ -1671,6 +1695,8 @@ def build_runtime_graph(runtime: Any):
             "active_invoked_skill_context": invoked_skill_context,
             "active_skill_context": invoked_skill_context,
         }
+        if tool_preamble_update_sent:
+            update["tool_preamble_update_sent"] = True
         if had_error:
             next_tool_error_count = int(state.get("tool_error_count", 0)) + 1
             last_tool_error = next(

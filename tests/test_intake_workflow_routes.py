@@ -205,6 +205,8 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
                 "thread_id": "thread_123",
                 "draft_patch": {
                     "name": "Car Wash Intake",
+                    "channel": "instagram_dm",
+                    "provider": "composio",
                     "intent_description": "Handle booking requests that arrive in Instagram DMs.",
                     "required_fields": ["day", "time", "car_type", "wash_type"],
                     "sink_type": "local_csv",
@@ -271,6 +273,8 @@ def test_intake_workflow_setup_finalize_confirmation_route_commits(tmp_path: Pat
                 "thread_id": "thread_123",
                 "draft_patch": {
                     "name": "Car Wash Intake",
+                    "channel": "instagram_dm",
+                    "provider": "composio",
                     "intent_description": "Handle booking requests that arrive in Instagram DMs.",
                     "required_fields": ["day", "time", "car_type", "wash_type"],
                     "sink_type": "local_csv",

@@ -403,6 +403,23 @@ def _workflow_requires_intent_match(workflow: dict[str, Any]) -> bool:
     )
 
 
+def _normalize_source_config(source_config: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = _safe_dict(source_config)
+    for key in ("intent_match_required", "strict_intent_matching", "filter_by_intent"):
+        if key in normalized and not _truthy_config_flag(normalized.get(key)):
+            normalized.pop(key, None)
+    matching = _safe_dict(normalized.get("matching"))
+    if "intent_match_required" in matching and not _truthy_config_flag(
+        matching.get("intent_match_required")
+    ):
+        matching.pop("intent_match_required", None)
+    if matching:
+        normalized["matching"] = matching
+    else:
+        normalized.pop("matching", None)
+    return normalized
+
+
 class IntakeWorkflowService:
     """Stores intake workflows and runs them on scheduled wake events."""
 
@@ -1295,7 +1312,7 @@ class IntakeWorkflowService:
         safe_intent = str(intent_description or "").strip()
         safe_schedule = str(schedule or _DEFAULT_SCHEDULE).strip() or _DEFAULT_SCHEDULE
         safe_required_fields = _unique_string_list(required_fields)
-        safe_source_config = _safe_dict(source_config)
+        safe_source_config = _normalize_source_config(source_config)
         safe_field_guidance = _safe_dict(field_guidance)
         safe_assistant_instructions = str(assistant_instructions or "").strip()
         safe_business_facts = _normalize_business_facts(business_facts)
@@ -1319,6 +1336,7 @@ class IntakeWorkflowService:
                 customer_id=safe_customer,
                 source_config=safe_source_config,
             )
+            safe_source_config = _normalize_source_config(safe_source_config)
             business_connection_id = str(safe_source_config.get("business_connection_id", "") or "").strip()
             if not business_connection_id:
                 raise ValueError("telegram_business_dm workflows require source_config.business_connection_id")

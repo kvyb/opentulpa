@@ -306,7 +306,12 @@ def _repair_command_args(command: str, args: dict[str, Any]) -> dict[str, Any]:
         repaired = {"draft_patch": draft_patch}
     draft_patch = repaired.get("draft_patch")
     if isinstance(draft_patch, dict):
-        normalized_draft = dict(draft_patch)
+        if isinstance(draft_patch.get("draft"), dict):
+            normalized_draft = dict(draft_patch["draft"])
+        elif isinstance(draft_patch.get("draft_upsert"), dict):
+            normalized_draft = dict(draft_patch["draft_upsert"])
+        else:
+            normalized_draft = dict(draft_patch)
         if normalized_draft.get("provider") in {"telegram", "telegram_business"}:
             normalized_draft["provider"] = "telegram_bot_api"
         if (

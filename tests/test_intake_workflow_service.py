@@ -895,6 +895,36 @@ async def test_telegram_business_workflow_upsert_auto_resolves_single_connected_
 
 
 @pytest.mark.asyncio
+async def test_telegram_business_workflow_drops_false_intent_match_source_config(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=_FakeRuntime([]),
+        composio=_FakeComposio({}, {}),
+    )
+
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Salon Telegram Intake",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={
+            "business_connection_id": "bc_123",
+            "intent_match_required": False,
+            "matching": {"intent_match_required": "false"},
+        },
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["name", "time"],
+        assistant_instructions="Be concise.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    assert workflow["source_config"] == {"business_connection_id": "bc_123"}
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_workflow_does_not_create_scheduler_routine(
     tmp_path: Path,
 ) -> None:
