@@ -172,6 +172,8 @@ def _looks_like_owner_proposal_message(item: dict[str, Any]) -> bool:
             "confirm",
             "save",
             "activate",
+            "commit",
+            "looks good",
             "подтверж",
             "сохран",
             "активир",
@@ -435,6 +437,10 @@ def _csv_rows_for_relative_path(
             {str(key): str(value or "") for key, value in row.items()}
             for row in csv.DictReader(handle)
         ]
+
+
+def _booking_category(row: dict[str, str]) -> str:
+    return str(row.get("service_category") or row.get("category") or "").strip().lower()
 
 
 def _lead_source_messages(
@@ -1924,13 +1930,13 @@ def test_live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated
         wash_row = by_conversation.get("39101") or {}
         tire_row = by_conversation.get("39102") or {}
         assert str(wash_row.get("status", "")).strip().lower() == "completed"
-        assert str(wash_row.get("service_category", "")).strip().lower() == "мойка"
+        assert _booking_category(wash_row) == "мойка"
         assert "2х-фазная" in str(wash_row.get("service_name", "")).lower()
         assert str(wash_row.get("quoted_price", "")).strip()
         assert str(wash_row.get("lead_name", "")).strip().lower() == "алексей"
         assert str(wash_row.get("phone", "")).strip() == "+79990001001"
         assert str(tire_row.get("status", "")).strip().lower() == "completed"
-        assert str(tire_row.get("service_category", "")).strip().lower() == "шиномонтаж"
+        assert _booking_category(tire_row) == "шиномонтаж"
         tire_service_text = (
             f"{tire_row.get('service_name', '')} {tire_row.get('vehicle_type', '')}".lower()
         )

@@ -5,13 +5,15 @@ from __future__ import annotations
 import hmac
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from opentulpa.api.customer_ids import resolve_body_customer_id
-from opentulpa.api.file_helpers import sanitize_uploaded_file_record
+from opentulpa.api.routes.intake_use_cases import (
+    workflow_upsert_kwargs,
+    workflow_with_knowledge_files,
+)
 
 
 def register_intake_workflow_routes(
@@ -37,42 +39,11 @@ def register_intake_workflow_routes(
         raw = str(request.query_params.get("customer_id", "") or "").strip()
         return resolve_body_customer_id({"customer_id": raw}, resolve_customer_id)
 
-    def _workflow_with_knowledge_files(workflow: dict[str, Any]) -> dict[str, Any]:
-        item = dict(workflow)
-        file_vault = get_file_vault() if get_file_vault is not None else None
-        customer_id = str(item.get("customer_id", "") or "").strip()
-        file_ids = [
-            str(file_id or "").strip()
-            for file_id in item.get("knowledge_file_ids", [])
-            if str(file_id or "").strip()
-        ]
-        knowledge_files: list[dict[str, Any]] = []
-        if file_vault is not None and customer_id and file_ids:
-            for record in file_vault.get_many(customer_id, file_ids):
-                clean = sanitize_uploaded_file_record(record, include_excerpt=False)
-                file_id = str(clean.get("id") or "").strip()
-                if not file_id:
-                    continue
-                knowledge_files.append(
-                    {
-                        "id": file_id,
-                        "kind": clean.get("kind"),
-                        "original_filename": clean.get("original_filename"),
-                        "mime_type": clean.get("mime_type"),
-                        "size_bytes": clean.get("size_bytes"),
-                        "caption": clean.get("caption"),
-                        "summary": clean.get("summary"),
-                        "created_at": clean.get("created_at"),
-                        "content_path": (
-                            f"/web/files/{quote(file_id)}/content?customer_id={quote(customer_id, safe='')}"
-                        ),
-                        "metadata_path": (
-                            f"/web/files/{quote(file_id)}/metadata?customer_id={quote(customer_id, safe='')}"
-                        ),
-                    }
-                )
-        item["knowledge_files"] = knowledge_files
-        return item
+    def _file_vault_or_none() -> Any | None:
+        return get_file_vault() if get_file_vault is not None else None
+
+    def _workflow_response(workflow: dict[str, Any]) -> dict[str, Any]:
+        return workflow_with_knowledge_files(workflow, file_vault=_file_vault_or_none())
 
     @app.post("/internal/intake/workflows/upsert")
     async def internal_intake_workflows_upsert(request: Request) -> Any:
@@ -81,24 +52,7 @@ def register_intake_workflow_routes(
         customer_id = resolve_body_customer_id(body, resolve_customer_id)
         try:
             workflow = service.upsert_workflow(
-                customer_id=customer_id,
-                workflow_id=str(body.get("workflow_id", "")).strip() or None,
-                name=str(body.get("name", "")).strip(),
-                channel=str(body.get("channel", "instagram_dm")).strip() or "instagram_dm",
-                provider=str(body.get("provider", "composio")).strip() or "composio",
-                source_config=body.get("source_config") if isinstance(body.get("source_config"), dict) else None,
-                intent_description=str(body.get("intent_description", "")).strip(),
-                required_fields=body.get("required_fields") if isinstance(body.get("required_fields"), list) else [],
-                field_guidance=body.get("field_guidance") if isinstance(body.get("field_guidance"), dict) else None,
-                assistant_instructions=str(body.get("assistant_instructions", "")).strip(),
-                business_facts=body.get("business_facts") if isinstance(body.get("business_facts"), dict) else None,
-                knowledge_file_ids=body.get("knowledge_file_ids") if isinstance(body.get("knowledge_file_ids"), list) else None,
-                sink_type=str(body.get("sink_type", "")).strip(),
-                sink_config=body.get("sink_config") if isinstance(body.get("sink_config"), dict) else None,
-                schedule=str(body.get("schedule", "*/2 * * * *")).strip() or "*/2 * * * *",
-                notify_user=bool(body.get("notify_user", True)),
-                enabled=bool(body.get("enabled", True)),
-                reply_mode=str(body.get("reply_mode", "auto")).strip() or "auto",
+                **workflow_upsert_kwargs(body, customer_id=customer_id)
             )
         except Exception as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
@@ -171,7 +125,7 @@ def register_intake_workflow_routes(
         )
         return {
             "ok": True,
-            "workflows": [_workflow_with_knowledge_files(workflow) for workflow in workflows],
+            "workflows": [_workflow_response(workflow) for workflow in workflows],
         }
 
     @app.get("/web/intake/workflows/{workflow_id}")
@@ -187,7 +141,7 @@ def register_intake_workflow_routes(
         )
         if workflow is None:
             return JSONResponse(status_code=404, content={"detail": "workflow not found"})
-        return {"ok": True, "workflow": _workflow_with_knowledge_files(workflow)}
+        return {"ok": True, "workflow": _workflow_response(workflow)}
 
     @app.put("/web/intake/workflows/{workflow_id}")
     async def web_intake_workflows_put(workflow_id: str, request: Request) -> Any:
@@ -203,28 +157,16 @@ def register_intake_workflow_routes(
         payload["workflow_id"] = str(workflow_id or "").strip()
         try:
             workflow = get_intake_workflows().upsert_workflow(
-                customer_id=customer_id,
-                workflow_id=payload["workflow_id"],
-                name=str(payload.get("name", "")).strip(),
-                channel=str(payload.get("channel", "instagram_dm")).strip() or "instagram_dm",
-                provider=str(payload.get("provider", "composio")).strip() or "composio",
-                source_config=payload.get("source_config") if isinstance(payload.get("source_config"), dict) else None,
-                intent_description=str(payload.get("intent_description", "")).strip(),
-                required_fields=payload.get("required_fields") if isinstance(payload.get("required_fields"), list) else [],
-                field_guidance=payload.get("field_guidance") if isinstance(payload.get("field_guidance"), dict) else None,
-                assistant_instructions=str(payload.get("assistant_instructions", "")).strip(),
-                business_facts=payload.get("business_facts") if isinstance(payload.get("business_facts"), dict) else None,
-                knowledge_file_ids=payload.get("knowledge_file_ids") if isinstance(payload.get("knowledge_file_ids"), list) else None,
-                sink_type=str(payload.get("sink_type", "")).strip(),
-                sink_config=payload.get("sink_config") if isinstance(payload.get("sink_config"), dict) else None,
-                schedule=str(payload.get("schedule") or "*/2 * * * *").strip() or "*/2 * * * *",
-                notify_user=bool(payload.get("notify_user", True)),
-                enabled=bool(payload.get("enabled", True)),
-                reply_mode=str(payload.get("reply_mode", "auto")).strip() or "auto",
+                **workflow_upsert_kwargs(
+                    payload,
+                    customer_id=customer_id,
+                    workflow_id=payload["workflow_id"],
+                    default_schedule_on_falsey=True,
+                )
             )
         except Exception as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
-        return {"ok": True, "workflow": _workflow_with_knowledge_files(workflow)}
+        return {"ok": True, "workflow": _workflow_response(workflow)}
 
     @app.delete("/web/intake/workflows/{workflow_id}")
     async def web_intake_workflows_delete(workflow_id: str, request: Request) -> Any:

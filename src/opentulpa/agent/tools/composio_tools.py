@@ -7,6 +7,10 @@ from typing import Any
 from langchain.tools import tool
 
 from opentulpa.agent.tools.common import require_customer_id
+from opentulpa.agent.tools.internal_http import (
+    RETRYABLE_INTERNAL_STATUS_CODES,
+    InternalToolHTTPClient,
+)
 
 
 def _toolkit_from_slug(tool_slug: str) -> str:
@@ -43,27 +47,28 @@ def _composio_failure_payload(
 
 
 def _is_retryable_internal_status(status_code: int) -> bool:
-    return int(status_code or 0) in {408, 429, 500, 502, 503, 504}
+    return int(status_code or 0) in RETRYABLE_INTERNAL_STATUS_CODES
 
 
 def register_composio_tools(runtime: Any) -> dict[str, Any]:
+    http = InternalToolHTTPClient(runtime)
+
     @tool
     async def composio_status() -> Any:
         """Check whether Composio is configured before trying auth or external tool execution."""
-        r = await runtime._request_with_backoff(
+        return await http.request(
+            "composio_status",
             "GET",
             "/internal/composio/status",
             timeout=8.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_status failed: {r.text}"}
-        return r.json()
 
     @tool
     async def composio_authorize_toolkit(toolkit: str, callback_url: str = "") -> Any:
         """Create a Composio auth link for the active user. Share redirect_url with the user so they can finish OAuth."""
         customer_id = require_customer_id(runtime)
-        r = await runtime._request_with_backoff(
+        payload = await http.request(
+            "composio_authorize_toolkit",
             "POST",
             "/internal/composio/authorize",
             json_body={
@@ -73,9 +78,8 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=20.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_authorize_toolkit failed: {r.text}"}
-        payload = r.json()
+        if payload.get("error"):
+            return payload
         redirect_url = str(payload.get("redirect_url", "") or "").strip()
         if redirect_url:
             payload["message"] = (
@@ -89,9 +93,12 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
         timeout_seconds: float = 60.0,
     ) -> Any:
         """Wait for a Composio connection to become active after the user finishes OAuth."""
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_wait_for_connection",
             "POST",
             "/internal/composio/wait_for_connection",
+            "connection",
+            default={},
             json_body={
                 "connection_id": connection_id,
                 "timeout_seconds": max(1.0, min(float(timeout_seconds), 600.0)),
@@ -99,9 +106,6 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             timeout=max(10.0, min(float(timeout_seconds) + 5.0, 605.0)),
             retries=0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_wait_for_connection failed: {r.text}"}
-        return r.json().get("connection", {})
 
     @tool
     async def composio_toolkits(
@@ -120,15 +124,15 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
         }
         if str(is_connected or "").strip():
             params["is_connected"] = str(is_connected).strip()
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_toolkits",
             "GET",
             "/internal/composio/toolkits",
+            "items",
+            default=[],
             params=params,
             timeout=15.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_toolkits failed: {r.text}"}
-        return r.json().get("items", [])
 
     @tool
     async def composio_connected_accounts(
@@ -138,9 +142,12 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
     ) -> Any:
         """List Composio connected accounts for the active user."""
         customer_id = require_customer_id(runtime)
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_connected_accounts",
             "GET",
             "/internal/composio/connected_accounts",
+            "items",
+            default=[],
             params={
                 "customer_id": customer_id,
                 "toolkits": ",".join(toolkits or []),
@@ -149,35 +156,32 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=15.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_connected_accounts failed: {r.text}"}
-        return r.json().get("items", [])
 
     @tool
     async def composio_disable_connected_account(connected_account_id: str) -> Any:
         """Disable a Composio connected account so OpenTulpa stops using it."""
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_disable_connected_account",
             "POST",
             "/internal/composio/connected_accounts/disable",
+            "connected_account",
+            default={},
             json_body={"connected_account_id": str(connected_account_id or "").strip()},
             timeout=20.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_disable_connected_account failed: {r.text}"}
-        return r.json().get("connected_account", {})
 
     @tool
     async def composio_delete_connected_account(connected_account_id: str) -> Any:
         """Delete a Composio connected account permanently."""
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_delete_connected_account",
             "POST",
             "/internal/composio/connected_accounts/delete",
+            "connected_account",
+            default={},
             json_body={"connected_account_id": str(connected_account_id or "").strip()},
             timeout=20.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_delete_connected_account failed: {r.text}"}
-        return r.json().get("connected_account", {})
 
     @tool
     async def composio_tool_search(
@@ -186,9 +190,12 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
         limit: int = 20,
     ) -> Any:
         """Search Composio tools and return candidate tool slugs, descriptions, and input schemas."""
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_tool_search",
             "GET",
             "/internal/composio/tools/search",
+            "items",
+            default=[],
             params={
                 "query": str(query or "").strip(),
                 "toolkits": ",".join(toolkits or []),
@@ -196,21 +203,18 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=20.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_tool_search failed: {r.text}"}
-        return r.json().get("items", [])
 
     @tool
     async def composio_tool_schema(tool_slug: str) -> Any:
         """Get the input schema for a single Composio tool slug."""
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "composio_tool_schema",
             "GET",
             f"/internal/composio/tools/{tool_slug}/schema",
+            "tool",
+            default={},
             timeout=20.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_tool_schema failed: {r.text}"}
-        return r.json().get("tool", {})
 
     @tool
     async def composio_instagram_reply_precheck(
@@ -221,7 +225,8 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
     ) -> Any:
         """Verify the exact Instagram thread for a recipient and capture the latest inbound timestamp before attempting a DM send."""
         customer_id = require_customer_id(runtime)
-        r = await runtime._request_with_backoff(
+        return await http.request(
+            "composio_instagram_reply_precheck",
             "POST",
             "/internal/composio/instagram/reply_precheck",
             json_body={
@@ -233,9 +238,6 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=60.0,
         )
-        if r.status_code != 200:
-            return {"error": f"composio_instagram_reply_precheck failed: {r.text}"}
-        return r.json()
 
     @tool
     async def composio_tool_execute(
@@ -295,7 +297,7 @@ def register_composio_tools(runtime: Any) -> dict[str, Any]:
             retries=0,
         )
         if r.status_code != 200:
-            retryable = r.status_code in {408, 429, 500, 502, 503, 504}
+            retryable = r.status_code in RETRYABLE_INTERNAL_STATUS_CODES
             return _composio_failure_payload(
                 operation="composio_tool_execute",
                 status_code=r.status_code,

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -72,11 +73,11 @@ def _extract_url_from_item(item: object) -> str | None:
     if isinstance(item, str):
         value = item.strip()
         return value if value.startswith(("http://", "https://")) else None
-    if isinstance(item, dict):
+    if isinstance(item, Mapping):
         for key in ("url", "link", "uri", "source", "href"):
-            value = item.get(key)
-            if isinstance(value, str):
-                clean = value.strip()
+            candidate = item.get(key)
+            if isinstance(candidate, str):
+                clean = candidate.strip()
                 if clean.startswith(("http://", "https://")):
                     return clean
     return None

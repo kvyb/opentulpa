@@ -252,6 +252,7 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.astream_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.model_with_tools_for_turn_mode = lambda turn_mode: runtime._model_with_tools  # type: ignore[assignment]
     runtime.log_behavior_event = lambda **kwargs: behavior_events.append(kwargs)  # type: ignore[assignment]
 
@@ -542,7 +543,7 @@ def test_live_telegram_interactive_chat_remembers_and_honors_style_preference(
         assert "Markdown" in stored_text or "markdown" in stored_text
         assert "natur" in stored_text.lower() or "естествен" in stored_text.lower()
         assert any(
-            item.get("path") == "/internal/memory/add"
+            item.get("path") in {"/internal/memory/add", "/internal/directive/set"}
             for item in harness.internal_api_calls_since(internal_start)
         )
 

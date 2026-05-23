@@ -7,8 +7,6 @@ import contextlib
 import json
 import logging
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -16,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from opentulpa.core.ids import new_short_id
+from opentulpa.persistence.sqlite import connect_sqlite
 from opentulpa.tasks.sandbox import (
     append_task_event_log,
     list_artifacts,
@@ -159,43 +158,15 @@ class TaskService:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
-            with self._conn() as conn:
-                if idempotency_key:
-                    existing = conn.execute(
-                        "SELECT * FROM tasks WHERE customer_id=? AND idempotency_key=?",
-                        (customer_id, idempotency_key),
-                    ).fetchone()
-                    if existing:
-                        return self._row_to_task(existing)
-
-                task_id = new_short_id("task")
-                now = _utc_now()
-                conn.execute(
-                    """
-                    INSERT INTO tasks (
-                        id, customer_id, goal, status, risk_level, payload_json,
-                        requires_user_input, final_summary, idempotency_key, created_at, updated_at
-                    ) VALUES (?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?, ?)
-                    """,
-                    (
-                        task_id,
-                        customer_id,
-                        goal,
-                        risk_level,
-                        json.dumps(payload),
-                        idempotency_key,
-                        now,
-                        now,
-                    ),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO task_runs (task_id, attempt_no, trigger_reason, result_status, created_at, finished_at)
-                    VALUES (?, 1, 'initial', NULL, ?, NULL)
-                    """,
-                    (task_id, now),
-                )
-                conn.commit()
+            existing_task, task_id = self._insert_task_if_absent(
+                customer_id=customer_id,
+                goal=goal,
+                payload=payload,
+                risk_level=risk_level,
+                idempotency_key=idempotency_key,
+            )
+            if existing_task is not None:
+                return existing_task
 
         await self._emit_event(task_id, "queued", {"goal": goal})
         # region agent log
@@ -215,6 +186,54 @@ class TaskService:
         # endregion
         self._spawn_runner(task_id)
         return self.get_task(task_id)
+
+    def _insert_task_if_absent(
+        self,
+        *,
+        customer_id: str,
+        goal: str,
+        payload: dict[str, Any],
+        risk_level: str,
+        idempotency_key: str | None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        with self._conn() as conn:
+            if idempotency_key:
+                existing = conn.execute(
+                    "SELECT * FROM tasks WHERE customer_id=? AND idempotency_key=?",
+                    (customer_id, idempotency_key),
+                ).fetchone()
+                if existing:
+                    return self._row_to_task(existing), str(existing["id"])
+
+            task_id = new_short_id("task")
+            now = _utc_now()
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    id, customer_id, goal, status, risk_level, payload_json,
+                    requires_user_input, final_summary, idempotency_key, created_at, updated_at
+                ) VALUES (?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    customer_id,
+                    goal,
+                    risk_level,
+                    json.dumps(payload),
+                    idempotency_key,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_runs (task_id, attempt_no, trigger_reason, result_status, created_at, finished_at)
+                VALUES (?, 1, 'initial', NULL, ?, NULL)
+                """,
+                (task_id, now),
+            )
+            conn.commit()
+        return None, task_id
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self._conn() as conn:
@@ -331,119 +350,11 @@ class TaskService:
             await self._set_status(task_id, "running")
             await self._emit_event(task_id, "running", {"step_count": len(steps)})
             artifact_dir = task_artifact_dir(task_id)
-
-            if not steps:
-                await self._set_status(task_id, "needs_input", requires_user_input=True)
-                await self._emit_event(
-                    task_id,
-                    "needs_input",
-                    {"reason": "No executable steps provided in payload."},
-                )
+            if not await self._run_task_steps(task_id=task_id, steps=steps, artifact_dir=artifact_dir):
                 return
-
-            for idx, step in enumerate(steps):
-                self._heartbeats[task_id] = time.monotonic()
-                await self._emit_event(task_id, "step_started", {"index": idx, "step": step})
-                if not isinstance(step, dict):
-                    # region agent log
-                    _debug_log(
-                        hypothesis_id="tasks",
-                        location="tasks/service.py:_run_task",
-                        message="invalid_step_schema",
-                        data={
-                            "task_id": task_id,
-                            "index": idx,
-                            "received_type": type(step).__name__,
-                        },
-                    )
-                    # endregion
-                    await self._set_status(
-                        task_id,
-                        "needs_input",
-                        requires_user_input=True,
-                        summary="Task steps must be objects with a 'type' field.",
-                    )
-                    await self._emit_event(
-                        task_id,
-                        "needs_input",
-                        {
-                            "reason": "Invalid task step schema.",
-                            "index": idx,
-                            "expected": "step object like {'type': 'run_terminal', ...}",
-                            "received_type": type(step).__name__,
-                        },
-                    )
-                    return
-                step_type = step.get("type")
-
-                if step_type == "write_file":
-                    target = write_file(step.get("path", ""), step.get("content", ""))
-                    await self._emit_event(
-                        task_id,
-                        "step_done",
-                        {"index": idx, "type": step_type, "path": str(target)},
-                    )
-                elif step_type == "run_terminal":
-                    extra_env = {"TASK_ARTIFACT_DIR": str(artifact_dir)}
-                    result = run_terminal(
-                        command=step.get("command", ""),
-                        working_dir=step.get("working_dir", "tulpa_stuff"),
-                        timeout_seconds=int(step.get("timeout_seconds", 90)),
-                        extra_env=extra_env,
-                    )
-                    await self._emit_event(
-                        task_id,
-                        "step_done",
-                        {
-                            "index": idx,
-                            "type": step_type,
-                            "ok": result["ok"],
-                            "returncode": result["returncode"],
-                            "stdout": result["stdout"],
-                            "stderr": result["stderr"],
-                            "cwd": result["cwd"],
-                        },
-                    )
-                    if not result["ok"]:
-                        await self._handle_failure(task_id, "command_failed", result)
-                        return
-                elif step_type == "sleep":
-                    await asyncio.sleep(float(step.get("seconds", 1)))
-                    await self._emit_event(task_id, "step_done", {"index": idx, "type": step_type})
-                elif step_type == "reload_tulpa":
-                    # Worker can ask main agent to call reload; mark advisory event.
-                    await self._emit_event(
-                        task_id,
-                        "step_done",
-                        {"index": idx, "type": step_type, "note": "Call tulpa_reload tool now."},
-                    )
-                else:
-                    await self._handle_failure(task_id, "unknown_step_type", {"step": step})
-                    return
-
-            # Optional low-risk tests.
             tests = payload.get("tests", [])
-            for test in tests:
-                result = run_terminal(
-                    command=test.get("command", ""),
-                    working_dir=test.get("working_dir", "tulpa_stuff"),
-                    timeout_seconds=int(test.get("timeout_seconds", 90)),
-                    extra_env={"TASK_ARTIFACT_DIR": str(artifact_dir)},
-                )
-                await self._emit_event(
-                    task_id,
-                    "test_result",
-                    {
-                        "ok": result["ok"],
-                        "returncode": result["returncode"],
-                        "stdout": result["stdout"],
-                        "stderr": result["stderr"],
-                        "command": test.get("command", ""),
-                    },
-                )
-                if not result["ok"]:
-                    await self._handle_failure(task_id, "test_failed", result)
-                    return
+            if not await self._run_task_tests(task_id=task_id, tests=tests, artifact_dir=artifact_dir):
+                return
 
             artifacts = list_artifacts(task_id)
             await self._set_status(task_id, "done", summary="Task finished successfully.")
@@ -474,6 +385,122 @@ class TaskService:
         finally:
             self._heartbeats.pop(task_id, None)
             self._running_tasks.pop(task_id, None)
+
+    async def _run_task_steps(self, *, task_id: str, steps: Any, artifact_dir: Any) -> bool:
+        if not steps:
+            await self._set_status(task_id, "needs_input", requires_user_input=True)
+            await self._emit_event(
+                task_id,
+                "needs_input",
+                {"reason": "No executable steps provided in payload."},
+            )
+            return False
+        for idx, step in enumerate(steps):
+            if not await self._run_one_task_step(
+                task_id=task_id,
+                index=idx,
+                step=step,
+                artifact_dir=artifact_dir,
+            ):
+                return False
+        return True
+
+    async def _run_one_task_step(
+        self,
+        *,
+        task_id: str,
+        index: int,
+        step: Any,
+        artifact_dir: Any,
+    ) -> bool:
+        self._heartbeats[task_id] = time.monotonic()
+        await self._emit_event(task_id, "step_started", {"index": index, "step": step})
+        if not isinstance(step, dict):
+            await self._handle_invalid_step(task_id=task_id, index=index, step=step)
+            return False
+        step_type = step.get("type")
+        if step_type == "write_file":
+            target = write_file(step.get("path", ""), step.get("content", ""))
+            await self._emit_event(task_id, "step_done", {"index": index, "type": step_type, "path": str(target)})
+            return True
+        if step_type == "run_terminal":
+            return await self._run_terminal_step(
+                task_id=task_id,
+                index=index,
+                step=step,
+                artifact_dir=artifact_dir,
+            )
+        if step_type == "sleep":
+            await asyncio.sleep(float(step.get("seconds", 1)))
+            await self._emit_event(task_id, "step_done", {"index": index, "type": step_type})
+            return True
+        if step_type == "reload_tulpa":
+            await self._emit_event(
+                task_id,
+                "step_done",
+                {"index": index, "type": step_type, "note": "Call tulpa_reload tool now."},
+            )
+            return True
+        await self._handle_failure(task_id, "unknown_step_type", {"step": step})
+        return False
+
+    async def _handle_invalid_step(self, *, task_id: str, index: int, step: Any) -> None:
+        _debug_log(
+            hypothesis_id="tasks",
+            location="tasks/service.py:_run_task",
+            message="invalid_step_schema",
+            data={"task_id": task_id, "index": index, "received_type": type(step).__name__},
+        )
+        await self._set_status(
+            task_id,
+            "needs_input",
+            requires_user_input=True,
+            summary="Task steps must be objects with a 'type' field.",
+        )
+        await self._emit_event(
+            task_id,
+            "needs_input",
+            {
+                "reason": "Invalid task step schema.",
+                "index": index,
+                "expected": "step object like {'type': 'run_terminal', ...}",
+                "received_type": type(step).__name__,
+            },
+        )
+
+    async def _run_terminal_step(
+        self,
+        *,
+        task_id: str,
+        index: int,
+        step: dict[str, Any],
+        artifact_dir: Any,
+    ) -> bool:
+        result = run_terminal(
+            command=step.get("command", ""),
+            working_dir=step.get("working_dir", "tulpa_stuff"),
+            timeout_seconds=int(step.get("timeout_seconds", 90)),
+            extra_env={"TASK_ARTIFACT_DIR": str(artifact_dir)},
+        )
+        await self._emit_event(task_id, "step_done", _terminal_step_payload(index=index, result=result))
+        if result["ok"]:
+            return True
+        await self._handle_failure(task_id, "command_failed", result)
+        return False
+
+    async def _run_task_tests(self, *, task_id: str, tests: Any, artifact_dir: Any) -> bool:
+        for test in tests:
+            result = run_terminal(
+                command=test.get("command", ""),
+                working_dir=test.get("working_dir", "tulpa_stuff"),
+                timeout_seconds=int(test.get("timeout_seconds", 90)),
+                extra_env={"TASK_ARTIFACT_DIR": str(artifact_dir)},
+            )
+            await self._emit_event(task_id, "test_result", _test_result_payload(test=test, result=result))
+            if not result["ok"]:
+                await self._handle_failure(task_id, "test_failed", result)
+                return False
+        return True
 
     async def _handle_failure(self, task_id: str, reason: str, data: dict[str, Any]) -> None:
         task = self.get_task(task_id)
@@ -628,3 +655,25 @@ class TaskService:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+
+def _terminal_step_payload(*, index: int, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "index": index,
+        "type": "run_terminal",
+        "ok": result["ok"],
+        "returncode": result["returncode"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "cwd": result["cwd"],
+    }
+
+
+def _test_result_payload(*, test: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": result["ok"],
+        "returncode": result["returncode"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "command": test.get("command", ""),
+    }

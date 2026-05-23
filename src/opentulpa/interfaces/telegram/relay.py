@@ -46,6 +46,46 @@ class _WorkflowSetupRun:
     delivery_task: asyncio.Task[None] | None = None
 
 
+@dataclass
+class _LiveStreamState:
+    last_streamed: str = ""
+    waiting_for_segment: bool = True
+    consecutive_timeouts: int = 0
+    final_reply: str | None = None
+    timeout_failed_without_reply: bool = False
+    timeout_failure_stage: str = ""
+    next_chunk_task: asyncio.Task[Any] | None = None
+
+
+@dataclass
+class _TelegramDeliveryState:
+    final_reply: str | None = None
+    delivered_any: bool = False
+    draft_enabled: bool = True
+    live_delivery_text: str = ""
+    live_delivery_at: float = 0.0
+    interim_status_sent: bool = False
+
+
+@dataclass
+class _TelegramStreamResources:
+    client: TelegramClient
+    delivery: _TelegramDeliveryState
+    typing_stop: asyncio.Event
+    typing_task: asyncio.Task[None]
+    draft_id: int
+    stream_started_at: float
+    observability_context: Any
+    observability_closed: bool = False
+
+    def close_observability_context(self) -> None:
+        if self.observability_closed:
+            return
+        self.observability_closed = True
+        with suppress(Exception):
+            self.observability_context.__exit__(None, None, None)
+
+
 _WORKFLOW_SETUP_RUNS: dict[str, _WorkflowSetupRun] = {}
 
 
@@ -140,6 +180,405 @@ async def _emit_typing_until_done(
             await client.send_chat_action(chat_id=chat_id, action="typing")
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=4.0)
+
+
+async def _session_has_pending_items(
+    *,
+    interactive_session: Any | None,
+    chat_id: int,
+    thread_id: str,
+    customer_id: str,
+) -> bool:
+    if interactive_session is None or not hasattr(interactive_session, "has_pending_items"):
+        return False
+    try:
+        return bool(await interactive_session.has_pending_items())
+    except Exception:
+        logger.exception(
+            "telegram.stream pending_items_check_failed chat_id=%s thread_id=%s customer_id=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+        )
+        return False
+
+
+async def _recover_after_stream_timeout(
+    *,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    turn_mode: str,
+) -> str | None:
+    if not hasattr(agent_runtime, "ainvoke_text"):
+        return None
+    try:
+        recovered = await asyncio.wait_for(
+            agent_runtime.ainvoke_text(
+                thread_id=thread_id,
+                customer_id=customer_id,
+                text=text,
+                turn_mode=turn_mode,
+            ),
+            timeout=90.0,
+        )
+    except Exception:
+        return None
+    safe = str(recovered or "").strip()
+    if not safe or is_low_signal_reply(safe):
+        return None
+    return safe
+
+
+async def _send_llm_status_update(
+    *,
+    agent_runtime: Any,
+    client: TelegramClient,
+    customer_id: str,
+    thread_id: str,
+    chat_id: int,
+    text: str,
+    turn_mode: str,
+    stage: str,
+) -> bool:
+    status_text = await generate_llm_status_message(
+        runtime=agent_runtime,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        context={
+            "event": "telegram_owner_stream_waiting",
+            "stage": stage,
+            "turn_mode": normalize_turn_mode(turn_mode),
+            "latest_user_message": str(text or "").strip()[:1000],
+            "latest_user_message_usage": (
+                "Background context only. Use it to understand why the turn may be slow, "
+                "but do not quote, paraphrase, summarize, or mention it in the status text."
+            ),
+            "status_goal": (
+                "Send a generic progress update that says the assistant is still checking "
+                "or preparing the answer."
+            ),
+        },
+        language="Russian",
+    )
+    if not status_text:
+        logger.warning(
+            "telegram.stream status_generation_skipped chat_id=%s thread_id=%s customer_id=%s stage=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+            stage,
+        )
+        return False
+    sent = await client.send_message(chat_id=chat_id, text=status_text, parse_mode="HTML")
+    if not sent:
+        return False
+    append_web_event(
+        customer_id=customer_id,
+        thread_id=thread_id,
+        source="chat",
+        kind="status",
+        text=status_text,
+        metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
+    )
+    logger.info(
+        "telegram.stream status_generation_sent chat_id=%s thread_id=%s customer_id=%s stage=%s chars=%s",
+        chat_id,
+        thread_id,
+        customer_id,
+        stage,
+        len(status_text),
+    )
+    return True
+
+
+async def _send_status_once(
+    *,
+    delivery: _TelegramDeliveryState,
+    agent_runtime: Any,
+    client: TelegramClient,
+    customer_id: str,
+    thread_id: str,
+    chat_id: int,
+    text: str,
+    turn_mode: str,
+    stage: str,
+) -> None:
+    if delivery.interim_status_sent:
+        return
+    sent = await _send_llm_status_update(
+        agent_runtime=agent_runtime,
+        client=client,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        text=text,
+        turn_mode=turn_mode,
+        stage=stage,
+    )
+    if sent:
+        delivery.delivered_any = True
+        delivery.interim_status_sent = True
+
+
+async def _send_draft_reply(
+    *,
+    delivery: _TelegramDeliveryState,
+    client: TelegramClient,
+    typing_stop: asyncio.Event,
+    interactive_session: Any | None,
+    chat_id: int,
+    thread_id: str,
+    customer_id: str,
+    draft_id: int,
+    stream_started_at: float,
+    text: str,
+    force: bool = False,
+) -> None:
+    current = str(text or "").strip()
+    if not current:
+        return
+    if await _session_has_pending_items(
+        interactive_session=interactive_session,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        customer_id=customer_id,
+    ):
+        return
+    delivery.final_reply = current
+    if current == delivery.live_delivery_text and not force:
+        return
+    if not delivery.draft_enabled:
+        return
+    now = time.monotonic()
+    earliest_publish_at = _draft_earliest_publish_at(
+        delivery=delivery,
+        stream_started_at=stream_started_at,
+        force=force,
+    )
+    if now < earliest_publish_at:
+        return
+    if await client.send_message_draft(
+        chat_id=chat_id,
+        draft_id=draft_id,
+        text=current,
+        parse_mode="HTML",
+    ):
+        _record_draft_delivery(
+            delivery=delivery,
+            typing_stop=typing_stop,
+            text=current,
+            delivered_at=now,
+        )
+        return
+    delivery.draft_enabled = False
+    if not typing_stop.is_set():
+        typing_stop.set()
+    logger.warning(
+        "telegram.stream draft_disabled chat_id=%s thread_id=%s customer_id=%s",
+        chat_id,
+        thread_id,
+        customer_id,
+    )
+
+
+def _draft_earliest_publish_at(
+    *,
+    delivery: _TelegramDeliveryState,
+    stream_started_at: float,
+    force: bool,
+) -> float:
+    if force:
+        return 0.0
+    if not delivery.delivered_any:
+        return stream_started_at + DRAFT_INITIAL_PUBLISH_DELAY_SECONDS
+    return delivery.live_delivery_at + DRAFT_PUBLISH_MIN_INTERVAL_SECONDS
+
+
+def _record_draft_delivery(
+    *,
+    delivery: _TelegramDeliveryState,
+    typing_stop: asyncio.Event,
+    text: str,
+    delivered_at: float,
+) -> None:
+    if not typing_stop.is_set():
+        typing_stop.set()
+    delivery.delivered_any = True
+    delivery.live_delivery_text = text
+    delivery.live_delivery_at = delivered_at
+
+
+async def _cancel_stream_task(task: asyncio.Task[Any] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        async with asyncio.timeout(1.0):
+            await task
+
+
+async def _pump_stream_to_queue(
+    *,
+    stream: Any,
+    stream_queue: asyncio.Queue[tuple[str, Any]],
+    done_marker: object,
+) -> None:
+    try:
+        async for partial in stream:
+            await stream_queue.put(("chunk", partial))
+    except BaseException as exc:
+        await stream_queue.put(("error", exc))
+    else:
+        await stream_queue.put(("done", done_marker))
+
+
+def _stream_timeout_seconds(state: _LiveStreamState) -> float:
+    if not state.last_streamed:
+        return 90.0 if state.consecutive_timeouts == 0 else 180.0
+    return 180.0 if state.consecutive_timeouts == 0 else 240.0
+
+
+async def _handle_stream_timeout(
+    *,
+    state: _LiveStreamState,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    turn_mode: str,
+    chat_id: int,
+    send_status_once: Callable[..., Any],
+) -> bool:
+    state.consecutive_timeouts += 1
+    stage = "first_token" if not state.last_streamed else "idle"
+    if state.consecutive_timeouts < 2:
+        logger.warning(
+            "telegram.stream timeout_retry chat_id=%s thread_id=%s customer_id=%s stage=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+            stage,
+        )
+        if not state.last_streamed:
+            await send_status_once(stage=stage)
+        return False
+    await _cancel_stream_task(state.next_chunk_task)
+    state.next_chunk_task = None
+    recovered_text = await _recover_after_stream_timeout(
+        agent_runtime=agent_runtime,
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        turn_mode=turn_mode,
+    )
+    if recovered_text:
+        logger.warning(
+            "telegram.stream timeout_recovered chat_id=%s thread_id=%s customer_id=%s stage=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+            stage,
+        )
+        state.final_reply = recovered_text
+        return True
+    state.timeout_failed_without_reply = True
+    state.timeout_failure_stage = stage
+    logger.error(
+        "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
+        chat_id,
+        thread_id,
+        customer_id,
+        stage,
+    )
+    return True
+
+
+async def _apply_stream_payload(
+    *,
+    state: _LiveStreamState,
+    payload: Any,
+    send_draft_reply: Callable[..., Any],
+) -> None:
+    progress_text = payload if isinstance(payload, str) else ""
+    if progress_text and _is_progress_signal(progress_text):
+        if not state.waiting_for_segment:
+            state.waiting_for_segment = True
+            state.last_streamed = ""
+        return
+    if not isinstance(payload, str):
+        return
+    state.consecutive_timeouts = 0
+    current = payload.strip()
+    if not current or is_low_signal_reply(current) or current == state.last_streamed:
+        return
+    if state.last_streamed and not current.startswith(state.last_streamed):
+        state.waiting_for_segment = True
+        state.last_streamed = ""
+    if state.waiting_for_segment:
+        state.waiting_for_segment = False
+    state.last_streamed = current
+    await send_draft_reply(current)
+
+
+async def _run_live_stream_loop(
+    *,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    turn_mode: str,
+    chat_id: int,
+    send_draft_reply: Callable[..., Any],
+    send_status_once: Callable[..., Any],
+) -> _LiveStreamState:
+    stream = agent_runtime.astream_text(
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        turn_mode=turn_mode,
+    )
+    stream_done = object()
+    stream_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    state = _LiveStreamState(
+        next_chunk_task=asyncio.create_task(
+            _pump_stream_to_queue(stream=stream, stream_queue=stream_queue, done_marker=stream_done)
+        )
+    )
+    while True:
+        try:
+            stream_status, stream_payload = await asyncio.wait_for(
+                stream_queue.get(),
+                timeout=_stream_timeout_seconds(state),
+            )
+        except TimeoutError:
+            if await _handle_stream_timeout(
+                state=state,
+                agent_runtime=agent_runtime,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                text=text,
+                turn_mode=turn_mode,
+                chat_id=chat_id,
+                send_status_once=send_status_once,
+            ):
+                break
+            continue
+        if stream_status == "done":
+            state.next_chunk_task = None
+            break
+        if stream_status == "error":
+            state.next_chunk_task = None
+            if isinstance(stream_payload, BaseException):
+                raise stream_payload
+            raise RuntimeError(str(stream_payload))
+        await _apply_stream_payload(
+            state=state,
+            payload=stream_payload,
+            send_draft_reply=send_draft_reply,
+        )
+    return state
 
 
 async def _classify_workflow_setup_interruption(
@@ -314,462 +753,186 @@ def _ensure_workflow_setup_delivery_task(
     )
 
 
-async def stream_langgraph_reply_to_telegram(
+async def _existing_workflow_setup_reply(
+    *,
+    run: _WorkflowSetupRun,
+    agent_runtime: Any,
+    text: str,
+    chat_id: int,
+    thread_id: str,
+    customer_id: str,
+) -> str:
+    queued = False
+    status = {
+        "state": "workflow_setup_running",
+        "current_status": "The workflow setup/preflight/proposal run is still active.",
+        "pending_setup_updates": len(run.pending_texts),
+        "reply_if_status_nudge": WORKFLOW_SETUP_BUSY_REPLY,
+        "reply_if_setup_input": WORKFLOW_SETUP_QUEUED_REPLY,
+    }
+    decision = await _classify_workflow_setup_interruption(
+        agent_runtime=agent_runtime,
+        text=text,
+        status=status,
+    )
+    if str(decision.get("kind", "") or "") == "status_nudge":
+        final_reply = str(decision.get("status_reply", "") or "").strip()
+        if not final_reply:
+            final_reply = WORKFLOW_SETUP_BUSY_REPLY
+    else:
+        safe_text = str(text or "").strip()
+        if safe_text:
+            run.pending_texts.append(safe_text)
+            queued = True
+        final_reply = WORKFLOW_SETUP_QUEUED_REPLY
+    logger.info(
+        "telegram.stream workflow_setup_existing_run chat_id=%s thread_id=%s customer_id=%s kind=%s queued=%s pending_count=%s",
+        chat_id,
+        thread_id,
+        customer_id,
+        str(decision.get("kind", "") or ""),
+        queued,
+        len(run.pending_texts),
+    )
+    return final_reply
+
+
+async def _new_workflow_setup_reply(
+    *,
+    run_key: str,
+    run: _WorkflowSetupRun,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    turn_mode: str,
+    bot_token: str,
+    chat_id: int,
+    final_reply_callback: Callable[[str], Any] | None,
+) -> str | None:
+    try:
+        recovered = await asyncio.wait_for(
+            asyncio.shield(run.task),
+            timeout=WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "telegram.stream workflow_setup_backgrounded chat_id=%s thread_id=%s customer_id=%s turn_mode=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+            turn_mode,
+        )
+        _ensure_workflow_setup_delivery_task(
+            run_key=run_key,
+            run=run,
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            turn_mode=turn_mode,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            final_reply_callback=final_reply_callback,
+        )
+        return WORKFLOW_SETUP_BUSY_REPLY
+    except asyncio.CancelledError:
+        _ensure_workflow_setup_delivery_task(
+            run_key=run_key,
+            run=run,
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            turn_mode=turn_mode,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            final_reply_callback=final_reply_callback,
+        )
+        raise
+    except Exception:
+        if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
+            _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+        raise
+    if run.pending_texts:
+        _ensure_workflow_setup_delivery_task(
+            run_key=run_key,
+            run=run,
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            turn_mode=turn_mode,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            final_reply_callback=final_reply_callback,
+        )
+        return WORKFLOW_SETUP_QUEUED_REPLY
+    if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
+        _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+    safe = str(recovered or "").strip()
+    return safe if safe and not is_low_signal_reply(safe) else None
+
+
+async def _workflow_setup_reply(
     *,
     agent_runtime: Any,
     thread_id: str,
     customer_id: str,
     text: str,
+    turn_mode: str,
     bot_token: str,
     chat_id: int,
-    turn_mode: str = "interactive",
-    interactive_session: Any | None = None,
-    final_reply_callback: Callable[[str], Any] | None = None,
-) -> tuple[str | None, bool]:
-    last_streamed = ""
-    final_reply = None
-    delivered_any = False
-    live_delivery_text = ""
-    live_delivery_at = 0.0
-    client = TelegramClient(bot_token)
-    draft_id = (
-        zlib.crc32(f"{thread_id}:{customer_id}:{chat_id}:{new_short_id('dft')}".encode()) or 1
+    final_reply_callback: Callable[[str], Any] | None,
+) -> str | None:
+    run_key = _workflow_setup_run_key(customer_id=customer_id, thread_id=thread_id)
+    existing_run = _WORKFLOW_SETUP_RUNS.get(run_key)
+    if existing_run is not None and not _workflow_setup_run_active(existing_run):
+        _WORKFLOW_SETUP_RUNS.pop(run_key, None)
+        existing_run = None
+    if existing_run is not None:
+        return await _existing_workflow_setup_reply(
+            run=existing_run,
+            agent_runtime=agent_runtime,
+            text=text,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            customer_id=customer_id,
+        )
+    run = _WorkflowSetupRun(
+        task=_start_workflow_setup_task(
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+            turn_mode=turn_mode,
+        ),
+        pending_texts=[],
     )
-    draft_enabled = chat_id > 0
-    waiting_for_segment = True
-    typing_stop = asyncio.Event()
-    typing_task = asyncio.create_task(
-        _emit_typing_until_done(client=client, chat_id=chat_id, stop_event=typing_stop)
-    )
-    suppressed = False
-    first_token_timeout_s = 90.0
-    first_token_retry_timeout_s = 180.0
-    stream_idle_timeout_s = 180.0
-    stream_idle_retry_timeout_s = 240.0
-    consecutive_timeouts = 0
-    max_consecutive_timeouts = 2
-    timeout_failed_without_reply = False
-    timeout_failure_stage = ""
-    interim_status_sent = False
-    stream_started_at = time.monotonic()
-    final_only = normalize_turn_mode(turn_mode) == "workflow_setup"
-    next_chunk_task: asyncio.Task[Any] | None = None
-    logger.info(
-        "telegram.stream start chat_id=%s thread_id=%s customer_id=%s text_chars=%s",
-        chat_id,
-        thread_id,
-        customer_id,
-        len(str(text or "")),
-    )
-    observability_context = _telegram_observability_context(
+    _WORKFLOW_SETUP_RUNS[run_key] = run
+    return await _new_workflow_setup_reply(
+        run_key=run_key,
+        run=run,
         agent_runtime=agent_runtime,
         thread_id=thread_id,
         customer_id=customer_id,
-        text=text,
-        chat_id=chat_id,
         turn_mode=turn_mode,
+        bot_token=bot_token,
+        chat_id=chat_id,
+        final_reply_callback=final_reply_callback,
     )
-    observability_context.__enter__()
-    observability_closed = False
 
-    def _close_observability_context() -> None:
-        nonlocal observability_closed
-        if observability_closed:
-            return
-        observability_closed = True
-        with suppress(Exception):
-            observability_context.__exit__(None, None, None)
 
-    async def _session_has_pending_items() -> bool:
-        if interactive_session is None or not hasattr(interactive_session, "has_pending_items"):
-            return False
-        try:
-            return bool(await interactive_session.has_pending_items())
-        except Exception:
-            logger.exception(
-                "telegram.stream pending_items_check_failed chat_id=%s thread_id=%s customer_id=%s",
-                chat_id,
-                thread_id,
-                customer_id,
-            )
-            return False
-
-    async def _recover_after_stream_timeout() -> str | None:
-        if not hasattr(agent_runtime, "ainvoke_text"):
-            return None
-        try:
-            recovered = await asyncio.wait_for(
-                agent_runtime.ainvoke_text(
-                    thread_id=thread_id,
-                    customer_id=customer_id,
-                    text=text,
-                    turn_mode=turn_mode,
-                ),
-                timeout=90.0,
-            )
-        except Exception:
-            return None
-        safe = str(recovered or "").strip()
-        if not safe or is_low_signal_reply(safe):
-            return None
-        return safe
-
-    async def _send_draft_reply(text: str, *, force: bool = False) -> None:
-        nonlocal delivered_any, draft_enabled, final_reply, live_delivery_text, live_delivery_at
-        current = str(text or "").strip()
-        if not current:
-            return
-        if await _session_has_pending_items():
-            return
-        final_reply = current
-        if current == live_delivery_text and not force:
-            return
-        if not draft_enabled:
-            return
-        now = time.monotonic()
-        if not force:
-            earliest_publish_at = (
-                stream_started_at + DRAFT_INITIAL_PUBLISH_DELAY_SECONDS
-                if not delivered_any
-                else live_delivery_at + DRAFT_PUBLISH_MIN_INTERVAL_SECONDS
-            )
-            if now < earliest_publish_at:
-                return
-        if not await client.send_message_draft(
-            chat_id=chat_id,
-            draft_id=draft_id,
-            text=current,
-            parse_mode="HTML",
-        ):
-            draft_enabled = False
-            if not typing_stop.is_set():
-                typing_stop.set()
-            logger.warning(
-                "telegram.stream draft_disabled chat_id=%s thread_id=%s customer_id=%s",
-                chat_id,
-                thread_id,
-                customer_id,
-            )
-            return
-        if not typing_stop.is_set():
-            typing_stop.set()
-        delivered_any = True
-        live_delivery_text = current
-        live_delivery_at = now
-
-    async def _send_llm_status_update(*, stage: str) -> None:
-        nonlocal delivered_any, interim_status_sent
-        if interim_status_sent or last_streamed:
-            return
-        status_text = await generate_llm_status_message(
-            runtime=agent_runtime,
-            customer_id=customer_id,
-            thread_id=thread_id,
-            context={
-                "event": "telegram_owner_stream_waiting",
-                "stage": stage,
-                "turn_mode": normalize_turn_mode(turn_mode),
-                "latest_user_message": str(text or "").strip()[:1000],
-                "latest_user_message_usage": (
-                    "Background context only. Use it to understand why the turn may be slow, "
-                    "but do not quote, paraphrase, summarize, or mention it in the status text."
-                ),
-                "status_goal": (
-                    "Send a generic progress update that says the assistant is still checking "
-                    "or preparing the answer."
-                ),
-            },
-            language="Russian",
-        )
-        if not status_text:
-            logger.warning(
-                "telegram.stream status_generation_skipped chat_id=%s thread_id=%s customer_id=%s stage=%s",
-                chat_id,
-                thread_id,
-                customer_id,
-                stage,
-            )
-            return
-        sent = await client.send_message(
-            chat_id=chat_id,
-            text=status_text,
-            parse_mode="HTML",
-        )
-        if sent:
-            delivered_any = True
-            interim_status_sent = True
-            append_web_event(
-                customer_id=customer_id,
-                thread_id=thread_id,
-                source="chat",
-                kind="status",
-                text=status_text,
-                metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
-            )
-            logger.info(
-                "telegram.stream status_generation_sent chat_id=%s thread_id=%s customer_id=%s stage=%s chars=%s",
-                chat_id,
-                thread_id,
-                customer_id,
-                stage,
-                len(status_text),
-            )
-
-    try:
-        if final_only:
-            draft_enabled = False
-            run_key = _workflow_setup_run_key(customer_id=customer_id, thread_id=thread_id)
-            existing_run = _WORKFLOW_SETUP_RUNS.get(run_key)
-            if existing_run is not None and not _workflow_setup_run_active(existing_run):
-                _WORKFLOW_SETUP_RUNS.pop(run_key, None)
-                existing_run = None
-            if existing_run is not None:
-                queued = False
-                status = {
-                    "state": "workflow_setup_running",
-                    "current_status": "The workflow setup/preflight/proposal run is still active.",
-                    "pending_setup_updates": len(existing_run.pending_texts),
-                    "reply_if_status_nudge": WORKFLOW_SETUP_BUSY_REPLY,
-                    "reply_if_setup_input": WORKFLOW_SETUP_QUEUED_REPLY,
-                }
-                decision = await _classify_workflow_setup_interruption(
-                    agent_runtime=agent_runtime,
-                    text=text,
-                    status=status,
-                )
-                if str(decision.get("kind", "") or "") == "status_nudge":
-                    final_reply = str(decision.get("status_reply", "") or "").strip()
-                    if not final_reply:
-                        final_reply = WORKFLOW_SETUP_BUSY_REPLY
-                else:
-                    safe_text = str(text or "").strip()
-                    if safe_text:
-                        existing_run.pending_texts.append(safe_text)
-                        queued = True
-                    final_reply = WORKFLOW_SETUP_QUEUED_REPLY
-                logger.info(
-                    "telegram.stream workflow_setup_existing_run chat_id=%s thread_id=%s customer_id=%s kind=%s queued=%s pending_count=%s",
-                    chat_id,
-                    thread_id,
-                    customer_id,
-                    str(decision.get("kind", "") or ""),
-                    queued,
-                    len(existing_run.pending_texts),
-                )
-            else:
-                run = _WorkflowSetupRun(
-                    task=_start_workflow_setup_task(
-                        agent_runtime=agent_runtime,
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                        text=text,
-                        turn_mode=turn_mode,
-                    ),
-                    pending_texts=[],
-                )
-                _WORKFLOW_SETUP_RUNS[run_key] = run
-                try:
-                    recovered = await asyncio.wait_for(
-                        asyncio.shield(run.task),
-                        timeout=WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS,
-                    )
-                except TimeoutError:
-                    logger.warning(
-                        "telegram.stream workflow_setup_backgrounded chat_id=%s thread_id=%s customer_id=%s turn_mode=%s",
-                        chat_id,
-                        thread_id,
-                        customer_id,
-                        turn_mode,
-                    )
-                    _ensure_workflow_setup_delivery_task(
-                        run_key=run_key,
-                        run=run,
-                        agent_runtime=agent_runtime,
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                        turn_mode=turn_mode,
-                        bot_token=bot_token,
-                        chat_id=chat_id,
-                        final_reply_callback=final_reply_callback,
-                    )
-                    final_reply = WORKFLOW_SETUP_BUSY_REPLY
-                except asyncio.CancelledError:
-                    _ensure_workflow_setup_delivery_task(
-                        run_key=run_key,
-                        run=run,
-                        agent_runtime=agent_runtime,
-                        thread_id=thread_id,
-                        customer_id=customer_id,
-                        turn_mode=turn_mode,
-                        bot_token=bot_token,
-                        chat_id=chat_id,
-                        final_reply_callback=final_reply_callback,
-                    )
-                    raise
-                except Exception:
-                    if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
-                        _WORKFLOW_SETUP_RUNS.pop(run_key, None)
-                    raise
-                else:
-                    if run.pending_texts:
-                        _ensure_workflow_setup_delivery_task(
-                            run_key=run_key,
-                            run=run,
-                            agent_runtime=agent_runtime,
-                            thread_id=thread_id,
-                            customer_id=customer_id,
-                            turn_mode=turn_mode,
-                            bot_token=bot_token,
-                            chat_id=chat_id,
-                            final_reply_callback=final_reply_callback,
-                        )
-                        final_reply = WORKFLOW_SETUP_QUEUED_REPLY
-                    else:
-                        if _WORKFLOW_SETUP_RUNS.get(run_key) is run:
-                            _WORKFLOW_SETUP_RUNS.pop(run_key, None)
-                        safe = str(recovered or "").strip()
-                        if safe and not is_low_signal_reply(safe):
-                            final_reply = safe
-        else:
-            stream = agent_runtime.astream_text(
-                thread_id=thread_id,
-                customer_id=customer_id,
-                text=text,
-                turn_mode=turn_mode,
-            )
-            stream_done = object()
-            stream_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
-
-            async def _pump_stream() -> None:
-                try:
-                    async for partial in stream:
-                        await stream_queue.put(("chunk", partial))
-                except BaseException as exc:
-                    await stream_queue.put(("error", exc))
-                else:
-                    await stream_queue.put(("done", stream_done))
-
-            next_chunk_task = asyncio.create_task(_pump_stream())
-            while True:
-                if not last_streamed:
-                    timeout_s = (
-                        first_token_timeout_s
-                        if consecutive_timeouts == 0
-                        else first_token_retry_timeout_s
-                    )
-                else:
-                    timeout_s = (
-                        stream_idle_timeout_s
-                        if consecutive_timeouts == 0
-                        else stream_idle_retry_timeout_s
-                    )
-                try:
-                    stream_status, stream_payload = await asyncio.wait_for(
-                        stream_queue.get(),
-                        timeout=timeout_s,
-                    )
-                except TimeoutError:
-                    consecutive_timeouts += 1
-                    if consecutive_timeouts < max_consecutive_timeouts:
-                        stage = "first_token" if not last_streamed else "idle"
-                        logger.warning(
-                            "telegram.stream timeout_retry chat_id=%s thread_id=%s customer_id=%s stage=%s",
-                            chat_id,
-                            thread_id,
-                            customer_id,
-                            stage,
-                        )
-                        if not last_streamed:
-                            await _send_llm_status_update(stage=stage)
-                        continue
-                    if next_chunk_task is not None and not next_chunk_task.done():
-                        next_chunk_task.cancel()
-                        with suppress(asyncio.CancelledError, Exception):
-                            async with asyncio.timeout(1.0):
-                                await next_chunk_task
-                    next_chunk_task = None
-                    recovered_text = await _recover_after_stream_timeout()
-                    if recovered_text:
-                        logger.warning(
-                            "telegram.stream timeout_recovered chat_id=%s thread_id=%s customer_id=%s stage=%s",
-                            chat_id,
-                            thread_id,
-                            customer_id,
-                            "first_token" if not last_streamed else "idle",
-                        )
-                        final_reply = recovered_text
-                        break
-                    timeout_failed_without_reply = True
-                    timeout_failure_stage = "first_token" if not last_streamed else "idle"
-                    logger.error(
-                        "telegram.stream timeout_fail chat_id=%s thread_id=%s customer_id=%s stage=%s",
-                        chat_id,
-                        thread_id,
-                        customer_id,
-                        timeout_failure_stage,
-                    )
-                    break
-                if stream_status == "done":
-                    next_chunk_task = None
-                    break
-                if stream_status == "error":
-                    next_chunk_task = None
-                    if isinstance(stream_payload, BaseException):
-                        raise stream_payload
-                    raise RuntimeError(str(stream_payload))
-                partial = stream_payload
-                progress_text = partial if isinstance(partial, str) else ""
-                if progress_text and _is_progress_signal(progress_text):
-                    if not waiting_for_segment:
-                        waiting_for_segment = True
-                        last_streamed = ""
-                    continue
-                if not isinstance(partial, str):
-                    continue
-                consecutive_timeouts = 0
-                current = partial.strip()
-                if not current or is_low_signal_reply(current) or current == last_streamed:
-                    continue
-                # Defensive boundary handling for streams that reset partial text without explicit signal.
-                if last_streamed and not current.startswith(last_streamed):
-                    waiting_for_segment = True
-                    last_streamed = ""
-                if waiting_for_segment:
-                    waiting_for_segment = False
-                last_streamed = current
-                await _send_draft_reply(current)
-    except MergedInputSuppressedError:
-        logger.info(
-            "telegram.stream suppressed_by_merge chat_id=%s thread_id=%s customer_id=%s",
-            chat_id,
-            thread_id,
-            customer_id,
-        )
-        suppressed = True
-    except Exception:
-        if next_chunk_task is not None and not next_chunk_task.done():
-            next_chunk_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                async with asyncio.timeout(1.0):
-                    await next_chunk_task
-        if not typing_stop.is_set():
-            typing_stop.set()
-        with suppress(Exception):
-            await typing_task
-        if hasattr(client, "aclose"):
-            with suppress(Exception):
-                await client.aclose()
-        _close_observability_context()
-        raise
-    if next_chunk_task is not None and not next_chunk_task.done():
-        next_chunk_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            async with asyncio.timeout(1.0):
-                await next_chunk_task
-    if not typing_stop.is_set():
-        typing_stop.set()
-    with suppress(Exception):
-        await typing_task
+async def _finalize_telegram_stream_reply(
+    *,
+    delivery: _TelegramDeliveryState,
+    client: TelegramClient,
+    interactive_session: Any | None,
+    customer_id: str,
+    thread_id: str,
+    chat_id: int,
+    turn_mode: str,
+    suppressed: bool,
+    timeout_failed_without_reply: bool,
+    timeout_failure_stage: str,
+) -> tuple[str | None, bool]:
+    final_reply = delivery.final_reply
     if not suppressed and not final_reply and timeout_failed_without_reply:
         logger.error(
             "telegram.stream timeout_without_final_reply chat_id=%s thread_id=%s customer_id=%s stage=%s "
@@ -778,8 +941,8 @@ async def stream_langgraph_reply_to_telegram(
             thread_id,
             customer_id,
             timeout_failure_stage,
-            interim_status_sent,
-            delivered_any,
+            delivery.interim_status_sent,
+            delivery.delivered_any,
         )
         final_reply = (
             "I couldn't finish that step before the reply timeout. "
@@ -796,33 +959,228 @@ async def stream_langgraph_reply_to_telegram(
             "I couldn't produce a visible user-facing reply for that step "
             "(the model/tool loop ended without displayable output)."
         )
-    if not suppressed and await _session_has_pending_items():
+    if not suppressed and await _session_has_pending_items(
+        interactive_session=interactive_session,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        customer_id=customer_id,
+    ):
         logger.info(
             "telegram.stream suppressed_by_interactive_pending chat_id=%s thread_id=%s customer_id=%s",
             chat_id,
             thread_id,
             customer_id,
         )
-        suppressed = True
-        final_reply = None
+        return None, True
     if not suppressed and final_reply:
-        sent = await client.send_message(
+        final_reply = await _send_final_telegram_reply(
+            client=client,
+            customer_id=customer_id,
+            thread_id=thread_id,
             chat_id=chat_id,
-            text=final_reply,
-            parse_mode="HTML",
+            turn_mode=turn_mode,
+            final_reply=final_reply,
         )
-        if sent:
-            delivered_any = True
-            append_web_event(
-                customer_id=customer_id,
-                thread_id=thread_id,
-                source="chat",
-                kind="assistant_message",
-                text=final_reply,
-                metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
-            )
-        else:
-            final_reply = None
+    return final_reply, suppressed
+
+
+async def _send_final_telegram_reply(
+    *,
+    client: TelegramClient,
+    customer_id: str,
+    thread_id: str,
+    chat_id: int,
+    turn_mode: str,
+    final_reply: str,
+) -> str | None:
+    sent = await client.send_message(chat_id=chat_id, text=final_reply, parse_mode="HTML")
+    if not sent:
+        return None
+    append_web_event(
+        customer_id=customer_id,
+        thread_id=thread_id,
+        source="chat",
+        kind="assistant_message",
+        text=final_reply,
+        metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
+    )
+    return final_reply
+
+
+def _start_telegram_stream_resources(
+    *,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    bot_token: str,
+    chat_id: int,
+    turn_mode: str,
+) -> _TelegramStreamResources:
+    client = TelegramClient(bot_token)
+    draft_id = (
+        zlib.crc32(f"{thread_id}:{customer_id}:{chat_id}:{new_short_id('dft')}".encode()) or 1
+    )
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(
+        _emit_typing_until_done(client=client, chat_id=chat_id, stop_event=typing_stop)
+    )
+    observability_context = _telegram_observability_context(
+        agent_runtime=agent_runtime,
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        chat_id=chat_id,
+        turn_mode=turn_mode,
+    )
+    observability_context.__enter__()
+    return _TelegramStreamResources(
+        client=client,
+        delivery=_TelegramDeliveryState(draft_enabled=chat_id > 0),
+        typing_stop=typing_stop,
+        typing_task=typing_task,
+        draft_id=draft_id,
+        stream_started_at=time.monotonic(),
+        observability_context=observability_context,
+    )
+
+
+async def _stop_telegram_stream_typing(
+    *,
+    resources: _TelegramStreamResources,
+    next_chunk_task: asyncio.Task[Any] | None,
+) -> None:
+    await _cancel_stream_task(next_chunk_task)
+    if not resources.typing_stop.is_set():
+        resources.typing_stop.set()
+    with suppress(Exception):
+        await resources.typing_task
+
+
+async def _close_telegram_stream_resources(resources: _TelegramStreamResources) -> None:
+    if hasattr(resources.client, "aclose"):
+        with suppress(Exception):
+            await resources.client.aclose()
+    resources.close_observability_context()
+
+
+async def _run_telegram_stream_delivery(
+    *,
+    resources: _TelegramStreamResources,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    bot_token: str,
+    chat_id: int,
+    turn_mode: str,
+    interactive_session: Any | None,
+    final_reply_callback: Callable[[str], Any] | None,
+) -> _LiveStreamState:
+    if normalize_turn_mode(turn_mode) == "workflow_setup":
+        return await _run_workflow_setup_stream_delivery(
+            resources=resources,
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            turn_mode=turn_mode,
+            final_reply_callback=final_reply_callback,
+        )
+
+    async def _draft_reply(value: str, *, force: bool = False) -> None:
+        await _send_draft_reply(
+            delivery=resources.delivery,
+            client=resources.client,
+            typing_stop=resources.typing_stop,
+            interactive_session=interactive_session,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            draft_id=resources.draft_id,
+            stream_started_at=resources.stream_started_at,
+            text=value,
+            force=force,
+        )
+
+    async def _status_once(*, stage: str) -> None:
+        await _send_status_once(
+            delivery=resources.delivery,
+            agent_runtime=agent_runtime,
+            client=resources.client,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            text=text,
+            turn_mode=turn_mode,
+            stage=stage,
+        )
+
+    return await _run_live_stream_loop(
+        agent_runtime=agent_runtime,
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        turn_mode=turn_mode,
+        chat_id=chat_id,
+        send_draft_reply=_draft_reply,
+        send_status_once=_status_once,
+    )
+
+
+async def _run_workflow_setup_stream_delivery(
+    *,
+    resources: _TelegramStreamResources,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    bot_token: str,
+    chat_id: int,
+    turn_mode: str,
+    final_reply_callback: Callable[[str], Any] | None,
+) -> _LiveStreamState:
+    resources.delivery.draft_enabled = False
+    resources.delivery.final_reply = await _workflow_setup_reply(
+        agent_runtime=agent_runtime,
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        turn_mode=turn_mode,
+        bot_token=bot_token,
+        chat_id=chat_id,
+        final_reply_callback=final_reply_callback,
+    )
+    return _LiveStreamState(final_reply=resources.delivery.final_reply)
+
+
+async def _complete_telegram_stream(
+    *,
+    resources: _TelegramStreamResources,
+    next_chunk_task: asyncio.Task[Any] | None,
+    live_state: _LiveStreamState,
+    interactive_session: Any | None,
+    customer_id: str,
+    thread_id: str,
+    chat_id: int,
+    turn_mode: str,
+    suppressed: bool,
+) -> tuple[str | None, bool]:
+    await _stop_telegram_stream_typing(resources=resources, next_chunk_task=next_chunk_task)
+    final_reply, suppressed = await _finalize_telegram_stream_reply(
+        delivery=resources.delivery,
+        client=resources.client,
+        interactive_session=interactive_session,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        turn_mode=turn_mode,
+        suppressed=suppressed,
+        timeout_failed_without_reply=live_state.timeout_failed_without_reply,
+        timeout_failure_stage=live_state.timeout_failure_stage,
+    )
     logger.info(
         "telegram.stream complete chat_id=%s thread_id=%s customer_id=%s suppressed=%s final_chars=%s",
         chat_id,
@@ -831,11 +1189,80 @@ async def stream_langgraph_reply_to_telegram(
         suppressed,
         len(str(final_reply or "")),
     )
-    if hasattr(client, "aclose"):
-        with suppress(Exception):
-            await client.aclose()
-    _close_observability_context()
+    await _close_telegram_stream_resources(resources)
     return final_reply, suppressed
+
+
+async def stream_langgraph_reply_to_telegram(
+    *,
+    agent_runtime: Any,
+    thread_id: str,
+    customer_id: str,
+    text: str,
+    bot_token: str,
+    chat_id: int,
+    turn_mode: str = "interactive",
+    interactive_session: Any | None = None,
+    final_reply_callback: Callable[[str], Any] | None = None,
+) -> tuple[str | None, bool]:
+    resources = _start_telegram_stream_resources(
+        agent_runtime=agent_runtime,
+        thread_id=thread_id,
+        customer_id=customer_id,
+        text=text,
+        bot_token=bot_token,
+        chat_id=chat_id,
+        turn_mode=turn_mode,
+    )
+    suppressed = False
+    live_state = _LiveStreamState()
+    next_chunk_task: asyncio.Task[Any] | None = None
+    logger.info(
+        "telegram.stream start chat_id=%s thread_id=%s customer_id=%s text_chars=%s",
+        chat_id,
+        thread_id,
+        customer_id,
+        len(str(text or "")),
+    )
+
+    try:
+        live_state = await _run_telegram_stream_delivery(
+            resources=resources,
+            agent_runtime=agent_runtime,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            text=text,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            turn_mode=turn_mode,
+            interactive_session=interactive_session,
+            final_reply_callback=final_reply_callback,
+        )
+        resources.delivery.final_reply = live_state.final_reply or resources.delivery.final_reply
+        next_chunk_task = live_state.next_chunk_task
+    except MergedInputSuppressedError:
+        logger.info(
+            "telegram.stream suppressed_by_merge chat_id=%s thread_id=%s customer_id=%s",
+            chat_id,
+            thread_id,
+            customer_id,
+        )
+        suppressed = True
+    except Exception:
+        await _stop_telegram_stream_typing(resources=resources, next_chunk_task=next_chunk_task)
+        await _close_telegram_stream_resources(resources)
+        raise
+    return await _complete_telegram_stream(
+        resources=resources,
+        next_chunk_task=next_chunk_task,
+        live_state=live_state,
+        interactive_session=interactive_session,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        chat_id=chat_id,
+        turn_mode=turn_mode,
+        suppressed=suppressed,
+    )
 
 
 async def relay_task_event_via_main_agent(
@@ -862,6 +1289,178 @@ async def relay_task_event_via_main_agent(
     )
 
 
+@dataclass(frozen=True)
+class _WakeSlotState:
+    chat_id: int
+    chat_key: str
+    last_user_at: str
+    last_assistant_at: str
+    user_idle_hours: str
+    assistant_idle_hours: str
+
+
+def _wake_slot_state(slot: dict[str, Any], *, now_utc: datetime) -> _WakeSlotState:
+    chat_id = int(slot["chat_id"])
+    last_user_at = str(slot.get("last_user_message_at", "")).strip()
+    last_assistant_at = str(slot.get("last_assistant_message_at", "")).strip()
+    return _WakeSlotState(
+        chat_id=chat_id,
+        chat_key=str(chat_id),
+        last_user_at=last_user_at,
+        last_assistant_at=last_assistant_at,
+        user_idle_hours=_idle_hours_since(last_user_at, now_utc=now_utc),
+        assistant_idle_hours=_idle_hours_since(last_assistant_at, now_utc=now_utc),
+    )
+
+
+def _idle_hours_since(value: str, *, now_utc: datetime) -> str:
+    if not value:
+        return "unknown"
+    with suppress(Exception):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
+    return "unknown"
+
+
+async def _routine_wake_should_notify(
+    *,
+    agent_runtime: Any,
+    customer_id: str,
+    event_label: str,
+    routine_name: str,
+    routine_payload: dict[str, Any],
+    slot_state: _WakeSlotState,
+) -> bool:
+    if not hasattr(agent_runtime, "classify_wake_event"):
+        return True
+    precheck_payload = {
+        "event_label": event_label,
+        "routine_name": routine_name,
+        "routine_payload": routine_payload,
+        "last_user_message_at_utc": slot_state.last_user_at or "unknown",
+        "last_assistant_message_at_utc": slot_state.last_assistant_at or "unknown",
+        "user_idle_hours": slot_state.user_idle_hours,
+        "assistant_idle_hours": slot_state.assistant_idle_hours,
+    }
+    decision = {"notify_user": True}
+    with suppress(Exception):
+        decision = await agent_runtime.classify_wake_event(
+            customer_id=customer_id,
+            event_label="routine/heartbeat_precheck",
+            payload=precheck_payload,
+        )
+    return bool(decision.get("notify_user", False))
+
+
+def _build_wake_instruction(
+    *,
+    event_label: str,
+    payload: dict[str, Any],
+    routine_name: str,
+    routine_instruction: str,
+    slot_state: _WakeSlotState,
+    now_utc: datetime,
+) -> str:
+    if str(event_label).startswith("routine/"):
+        return (
+            "System update: a scheduled routine woke you.\n"
+            "Decide if the user should be messaged right now.\n"
+            f"- event: {event_label}\n"
+            f"- routine_name: {routine_name or 'unnamed'}\n"
+            f"- routine_instruction: {routine_instruction[:3000] or '(none)'}\n"
+            f"- last_user_message_at_utc: {slot_state.last_user_at or 'unknown'}\n"
+            f"- user_idle_hours: {slot_state.user_idle_hours}\n"
+            f"- last_assistant_message_at_utc: {slot_state.last_assistant_at or 'unknown'}\n"
+            f"- assistant_idle_hours: {slot_state.assistant_idle_hours}\n"
+            f"- now_utc: {now_utc.isoformat()}\n"
+            f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}\n\n"
+            f"If you decide to skip messaging this run, reply exactly: {NO_NOTIFY_TOKEN}\n"
+            "If you decide to message, send one concise, natural message (no rigid status template)."
+        )
+    return (
+        "System update: a background event occurred.\n"
+        "Respond with concise plain-language status, what happened, and next action.\n"
+        f"- event: {event_label}\n"
+        f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}"
+    )
+
+
+def _ensure_wake_thread_id(state: dict[str, Any], *, chat_key: str) -> str:
+    sessions = state.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+    raw_slot = sessions.get(chat_key)
+    if not isinstance(raw_slot, dict):
+        raw_slot = {}
+    wake_thread_id = _clean_thread_id(raw_slot.get("wake_thread_id"))
+    if not wake_thread_id or not wake_thread_id.lower().startswith("wake_"):
+        wake_thread_id = new_short_id("wake")
+        raw_slot["wake_thread_id"] = wake_thread_id
+        sessions[chat_key] = raw_slot
+        state["sessions"] = sessions
+    return wake_thread_id
+
+
+async def _relay_wake_slot_via_main_agent(
+    *,
+    slot: dict[str, Any],
+    customer_id: str,
+    event_label: str,
+    payload: dict[str, Any],
+    routine_payload: dict[str, Any],
+    routine_instruction: str,
+    routine_name: str,
+    proactive_heartbeat: bool,
+    now_utc: datetime,
+    state_store: Any,
+    agent_runtime: Any,
+) -> dict[str, Any] | None:
+    slot_state = _wake_slot_state(slot, now_utc=now_utc)
+    if (
+        str(event_label).startswith("routine/")
+        and proactive_heartbeat
+        and not await _routine_wake_should_notify(
+            agent_runtime=agent_runtime,
+            customer_id=customer_id,
+            event_label=event_label,
+            routine_name=routine_name,
+            routine_payload=routine_payload,
+            slot_state=slot_state,
+        )
+    ):
+        return None
+    instruction = _build_wake_instruction(
+        event_label=event_label,
+        payload=payload,
+        routine_name=routine_name,
+        routine_instruction=routine_instruction,
+        slot_state=slot_state,
+        now_utc=now_utc,
+    )
+    wake_thread_id = state_store.update(
+        lambda state, chat_key=slot_state.chat_key: _ensure_wake_thread_id(
+            state, chat_key=chat_key
+        )
+    )
+    text = await agent_runtime.ainvoke_text(
+        thread_id=wake_thread_id,
+        customer_id=customer_id,
+        text=instruction,
+        turn_mode="event_notification",
+        include_pending_context=False,
+        recursion_limit_override=36 if proactive_heartbeat else None,
+    )
+    safe = str(text or "").strip()
+    if not safe:
+        return None
+    return {
+        "chat_id": slot_state.chat_id,
+        "text": NO_NOTIFY_TOKEN if safe == NO_NOTIFY_TOKEN else safe,
+    }
+
+
 async def relay_event_via_main_agent(
     *,
     customer_id: str,
@@ -878,114 +1477,32 @@ async def relay_event_via_main_agent(
     slots = owner_slots or slots[:1]
     if agent_runtime is None:
         raise RuntimeError("Agent runtime unavailable for wake relay")
-    routine_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    raw_routine_payload = payload.get("payload")
+    routine_payload: dict[str, Any] = (
+        dict(raw_routine_payload) if isinstance(raw_routine_payload, dict) else {}
+    )
     routine_instruction = str(routine_payload.get("instruction", "")).strip()
     routine_name = str(payload.get("routine_name", "")).strip()
     proactive_heartbeat = bool(routine_payload.get("proactive_heartbeat", False))
     now_utc = datetime.now(UTC)
     replies: list[dict[str, Any]] = []
     for slot in slots:
-        chat_id = int(slot["chat_id"])
-        chat_key = str(chat_id)
-        last_user_at = str(slot.get("last_user_message_at", "")).strip()
-        last_assistant_at = str(slot.get("last_assistant_message_at", "")).strip()
-        user_idle_hours = "unknown"
-        assistant_idle_hours = "unknown"
-        if last_user_at:
-            with suppress(Exception):
-                parsed = datetime.fromisoformat(last_user_at.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=UTC)
-                user_idle_hours = f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
-        if last_assistant_at:
-            with suppress(Exception):
-                parsed = datetime.fromisoformat(last_assistant_at.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=UTC)
-                assistant_idle_hours = (
-                    f"{max(0.0, (now_utc - parsed).total_seconds() / 3600.0):.2f}"
-                )
-
-        if (
-            str(event_label).startswith("routine/")
-            and proactive_heartbeat
-            and hasattr(agent_runtime, "classify_wake_event")
-        ):
-            precheck_payload = {
-                "event_label": event_label,
-                "routine_name": routine_name,
-                "routine_payload": routine_payload,
-                "last_user_message_at_utc": last_user_at or "unknown",
-                "last_assistant_message_at_utc": last_assistant_at or "unknown",
-                "user_idle_hours": user_idle_hours,
-                "assistant_idle_hours": assistant_idle_hours,
-            }
-            decision = {"notify_user": True}
-            with suppress(Exception):
-                decision = await agent_runtime.classify_wake_event(
-                    customer_id=customer_id,
-                    event_label="routine/heartbeat_precheck",
-                    payload=precheck_payload,
-                )
-            if not bool(decision.get("notify_user", False)):
-                continue
-
-        if str(event_label).startswith("routine/"):
-            instruction = (
-                "System update: a scheduled routine woke you.\n"
-                "Decide if the user should be messaged right now.\n"
-                f"- event: {event_label}\n"
-                f"- routine_name: {routine_name or 'unnamed'}\n"
-                f"- routine_instruction: {routine_instruction[:3000] or '(none)'}\n"
-                f"- last_user_message_at_utc: {last_user_at or 'unknown'}\n"
-                f"- user_idle_hours: {user_idle_hours}\n"
-                f"- last_assistant_message_at_utc: {last_assistant_at or 'unknown'}\n"
-                f"- assistant_idle_hours: {assistant_idle_hours}\n"
-                f"- now_utc: {now_utc.isoformat()}\n"
-                f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}\n\n"
-                f"If you decide to skip messaging this run, reply exactly: {NO_NOTIFY_TOKEN}\n"
-                "If you decide to message, send one concise, natural message (no rigid status template)."
-            )
-        else:
-            instruction = (
-                "System update: a background event occurred.\n"
-                "Respond with concise plain-language status, what happened, and next action.\n"
-                f"- event: {event_label}\n"
-                f"- payload: {json.dumps(payload, ensure_ascii=False)[:4000]}"
-            )
-
-        def _ensure_wake_thread_id(state: dict[str, Any], _chat_key: str = chat_key) -> str:
-            sessions = state.get("sessions")
-            if not isinstance(sessions, dict):
-                sessions = {}
-            raw_slot = sessions.get(_chat_key)
-            if not isinstance(raw_slot, dict):
-                raw_slot = {}
-            wake_thread_id = _clean_thread_id(raw_slot.get("wake_thread_id"))
-            if not wake_thread_id or not wake_thread_id.lower().startswith("wake_"):
-                wake_thread_id = new_short_id("wake")
-                raw_slot["wake_thread_id"] = wake_thread_id
-                sessions[_chat_key] = raw_slot
-                state["sessions"] = sessions
-            return wake_thread_id
-
-        wake_thread_id = state_store.update(_ensure_wake_thread_id)
         try:
-            text = await agent_runtime.ainvoke_text(
-                thread_id=wake_thread_id,
+            reply = await _relay_wake_slot_via_main_agent(
+                slot=slot,
                 customer_id=customer_id,
-                text=instruction,
-                turn_mode="event_notification",
-                include_pending_context=False,
-                recursion_limit_override=36 if proactive_heartbeat else None,
+                event_label=event_label,
+                payload=payload,
+                routine_payload=routine_payload,
+                routine_instruction=routine_instruction,
+                routine_name=routine_name,
+                proactive_heartbeat=proactive_heartbeat,
+                now_utc=now_utc,
+                state_store=state_store,
+                agent_runtime=agent_runtime,
             )
-            safe = str(text or "").strip()
-            if not safe:
-                continue
-            if safe == NO_NOTIFY_TOKEN:
-                replies.append({"chat_id": chat_id, "text": NO_NOTIFY_TOKEN})
-                continue
-            replies.append({"chat_id": chat_id, "text": safe})
         except Exception:
             continue
+        if reply is not None:
+            replies.append(reply)
     return replies

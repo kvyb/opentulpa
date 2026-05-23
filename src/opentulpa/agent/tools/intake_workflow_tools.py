@@ -7,6 +7,7 @@ from typing import Any
 from langchain.tools import tool
 
 from opentulpa.agent.tools.common import require_customer_id
+from opentulpa.agent.tools.internal_http import InternalToolHTTPClient
 
 
 def _unique_string_list(values: list[str] | None) -> list[str]:
@@ -81,6 +82,8 @@ def _active_thread_id(runtime: Any, explicit_thread_id: str | None) -> str:
 
 
 def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
+    http = InternalToolHTTPClient(runtime)
+
     @tool
     async def intake_workflow_upsert(
         name: str,
@@ -226,9 +229,12 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         if sink_error:
             return {"error": f"intake_workflow_upsert failed: {sink_error}"}
 
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "intake_workflow_upsert",
             "POST",
             "/internal/intake/workflows/upsert",
+            "workflow",
+            default={},
             json_body={
                 "customer_id": safe_customer,
                 "workflow_id": safe_workflow_id or None,
@@ -251,40 +257,35 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=20.0,
         )
-        if r.status_code != 200:
-            return {"error": f"intake_workflow_upsert failed: {r.text}"}
-        return r.json().get("workflow", {})
 
     @tool
     async def telegram_business_status() -> Any:
         """Check whether Telegram Business is connected for the active user and inspect available business connections."""
         customer_id = require_customer_id(runtime)
-        r = await runtime._request_with_backoff(
+        return await http.request(
+            "telegram_business_status",
             "POST",
             "/internal/telegram/business/status",
             json_body={"customer_id": customer_id},
             timeout=10.0,
         )
-        if r.status_code != 200:
-            return {"error": f"telegram_business_status failed: {r.text}"}
-        return r.json()
 
     @tool
     async def intake_workflow_list(include_disabled: bool = False) -> Any:
         """List saved intake workflows for inbound DM automation and booking flows."""
         customer_id = require_customer_id(runtime)
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "intake_workflow_list",
             "POST",
             "/internal/intake/workflows/list",
+            "workflows",
+            default=[],
             json_body={
                 "customer_id": customer_id,
                 "include_disabled": bool(include_disabled),
             },
             timeout=10.0,
         )
-        if r.status_code != 200:
-            return {"error": f"intake_workflow_list failed: {r.text}"}
-        return r.json().get("workflows", [])
 
     @tool
     async def intake_workflow_get(workflow_id: str) -> Any:
@@ -293,18 +294,18 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:
             return {"error": "intake_workflow_get failed: workflow_id is required"}
-        r = await runtime._request_with_backoff(
+        return await http.request_item(
+            "intake_workflow_get",
             "POST",
             "/internal/intake/workflows/get",
+            "workflow",
+            default={},
             json_body={
                 "customer_id": customer_id,
                 "workflow_id": safe_workflow_id,
             },
             timeout=10.0,
         )
-        if r.status_code != 200:
-            return {"error": f"intake_workflow_get failed: {r.text}"}
-        return r.json().get("workflow", {})
 
     @tool
     async def intake_workflow_delete(workflow_id: str) -> Any:
@@ -313,7 +314,8 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:
             return {"error": "intake_workflow_delete failed: workflow_id is required"}
-        r = await runtime._request_with_backoff(
+        return await http.request(
+            "intake_workflow_delete",
             "POST",
             "/internal/intake/workflows/delete",
             json_body={
@@ -322,9 +324,6 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=10.0,
         )
-        if r.status_code != 200:
-            return {"error": f"intake_workflow_delete failed: {r.text}"}
-        return r.json()
 
     @tool
     async def intake_workflow_run(workflow_id: str, force: bool = False) -> Any:
@@ -333,7 +332,8 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:
             return {"error": "intake_workflow_run failed: workflow_id is required"}
-        r = await runtime._request_with_backoff(
+        return await http.request(
+            "intake_workflow_run",
             "POST",
             "/internal/intake/workflows/run",
             json_body={
@@ -344,9 +344,6 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=60.0,
         )
-        if r.status_code != 200:
-            return {"error": f"intake_workflow_run failed: {r.text}"}
-        return r.json()
 
     return {
         "intake_workflow_upsert": intake_workflow_upsert,

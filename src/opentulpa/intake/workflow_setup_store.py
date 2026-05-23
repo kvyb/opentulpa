@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from opentulpa.core.ids import new_short_id
+from opentulpa.persistence.sqlite import connect_sqlite
 
 SetupSessionStatus = Literal["active", "paused", "completed", "cancelled"]
 SetupSessionMode = Literal["create", "edit"]

@@ -386,7 +386,7 @@ def test_oracle_client_posts_default_model_with_openrouter_attribution(
         captured.update(kwargs)
         return _Response()
 
-    monkeypatch.setattr("opentulpa.business_knowledge.service.httpx.post", _post)
+    monkeypatch.setattr("opentulpa.business_knowledge.oracle_client.httpx.post", _post)
 
     client = OpenAICompatibleKnowledgeOracleClient(
         api_key="test-key",
@@ -438,7 +438,7 @@ def test_oracle_client_traces_intent_extraction(
     def _post(url: str, **kwargs: Any) -> _Response:
         return _Response()
 
-    monkeypatch.setattr("opentulpa.business_knowledge.service.httpx.post", _post)
+    monkeypatch.setattr("opentulpa.business_knowledge.oracle_client.httpx.post", _post)
 
     client = OpenAICompatibleKnowledgeOracleClient(
         api_key="test-key",
@@ -699,7 +699,7 @@ def test_business_knowledge_configures_sqlite_for_concurrent_server_use(tmp_path
     vault = _vault(tmp_path)
     knowledge = _knowledge(tmp_path, vault)
 
-    with knowledge._conn() as conn:
+    with knowledge.repository.conn() as conn:
         journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
         synchronous = int(conn.execute("PRAGMA synchronous").fetchone()[0])

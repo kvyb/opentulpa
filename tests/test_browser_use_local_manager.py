@@ -12,6 +12,10 @@ from opentulpa.integrations.browser_use_local import (
     BrowserUseLocalManager,
     _BrowserUseTaskState,
 )
+from opentulpa.integrations.browser_use_session_registry import (
+    BrowserUseSessionRegistry,
+    BrowserUseSessionState,
+)
 
 
 class _FakeBrowserSession:
@@ -91,6 +95,39 @@ async def _no_preflight() -> str | None:
 
 def _fake_browser_use_components() -> tuple[None, None, type[_FakeBrowserSession]]:
     return None, None, _FakeBrowserSession
+
+
+def test_browser_use_session_registry_tracks_active_and_reusable_sessions() -> None:
+    registry = BrowserUseSessionRegistry()
+    registry.set_session(
+        BrowserUseSessionState(
+            session=object(),
+            customer_id="cust_1",
+            session_id="shared",
+            updated_monotonic=10.0,
+        )
+    )
+    registry.set_task(
+        _BrowserUseTaskState(
+            task_id="task_running",
+            customer_id="cust_1",
+            session_id="shared",
+            task="open page",
+            llm="model",
+            status="running",
+            updated_monotonic=11.0,
+        )
+    )
+
+    active_task = registry.active_task_for_session(customer_id="cust_1", session_id="shared")
+
+    assert active_task is not None
+    assert active_task.task_id == "task_running"
+    assert registry.pick_reusable_session_id("cust_1") is None
+    registry.tasks["task_running"].status = "finished"
+
+    assert registry.active_task_for_session(customer_id="cust_1", session_id="shared") is None
+    assert registry.pick_reusable_session_id("cust_1") == "shared"
 
 
 @pytest.mark.asyncio

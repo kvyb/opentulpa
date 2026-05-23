@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from opentulpa.core.public_urls import build_public_composio_callback_url
+from opentulpa.integrations.composio_google_sheets import GoogleSheetsComposioAdapter
+from opentulpa.integrations.composio_instagram import InstagramComposioAdapter
 
 
 def _load_composio_sdk() -> tuple[type[Any], type[Any]]:
@@ -58,26 +59,6 @@ def _coerce_status_list(values: list[str] | None) -> list[str]:
     return out
 
 
-def _parse_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    for candidate in (text, text.replace("Z", "+00:00")):
-        try:
-            return datetime.fromisoformat(candidate)
-        except ValueError:
-            continue
-    return None
-
-
-def _safe_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _safe_list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
-
-
 def _unique_strings(values: list[Any]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -93,74 +74,83 @@ def _unique_strings(values: list[Any]) -> list[str]:
     return out
 
 
-def _extract_google_sheet_names(value: Any) -> list[str]:
-    """Extract worksheet names from common Google Sheets metadata payloads."""
-
-    names: list[Any] = []
-
-    def visit(node: Any, *, sheet_context: bool = False) -> None:
-        if isinstance(node, list):
-            if all(isinstance(item, str) for item in node):
-                names.extend(node)
-                return
-            for item in node:
-                if isinstance(item, str) and sheet_context:
-                    names.append(item)
-                    continue
-                visit(item, sheet_context=sheet_context)
-            return
-        if not isinstance(node, dict):
-            return
-
-        for key in (
-            "sheet_names",
-            "sheetNames",
-            "worksheet_names",
-            "worksheetNames",
-        ):
-            raw = node.get(key)
-            if isinstance(raw, list):
-                names.extend(raw)
-
-        for key in ("sheets", "worksheets", "tabs"):
-            raw = node.get(key)
-            if isinstance(raw, list):
-                for item in raw:
-                    if isinstance(item, str):
-                        names.append(item)
-                    elif isinstance(item, dict):
-                        props = _safe_dict(item.get("properties"))
-                        candidate = (
-                            item.get("sheetName")
-                            or item.get("sheet_name")
-                            or item.get("name")
-                            or item.get("title")
-                            or props.get("title")
-                            or props.get("sheetName")
-                            or props.get("name")
-                        )
-                        if str(candidate or "").strip():
-                            names.append(candidate)
-                        else:
-                            visit(item, sheet_context=True)
-
-        data = node.get("data")
-        if isinstance(data, dict | list):
-            visit(data, sheet_context=sheet_context)
-
-        result = node.get("result")
-        if isinstance(result, dict | list):
-            visit(result, sheet_context=sheet_context)
-
-    visit(value)
-    return _unique_strings(names)
-
-
 def _is_invalid_instagram_reply_to_error(error: Any) -> bool:
     text = str(error or "").lower()
     if not text:
         return False
     return "invalid message id" in text or "error_subcode\\\":2534002" in text or "error_subcode:2534002" in text
+
+
+def _blocked_instagram_send_result(
+    *,
+    tool_slug: str,
+    preflight: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if tool_slug.upper() != "INSTAGRAM_SEND_TEXT_MESSAGE" or preflight is None:
+        return {}
+    if not bool(preflight.get("recipient_id_verified")):
+        return {
+            "ok": True,
+            "tool_slug": tool_slug,
+            "successful": False,
+            "error": (
+                "Instagram send blocked: could not verify the exact conversation for "
+                "this recipient_id. Inspect the thread first and retry with the verified target."
+            ),
+            "data": {"blocked": True, "preflight": preflight},
+        }
+    if str(preflight.get("latest_inbound_message_created_time", "") or "").strip():
+        return {}
+    return {
+        "ok": True,
+        "tool_slug": tool_slug,
+        "successful": False,
+        "error": (
+            "Instagram send blocked: no inbound message timestamp was found on the "
+            "verified thread, so OpenTulpa cannot claim the reply window is open."
+        ),
+        "data": {"blocked": True, "preflight": preflight},
+    }
+
+
+def _should_retry_without_reply_to(
+    *,
+    tool_slug: str,
+    result: dict[str, Any],
+    arguments: dict[str, Any],
+) -> bool:
+    return (
+        tool_slug.upper() == "INSTAGRAM_SEND_TEXT_MESSAGE"
+        and bool(str(arguments.get("reply_to_message_id", "") or "").strip())
+        and not bool(result.get("successful", False))
+        and _is_invalid_instagram_reply_to_error(result.get("error"))
+    )
+
+
+def _tool_result_data_with_preflight(
+    *,
+    result: dict[str, Any],
+    preflight: dict[str, Any] | None,
+    retried_without_reply_to: bool,
+) -> Any:
+    data = result.get("data")
+    if preflight is None:
+        return data
+    payload = data if isinstance(data, dict) else {"result": data}
+    payload["preflight"] = preflight
+    if retried_without_reply_to:
+        payload["retried_without_reply_to_message_id"] = True
+        payload["retry_reason"] = (
+            "Meta rejected reply_to_message_id as invalid, so OpenTulpa retried as a plain DM."
+        )
+    if not bool(result.get("successful", False)) and "outside of allowed window" in str(
+        result.get("error") or ""
+    ).lower():
+        preflight["reply_window_status"] = "rejected_by_meta"
+        preflight["reply_window_reason"] = (
+            "Meta rejected the send on this verified thread as outside the allowed window."
+        )
+    return payload
 
 
 @dataclass(slots=True)
@@ -440,36 +430,15 @@ class ComposioService:
         if not safe_slug:
             raise ValueError("tool_slug is required")
         safe_arguments = dict(arguments) if isinstance(arguments, dict) else {}
-        preflight: dict[str, Any] | None = None
-        if safe_slug.upper() == "INSTAGRAM_SEND_TEXT_MESSAGE":
-            preflight = self.inspect_instagram_reply_target(
-                customer_id=customer_id,
-                recipient_id=str(safe_arguments.get("recipient_id", "")).strip() or None,
-                conversation_id=str(safe_arguments.pop("conversation_id", "")).strip() or None,
-                connected_account_id=str(connected_account_id or "").strip() or None,
-            )
-            if not bool(preflight.get("recipient_id_verified")):
-                return {
-                    "ok": True,
-                    "tool_slug": safe_slug,
-                    "successful": False,
-                    "error": (
-                        "Instagram send blocked: could not verify the exact conversation for "
-                        "this recipient_id. Inspect the thread first and retry with the verified target."
-                    ),
-                    "data": {"blocked": True, "preflight": preflight},
-                }
-            if not str(preflight.get("latest_inbound_message_created_time", "") or "").strip():
-                return {
-                    "ok": True,
-                    "tool_slug": safe_slug,
-                    "successful": False,
-                    "error": (
-                        "Instagram send blocked: no inbound message timestamp was found on the "
-                        "verified thread, so OpenTulpa cannot claim the reply window is open."
-                    ),
-                    "data": {"blocked": True, "preflight": preflight},
-                }
+        preflight = self._instagram_send_preflight(
+            customer_id=customer_id,
+            tool_slug=safe_slug,
+            arguments=safe_arguments,
+            connected_account_id=connected_account_id,
+        )
+        blocked = _blocked_instagram_send_result(tool_slug=safe_slug, preflight=preflight)
+        if blocked:
+            return blocked
         result = self._sdk_execute_tool(
             slug=safe_slug,
             arguments=safe_arguments,
@@ -477,46 +446,64 @@ class ComposioService:
             user_id=str(customer_id or "").strip(),
             text=str(text or "").strip() or None,
         )
-        retried_without_reply_to = False
-        if (
-            safe_slug.upper() == "INSTAGRAM_SEND_TEXT_MESSAGE"
-            and str(safe_arguments.get("reply_to_message_id", "") or "").strip()
-            and not bool(result.get("successful", False))
-            and _is_invalid_instagram_reply_to_error(result.get("error"))
-        ):
-            retry_arguments = dict(safe_arguments)
-            retry_arguments.pop("reply_to_message_id", None)
-            retry_result = self._sdk_execute_tool(
-                slug=safe_slug,
-                arguments=retry_arguments,
-                connected_account_id=str(connected_account_id or "").strip() or None,
-                user_id=str(customer_id or "").strip(),
-                text=str(text or "").strip() or None,
-            )
-            retried_without_reply_to = True
-            result = retry_result
-        data = result.get("data")
-        if preflight is not None:
-            payload = data if isinstance(data, dict) else {"result": data}
-            payload["preflight"] = preflight
-            if retried_without_reply_to:
-                payload["retried_without_reply_to_message_id"] = True
-                payload["retry_reason"] = "Meta rejected reply_to_message_id as invalid, so OpenTulpa retried as a plain DM."
-            if not bool(result.get("successful", False)) and "outside of allowed window" in str(
-                result.get("error") or ""
-            ).lower():
-                preflight["reply_window_status"] = "rejected_by_meta"
-                preflight["reply_window_reason"] = (
-                    "Meta rejected the send on this verified thread as outside the allowed window."
-                )
-            data = payload
+        result, retried = self._retry_instagram_send_without_reply_to(
+            tool_slug=safe_slug,
+            result=result,
+            arguments=safe_arguments,
+            connected_account_id=connected_account_id,
+            customer_id=customer_id,
+            text=text,
+        )
         return {
             "ok": True,
             "tool_slug": safe_slug,
             "successful": bool(result.get("successful", False)),
             "error": result.get("error"),
-            "data": data,
+            "data": _tool_result_data_with_preflight(
+                result=result,
+                preflight=preflight,
+                retried_without_reply_to=retried,
+            ),
         }
+
+    def _instagram_send_preflight(
+        self,
+        *,
+        customer_id: str,
+        tool_slug: str,
+        arguments: dict[str, Any],
+        connected_account_id: str | None,
+    ) -> dict[str, Any] | None:
+        if tool_slug.upper() != "INSTAGRAM_SEND_TEXT_MESSAGE":
+            return None
+        return self.inspect_instagram_reply_target(
+            customer_id=customer_id,
+            recipient_id=str(arguments.get("recipient_id", "")).strip() or None,
+            conversation_id=str(arguments.pop("conversation_id", "")).strip() or None,
+            connected_account_id=str(connected_account_id or "").strip() or None,
+        )
+
+    def _retry_instagram_send_without_reply_to(
+        self,
+        *,
+        tool_slug: str,
+        result: dict[str, Any],
+        arguments: dict[str, Any],
+        connected_account_id: str | None,
+        customer_id: str,
+        text: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        if not _should_retry_without_reply_to(tool_slug=tool_slug, result=result, arguments=arguments):
+            return result, False
+        retry_arguments = dict(arguments)
+        retry_arguments.pop("reply_to_message_id", None)
+        return self._sdk_execute_tool(
+            slug=tool_slug,
+            arguments=retry_arguments,
+            connected_account_id=str(connected_account_id or "").strip() or None,
+            user_id=str(customer_id or "").strip(),
+            text=str(text or "").strip() or None,
+        ), True
 
     def list_google_sheets_tab_names(
         self,
@@ -525,62 +512,11 @@ class ComposioService:
         spreadsheet_id: str,
         connected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        safe_customer = str(customer_id or "").strip()
-        safe_spreadsheet_id = str(spreadsheet_id or "").strip()
-        if not safe_customer:
-            raise ValueError("customer_id is required")
-        if not safe_spreadsheet_id:
-            raise ValueError("spreadsheet_id is required")
-
-        candidate_slugs = ["GOOGLESHEETS_GET_SHEET_NAMES"]
-        try:
-            with_tool_search = self.search_tools(
-                query="list sheets in google spreadsheet",
-                toolkits=["googlesheets"],
-                limit=20,
-            )
-        except Exception:
-            with_tool_search = {}
-        for item in _safe_list(with_tool_search.get("items")):
-            slug = str(_safe_dict(item).get("slug", "") or "").strip()
-            upper_slug = slug.upper()
-            if slug and (
-                "GET_SHEET_NAMES" in upper_slug
-                or "GET_SPREADSHEET_INFO" in upper_slug
-            ):
-                candidate_slugs.append(slug)
-        candidate_slugs = _unique_strings(candidate_slugs)
-
-        last_error = ""
-        for slug in candidate_slugs:
-            for arguments in (
-                {"spreadsheetId": safe_spreadsheet_id},
-                {"spreadsheet_id": safe_spreadsheet_id},
-            ):
-                result = self.execute_tool(
-                    customer_id=safe_customer,
-                    tool_slug=slug,
-                    arguments=arguments,
-                    connected_account_id=connected_account_id,
-                )
-                if not bool(result.get("successful", False)):
-                    last_error = str(result.get("error") or "sheet metadata lookup failed")
-                    continue
-                sheet_names = _extract_google_sheet_names(result.get("data"))
-                if sheet_names:
-                    return {
-                        "ok": True,
-                        "spreadsheet_id": safe_spreadsheet_id,
-                        "sheet_names": sheet_names,
-                        "tool_slug": slug,
-                    }
-                last_error = f"{slug} returned no sheet names"
-        return {
-            "ok": False,
-            "spreadsheet_id": safe_spreadsheet_id,
-            "sheet_names": [],
-            "error": last_error or "unable to discover Google Sheets worksheet names",
-        }
+        return GoogleSheetsComposioAdapter(self).list_tab_names(
+            customer_id=customer_id,
+            spreadsheet_id=spreadsheet_id,
+            connected_account_id=connected_account_id,
+        )
 
     def inspect_instagram_reply_target(
         self,
@@ -591,50 +527,13 @@ class ComposioService:
         connected_account_id: str | None = None,
         scan_limit: int = 10,
     ) -> dict[str, Any]:
-        safe_customer = str(customer_id or "").strip()
-        safe_recipient = str(recipient_id or "").strip()
-        safe_conversation = str(conversation_id or "").strip()
-        safe_account = str(connected_account_id or "").strip() or None
-        if not safe_customer:
-            raise ValueError("customer_id is required")
-        if not safe_recipient and not safe_conversation:
-            raise ValueError("recipient_id or conversation_id is required")
-
-        conversation: dict[str, Any] | None = None
-        if safe_conversation:
-            conversation = self._fetch_instagram_conversation(
-                customer_id=safe_customer,
-                conversation_id=safe_conversation,
-                connected_account_id=safe_account,
-            )
-        else:
-            conversation = self._find_instagram_conversation_for_recipient(
-                customer_id=safe_customer,
-                recipient_id=safe_recipient,
-                connected_account_id=safe_account,
-                scan_limit=scan_limit,
-            )
-
-        if not conversation:
-            return {
-                "ok": True,
-                "customer_id": safe_customer,
-                "conversation_id": safe_conversation or None,
-                "recipient_id": safe_recipient or None,
-                "recipient_id_verified": False,
-                "matched": False,
-                "reply_window_status": "unconfirmed",
-                "reply_window_reason": "No Instagram conversation matching this target was found.",
-            }
-
-        summary = self._summarize_instagram_conversation(
-            conversation=conversation,
-            requested_recipient_id=safe_recipient or None,
+        return InstagramComposioAdapter(self).inspect_reply_target(
+            customer_id=customer_id,
+            recipient_id=recipient_id,
+            conversation_id=conversation_id,
+            connected_account_id=connected_account_id,
+            scan_limit=scan_limit,
         )
-        summary["ok"] = True
-        summary["customer_id"] = safe_customer
-        summary["connected_account_id"] = safe_account
-        return summary
 
     def list_instagram_conversations(
         self,
@@ -643,49 +542,11 @@ class ComposioService:
         connected_account_id: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
-        safe_customer = str(customer_id or "").strip()
-        if not safe_customer:
-            raise ValueError("customer_id is required")
-        safe_account = str(connected_account_id or "").strip() or None
-        response = self._sdk_execute_tool(
-            slug="INSTAGRAM_LIST_ALL_CONVERSATIONS",
-            arguments={"limit": max(1, min(int(limit), 25))},
-            connected_account_id=safe_account,
-            user_id=safe_customer,
+        return InstagramComposioAdapter(self).list_conversations(
+            customer_id=customer_id,
+            connected_account_id=connected_account_id,
+            limit=limit,
         )
-        if not bool(response.get("successful", False)):
-            raise RuntimeError(str(response.get("error") or "failed to list Instagram conversations"))
-        items = _safe_list(_safe_dict(response.get("data")).get("data"))
-        summaries: list[dict[str, Any]] = []
-        warnings: list[dict[str, str]] = []
-        for item in items:
-            conversation_id = str(_safe_dict(item).get("id", "") or "").strip()
-            if not conversation_id:
-                continue
-            try:
-                conversation = self._fetch_instagram_conversation(
-                    customer_id=safe_customer,
-                    conversation_id=conversation_id,
-                    connected_account_id=safe_account,
-                )
-            except Exception as exc:
-                warnings.append({"conversation_id": conversation_id, "error": str(exc)})
-                continue
-            summary = self._summarize_instagram_conversation(
-                conversation=conversation,
-                requested_recipient_id=None,
-            )
-            summary["ok"] = True
-            summary["customer_id"] = safe_customer
-            summary["connected_account_id"] = safe_account
-            summaries.append(summary)
-        return {
-            "ok": True,
-            "customer_id": safe_customer,
-            "connected_account_id": safe_account,
-            "items": summaries,
-            "warnings": warnings,
-        }
 
     def get_instagram_conversation(
         self,
@@ -694,32 +555,11 @@ class ComposioService:
         conversation_id: str,
         connected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        safe_customer = str(customer_id or "").strip()
-        safe_conversation = str(conversation_id or "").strip()
-        safe_account = str(connected_account_id or "").strip() or None
-        if not safe_customer:
-            raise ValueError("customer_id is required")
-        if not safe_conversation:
-            raise ValueError("conversation_id is required")
-        conversation = self._fetch_instagram_conversation(
-            customer_id=safe_customer,
-            conversation_id=safe_conversation,
-            connected_account_id=safe_account,
+        return InstagramComposioAdapter(self).get_conversation(
+            customer_id=customer_id,
+            conversation_id=conversation_id,
+            connected_account_id=connected_account_id,
         )
-        summary = self._summarize_instagram_conversation(
-            conversation=conversation,
-            requested_recipient_id=None,
-        )
-        summary["ok"] = True
-        summary["customer_id"] = safe_customer
-        summary["connected_account_id"] = safe_account
-        return {
-            "ok": True,
-            "customer_id": safe_customer,
-            "connected_account_id": safe_account,
-            "conversation": conversation,
-            "summary": summary,
-        }
 
     def _sdk_execute_tool(
         self,
@@ -730,157 +570,17 @@ class ComposioService:
         user_id: str,
         text: str | None = None,
     ) -> dict[str, Any]:
-        return self._sdk().tools.execute(
-            slug=slug,
-            arguments=arguments,
-            connected_account_id=connected_account_id,
-            user_id=user_id,
-            text=text,
-            dangerously_skip_version_check=True,
-        )
-
-    def _fetch_instagram_conversation(
-        self,
-        *,
-        customer_id: str,
-        conversation_id: str,
-        connected_account_id: str | None,
-    ) -> dict[str, Any]:
-        result = self._sdk_execute_tool(
-            slug="INSTAGRAM_GET_CONVERSATION",
-            arguments={"conversation_id": conversation_id},
-            connected_account_id=connected_account_id,
-            user_id=customer_id,
-        )
-        if not bool(result.get("successful", False)):
-            raise RuntimeError(str(result.get("error") or "failed to fetch Instagram conversation"))
-        payload = _safe_dict(result.get("data"))
-        return payload
-
-    def _find_instagram_conversation_for_recipient(
-        self,
-        *,
-        customer_id: str,
-        recipient_id: str,
-        connected_account_id: str | None,
-        scan_limit: int,
-    ) -> dict[str, Any] | None:
-        if not recipient_id:
-            return None
-        response = self._sdk_execute_tool(
-            slug="INSTAGRAM_LIST_ALL_CONVERSATIONS",
-            arguments={"limit": max(1, min(int(scan_limit), 25))},
-            connected_account_id=connected_account_id,
-            user_id=customer_id,
-        )
-        if not bool(response.get("successful", False)):
-            raise RuntimeError(str(response.get("error") or "failed to list Instagram conversations"))
-        items = _safe_list(_safe_dict(response.get("data")).get("data"))
-        for item in items:
-            conversation_id = str(_safe_dict(item).get("id", "") or "").strip()
-            if not conversation_id:
-                continue
-            conversation = self._fetch_instagram_conversation(
-                customer_id=customer_id,
-                conversation_id=conversation_id,
+        return cast(
+            "dict[str, Any]",
+            self._sdk().tools.execute(
+                slug=slug,
+                arguments=arguments,
                 connected_account_id=connected_account_id,
-            )
-            participant_ids = {
-                str(_safe_dict(participant).get("id", "") or "").strip()
-                for participant in _safe_list(_safe_dict(conversation.get("participants")).get("data"))
-            }
-            if recipient_id in participant_ids:
-                return conversation
-        return None
-
-    @staticmethod
-    def _summarize_instagram_conversation(
-        *,
-        conversation: dict[str, Any],
-        requested_recipient_id: str | None,
-    ) -> dict[str, Any]:
-        payload = _safe_dict(conversation.get("data")) if "data" in conversation else conversation
-        participants = _safe_list(_safe_dict(payload.get("participants")).get("data"))
-        messages = _safe_list(_safe_dict(payload.get("messages")).get("data"))
-        participant_ids = [
-            str(_safe_dict(item).get("id", "") or "").strip()
-            for item in participants
-            if str(_safe_dict(item).get("id", "") or "").strip()
-        ]
-        participant_usernames = {
-            str(_safe_dict(item).get("id", "") or "").strip(): str(_safe_dict(item).get("username", "") or "").strip()
-            for item in participants
-            if str(_safe_dict(item).get("id", "") or "").strip()
-        }
-        verified_recipient = str(requested_recipient_id or "").strip() or None
-        if verified_recipient and verified_recipient not in participant_ids:
-            verified_recipient = None
-        if not verified_recipient and len(participant_ids) == 2:
-            verified_recipient = participant_ids[1]
-
-        own_participant_ids = [item for item in participant_ids if item != verified_recipient] if verified_recipient else []
-        normalized_messages = []
-        for item in messages:
-            msg = _safe_dict(item)
-            sender = _safe_dict(msg.get("from"))
-            recipients = _safe_list(_safe_dict(msg.get("to")).get("data"))
-            normalized_messages.append(
-                {
-                    "id": str(msg.get("id", "") or "").strip(),
-                    "created_time": str(msg.get("created_time", "") or "").strip(),
-                    "created_at": _parse_datetime(msg.get("created_time")),
-                    "message": str(msg.get("message", "") or "").strip(),
-                    "from_id": str(sender.get("id", "") or "").strip(),
-                    "from_username": str(sender.get("username", "") or "").strip(),
-                    "to_ids": [
-                        str(_safe_dict(recipient).get("id", "") or "").strip()
-                        for recipient in recipients
-                        if str(_safe_dict(recipient).get("id", "") or "").strip()
-                    ],
-                }
-            )
-        normalized_messages.sort(key=lambda item: item["created_at"] or datetime.min, reverse=True)
-
-        latest_message = normalized_messages[0] if normalized_messages else None
-        latest_inbound = None
-        latest_outbound = None
-        for item in normalized_messages:
-            sender_id = item["from_id"]
-            if verified_recipient and sender_id == verified_recipient and latest_inbound is None:
-                latest_inbound = item
-            if own_participant_ids and sender_id in own_participant_ids and latest_outbound is None:
-                latest_outbound = item
-            if latest_inbound is not None and (latest_outbound is not None or not own_participant_ids):
-                break
-
-        return {
-            "matched": True,
-            "conversation_id": str(payload.get("id", "") or "").strip() or None,
-            "conversation_updated_time": str(payload.get("updated_time", "") or "").strip() or None,
-            "participant_ids": participant_ids,
-            "participant_usernames": participant_usernames,
-            "recipient_id": verified_recipient or requested_recipient_id or None,
-            "recipient_id_verified": bool(verified_recipient),
-            "latest_message_id": latest_message["id"] if latest_message else None,
-            "latest_message_created_time": latest_message["created_time"] if latest_message else None,
-            "latest_message_sender_id": latest_message["from_id"] if latest_message else None,
-            "latest_message_sender_username": latest_message["from_username"] if latest_message else None,
-            "latest_message_text_preview": latest_message["message"][:280] if latest_message else None,
-            "latest_inbound_message_id": latest_inbound["id"] if latest_inbound else None,
-            "latest_inbound_message_created_time": latest_inbound["created_time"] if latest_inbound else None,
-            "latest_inbound_sender_id": latest_inbound["from_id"] if latest_inbound else None,
-            "latest_inbound_sender_username": latest_inbound["from_username"] if latest_inbound else None,
-            "latest_inbound_message_text_preview": latest_inbound["message"][:280] if latest_inbound else None,
-            "latest_outbound_message_id": latest_outbound["id"] if latest_outbound else None,
-            "latest_outbound_message_created_time": latest_outbound["created_time"] if latest_outbound else None,
-            "reply_window_status": "unconfirmed",
-            "reply_window_reason": (
-                "Exact thread verified and latest inbound timestamp captured, but Meta still decides whether the "
-                "reply window is open at send time."
-                if latest_inbound
-                else "Exact thread verified, but no inbound message timestamp was found on this thread."
+                user_id=user_id,
+                text=text,
+                dangerously_skip_version_check=True,
             ),
-        }
+        )
 
     @staticmethod
     def _serialize_connected_account(item: Any) -> dict[str, Any]:

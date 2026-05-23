@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from langchain.chat_models import init_chat_model
@@ -325,7 +325,11 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
         completion_tokens = _maybe_int(usage.get("output_tokens"))
     total_tokens = _maybe_int(usage.get("total_tokens"))
     cached_tokens = _maybe_int(prompt_details.get("cached_tokens"))
+    if cached_tokens is None:
+        cached_tokens = _maybe_int(usage.get("prompt_cache_hit_tokens"))
     cache_write_tokens = _maybe_int(prompt_details.get("cache_write_tokens"))
+    if cache_write_tokens is None:
+        cache_write_tokens = _maybe_int(usage.get("prompt_cache_miss_tokens"))
     reasoning_tokens = _maybe_int(completion_details.get("reasoning_tokens"))
     cost = usage.get("cost")
     cost_details = _usage_object_to_dict(usage.get("cost_details"))
@@ -1192,11 +1196,13 @@ def _build_intake_workflow_context_prompt(
 
 def _build_intake_workflow_state_prompt(
     *,
+    workflow: dict[str, Any],
     conversation: dict[str, Any],
     active_booking: dict[str, Any] | None,
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
 ) -> str:
+    compact_workflow = _compact_workflow_for_prompt(workflow)
     compact_conversation = _compact_conversation_for_prompt(conversation)
     compact_active_booking = _compact_booking_for_prompt(active_booking)
     compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
@@ -1204,6 +1210,7 @@ def _build_intake_workflow_state_prompt(
     return (
         "INTAKE_CONVERSATION_STATE\n"
         "Volatile conversation state for the current inbound message.\n"
+        f"workflow={json.dumps(compact_workflow, ensure_ascii=False)}\n"
         f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
         f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
         f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
@@ -1320,17 +1327,17 @@ class OpenTulpaLangGraphRuntime:
         self._max_completion_tokens = max(128, min(int(max_completion_tokens), 32768))
         self._max_user_reply_chars = max(500, min(int(max_user_reply_chars), 20000))
         self._wake_classifier_model_name = (
-            _normalize_model_name(wake_classifier_model_name)
+            _normalize_model_name(str(wake_classifier_model_name))
             if str(wake_classifier_model_name or "").strip()
             else self.model_name
         )
         self._wake_execution_model_name = (
-            _normalize_model_name(wake_execution_model_name)
+            _normalize_model_name(str(wake_execution_model_name))
             if str(wake_execution_model_name or "").strip()
             else self.model_name
         )
         self._telegram_media_model_name = (
-            _normalize_model_name(telegram_media_model_name)
+            _normalize_model_name(str(telegram_media_model_name))
             if str(telegram_media_model_name or "").strip()
             else "google/gemini-3.1-flash-lite-preview"
         )
@@ -1353,6 +1360,7 @@ class OpenTulpaLangGraphRuntime:
         self._customer_profile_service = customer_profile_service
         self._thread_rollup_service = thread_rollup_service
         self._link_alias_service = link_alias_service
+        self._composio_service: Any | None = None
         self._workflow_setup_service: Any | None = None
         self._context_token_limit = max(6000, min(30000, int(context_token_limit)))
         self._context_short_term_high_tokens = self._context_token_limit
@@ -1572,6 +1580,34 @@ class OpenTulpaLangGraphRuntime:
         self._wake_execution_model_with_tools = None
         self._thread_inputs = ThreadInputCoordinator(debounce_seconds=self._input_debounce_seconds)
         self._internal_api = InternalApiClient(base_url=self.app_url)
+
+    @property
+    def link_alias_service(self) -> LinkAliasService | None:
+        return self._link_alias_service
+
+    @property
+    def composio_service(self) -> Any | None:
+        return self._composio_service
+
+    @property
+    def workflow_setup_service(self) -> Any | None:
+        return self._workflow_setup_service
+
+    def configure_api_services(
+        self,
+        *,
+        link_alias_service: LinkAliasService | None = None,
+        composio_service: Any | None = None,
+        workflow_setup_service: Any | None = None,
+    ) -> None:
+        assert composio_service is None or hasattr(composio_service, "status")
+        assert workflow_setup_service is None or hasattr(workflow_setup_service, "get_thread_session")
+        if link_alias_service is not None and self._link_alias_service is None:
+            self._link_alias_service = link_alias_service
+        if composio_service is not None:
+            self._composio_service = composio_service
+        if workflow_setup_service is not None:
+            self._workflow_setup_service = workflow_setup_service
 
     def prompt_cache_profile(self, *, model_name: str | None = None) -> dict[str, Any]:
         target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
@@ -2400,7 +2436,8 @@ class OpenTulpaLangGraphRuntime:
         kind = str(item.get("kind", "") or "").strip().lower()
         priority = int(MEMORY_KIND_PRIORITY.get(kind, 50))
         try:
-            score = float(item.get("score"))
+            raw_score = item.get("score")
+            score = float(raw_score) if raw_score is not None else 0.0
         except (TypeError, ValueError):
             score = 0.0
         return priority, -score
@@ -2752,7 +2789,7 @@ class OpenTulpaLangGraphRuntime:
             "server_time_utc_iso": now_utc.isoformat(),
             "server_utc_offset": server_offset_text,
             "user_time_local_iso": user_local.isoformat(),
-            "user_utc_offset": user_offset_text,
+            "user_utc_offset": str(user_offset_text or server_offset_text),
             "user_time_source": source,
         }
 
@@ -3186,11 +3223,12 @@ class OpenTulpaLangGraphRuntime:
                     prompt_mode=prompt_mode,
                 )
             except TypeError:
-                skill_state = await self._pre_resolve_skill_state(
+                resolver = cast(Any, self._pre_resolve_skill_state)
+                skill_state = await resolver(
                     customer_id=customer_id,
                     user_text=user_text,
                 )
-        config = {
+        config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
         }
@@ -3218,7 +3256,7 @@ class OpenTulpaLangGraphRuntime:
             }
             config_metadata.update(_tool_schema_trace_fields(self, turn_mode))
             config["metadata"] = config_metadata
-            config["tags"] = list(config["metadata"]["langfuse_tags"])
+            config["tags"] = list(config_metadata["langfuse_tags"])
             graph_langfuse_callback_attached = True
         else:
             graph_langfuse_callback_attached = False
@@ -3263,12 +3301,19 @@ class OpenTulpaLangGraphRuntime:
             "opentulpa_trace_id": str(trace_id or "").strip(),
         }
         metadata.update(_tool_schema_trace_fields(self, str(turn_mode or "").strip()))
-        return build_callbacks(
-            user_id=str(customer_id or "").strip() or None,
-            trace_id=str(trace_id or "").strip() or None,
-            session_id=str(thread_id or "").strip() or None,
-            metadata=metadata,
-            tags=[item for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip()) if item],
+        return cast(
+            "list[Any]",
+            build_callbacks(
+                user_id=str(customer_id or "").strip() or None,
+                trace_id=str(trace_id or "").strip() or None,
+                session_id=str(thread_id or "").strip() or None,
+                metadata=metadata,
+                tags=[
+                    item
+                    for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip())
+                    if item
+                ],
+            ),
         )
 
     def _model_with_callbacks(
@@ -4632,15 +4677,19 @@ class OpenTulpaLangGraphRuntime:
                     model=model,
                     schema=_IntakeWorkflowDecision,
                     messages=[
-                        SystemMessage(content=_build_intake_workflow_system_prompt()),
                         SystemMessage(
-                            content=_build_intake_workflow_context_prompt(
-                                customer_id=customer_id,
-                                workflow=workflow,
+                            content=(
+                                _build_intake_workflow_system_prompt()
+                                + "\n\n"
+                                + _build_intake_workflow_context_prompt(
+                                    customer_id=customer_id,
+                                    workflow=workflow,
+                                )
                             )
                         ),
                         HumanMessage(
                             content=_build_intake_workflow_state_prompt(
+                                workflow=workflow,
                                 conversation=conversation,
                                 active_booking=active_booking,
                                 recent_completed_booking=recent_completed_booking,
@@ -4648,7 +4697,7 @@ class OpenTulpaLangGraphRuntime:
                             )
                         ),
                     ],
-                    stable_prefix_count=2,
+                    stable_prefix_count=1,
                     call_context={
                         "call_site": "intake_workflow_decision",
                         "trace_id": structured_trace_id,
@@ -4807,7 +4856,7 @@ class OpenTulpaLangGraphRuntime:
             raw_token, previous = token
             previous = str(previous or "").strip()
         try:
-            ctx.reset(raw_token)
+            ctx.reset(cast("contextvars.Token[str]", raw_token))
         except ValueError:
             ctx.set(previous)
         self._active_customer_id = str(ctx.get() or "").strip()
@@ -4839,7 +4888,7 @@ class OpenTulpaLangGraphRuntime:
             raw_token, previous = token
             previous = str(previous or "").strip()
         try:
-            ctx.reset(raw_token)
+            ctx.reset(cast("contextvars.Token[str]", raw_token))
         except ValueError:
             ctx.set(previous)
         self._active_thread_id = str(ctx.get() or "").strip()
@@ -4871,7 +4920,7 @@ class OpenTulpaLangGraphRuntime:
             raw_token, previous = token
             previous = str(previous or "").strip() or "interactive"
         try:
-            ctx.reset(raw_token)
+            ctx.reset(cast("contextvars.Token[str]", raw_token))
         except ValueError:
             ctx.set(previous)
         self._active_turn_mode = _normalize_turn_mode(str(ctx.get() or "interactive"))

@@ -285,6 +285,42 @@ def test_record_generation_captures_usage_and_cost() -> None:
     assert observation.kwargs["cost_details"] == {"input": 0.01, "output": 0.02, "total": 0.03}
 
 
+def test_record_generation_maps_native_deepseek_cache_usage() -> None:
+    client = _FakeLangfuseClient()
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+        client=client,
+    )
+
+    tracer.record_generation(
+        {
+            "model_name": "deepseek/deepseek-v4-pro",
+            "call_site": "graph_agent",
+            "trace_id": "turn_1",
+            "prompt_messages": [{"role": "user", "text": "hi"}],
+            "response_text": "hello",
+            "usage": {
+                "prompt_tokens": 10124,
+                "completion_tokens": 5,
+                "total_tokens": 10129,
+                "prompt_cache_hit_tokens": 10112,
+                "prompt_cache_miss_tokens": 12,
+            },
+        }
+    )
+
+    observation = client.observations[0]
+    assert observation.kwargs["usage_details"] == {
+        "input": 10124,
+        "output": 5,
+        "total": 10129,
+        "cache_read_input_tokens": 10112,
+        "cache_write_input_tokens": 12,
+    }
+
+
 def test_trace_context_rolls_up_child_generation_usage_and_cost() -> None:
     client = _FakeLangfuseClient()
     tracer = LangfuseTracer(

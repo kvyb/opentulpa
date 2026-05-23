@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
@@ -19,6 +20,34 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENROUTER_APP_REFERER = "https://github.com/kvyb/opentulpa"
 DEFAULT_OPENROUTER_APP_TITLE = "OpenTulpa"
+_RETRYABLE_MODEL_ERROR_MARKERS = (
+    "429",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "toomanyrequests",
+    "temporarily unavailable",
+    "provider returned error",
+)
+
+
+def _model_transient_retry_limit() -> int:
+    raw = str(os.getenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "2") or "2").strip()
+    try:
+        return max(0, min(5, int(raw)))
+    except ValueError:
+        return 2
+
+
+def _is_retryable_model_error(error_text: str) -> bool:
+    normalized = str(error_text or "").strip().lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _RETRYABLE_MODEL_ERROR_MARKERS)
+
+
+def _model_transient_retry_delay_seconds(retry_index: int) -> float:
+    return float(min(6.0, 0.75 * (2 ** max(0, int(retry_index)))))
 
 
 def prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
@@ -188,6 +217,15 @@ def openrouter_reasoning_config(reasoning_effort: str | None) -> dict[str, Any]:
     return {"effort": effort, "exclude": False}
 
 
+def openrouter_provider_routing(*, model_name: str | None, base_url: str | None) -> dict[str, Any] | None:
+    if not looks_like_openrouter_base_url(base_url):
+        return None
+    slug = str(model_name or "").strip().lower()
+    if slug in {"deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-pro-20260423"}:
+        return {"order": ["DeepSeek"], "allow_fallbacks": False}
+    return None
+
+
 def openrouter_app_headers(
     *,
     base_url: str | None,
@@ -245,6 +283,12 @@ def init_runtime_chat_model(
         }
         if uses_reasoning:
             adapter_kwargs["reasoning"] = openrouter_reasoning_config(reasoning_effort)
+        provider_routing = openrouter_provider_routing(
+            model_name=model_name,
+            base_url=openrouter_base_url,
+        )
+        if provider_routing is not None:
+            adapter_kwargs["openrouter_provider"] = provider_routing
         if referer := app_headers.get("HTTP-Referer"):
             adapter_kwargs["app_url"] = referer
         if title := app_headers.get("X-OpenRouter-Title"):
@@ -731,10 +775,42 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                         attempt_context.get("provider_attempt_name") or "default"
                     ),
                 )
-                if supports_ainvoke_kwargs(runner, invoke_extras):
-                    payload = await runner.ainvoke(prepared_messages, **invoke_extras)
-                else:
-                    payload = await runner.ainvoke(prepared_messages)
+                transient_retries = _model_transient_retry_limit()
+                provider_retry_index = 0
+                while True:
+                    try:
+                        if supports_ainvoke_kwargs(runner, invoke_extras):
+                            payload = await runner.ainvoke(prepared_messages, **invoke_extras)
+                        else:
+                            payload = await runner.ainvoke(prepared_messages)
+                        break
+                    except Exception as exc:
+                        retry_error_text = f"{type(exc).__name__}: {exc}"
+                        if (
+                            provider_retry_index >= transient_retries
+                            or not _is_retryable_model_error(retry_error_text)
+                        ):
+                            raise
+                        delay_seconds = _model_transient_retry_delay_seconds(provider_retry_index)
+                        provider_retry_index += 1
+                        runtime.log_behavior_event(
+                            event="llm.invoke.transient_retry",
+                            model_name=resolved_model_name,
+                            call_site=str(
+                                attempt_context.get("call_site") or "runtime_model_invoke"
+                            ),
+                            trace_id=str(attempt_context.get("trace_id") or ""),
+                            thread_id=str(attempt_context.get("thread_id") or ""),
+                            customer_id=str(attempt_context.get("customer_id") or ""),
+                            provider_attempt_name=str(
+                                attempt_context.get("provider_attempt_name") or "default"
+                            ),
+                            retry_index=provider_retry_index,
+                            retry_limit=transient_retries,
+                            delay_seconds=delay_seconds,
+                            error=retry_error_text,
+                        )
+                        await asyncio.sleep(delay_seconds)
                 provider_elapsed_ms = int((time.monotonic() - provider_started) * 1000)
                 if isinstance(payload, schema):
                     runtime.log_behavior_event(

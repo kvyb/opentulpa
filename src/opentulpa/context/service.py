@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
-from opentulpa.persistence.sqlite import connect_sqlite
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from opentulpa.persistence.sqlite import connect_sqlite
 
 
 class EventContextService:
@@ -70,7 +70,7 @@ class EventContextService:
                 ),
             )
             conn.commit()
-            return int(cur.lastrowid)
+            return int(cur.lastrowid or 0)
 
     def list_events(self, customer_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         cid = str(customer_id or "").strip()
@@ -123,4 +123,3 @@ class EventContextService:
                 )
             conn.commit()
             return int(cur.rowcount or 0)
-
