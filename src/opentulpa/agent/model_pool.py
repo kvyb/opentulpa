@@ -217,6 +217,15 @@ def openrouter_reasoning_config(reasoning_effort: str | None) -> dict[str, Any]:
     return {"effort": effort, "exclude": False}
 
 
+def openrouter_provider_routing(*, model_name: str | None, base_url: str | None) -> dict[str, Any] | None:
+    if not looks_like_openrouter_base_url(base_url):
+        return None
+    slug = str(model_name or "").strip().lower()
+    if slug in {"deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-pro-20260423"}:
+        return {"order": ["DeepSeek"], "allow_fallbacks": False}
+    return None
+
+
 def openrouter_app_headers(
     *,
     base_url: str | None,
@@ -274,6 +283,12 @@ def init_runtime_chat_model(
         }
         if uses_reasoning:
             adapter_kwargs["reasoning"] = openrouter_reasoning_config(reasoning_effort)
+        provider_routing = openrouter_provider_routing(
+            model_name=model_name,
+            base_url=openrouter_base_url,
+        )
+        if provider_routing is not None:
+            adapter_kwargs["openrouter_provider"] = provider_routing
         if referer := app_headers.get("HTTP-Referer"):
             adapter_kwargs["app_url"] = referer
         if title := app_headers.get("X-OpenRouter-Title"):

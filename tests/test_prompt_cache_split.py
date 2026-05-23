@@ -564,6 +564,35 @@ def test_model_request_attempts_are_default_for_deepseek_v4_pro_on_openrouter() 
     assert attempts == [{"name": "default", "invoke_extras": {}, "call_context": {}}]
 
 
+def test_extract_response_usage_fields_normalizes_native_deepseek_cache_usage() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+
+    class _UsageResponse:
+        content = "ok"
+        usage = {
+            "prompt_tokens": 10124,
+            "completion_tokens": 5,
+            "total_tokens": 10129,
+            "prompt_cache_hit_tokens": 10112,
+            "prompt_cache_miss_tokens": 12,
+        }
+
+    assert rt.extract_response_usage_fields(_UsageResponse()) == {
+        "native_tokens_prompt": 10124,
+        "native_tokens_completion": 5,
+        "native_tokens_total": 10129,
+        "native_tokens_cached": 10112,
+        "cache_hit": True,
+        "native_tokens_cache_write": 12,
+    }
+
+
 def test_extract_response_usage_fields_normalizes_openrouter_usage() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",

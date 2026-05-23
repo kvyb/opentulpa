@@ -193,6 +193,12 @@ def _usage_details(record: dict[str, Any]) -> dict[str, int]:
                 details.setdefault("cache_read_input_tokens", cached)
             if cache_write is not None:
                 details.setdefault("cache_write_input_tokens", cache_write)
+        native_cached = _int_value(usage.get("prompt_cache_hit_tokens"))
+        native_miss = _int_value(usage.get("prompt_cache_miss_tokens"))
+        if native_cached is not None:
+            details.setdefault("cache_read_input_tokens", native_cached)
+        if native_miss is not None:
+            details.setdefault("cache_write_input_tokens", native_miss)
         completion_details = usage.get("completion_tokens_details")
         if isinstance(completion_details, dict):
             reasoning = _int_value(completion_details.get("reasoning_tokens"))

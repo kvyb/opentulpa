@@ -177,6 +177,10 @@ def test_runtime_uses_openrouter_adapter_for_deepseek_reasoning(monkeypatch) -> 
     assert deepseek_call["api_key"] == "test-key"
     assert deepseek_call["base_url"] == "https://openrouter.ai/api/v1"
     assert deepseek_call["reasoning"] == {"effort": "high", "exclude": False}
+    assert deepseek_call["openrouter_provider"] == {
+        "order": ["DeepSeek"],
+        "allow_fallbacks": False,
+    }
     assert deepseek_call["streaming"] is True
     assert deepseek_call["app_url"] == "https://github.com/kvyb/opentulpa"
     assert deepseek_call["app_title"] == "OpenTulpa"
@@ -221,6 +225,7 @@ def test_runtime_uses_openrouter_adapter_for_qwen_prompt_cache(monkeypatch) -> N
     assert qwen_call["app_url"] == "https://github.com/kvyb/opentulpa"
     assert qwen_call["app_title"] == "OpenTulpa"
     assert "reasoning" not in qwen_call
+    assert "openrouter_provider" not in qwen_call
     assert all(call["model"] != "qwen/qwen3.7-max" for call in init_calls)
 
 
@@ -245,6 +250,10 @@ def test_runtime_uses_openrouter_adapter_to_disable_deepseek_reasoning(monkeypat
 
     assert openrouter_calls
     assert openrouter_calls[0]["reasoning"] == {"effort": "none", "exclude": False}
+    assert openrouter_calls[0]["openrouter_provider"] == {
+        "order": ["DeepSeek"],
+        "allow_fallbacks": False,
+    }
 
 
 def test_openrouter_deepseek_adapter_replays_reasoning_details_for_tool_turns() -> None:

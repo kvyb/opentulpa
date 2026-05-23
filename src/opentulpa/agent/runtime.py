@@ -325,7 +325,11 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
         completion_tokens = _maybe_int(usage.get("output_tokens"))
     total_tokens = _maybe_int(usage.get("total_tokens"))
     cached_tokens = _maybe_int(prompt_details.get("cached_tokens"))
+    if cached_tokens is None:
+        cached_tokens = _maybe_int(usage.get("prompt_cache_hit_tokens"))
     cache_write_tokens = _maybe_int(prompt_details.get("cache_write_tokens"))
+    if cache_write_tokens is None:
+        cache_write_tokens = _maybe_int(usage.get("prompt_cache_miss_tokens"))
     reasoning_tokens = _maybe_int(completion_details.get("reasoning_tokens"))
     cost = usage.get("cost")
     cost_details = _usage_object_to_dict(usage.get("cost_details"))
