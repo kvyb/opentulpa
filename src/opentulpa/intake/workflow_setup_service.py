@@ -695,6 +695,20 @@ class WorkflowSetupService:
         committed["preflight"] = preflight
         return committed
 
+    def propose_current(self, *, customer_id: str, thread_id: str) -> dict[str, Any]:
+        """Preflight the current draft and mark it proposed when it is ready."""
+
+        preflight_session = self.preflight_current(customer_id=customer_id, thread_id=thread_id)
+        preflight = _safe_dict(preflight_session.get("preflight"))
+        if (
+            not bool(preflight.get("ok", False))
+            or str(preflight.get("status", "") or "") != "ready"
+        ):
+            return preflight_session
+        proposed = self.mark_proposed(customer_id=customer_id, thread_id=thread_id)
+        proposed["preflight"] = preflight
+        return proposed
+
     def _preflight_knowledge_scope(
         self,
         *,

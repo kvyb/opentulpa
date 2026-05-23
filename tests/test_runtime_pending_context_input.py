@@ -373,6 +373,131 @@ async def test_graph_surfaces_default_progress_for_silent_workflow_setup_tool_ca
 
 
 @pytest.mark.asyncio
+async def test_graph_finalizes_successful_workflow_delete_when_model_omits_confirmation() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+
+    class _DeleteTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            return {
+                "ok": True,
+                "deleted": True,
+                "workflow_id": "iwf_123",
+                "final_response_hint": "Deleted the intake workflow. It is gone now.",
+            }
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="I'll look up the workflow and delete it.",
+                tool_calls=[
+                    {"id": "call_delete", "name": "intake_workflow_delete", "args": {"workflow_id": "iwf_123"}}
+                ],
+            )
+        return AIMessage(content="")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"intake_workflow_delete": _DeleteTool()}
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="delete the intake workflow")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_delete_workflow",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_delete_workflow",
+        },
+        config={"configurable": {"thread_id": "chat_delete_workflow"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Deleted the intake workflow. It is gone now."
+
+
+@pytest.mark.asyncio
+async def test_graph_finalizes_ready_workflow_proposal_when_model_omits_summary() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+
+    class _ProposeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            return {
+                "last_proposed_draft_hash": "hash_123",
+                "draft_upsert": {
+                    "name": "AutoSpa",
+                    "channel": "telegram_business_dm",
+                    "required_fields": ["service_name", "phone"],
+                    "sink_type": "google_sheets_composio",
+                },
+                "preflight": {"ok": True, "status": "ready"},
+                "final_response_hint": (
+                    "Workflow proposal is ready.\n"
+                    "- Name: AutoSpa\n"
+                    "- Channel: telegram_business_dm\n"
+                    "- Required fields: service_name, phone\n"
+                    "- Sink: google_sheets_composio\n"
+                    "Confirm/save to activate it, or tell me what to change."
+                ),
+            }
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{"id": "call_propose", "name": "intake_workflow_setup_propose_current", "args": {}}],
+            )
+        return AIMessage(content="")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"intake_workflow_setup_propose_current": _ProposeTool()}
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="propose workflow")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_propose_workflow",
+            "turn_mode": "workflow_setup",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_propose_workflow",
+        },
+        config={"configurable": {"thread_id": "chat_propose_workflow"}, "recursion_limit": 8},
+    )
+
+    text = result["final_response_text"]
+    assert "Workflow proposal is ready" in text
+    assert "Confirm/save to activate it" in text
+    assert "AutoSpa" in text
+
+
+@pytest.mark.asyncio
 async def test_graph_does_not_surface_tool_call_preamble_for_background_turns() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     sequence: list[str] = []
@@ -900,7 +1025,7 @@ async def test_workflow_setup_prompt_injects_authoritative_next_action() -> None
     assert "WORKFLOW_SETUP_CONTROL_CARD" in prompt_text
     assert "draft_status: preflight_ready" in prompt_text
     assert "proposal_status: not_proposed" in prompt_text
-    assert "Call intake_workflow_setup_mark_proposed" in prompt_text
+    assert "Call intake_workflow_setup_propose_current" in prompt_text
     assert "After a ready preflight, do not re-query knowledge" in prompt_text
 
 
@@ -950,7 +1075,7 @@ async def test_interactive_turn_promotes_to_workflow_setup_when_session_becomes_
     assert "graph.workflow_setup.promoted_turn_mode" in behavior_events
     prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
     assert "WORKFLOW_SETUP_CONTROL_CARD" in prompt_text
-    assert "Call intake_workflow_setup_mark_proposed" in prompt_text
+    assert "Call intake_workflow_setup_propose_current" in prompt_text
 
 
 @pytest.mark.asyncio

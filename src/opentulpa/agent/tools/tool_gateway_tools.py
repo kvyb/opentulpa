@@ -141,6 +141,7 @@ TOOL_GROUP_DEFINITIONS: dict[str, dict[str, Any]] = {
             "intake_workflow_setup_get",
             "intake_workflow_setup_update",
             "intake_workflow_setup_preflight",
+            "intake_workflow_setup_propose_current",
             "intake_workflow_setup_mark_proposed",
             "intake_workflow_setup_confirm_current",
             "intake_workflow_setup_commit",

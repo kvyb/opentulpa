@@ -16,6 +16,12 @@ from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
+from opentulpa.intake.reply_policy import (
+    build_missing_field_follow_up_reply,
+)
+from opentulpa.intake.reply_policy import (
+    looks_like_cyrillic as _looks_like_cyrillic,
+)
 from opentulpa.intake.workflow_boundaries import (
     DECISION_BOOKING_ACTIONS,
     BookingTargetResolution,
@@ -369,11 +375,6 @@ def _required_field_is_present(payload: dict[str, Any], field: str) -> bool:
     }:
         return field in payload
     return False
-
-
-def _looks_like_cyrillic(*values: Any) -> bool:
-    text = " ".join(str(value or "") for value in values)
-    return any("\u0400" <= char <= "\u04ff" for char in text)
 
 
 def _extract_phone_hint(value: Any) -> str:
@@ -4026,6 +4027,29 @@ class IntakeWorkflowService:
             target_booking["sink_write_status"] = sink_status
             target_booking["sink_record_ref"] = sink_ref
             target_booking["updated_at"] = _utc_now_iso()
+            if self._should_enforce_completion_reply(workflow=workflow) and (
+                reply_action != "send_reply" or not reply_text
+            ):
+                missing_field = self._missing_field_for_follow_up(
+                    workflow=workflow,
+                    decision=decision,
+                    active_booking=target_booking,
+                )
+                follow_up_reply = build_missing_field_follow_up_reply(
+                    missing_field=missing_field,
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                )
+                if follow_up_reply:
+                    reply_action = "send_reply"
+                    reply_text = follow_up_reply
+                    self._emit_observability(
+                        event="intake.reply.normalized_missing_field_follow_up",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        reply_text=reply_text,
+                    )
             if sink_action == "upsert_partial" and sink_payload:
                 sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
                 if sink_type not in {"google_sheets_composio", "generic_composio_write"}:

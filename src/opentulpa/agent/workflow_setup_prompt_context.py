@@ -178,7 +178,7 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
         )
     elif preflight_ok and preflight_status == "ready":
         suggested = (
-            "Call intake_workflow_setup_mark_proposed. Then send a concise proposal summary and ask for confirmation, then stop. "
+            "Call intake_workflow_setup_propose_current. Then send a concise proposal summary and ask for confirmation, then stop. "
             "If the latest owner message is already an explicit confirmation of a proposal visible in this conversation, "
             "call intake_workflow_setup_finalize_confirmation instead."
         )
@@ -195,10 +195,10 @@ def build_workflow_setup_control_context(session: dict[str, Any] | None) -> str:
     elif knowledge_status == "source_files_bound_needs_index_or_preflight":
         suggested = (
             "Prepare the bound source files with business_knowledge_index, verify representative facts with "
-            "business_knowledge_query, then call intake_workflow_setup_preflight."
+            "business_knowledge_query, then call intake_workflow_setup_propose_current."
         )
     else:
-        suggested = "Call intake_workflow_setup_preflight. If it returns ready, call intake_workflow_setup_mark_proposed next."
+        suggested = "Call intake_workflow_setup_propose_current when the draft is complete; otherwise update the draft or ask the focused missing-field question."
 
     state_lines = [
         "WORKFLOW_SETUP_CONTROL_CARD",

@@ -54,6 +54,9 @@ from opentulpa.agent.tool_message_protocol import (
 from opentulpa.agent.tool_message_protocol import (
     sanitize_history_messages_for_model as _sanitize_history_messages_for_model,
 )
+from opentulpa.agent.tool_outcome_finalizers import (
+    fallback_final_text_from_tool_outcomes as _fallback_final_text_from_tool_outcomes,
+)
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message as _build_turn_mode_system_message,
 )
@@ -464,6 +467,7 @@ def build_runtime_graph(runtime: Any):
         "intake_workflow_setup_get": (),
         "intake_workflow_setup_update": (),
         "intake_workflow_setup_preflight": (),
+        "intake_workflow_setup_propose_current": (),
         "intake_workflow_setup_mark_proposed": (),
         "intake_workflow_setup_confirm_current": (),
         "intake_workflow_setup_commit": (),
@@ -532,6 +536,7 @@ def build_runtime_graph(runtime: Any):
         "intake_workflow_setup_get",
         "intake_workflow_setup_update",
         "intake_workflow_setup_preflight",
+        "intake_workflow_setup_propose_current",
         "intake_workflow_setup_mark_proposed",
         "intake_workflow_setup_confirm_current",
         "intake_workflow_setup_commit",
@@ -1500,8 +1505,9 @@ def build_runtime_graph(runtime: Any):
                     "- If the latest owner message supplied a local CSV path, persist it as "
                     "draft_patch.sink_type='local_csv' and draft_patch.sink_config.file_path; "
                     "do not ask for sink details already present.\n"
-                    "- If the draft is complete after the update: call intake_workflow_setup_preflight; "
-                    "when ready, call intake_workflow_setup_mark_proposed before summarizing the proposal.\n"
+                    "- If the draft is complete after the update: call "
+                    "intake_workflow_setup_propose_current once, then summarize the returned "
+                    "draft/preflight as the proposal.\n"
                     "- If the latest owner message explicitly confirms a shown proposal: call "
                     "intake_workflow_setup_finalize_confirmation. Pass any small final behavior-rule "
                     "edits in that same tool call when needed instead of doing a separate "
@@ -1798,6 +1804,12 @@ def build_runtime_graph(runtime: Any):
                         "turn_status": "completed",
                         "final_response_text": text,
                     }
+        fallback_text = _fallback_final_text_from_tool_outcomes(state.get("tool_outcomes"))
+        if fallback_text:
+            return {
+                "turn_status": "completed",
+                "final_response_text": fallback_text,
+            }
         return {
             "turn_status": "completed",
             "final_response_text": "",

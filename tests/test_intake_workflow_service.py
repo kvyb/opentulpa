@@ -2610,6 +2610,87 @@ async def test_telegram_business_reply_with_create_booking_action_opens_pending_
 
 
 @pytest.mark.asyncio
+async def test_telegram_business_pending_booking_without_model_reply_asks_missing_field(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a booking but omitted contact details.",
+                "extracted_fields": {"service": "2х-фазная мойка", "price": "1200"},
+                "missing_fields": ["client_name", "phone"],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": False,
+                "booking_action": "create_new_booking",
+                "save_payload": {},
+                "reason": "Need missing fields before saving, but model omitted a reply.",
+            }
+        ]
+    )
+    service, _, _, telegram_business, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio({}, {}),
+    )
+    telegram_business.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False, "first_name": "Kim"},
+            "rights": {"can_reply": True},
+        }
+    )
+    telegram_business.upsert_message(
+        business_connection_id="bc_123",
+        customer_id="telegram_123",
+        message=_telegram_business_inbound(
+            business_connection_id="bc_123",
+            chat_id=555,
+            user_id=999,
+            username="alice",
+            message_id=10,
+            text="Сколько стоит 2х-фазная мойка?",
+            date=1_775_552_400,
+        ),
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Telegram Booking",
+        channel="telegram_business_dm",
+        provider="telegram_bot_api",
+        source_config={"business_connection_id": "bc_123"},
+        intent_description="Handle Telegram Business appointment requests.",
+        required_fields=["service", "client_name", "phone"],
+        assistant_instructions="Ask for missing fields before saving.",
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        event_type="telegram_business_webhook",
+    )
+
+    assert result["ok"] is True
+    sent = telegram_business.client.sent_messages
+    assert len(sent) == 1
+    assert "client name" in sent[0]["text"].lower()
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="555",
+    )
+    assert len(bookings) == 1
+    assert bookings[0]["status"] == "active"
+
+
+@pytest.mark.asyncio
 async def test_telegram_business_workflow_serializes_same_conversation_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
