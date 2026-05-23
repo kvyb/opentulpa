@@ -72,4 +72,3 @@ class TelegramCommandRoute:
     @property
     def is_chat(self) -> bool:
         return self.kind == "chat"
-

@@ -281,8 +281,11 @@ async def _build_connected_composio_toolkits_context(runtime: Any, customer_id: 
     else:
         toolkits = []
         composio = getattr(runtime, "composio_service", None)
-        list_connected_accounts = getattr(composio, "list_connected_accounts", None)
-        if bool(getattr(composio, "enabled", False)) and callable(list_connected_accounts):
+        if not bool(getattr(composio, "enabled", False)):
+            list_connected_accounts = None
+        else:
+            list_connected_accounts = getattr(composio, "list_connected_accounts", None)
+        if callable(list_connected_accounts):
             try:
                 response = await asyncio.wait_for(
                     asyncio.to_thread(

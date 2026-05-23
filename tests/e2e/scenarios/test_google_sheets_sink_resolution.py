@@ -76,6 +76,36 @@ def _list_workflows(harness: E2EHarness, *, customer_id: str) -> list[dict[str, 
     return workflows if isinstance(workflows, list) else []
 
 
+def _telegram_owner_thread_id(*, chat_id: int) -> str:
+    from opentulpa.interfaces.telegram import chat_service as chat_module
+
+    state = chat_module.STATE_STORE.load()
+    sessions = state.get("sessions") if isinstance(state, dict) else {}
+    slot = sessions.get(str(chat_id)) if isinstance(sessions, dict) else {}
+    if not isinstance(slot, dict):
+        return ""
+    return str(slot.get("thread_id", "") or "").strip()
+
+
+def _workflow_setup_has_proposal(
+    harness: E2EHarness,
+    *,
+    customer_id: str,
+    thread_id: str,
+) -> bool:
+    response = harness.client.post(
+        "/internal/intake/setup/get",
+        json={"customer_id": customer_id, "thread_id": thread_id, "include_paused": True},
+    )
+    if response.status_code != 200:
+        return False
+    payload = response.json()
+    session = payload.get("session")
+    if not isinstance(session, dict):
+        return False
+    return bool(str(session.get("last_proposed_draft_hash", "") or "").strip())
+
+
 def _first_sheet_row(write: dict[str, Any]) -> dict[str, Any]:
     normalized = write.get("normalized_rows")
     if isinstance(normalized, list) and normalized and isinstance(normalized[0], dict):
@@ -286,13 +316,45 @@ def test_live_llm_telegram_business_intake_upserts_partial_identity_then_final_r
         lambda: len(e2e_harness.telegram_client.sent_messages) > owner_message_count,
         timeout_seconds=90.0,
     )
+    owner_thread_id = _telegram_owner_thread_id(chat_id=owner_chat_id)
+    assert owner_thread_id
+    if not _wait_until(
+        lambda: _workflow_setup_has_proposal(
+            e2e_harness,
+            customer_id=customer_id,
+            thread_id=owner_thread_id,
+        ),
+        timeout_seconds=90.0,
+    ):
+        assert (
+            e2e_harness.post_telegram(
+                body=_telegram_message(
+                    chat_id=owner_chat_id,
+                    user_id=owner_user_id,
+                    message_id=102,
+                    text=(
+                        "Use the workflow setup tools now: persist that exact draft, run preflight, "
+                        "mark it proposed, and wait for my confirmation before saving."
+                    ),
+                )
+            )
+            == 200
+        )
+        assert _wait_until(
+            lambda: _workflow_setup_has_proposal(
+                e2e_harness,
+                customer_id=customer_id,
+                thread_id=owner_thread_id,
+            ),
+            timeout_seconds=90.0,
+        )
     assert _list_workflows(e2e_harness, customer_id=customer_id) == []
     assert (
         e2e_harness.post_telegram(
             body=_telegram_message(
                 chat_id=owner_chat_id,
                 user_id=owner_user_id,
-                message_id=102,
+                message_id=103,
                 text="Looks correct. Save and activate this workflow now exactly as proposed.",
             )
         )

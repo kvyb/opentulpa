@@ -375,13 +375,22 @@ def test_live_telegram_chat_uploads_real_files_then_queries_user_context(
             if item.get("path") == "/internal/user_context/add_files"
         ]
 
-    assert _wait_until(lambda: bool(add_file_calls()), timeout_seconds=240.0), add_file_calls()
-    added_file_ids = [
-        file_id
-        for call in add_file_calls()
-        for file_id in call.get("json_body", {}).get("file_ids", [])
-    ]
-    assert len(set(added_file_ids)) == 2, add_file_calls()
+    def added_file_ids() -> list[str]:
+        return [
+            file_id
+            for call in add_file_calls()
+            for file_id in call.get("json_body", {}).get("file_ids", [])
+        ]
+
+    assert _wait_until(lambda: len(set(added_file_ids())) == 2, timeout_seconds=240.0), add_file_calls()
+    collected_file_ids = added_file_ids()
+    assert len(set(collected_file_ids)) == 2, add_file_calls()
+    assert _wait_until(
+        lambda: bool(
+            _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=upload_start)
+        ),
+        timeout_seconds=180.0,
+    )
     upload_messages = _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=upload_start)
     assert upload_messages
 
@@ -826,33 +835,6 @@ def test_live_telegram_chat_recalls_image_and_video_user_context(
         timeout_seconds=180.0,
     )
 
-    image_status = e2e_harness.post_telegram(
-        body=_telegram_photo_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            username=username,
-            message_id=2002,
-            file_id="tg_blog_sprint_cta",
-            file_unique_id="blog_sprint_cta_unique",
-            file_size=int(image_tg["file_size"]),
-        )
-    )
-    video_status = e2e_harness.post_telegram(
-        body=_telegram_video_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            username=username,
-            message_id=2003,
-            file_id="tg_retention_loop_video",
-            file_unique_id="retention_loop_unique",
-            file_name="retention_loop.mp4",
-            mime_type=str(video_tg["mime_type"]),
-            file_size=int(video_tg["file_size"]),
-        )
-    )
-    assert image_status == 200
-    assert video_status == 200
-
     def add_file_calls() -> list[dict[str, Any]]:
         return [
             item
@@ -866,6 +848,35 @@ def test_live_telegram_chat_recalls_image_and_video_user_context(
             for call in add_file_calls()
             for file_id in call.get("json_body", {}).get("file_ids", [])
         ]
+
+    image_status = e2e_harness.post_telegram(
+        body=_telegram_photo_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=2002,
+            file_id="tg_blog_sprint_cta",
+            file_unique_id="blog_sprint_cta_unique",
+            file_size=int(image_tg["file_size"]),
+        )
+    )
+    assert image_status == 200
+    assert _wait_until(lambda: len(set(added_file_ids())) == 1, timeout_seconds=240.0), add_file_calls()
+
+    video_status = e2e_harness.post_telegram(
+        body=_telegram_video_message(
+            chat_id=owner_chat_id,
+            user_id=owner_user_id,
+            username=username,
+            message_id=2003,
+            file_id="tg_retention_loop_video",
+            file_unique_id="retention_loop_unique",
+            file_name="retention_loop.mp4",
+            mime_type=str(video_tg["mime_type"]),
+            file_size=int(video_tg["file_size"]),
+        )
+    )
+    assert video_status == 200
 
     assert _wait_until(lambda: len(set(added_file_ids())) == 2, timeout_seconds=360.0), add_file_calls()
     assert len(set(added_file_ids())) == 2, add_file_calls()
