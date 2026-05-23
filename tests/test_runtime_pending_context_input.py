@@ -405,6 +405,8 @@ async def test_graph_finalizes_successful_workflow_delete_when_model_omits_confi
                     {"id": "call_delete", "name": "intake_workflow_delete", "args": {"workflow_id": "iwf_123"}}
                 ],
             )
+        if calls == 3:
+            return AIMessage(content="All set, I deleted that intake workflow.")
         return AIMessage(content="")
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
@@ -425,7 +427,8 @@ async def test_graph_finalizes_successful_workflow_delete_when_model_omits_confi
         config={"configurable": {"thread_id": "chat_delete_workflow"}, "recursion_limit": 8},
     )
 
-    assert result["final_response_text"] == "Deleted the intake workflow. It is gone now."
+    assert calls == 3
+    assert result["final_response_text"] == "All set, I deleted that intake workflow."
 
 
 @pytest.mark.asyncio
@@ -471,6 +474,14 @@ async def test_graph_finalizes_ready_workflow_proposal_when_model_omits_summary(
                 content="",
                 tool_calls=[{"id": "call_propose", "name": "intake_workflow_setup_propose_current", "args": {}}],
             )
+        if calls == 3:
+            return AIMessage(
+                content=(
+                    "I prepared the AutoSpa workflow proposal with Telegram Business DMs, "
+                    "service name and phone collection, and Google Sheets as the sink. "
+                    "You can confirm it to activate it or tell me what to change."
+                )
+            )
         return AIMessage(content="")
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
@@ -491,10 +502,11 @@ async def test_graph_finalizes_ready_workflow_proposal_when_model_omits_summary(
         config={"configurable": {"thread_id": "chat_propose_workflow"}, "recursion_limit": 8},
     )
 
+    assert calls == 3
     text = result["final_response_text"]
-    assert "Workflow proposal is ready" in text
-    assert "Confirm/save to activate it" in text
-    assert "AutoSpa" in text
+    assert "I prepared the AutoSpa workflow proposal" in text
+    assert "confirm it to activate it" in text
+    assert "Workflow proposal is ready" not in text
 
 
 @pytest.mark.asyncio

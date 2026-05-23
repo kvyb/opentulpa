@@ -55,7 +55,10 @@ from opentulpa.agent.tool_message_protocol import (
     sanitize_history_messages_for_model as _sanitize_history_messages_for_model,
 )
 from opentulpa.agent.tool_outcome_finalizers import (
-    fallback_final_text_from_tool_outcomes as _fallback_final_text_from_tool_outcomes,
+    final_response_hint_from_tool_outcomes as _final_response_hint_from_tool_outcomes,
+)
+from opentulpa.agent.tool_outcome_finalizers import (
+    generate_final_response_from_tool_hint as _generate_final_response_from_tool_hint,
 )
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message as _build_turn_mode_system_message,
@@ -1804,12 +1807,18 @@ def build_runtime_graph(runtime: Any):
                         "turn_status": "completed",
                         "final_response_text": text,
                     }
-        fallback_text = _fallback_final_text_from_tool_outcomes(state.get("tool_outcomes"))
-        if fallback_text:
-            return {
-                "turn_status": "completed",
-                "final_response_text": fallback_text,
-            }
+        final_response_hint = _final_response_hint_from_tool_outcomes(state.get("tool_outcomes"))
+        if final_response_hint:
+            fallback_text = await _generate_final_response_from_tool_hint(
+                runtime=runtime,
+                state=state,
+                hint=final_response_hint,
+            )
+            if fallback_text:
+                return {
+                    "turn_status": "completed",
+                    "final_response_text": fallback_text,
+                }
         return {
             "turn_status": "completed",
             "final_response_text": "",
