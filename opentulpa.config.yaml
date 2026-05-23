@@ -26,11 +26,12 @@ agent_context_rollup_tokens: 2200
 agent_context_compaction_source_tokens: 12000
 
 # LLM/provider configuration
-llm_model: qwen/qwen3.7-max
+llm_model: deepseek/deepseek-v4-pro
 memory_llm_model: google/gemini-3-flash-preview
 llm_reasoning_effort: medium
 wake_classifier_model: null
-wake_execution_model: qwen/qwen3.7-max
+wake_execution_model: deepseek/deepseek-v4-pro
+workflow_setup_input_classifier_model: deepseek/deepseek-v4-pro
 multimodal_llm: google/gemini-3.1-flash-lite-preview
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
 openai_compatible_embedding_model: openai/text-embedding-3-small
