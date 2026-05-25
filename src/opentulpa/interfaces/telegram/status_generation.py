@@ -92,7 +92,7 @@ async def generate_llm_status_message(
                             "is taking time, but it is background-only.\n"
                             "Do not mention the user's specific task, object names, message text, or table contents. "
                             "Do not repeat, translate, summarize, or paraphrase the user's wording.\n"
-                            "If a useful status update is not appropriate, set ok=false and text=\"\"."
+                            'If a useful status update is not appropriate, set ok=false and text="".'
                         )
                     ),
                     HumanMessage(content=f"context={safe_context}"),
@@ -105,6 +105,12 @@ async def generate_llm_status_message(
             ),
             timeout=max(0.1, float(timeout_seconds)),
         )
+    except TimeoutError:
+        logger.warning(
+            "telegram.status_generation structured generator timed out timeout_seconds=%s",
+            max(0.1, float(timeout_seconds)),
+        )
+        return None
     except Exception:
         logger.exception("telegram.status_generation structured generator failed")
         return None

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from opentulpa.agent.lc_messages import HumanMessage
-from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime, _langchain_callback_metadata
 from opentulpa.logging.langfuse import (
     LangfuseTracer,
     create_langfuse_tracer,
@@ -36,9 +36,9 @@ class _FakeObservationContext:
 
     def __enter__(self) -> _FakeObservation:
         self.client.observations.append(self.observation)
-        self.client.current_trace_id = (
-            self.observation.kwargs.get("trace_context", {}) or {}
-        ).get("trace_id") or "generated_trace_id"
+        self.client.current_trace_id = (self.observation.kwargs.get("trace_context", {}) or {}).get(
+            "trace_id"
+        ) or "generated_trace_id"
         return self.observation
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -93,10 +93,7 @@ def test_create_langfuse_tracer_requires_full_config() -> None:
         )
         is None
     )
-    assert (
-        create_langfuse_tracer(public_key="pk", secret_key="sk", base_url=None)
-        is None
-    )
+    assert create_langfuse_tracer(public_key="pk", secret_key="sk", base_url=None) is None
 
 
 def test_create_langfuse_tracer_enabled_with_keys_and_base_url() -> None:
@@ -211,6 +208,25 @@ def test_langfuse_callbacks_attach_to_active_root_span() -> None:
 
     assert callbacks
     assert _FakeCallbackHandler.init_kwargs == [{}]
+
+
+def test_langchain_callback_metadata_stringifies_non_string_values() -> None:
+    metadata = _langchain_callback_metadata(
+        {
+            "call_site": "graph_agent",
+            "bound_tool_count": 1,
+            "bound_tool_names": ["_trace_lookup_tool"],
+            "bound_tool_schema_chars": 123,
+            "empty": None,
+        }
+    )
+
+    assert metadata == {
+        "call_site": "graph_agent",
+        "bound_tool_count": "1",
+        "bound_tool_names": '["_trace_lookup_tool"]',
+        "bound_tool_schema_chars": "123",
+    }
 
 
 def test_langfuse_trace_context_uses_active_root_span_and_deployment_tag() -> None:
@@ -463,12 +479,15 @@ def test_tool_span_inherits_active_trace_context() -> None:
         client=client,
     )
 
-    with tracer.trace_context(
-        name="opentulpa.turn.interactive",
-        trace_id="turn_1",
-        user_id="cust_1",
-        session_id="thread_1",
-    ), tracer.tool_span(trace_id="turn_1", tool_name="send_message"):
+    with (
+        tracer.trace_context(
+            name="opentulpa.turn.interactive",
+            trace_id="turn_1",
+            user_id="cust_1",
+            session_id="thread_1",
+        ),
+        tracer.tool_span(trace_id="turn_1", tool_name="send_message"),
+    ):
         pass
 
     root, tool = client.observations
@@ -572,6 +591,7 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
 
     async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
         del thread_id, customer_id
+
     runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
     prepared = await runtime._prepare_turn_context(
         thread_id="chat_test",

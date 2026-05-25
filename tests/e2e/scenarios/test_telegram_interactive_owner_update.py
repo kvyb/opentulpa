@@ -5,6 +5,7 @@ import contextvars
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -15,7 +16,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from mocks.telegram import FakeTelegramClient
 
 from opentulpa.agent.graph_builder import build_runtime_graph
-from opentulpa.agent.lc_messages import AIMessage
+from opentulpa.agent.lc_messages import AIMessage, SystemMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 from opentulpa.agent.tools_registry import register_runtime_tools
@@ -26,6 +27,7 @@ from opentulpa.core.config import get_settings
 from opentulpa.interfaces.telegram import attachments as attachments_module
 from opentulpa.interfaces.telegram import chat_service as chat_module
 from opentulpa.interfaces.telegram import relay as relay_module
+from opentulpa.interfaces.telegram.interactive_inbox import TelegramInteractiveInbox
 from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.tasks import sandbox as sandbox_module
@@ -53,6 +55,15 @@ def _wait_until(predicate: Any, timeout_seconds: float = 60.0) -> bool:
             return True
         time.sleep(0.2)
     return bool(predicate())
+
+
+async def _wait_until_async(predicate: Any, timeout_seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        if bool(await predicate()):
+            return True
+        await asyncio.sleep(0.05)
+    return bool(await predicate())
 
 
 class _RecordingMemory:
@@ -197,7 +208,9 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
                         "args": {
                             "group": "web",
                             "command": "web_search",
-                            "args_json": {"query": "OpenTulpa interactive owner update search test"},
+                            "args_json": {
+                                "query": "OpenTulpa interactive owner update search test"
+                            },
                         },
                     },
                 ],
@@ -372,6 +385,136 @@ def test_telegram_interactive_chat_can_send_owner_update_before_search_final(
     assert len(model_calls) == 2
 
 
+@pytest.mark.asyncio
+async def test_telegram_interactive_message_steers_active_graph_after_tool_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_tg = FakeTelegramClient("fake-token")
+    runtime, model_calls = _build_deterministic_runtime()
+    first_tool_started = asyncio.Event()
+    steering_ready = asyncio.Event()
+    chat_id = 1200
+    user_id = 100
+    inbox = TelegramInteractiveInbox()
+
+    class _WaitForSteeringTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            first_tool_started.set()
+            await asyncio.wait_for(steering_ready.wait(), timeout=5.0)
+            return {"status": "ok", "checkpoint": "after_first_model_call"}
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        model_calls.append(list(messages))
+        if len(model_calls) == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_wait",
+                        "name": "wait_for_steering",
+                        "args": {},
+                    }
+                ],
+            )
+        return AIMessage(content="I used the green mug detail from the steering message.")
+
+    runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.astream_model = _ainvoke_model  # type: ignore[method-assign]
+    runtime.tools_for_turn_mode = lambda turn_mode: [SimpleNamespace(name="wait_for_steering")]  # type: ignore[assignment]
+    runtime._tools["wait_for_steering"] = _WaitForSteeringTool()
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
+    monkeypatch.setattr(
+        chat_module,
+        "STATE_STORE",
+        TelegramStateStore(tmp_path / ".opentulpa" / "telegram_state.json"),
+    )
+    monkeypatch.setattr(chat_module, "TelegramClient", lambda _token: fake_tg)
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda _token: fake_tg)
+
+    first_task = asyncio.create_task(
+        chat_module.handle_telegram_text(
+            body=_telegram_message(
+                chat_id=chat_id,
+                user_id=user_id,
+                username="owner",
+                text="Inspect the scene and answer after the tool checkpoint.",
+            ),
+            bot_token="test-bot-token",
+            allowed_user_ids_csv=str(user_id),
+            agent_runtime=runtime,
+            interactive_inbox=inbox,
+        )
+    )
+    assert await _wait_until_async(
+        lambda: asyncio.sleep(0, result=first_tool_started.is_set() or first_task.done()),
+        timeout_seconds=5.0,
+    )
+    if first_task.done():
+        raise AssertionError(
+            {
+                "first_result": first_task.result(),
+                "sent_messages": fake_tg.sent_messages,
+                "model_calls": len(model_calls),
+                "second_call_messages": [
+                    str(getattr(message, "content", "") or "")[:500]
+                    for message in (model_calls[1] if len(model_calls) > 1 else [])
+                ],
+            }
+        )
+
+    second_result = await chat_module.handle_telegram_text(
+        body=_telegram_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            username="owner",
+            text="Actually mention the green mug detail.",
+        ),
+        bot_token="test-bot-token",
+        allowed_user_ids_csv=str(user_id),
+        agent_runtime=runtime,
+        interactive_inbox=inbox,
+    )
+    assert second_result is None
+
+    async def _queued_steering_ready() -> bool:
+        async with inbox._lock:
+            session = inbox._sessions.get(str(chat_id))
+        if session is None:
+            return False
+        async with session._condition:
+            return any(
+                item.ready and "green mug" in str(item.result.fragment or "").lower()
+                for item in session._queue
+            )
+
+    assert await _wait_until_async(_queued_steering_ready, timeout_seconds=5.0)
+    steering_ready.set()
+
+    first_result = await asyncio.wait_for(first_task, timeout=10.0)
+    assert first_result is None
+    assert len(model_calls) == 2
+    second_model_messages = model_calls[1]
+    assert any(
+        isinstance(message, SystemMessage)
+        and "user steers with message:" in str(getattr(message, "content", "")).lower()
+        and "green mug" in str(getattr(message, "content", "")).lower()
+        for message in second_model_messages
+    )
+    assert [item["text"] for item in fake_tg.sent_messages if item.get("chat_id") == chat_id] == [
+        "I used the green mug detail from the steering message."
+    ]
+
+
 @pytest.mark.live_llm
 def test_live_telegram_interactive_chat_can_use_owner_update_while_searching(
     e2e_harness: E2EHarness,
@@ -449,10 +592,7 @@ def test_live_telegram_interactive_chat_can_use_owner_update_while_searching(
     behavior = load_jsonl(e2e_harness.behavior_log_path)
 
     assert any(item.get("path") == "/internal/web_search" for item in internal_calls)
-    assert any(
-        str(item.get("event", "")) == "interactive_owner_update_sent"
-        for item in behavior
-    )
+    assert any(str(item.get("event", "")) == "interactive_owner_update_sent" for item in behavior)
     assert any(marker in first_text for marker in ("провер", "ищ", "смотр", "нач"))
     assert final_text
     assert final_text != str(messages[0].get("text", "") or "").strip()
