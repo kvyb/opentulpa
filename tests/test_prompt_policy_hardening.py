@@ -554,7 +554,6 @@ async def test_validate_tool_calls_blocks_web_search_after_two_successes() -> No
         log=_log,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(
@@ -606,7 +605,6 @@ async def test_validate_tool_calls_rejects_oversized_web_search_batch_with_retry
         log=lambda state, event, **kwargs: None,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(
@@ -642,7 +640,6 @@ async def test_validate_tool_calls_does_not_count_blocked_web_search_as_success(
         log=lambda state, event, **kwargs: None,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(
@@ -690,7 +687,6 @@ async def test_validate_tool_calls_repairs_sendable_file_written_to_source_root(
         log=_log,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(
@@ -739,7 +735,6 @@ async def test_validate_tool_calls_repairs_file_send_outside_tulpa_stuff() -> No
         log=lambda state, event, **kwargs: None,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(
@@ -778,7 +773,6 @@ async def test_validate_tool_calls_repairs_grouped_write_to_source_root() -> Non
         log=lambda state, event, **kwargs: None,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(
@@ -829,7 +823,6 @@ async def test_validate_tool_calls_repairs_grouped_file_send_outside_tulpa_stuff
         log=lambda state, event, **kwargs: None,
         loop_limit_near=lambda state: False,
         remaining_steps=lambda state: 10,
-        loop_limit_final_status_text="loop limit",
     )
 
     result = await node(

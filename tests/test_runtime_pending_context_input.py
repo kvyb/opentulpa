@@ -637,17 +637,9 @@ async def test_graph_does_not_duplicate_send_owner_update_preamble() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_warns_owner_before_loop_limit_and_instructs_status_reply() -> None:
+async def test_graph_adds_loop_limit_instruction_for_final_prose() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
-    emitted: list[tuple[str, str | None]] = []
     saw_loop_instruction = False
-
-    async def _emit_update(
-        *, text: str, dedupe_key: str = "", thread_id: str | None = None
-    ) -> dict[str, bool]:
-        assert dedupe_key.startswith("loop_limit_status:")
-        emitted.append((text, thread_id))
-        return {"sent": True, "duplicate": False}
 
     async def _ainvoke_model(
         model: Any,
@@ -665,7 +657,6 @@ async def test_graph_warns_owner_before_loop_limit_and_instructs_status_reply() 
         return AIMessage(content="Current status: I am near the turn limit and stopping tools now.")
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
-    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -683,13 +674,6 @@ async def test_graph_warns_owner_before_loop_limit_and_instructs_status_reply() 
     )
 
     assert saw_loop_instruction is True
-    assert emitted == [
-        (
-            "This turn is near its tool-step budget. I’ll stop polling tools now and "
-            "report the latest confirmed state.",
-            "chat_loop_limit",
-        )
-    ]
     assert result["final_response_text"] == (
         "Current status: I am near the turn limit and stopping tools now."
     )
@@ -698,8 +682,8 @@ async def test_graph_warns_owner_before_loop_limit_and_instructs_status_reply() 
 @pytest.mark.asyncio
 async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
-    emitted: list[str] = []
     tool_invoked = False
+    model_calls = 0
 
     class _FakeTool:
         async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -707,13 +691,6 @@ async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
             nonlocal tool_invoked
             tool_invoked = True
             return {"status": "ok"}
-
-    async def _emit_update(
-        *, text: str, dedupe_key: str = "", thread_id: str | None = None
-    ) -> dict[str, bool]:
-        del dedupe_key, thread_id
-        emitted.append(text)
-        return {"sent": True, "duplicate": False}
 
     async def _ainvoke_model(
         model: Any,
@@ -723,6 +700,10 @@ async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
         **kwargs: Any,
     ) -> AIMessage:
         del model, messages, stable_prefix_count, kwargs
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls > 1:
+            return AIMessage(content="I could not run more tools, so here is the current status.")
         return AIMessage(
             content="I will run one more tool:",
             tool_calls=[{"id": "call_more", "name": "fake_tool", "args": {}}],
@@ -730,7 +711,6 @@ async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
     runtime._tools = {"fake_tool": _FakeTool()}
-    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -744,15 +724,73 @@ async def test_graph_blocks_new_tool_calls_when_loop_limit_is_near() -> None:
             "pending_context_summary": "",
             "agent_trace_id": "turn_loop_limit_tools",
         },
-        config={"configurable": {"thread_id": "chat_loop_limit_tools"}, "recursion_limit": 3},
+        config={"configurable": {"thread_id": "chat_loop_limit_tools"}, "recursion_limit": 5},
     )
 
-    assert emitted == [
-        "This turn is near its tool-step budget. I’ll stop polling tools now and "
-        "report the latest confirmed state."
-    ]
     assert tool_invoked is False
-    assert "tool-step budget" in result["final_response_text"]
+    assert result["final_response_text"] == (
+        "I could not run more tools, so here is the current status."
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_carries_compact_tool_outcome_context_between_tool_rounds() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    calls = 0
+    saw_tool_context = False
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            return {
+                "ok": True,
+                "answer": "SUV full wash costs 2500 rubles.",
+                "headers": {"authorization": "secret"},
+            }
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        nonlocal calls, saw_tool_context
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="Checking price:",
+                tool_calls=[{"id": "call_price", "name": "fake_tool", "args": {}}],
+            )
+        prompt_text = "\n".join(str(getattr(message, "content", "")) for message in messages)
+        saw_tool_context = (
+            "Previous tool results" in prompt_text
+            and "SUV full wash costs 2500 rubles" in prompt_text
+            and "authorization" not in prompt_text
+        )
+        return AIMessage(content="SUV full wash is 2500 rubles.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"fake_tool": _FakeTool()}
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="price for SUV full wash?")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_tool_context",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_tool_context",
+        },
+        config={"configurable": {"thread_id": "chat_tool_context"}, "recursion_limit": 12},
+    )
+
+    assert saw_tool_context is True
+    assert result["final_response_text"] == "SUV full wash is 2500 rubles."
 
 
 @pytest.mark.asyncio

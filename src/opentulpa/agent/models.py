@@ -9,14 +9,17 @@ from langgraph.managed.is_last_step import RemainingSteps
 from typing_extensions import TypedDict
 
 from opentulpa.agent.lc_messages import AnyMessage
+from opentulpa.agent.tool_outcome_context import add_tool_outcomes
 
 
 class ToolOutcome(TypedDict, total=False):
+    round_id: int
     tool_name: str
     tool_call_id: str
     status: Literal["ok", "error"]
     result_text: str
     error: str
+    final_response_hint: str
 
 
 class AgentState(TypedDict, total=False):
@@ -37,7 +40,7 @@ class AgentState(TypedDict, total=False):
     active_invoked_skill_context: str
     active_invoked_skill_names: list[str]
     active_skill_context: str
-    tool_outcomes: list[ToolOutcome]
+    tool_outcomes: Annotated[list[ToolOutcome], add_tool_outcomes]
     tool_validation_passed: bool
     tool_error_count: int
     last_tool_error: str
@@ -47,5 +50,4 @@ class AgentState(TypedDict, total=False):
     frozen_history_projection: dict[str, Any] | None
     stream_model_calls: bool
     remaining_steps: RemainingSteps
-    loop_limit_status_update_sent: bool
     tool_preamble_update_sent: bool

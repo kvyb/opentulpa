@@ -21,6 +21,9 @@ def final_response_hint_from_tool_outcomes(outcomes: Any) -> str:
     for outcome in reversed(outcomes):
         if not isinstance(outcome, dict) or outcome.get("status") != "ok":
             continue
+        direct = str(outcome.get("final_response_hint", "") or "").strip()
+        if direct:
+            return direct
         payload = _tool_outcome_payload(outcome)
         direct_hint = _final_response_hint(payload)
         if direct_hint:

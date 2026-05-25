@@ -87,6 +87,7 @@ from opentulpa.agent.tools_registry import register_runtime_tools
 from opentulpa.agent.turn_policy import (
     normalize_turn_mode as _normalize_turn_mode,
 )
+from opentulpa.agent.turn_runtime_policy import recursion_limit_for_turn
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
 )
@@ -3229,9 +3230,16 @@ class OpenTulpaLangGraphRuntime:
                     customer_id=customer_id,
                     user_text=user_text,
                 )
+        requested_limit = self._effective_recursion_limit(recursion_limit_override)
         config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id},
-            "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
+            "recursion_limit": recursion_limit_for_turn(
+                self,
+                customer_id=customer_id,
+                thread_id=thread_id,
+                requested_turn_mode=turn_mode,
+                requested_limit=requested_limit,
+            ),
         }
         callbacks = self._build_langfuse_callbacks(
             customer_id=customer_id,

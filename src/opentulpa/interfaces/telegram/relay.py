@@ -19,6 +19,7 @@ from opentulpa.agent.runtime import (
     MergedInputSuppressedError,
 )
 from opentulpa.agent.turn_policy import normalize_turn_mode
+from opentulpa.agent.turn_runtime_policy import effective_turn_mode as _effective_turn_mode
 from opentulpa.core.ids import new_short_id
 from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.interfaces.telegram.constants import DEBUG_LOG_PATH, LOW_SIGNAL_REPLIES
@@ -921,6 +922,7 @@ async def _workflow_setup_reply(
 
 async def _finalize_telegram_stream_reply(
     *,
+    agent_runtime: Any,
     delivery: _TelegramDeliveryState,
     client: TelegramClient,
     interactive_session: Any | None,
@@ -933,6 +935,7 @@ async def _finalize_telegram_stream_reply(
     timeout_failure_stage: str,
 ) -> tuple[str | None, bool]:
     final_reply = delivery.final_reply
+    log_event = getattr(agent_runtime, "log_behavior_event", None)
     if not suppressed and not final_reply and timeout_failed_without_reply:
         logger.error(
             "telegram.stream timeout_without_final_reply chat_id=%s thread_id=%s customer_id=%s stage=%s "
@@ -959,7 +962,13 @@ async def _finalize_telegram_stream_reply(
             "I couldn't produce a visible user-facing reply for that step "
             "(the model/tool loop ended without displayable output)."
         )
-    suppress_for_pending_session = normalize_turn_mode(turn_mode) != "workflow_setup"
+    effective_mode = _effective_turn_mode(
+        agent_runtime,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        requested_turn_mode=turn_mode,
+    )
+    suppress_for_pending_session = effective_mode != "workflow_setup"
     if suppress_for_pending_session and not suppressed and await _session_has_pending_items(
         interactive_session=interactive_session,
         chat_id=chat_id,
@@ -972,14 +981,25 @@ async def _finalize_telegram_stream_reply(
             thread_id,
             customer_id,
         )
+        if callable(log_event):
+            log_event(
+                event="telegram.stream.final_suppressed",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                requested_turn_mode=normalize_turn_mode(turn_mode),
+                effective_turn_mode=effective_mode,
+                reason="interactive_pending",
+            )
         return None, True
     if not suppressed and final_reply:
         final_reply = await _send_final_telegram_reply(
+            agent_runtime=agent_runtime,
             client=client,
             customer_id=customer_id,
             thread_id=thread_id,
             chat_id=chat_id,
-            turn_mode=turn_mode,
+            turn_mode=effective_mode,
             final_reply=final_reply,
         )
     return final_reply, suppressed
@@ -987,6 +1007,7 @@ async def _finalize_telegram_stream_reply(
 
 async def _send_final_telegram_reply(
     *,
+    agent_runtime: Any,
     client: TelegramClient,
     customer_id: str,
     thread_id: str,
@@ -994,8 +1015,26 @@ async def _send_final_telegram_reply(
     turn_mode: str,
     final_reply: str,
 ) -> str | None:
+    log_event = getattr(agent_runtime, "log_behavior_event", None)
+    if callable(log_event):
+        log_event(
+            event="telegram.stream.final_send_attempt",
+            chat_id=chat_id,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            turn_mode=normalize_turn_mode(turn_mode),
+            final_chars=len(str(final_reply or "").strip()),
+        )
     sent = await client.send_message(chat_id=chat_id, text=final_reply, parse_mode="HTML")
     if not sent:
+        if callable(log_event):
+            log_event(
+                event="telegram.stream.final_send_failed",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                customer_id=customer_id,
+                turn_mode=normalize_turn_mode(turn_mode),
+            )
         return None
     append_web_event(
         customer_id=customer_id,
@@ -1005,6 +1044,15 @@ async def _send_final_telegram_reply(
         text=final_reply,
         metadata_json=json.dumps({"turn_mode": normalize_turn_mode(turn_mode)}),
     )
+    if callable(log_event):
+        log_event(
+            event="telegram.stream.final_send_succeeded",
+            chat_id=chat_id,
+            thread_id=thread_id,
+            customer_id=customer_id,
+            turn_mode=normalize_turn_mode(turn_mode),
+            final_chars=len(str(final_reply or "").strip()),
+        )
     return final_reply
 
 
@@ -1078,7 +1126,13 @@ async def _run_telegram_stream_delivery(
     interactive_session: Any | None,
     final_reply_callback: Callable[[str], Any] | None,
 ) -> _LiveStreamState:
-    if normalize_turn_mode(turn_mode) == "workflow_setup":
+    delivery_turn_mode = _effective_turn_mode(
+        agent_runtime,
+        customer_id=customer_id,
+        thread_id=thread_id,
+        requested_turn_mode=turn_mode,
+    )
+    if delivery_turn_mode == "workflow_setup":
         return await _run_workflow_setup_stream_delivery(
             resources=resources,
             agent_runtime=agent_runtime,
@@ -1087,7 +1141,7 @@ async def _run_telegram_stream_delivery(
             text=text,
             bot_token=bot_token,
             chat_id=chat_id,
-            turn_mode=turn_mode,
+            turn_mode=delivery_turn_mode,
             final_reply_callback=final_reply_callback,
         )
 
@@ -1159,6 +1213,7 @@ async def _run_workflow_setup_stream_delivery(
 
 async def _complete_telegram_stream(
     *,
+    agent_runtime: Any,
     resources: _TelegramStreamResources,
     next_chunk_task: asyncio.Task[Any] | None,
     live_state: _LiveStreamState,
@@ -1171,6 +1226,7 @@ async def _complete_telegram_stream(
 ) -> tuple[str | None, bool]:
     await _stop_telegram_stream_typing(resources=resources, next_chunk_task=next_chunk_task)
     final_reply, suppressed = await _finalize_telegram_stream_reply(
+        agent_runtime=agent_runtime,
         delivery=resources.delivery,
         client=resources.client,
         interactive_session=interactive_session,
@@ -1254,6 +1310,7 @@ async def stream_langgraph_reply_to_telegram(
         await _close_telegram_stream_resources(resources)
         raise
     return await _complete_telegram_stream(
+        agent_runtime=agent_runtime,
         resources=resources,
         next_chunk_task=next_chunk_task,
         live_state=live_state,

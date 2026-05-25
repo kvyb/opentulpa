@@ -54,6 +54,15 @@ from opentulpa.agent.tool_message_protocol import (
 from opentulpa.agent.tool_message_protocol import (
     sanitize_history_messages_for_model as _sanitize_history_messages_for_model,
 )
+from opentulpa.agent.tool_outcome_context import (
+    build_tool_outcome_context as _build_tool_outcome_context,
+)
+from opentulpa.agent.tool_outcome_context import (
+    compact_tool_result_for_model as _compact_tool_result_for_model,
+)
+from opentulpa.agent.tool_outcome_context import (
+    next_tool_round_id as _next_tool_round_id,
+)
 from opentulpa.agent.tool_outcome_finalizers import (
     final_response_hint_from_tool_outcomes as _final_response_hint_from_tool_outcomes,
 )
@@ -102,14 +111,6 @@ def _workflow_setup_no_progress_retry_limit(runtime: Any) -> int:
 
 
 LOOP_LIMIT_STATUS_REMAINING_STEPS = 3
-LOOP_LIMIT_STATUS_UPDATE_TEXT = (
-    "This turn is near its tool-step budget. I’ll stop polling tools now and "
-    "report the latest confirmed state."
-)
-LOOP_LIMIT_FINAL_STATUS_TEXT = (
-    "I stopped tool work because this turn reached its tool-step budget. The latest "
-    "tool result is the current state; send a short follow-up to continue from there."
-)
 WORKFLOW_SETUP_TOOL_PROGRESS_TEXT = (
     "I’m setting up the workflow now. I’ll send the proposal or exact blocker when "
     "validation finishes."
@@ -612,66 +613,6 @@ def build_runtime_graph(runtime: Any):
         remaining = _remaining_steps(state)
         return remaining is not None and remaining <= LOOP_LIMIT_STATUS_REMAINING_STEPS
 
-    async def _emit_loop_limit_status_update(
-        state: AgentState,
-        *,
-        turn_mode: str,
-    ) -> bool:
-        if turn_mode not in {"interactive", "workflow_setup"}:
-            return False
-        if bool(state.get("loop_limit_status_update_sent")):
-            return False
-        if not _loop_limit_near(state):
-            return False
-        emitter = getattr(runtime, "emit_interactive_update", None)
-        if not callable(emitter):
-            _log(
-                state,
-                "graph.loop_limit_status_update",
-                sent=False,
-                reason="missing_interactive_emitter",
-                remaining_steps=_remaining_steps(state),
-                turn_mode=turn_mode,
-            )
-            return False
-        try:
-            result = await emitter(
-                text=LOOP_LIMIT_STATUS_UPDATE_TEXT,
-                dedupe_key=(
-                    "loop_limit_status:"
-                    + hashlib.sha256(
-                        "|".join(
-                            [
-                                str(state.get("agent_trace_id", "")).strip(),
-                                str(state.get("thread_id", "")).strip(),
-                            ]
-                        ).encode("utf-8")
-                    ).hexdigest()[:32]
-                ),
-                thread_id=str(state.get("thread_id", "")).strip() or None,
-            )
-            sent = bool(isinstance(result, dict) and result.get("sent"))
-            _log(
-                state,
-                "graph.loop_limit_status_update",
-                sent=sent,
-                duplicate=bool(isinstance(result, dict) and result.get("duplicate")),
-                remaining_steps=_remaining_steps(state),
-                turn_mode=turn_mode,
-            )
-            return sent
-        except Exception as exc:
-            _log(
-                state,
-                "graph.loop_limit_status_update",
-                sent=False,
-                reason="emit_failed",
-                error=str(exc)[:500],
-                remaining_steps=_remaining_steps(state),
-                turn_mode=turn_mode,
-            )
-            return False
-
     async def _emit_tool_call_preamble_update(
         state: AgentState,
         *,
@@ -816,10 +757,6 @@ def build_runtime_graph(runtime: Any):
             latest_user_chars=len(latest_user),
             turn_mode=turn_mode,
             injected_user_messages=len(injected_messages),
-        )
-        loop_limit_status_sent = await _emit_loop_limit_status_update(
-            state,
-            turn_mode=turn_mode,
         )
         cached_query = str(state.get("active_skill_query", "")).strip()
         cached_names = state.get("active_skill_names", []) or []
@@ -1280,6 +1217,10 @@ def build_runtime_graph(runtime: Any):
         if current_turn_context_content:
             dynamic_late_messages.append(SystemMessage(content=current_turn_context_content))
             dynamic_late_sections.extend(current_turn_context_sections)
+        tool_outcome_context = _build_tool_outcome_context(state.get("tool_outcomes"))
+        if tool_outcome_context:
+            dynamic_late_messages.append(SystemMessage(content=tool_outcome_context))
+            dynamic_late_sections.append("current_turn_tool_results")
         if _loop_limit_near(state):
             dynamic_late_messages.append(SystemMessage(content=LOOP_LIMIT_REPAIR_INSTRUCTION))
             dynamic_late_sections.append("loop_limit_repair")
@@ -1449,8 +1390,6 @@ def build_runtime_graph(runtime: Any):
             "workflow_setup_repair_instruction": "",
             **prompt_context_update,
         }
-        if loop_limit_status_sent:
-            update["loop_limit_status_update_sent"] = True
         if skill_query:
             update["active_skill_query"] = skill_query
             update["active_skill_names"] = skill_names
@@ -1460,22 +1399,6 @@ def build_runtime_graph(runtime: Any):
             update["active_invoked_skill_names"] = invoked_skill_names
             update["active_skill_context"] = invoked_skill_context
         has_tool_calls = isinstance(response, AIMessage) and bool(getattr(response, "tool_calls", []))
-        if has_tool_calls and _loop_limit_near(state):
-            _log(
-                state,
-                "graph.loop_limit_tool_call_blocked",
-                tool_call_count=len(getattr(response, "tool_calls", []) or []),
-                remaining_steps=_remaining_steps(state),
-                turn_mode=turn_mode,
-            )
-            update["messages"] = [
-                *injected_messages,
-                response,
-                AIMessage(content=LOOP_LIMIT_FINAL_STATUS_TEXT),
-            ]
-            update["tool_validation_passed"] = False
-            update["loop_limit_status_update_sent"] = True
-            return Command(update=update, goto="finalize_turn")
         goto: Literal["validate_tools", "finalize_turn"] = (
             "validate_tools" if has_tool_calls else "finalize_turn"
         )
@@ -1529,7 +1452,6 @@ def build_runtime_graph(runtime: Any):
         log=_log,
         loop_limit_near=_loop_limit_near,
         remaining_steps=_remaining_steps,
-        loop_limit_final_status_text=LOOP_LIMIT_FINAL_STATUS_TEXT,
     )
 
     async def tools_node(state: AgentState) -> Command[Literal["agent", "finalize_turn", "__end__"]]:
@@ -1558,6 +1480,7 @@ def build_runtime_graph(runtime: Any):
 
         tool_messages: list[ToolMessage] = []
         tool_outcomes: list[dict[str, Any]] = []
+        tool_round_id = _next_tool_round_id(state.get("tool_outcomes"))
         had_error = False
         failed_tool_names: list[str] = []
         failed_tool_errors: list[str] = []
@@ -1625,10 +1548,17 @@ def build_runtime_graph(runtime: Any):
                     limit=40,
                 )
                 result_text = _safe_json(result)
-                model_visible_result_text = result_text
+                model_visible_result_text = _compact_tool_result_for_model(
+                    tool_name=call_name,
+                    result=result,
+                )
+                final_response_hint = _final_response_hint_from_tool_outcomes(
+                    [{"status": "ok", "result_text": result_text}]
+                )
                 _log(
                     state,
                     "graph.tools.success",
+                    tool_round_id=tool_round_id,
                     tool_name=call_name,
                     tool_call_id=call_id,
                     result_chars=len(result_text),
@@ -1644,10 +1574,12 @@ def build_runtime_graph(runtime: Any):
                 )
                 tool_outcomes.append(
                     {
+                        "round_id": tool_round_id,
                         "tool_name": call_name,
                         "tool_call_id": call_id,
                         "status": "ok",
-                        "result_text": result_text,
+                        "result_text": model_visible_result_text,
+                        "final_response_hint": final_response_hint,
                     }
                 )
                 if call_name == "skill_get":
@@ -1671,6 +1603,7 @@ def build_runtime_graph(runtime: Any):
                 _log(
                     state,
                     "graph.tools.error",
+                    tool_round_id=tool_round_id,
                     tool_name=call_name,
                     tool_call_id=call_id,
                     error=str(exc)[:500],
@@ -1689,6 +1622,7 @@ def build_runtime_graph(runtime: Any):
                 )
                 tool_outcomes.append(
                     {
+                        "round_id": tool_round_id,
                         "tool_name": call_name,
                         "tool_call_id": call_id,
                         "status": "error",
