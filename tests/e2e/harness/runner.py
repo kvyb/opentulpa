@@ -24,6 +24,33 @@ from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.scheduler.service import SchedulerService
 
 
+def effective_live_llm_timeout_seconds(
+    requested: float,
+    *,
+    override_env: str,
+    live_minimum_seconds: float = 180.0,
+) -> float:
+    requested = max(1.0, float(requested))
+    override = str(os.getenv(override_env, "") or "").strip()
+    if override:
+        try:
+            return max(requested, float(override))
+        except ValueError:
+            return requested
+    if str(os.getenv("OPENTULPA_E2E_MODEL", "") or "").strip() or str(
+        os.getenv("OPENTULPA_E2E_WAKE_MODEL", "") or ""
+    ).strip():
+        return max(requested, float(live_minimum_seconds))
+    return requested
+
+
+def _effective_lead_idle_timeout_seconds(requested: float) -> float:
+    return effective_live_llm_timeout_seconds(
+        requested,
+        override_env="OPENTULPA_E2E_LEAD_IDLE_TIMEOUT_SECONDS",
+    )
+
+
 @dataclass
 class E2EHarness:
     client: TestClient
@@ -227,7 +254,8 @@ class E2EHarness:
                     ),
                 }
 
-            deadline = time.monotonic() + max(1.0, float(idle_timeout_seconds))
+            timeout_seconds = _effective_lead_idle_timeout_seconds(idle_timeout_seconds)
+            deadline = time.monotonic() + timeout_seconds
             while time.monotonic() < deadline:
                 bookings = self.list_bookings(
                     customer_id=customer_id,

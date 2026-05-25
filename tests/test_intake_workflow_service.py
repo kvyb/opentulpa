@@ -1169,6 +1169,158 @@ async def test_intake_workflow_run_saves_local_csv_and_skips_reprocessing_same_m
 
 
 @pytest.mark.asyncio
+async def test_local_csv_sink_status_is_runtime_owned(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Book a wash tomorrow at 3pm.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a car wash booking.",
+                "extracted_fields": {"day": "tomorrow", "time": "3pm"},
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {"day": "tomorrow", "time": "3pm", "status": "active"},
+                "reason": "All required fields are present.",
+            }
+        ]
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio(summary, conversation),
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    result = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+
+    assert result["ok"] is True
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    )
+    assert bookings[0]["status"] == "completed"
+    with (tmp_path / "tulpa_stuff" / "bookings.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_local_csv_sink_uses_runtime_cancelled_status(tmp_path: Path) -> None:
+    summary = {
+        "conversation_id": "conv_1",
+        "recipient_id": "cust_1",
+        "latest_inbound_message_id": "msg_1",
+        "latest_inbound_message_created_time": "2026-04-07T08:00:00+00:00",
+        "latest_inbound_sender_username": "alice",
+    }
+    conversation = _instagram_conversation(
+        conversation_id="conv_1",
+        latest_message_id="msg_1",
+        latest_message_text="Book a wash tomorrow at 3pm.",
+        latest_message_time="2026-04-07T08:00:00+00:00",
+    )
+    runtime = _FakeRuntime(
+        [
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer wants a car wash booking.",
+                "extracted_fields": {"day": "tomorrow", "time": "3pm"},
+                "missing_fields": [],
+                "reply_action": "none",
+                "reply_text": "",
+                "ready_to_save": True,
+                "booking_action": "create_new_booking",
+                "save_payload": {"day": "tomorrow", "time": "3pm"},
+                "reason": "All required fields are present.",
+            },
+            {
+                "ok": True,
+                "matches_workflow": True,
+                "confidence": 0.95,
+                "conversation_summary": "Customer cancelled the booking.",
+                "extracted_fields": {},
+                "missing_fields": [],
+                "reply_action": "mark_cancelled",
+                "reply_text": "Cancelled.",
+                "ready_to_save": True,
+                "booking_action": "edit_recent_completed",
+                "save_payload": {"day": "tomorrow", "time": "3pm", "status": "cancelled"},
+                "reason": "Clear cancellation.",
+            },
+        ]
+    )
+    service, _, _, _, _ = _mk_service(
+        tmp_path,
+        runtime=runtime,
+        composio=_FakeComposio(summary, conversation),
+    )
+    workflow = service.upsert_workflow(
+        customer_id="telegram_123",
+        name="Car Wash Intake",
+        intent_description="Handle Instagram DMs that ask to book a car wash service.",
+        required_fields=["day", "time"],
+        sink_type="local_csv",
+        sink_config={"file_path": "tulpa_stuff/bookings.csv"},
+    )
+
+    first_run = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+    )
+    assert first_run["ok"] is True
+    second_run = await service.run_workflow(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        force=True,
+    )
+
+    assert second_run["ok"] is True
+    bookings = service.list_bookings(
+        customer_id="telegram_123",
+        workflow_id=workflow["workflow_id"],
+        conversation_id="conv_1",
+    )
+    assert bookings[0]["status"] == "cancelled"
+    with (tmp_path / "tulpa_stuff" / "bookings.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_instagram_scheduled_workflow_uses_poll_interval_for_fresh_inbound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

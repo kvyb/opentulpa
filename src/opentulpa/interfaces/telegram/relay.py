@@ -520,6 +520,7 @@ async def _apply_stream_payload(
     if state.waiting_for_segment:
         state.waiting_for_segment = False
     state.last_streamed = current
+    state.final_reply = current
     await send_draft_reply(current)
 
 
@@ -936,6 +937,8 @@ async def _finalize_telegram_stream_reply(
 ) -> tuple[str | None, bool]:
     final_reply = delivery.final_reply
     log_event = getattr(agent_runtime, "log_behavior_event", None)
+    if not suppressed and not final_reply and delivery.live_delivery_text:
+        final_reply = delivery.live_delivery_text
     if not suppressed and not final_reply and timeout_failed_without_reply:
         logger.error(
             "telegram.stream timeout_without_final_reply chat_id=%s thread_id=%s customer_id=%s stage=%s "
