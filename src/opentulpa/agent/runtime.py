@@ -4238,7 +4238,7 @@ class OpenTulpaLangGraphRuntime:
                 first_visible_yield_ms=first_visible_yield_ms,
                 turn_mode=normalized_turn_mode,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "runtime.astream_text failed thread_id=%s customer_id=%s",
                 thread_id,
@@ -4250,6 +4250,7 @@ class OpenTulpaLangGraphRuntime:
                 mode="astream",
                 thread_id=thread_id,
                 customer_id=customer_id,
+                error=f"{type(exc).__name__}: {exc}"[:500],
                 turn_mode=normalized_turn_mode,
             )
             raise
