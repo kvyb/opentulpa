@@ -2912,6 +2912,7 @@ def test_live_lead_simulator_can_complete_telegram_car_wash_booking(
                 "Use the workflow name 'E2E Simulated Lead Car Wash'. "
                 "Collect exactly these fields: car_model, car_type, wash_type, date, time. "
                 "If a lead asks for price, answer directly first and then ask only for the next missing booking detail. "
+                "Use these prices: small car full wash 1000 rubles, SUV full wash 2500 rubles. "
                 "Do not repeat already known details. "
                 "Do not save until all required fields are known. "
                 f"Save completed bookings to local CSV {csv_relative_path}. "
