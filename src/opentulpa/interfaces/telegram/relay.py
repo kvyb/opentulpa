@@ -959,7 +959,8 @@ async def _finalize_telegram_stream_reply(
             "I couldn't produce a visible user-facing reply for that step "
             "(the model/tool loop ended without displayable output)."
         )
-    if not suppressed and await _session_has_pending_items(
+    suppress_for_pending_session = normalize_turn_mode(turn_mode) != "workflow_setup"
+    if suppress_for_pending_session and not suppressed and await _session_has_pending_items(
         interactive_session=interactive_session,
         chat_id=chat_id,
         thread_id=thread_id,

@@ -523,6 +523,7 @@ async def ainvoke_model(
         callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
         response: Any | None = None
         error_text: str | None = None
+        error_fields: dict[str, str] = {}
         try:
             if supports_ainvoke_kwargs(callback_target, invoke_extras):
                 response = await callback_target.ainvoke(prepared_messages, **invoke_extras)
@@ -530,7 +531,7 @@ async def ainvoke_model(
                 response = await callback_target.ainvoke(prepared_messages)
             return response
         except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_text, error_fields = model_error_trace.log_invoke_error(runtime, exc=exc, model_name=resolved_model_name, attempt_context=attempt_context, phase="ainvoke")
             last_exc = exc
             if attempt_index + 1 >= len(attempts):
                 raise
@@ -557,6 +558,7 @@ async def ainvoke_model(
                 error=error_text,
                 call_context={
                     **attempt_context,
+                    **error_fields,
                     "cacheable_prefix_count": cacheable_prefix_count,
                 },
             )
@@ -614,6 +616,7 @@ async def astream_model(
             )
         response: Any | None = None
         error_text: str | None = None
+        error_fields: dict[str, str] = {}
         try:
             accumulated: Any | None = None
             stream_kwargs = dict(invoke_extras)
@@ -638,7 +641,7 @@ async def astream_model(
                 response = _ai_message_from_stream_chunk(accumulated)
             return response
         except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_text, error_fields = model_error_trace.log_invoke_error(runtime, exc=exc, model_name=resolved_model_name, attempt_context=attempt_context, phase="astream")
             last_exc = exc
             if attempt_index + 1 >= len(attempts):
                 raise
@@ -665,6 +668,7 @@ async def astream_model(
                 error=error_text,
                 call_context={
                     **attempt_context,
+                    **error_fields,
                     "cacheable_prefix_count": cacheable_prefix_count,
                 },
             )

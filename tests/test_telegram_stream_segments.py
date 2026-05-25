@@ -327,6 +327,33 @@ async def test_workflow_setup_turn_uses_final_reply_without_draft_streaming(
 
 
 @pytest.mark.asyncio
+async def test_workflow_setup_final_reply_is_not_suppressed_by_interactive_pending_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _FakeTelegramClient("dummy", draft_ok=False)
+    runtime = _FinalOnlyWorkflowSetupRuntime()
+    monkeypatch.setattr(relay_module, "TelegramClient", lambda token: fake_client)
+
+    final, suppressed = await relay_module.stream_langgraph_reply_to_telegram(
+        agent_runtime=runtime,
+        thread_id="chat-setup-pending",
+        customer_id="telegram_setup_pending",
+        text="update workflow draft",
+        bot_token="dummy",
+        chat_id=1,
+        turn_mode="workflow_setup",
+        interactive_session=_AlwaysPendingInteractiveSession(),
+    )
+
+    assert suppressed is False
+    assert final == "Draft updated. Please confirm this workflow before I save it."
+    assert fake_client.draft_calls == []
+    assert fake_client.message_calls == [
+        (1, "Draft updated. Please confirm this workflow before I save it.", "HTML")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_slow_workflow_setup_turn_backgrounds_and_status_nudges_do_not_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

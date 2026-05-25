@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict, is_dataclass
+from typing import Any
+
+
+def _compact_provider_value(value: Any) -> str:
+    try:
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        elif is_dataclass(value):
+            value = asdict(value)
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    return str(text or "").strip()[:2000]
+
 
 def exception_trace_fields(exc: Exception) -> dict[str, str]:
     fields: dict[str, str] = {}
     for attr_name, field_name in (
         ("status_code", "provider_error_status_code"),
         ("response", "provider_error_response"),
+        ("data", "provider_error_response_data"),
         ("response_data", "provider_error_response_data"),
         ("body", "provider_error_body"),
         ("message", "provider_error_message"),
@@ -16,10 +33,10 @@ def exception_trace_fields(exc: Exception) -> dict[str, str]:
         value = getattr(exc, attr_name, None)
         if value is None:
             continue
-        text = str(value).strip()
+        text = _compact_provider_value(value)
         if text:
             fields[field_name] = text[:2000]
-    response = getattr(exc, "response", None)
+    response = getattr(exc, "raw_response", None) or getattr(exc, "response", None)
     if response is not None:
         for attr_name, field_name in (
             ("status_code", "provider_http_status_code"),
@@ -28,7 +45,7 @@ def exception_trace_fields(exc: Exception) -> dict[str, str]:
             value = getattr(response, attr_name, None)
             if callable(value):
                 continue
-            text = str(value or "").strip()
+            text = _compact_provider_value(value)
             if text:
                 fields[field_name] = text[:2000]
     return fields
@@ -41,6 +58,31 @@ def exception_trace_text(exc: Exception) -> str:
         return base
     details = " ".join(f"{key}={value}" for key, value in sorted(fields.items()))
     return f"{base} [{details}]"
+
+
+def log_invoke_error(
+    runtime: Any,
+    *,
+    exc: Exception,
+    model_name: str,
+    attempt_context: dict[str, Any],
+    phase: str,
+) -> tuple[str, dict[str, str]]:
+    error_text = exception_trace_text(exc)
+    error_fields = exception_trace_fields(exc)
+    runtime.log_behavior_event(
+        event="llm.invoke.error",
+        model_name=model_name,
+        call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+        trace_id=str(attempt_context.get("trace_id") or ""),
+        thread_id=str(attempt_context.get("thread_id") or ""),
+        customer_id=str(attempt_context.get("customer_id") or ""),
+        provider_attempt_name=str(attempt_context.get("provider_attempt_name") or "default"),
+        phase=phase,
+        error=error_text,
+        **error_fields,
+    )
+    return error_text, error_fields
 
 
 def skip_native_structured_output(model_name: str | None) -> bool:
