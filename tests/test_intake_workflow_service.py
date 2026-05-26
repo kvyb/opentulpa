@@ -1845,6 +1845,8 @@ async def test_telegram_business_reply_persists_each_split_message(
     telegram_business.client = _SplitResultTelegramClient()
     workflow = {
         "customer_id": "telegram_123",
+        "channel": "telegram_business_dm",
+        "provider": "telegram_bot_api",
         "source_config": {"business_connection_id": "bc_123"},
     }
     conversation_summary = {
@@ -1852,7 +1854,7 @@ async def test_telegram_business_reply_persists_each_split_message(
         "latest_inbound_message_id": "10",
     }
 
-    error = await service._send_telegram_business_reply(
+    error = await service._send_source_reply(
         workflow=workflow,
         conversation_summary=conversation_summary,
         reply_text="First chunk\n\nSecond chunk",
