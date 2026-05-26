@@ -16,6 +16,12 @@ from typing import Any
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
+from opentulpa.intake.reply_policy import (
+    build_missing_field_follow_up_reply,
+)
+from opentulpa.intake.reply_policy import (
+    looks_like_cyrillic as _looks_like_cyrillic,
+)
 from opentulpa.intake.workflow_boundaries import (
     DECISION_BOOKING_ACTIONS,
     BookingTargetResolution,
@@ -56,6 +62,17 @@ _BUSINESS_FACTS_MAX_JSON_CHARS = 12000
 _DEFAULT_INSTAGRAM_SCAN_LIMIT = 20
 _MAX_INSTAGRAM_SCAN_LIMIT = 20
 _STALE_TERMINAL_STATUSES = {"stale_requeued", "stale_waiting_for_next_poll"}
+_LOCAL_CSV_SYSTEM_COLUMNS = frozenset(
+    {
+        "booking_id",
+        "workflow_id",
+        "workflow_name",
+        "conversation_id",
+        "customer_id",
+        "status",
+        "completed_at",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -371,11 +388,6 @@ def _required_field_is_present(payload: dict[str, Any], field: str) -> bool:
     return False
 
 
-def _looks_like_cyrillic(*values: Any) -> bool:
-    text = " ".join(str(value or "") for value in values)
-    return any("\u0400" <= char <= "\u04ff" for char in text)
-
-
 def _extract_phone_hint(value: Any) -> str:
     text = str(value or "")
     match = re.search(r"\+?\d[\d\s().-]{6,}\d", text)
@@ -401,6 +413,23 @@ def _workflow_requires_intent_match(workflow: dict[str, Any]) -> bool:
             matching.get("intent_match_required"),
         )
     )
+
+
+def _normalize_source_config(source_config: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = _safe_dict(source_config)
+    for key in ("intent_match_required", "strict_intent_matching", "filter_by_intent"):
+        if key in normalized and not _truthy_config_flag(normalized.get(key)):
+            normalized.pop(key, None)
+    matching = _safe_dict(normalized.get("matching"))
+    if "intent_match_required" in matching and not _truthy_config_flag(
+        matching.get("intent_match_required")
+    ):
+        matching.pop("intent_match_required", None)
+    if matching:
+        normalized["matching"] = matching
+    else:
+        normalized.pop("matching", None)
+    return normalized
 
 
 class IntakeWorkflowService:
@@ -1295,7 +1324,7 @@ class IntakeWorkflowService:
         safe_intent = str(intent_description or "").strip()
         safe_schedule = str(schedule or _DEFAULT_SCHEDULE).strip() or _DEFAULT_SCHEDULE
         safe_required_fields = _unique_string_list(required_fields)
-        safe_source_config = _safe_dict(source_config)
+        safe_source_config = _normalize_source_config(source_config)
         safe_field_guidance = _safe_dict(field_guidance)
         safe_assistant_instructions = str(assistant_instructions or "").strip()
         safe_business_facts = _normalize_business_facts(business_facts)
@@ -1319,6 +1348,7 @@ class IntakeWorkflowService:
                 customer_id=safe_customer,
                 source_config=safe_source_config,
             )
+            safe_source_config = _normalize_source_config(safe_source_config)
             business_connection_id = str(safe_source_config.get("business_connection_id", "") or "").strip()
             if not business_connection_id:
                 raise ValueError("telegram_business_dm workflows require source_config.business_connection_id")
@@ -3903,12 +3933,14 @@ class IntakeWorkflowService:
                     sink_type=str(workflow.get("sink_type", "") or "").strip(),
                     payload=save_payload,
                 )
+                record_status = "cancelled" if is_cancellation_save else "completed"
                 sink_result, sink_error = self._write_to_sink(
                     workflow=workflow,
                     booking=target_booking,
                     conversation_summary=conversation_summary,
                     payload=save_payload,
                     sink_arguments=sink_arguments,
+                    record_status=record_status,
                 )
                 if sink_error is not None:
                     target_booking["status"] = "active"
@@ -3939,7 +3971,7 @@ class IntakeWorkflowService:
                 sink_status = "succeeded"
                 sink_ref = _safe_dict(sink_result)
                 now = _utc_now()
-                target_booking["status"] = "cancelled" if reply_action == "mark_cancelled" else "completed"
+                target_booking["status"] = record_status
                 target_booking["completed_at"] = now.isoformat()
                 target_booking["edit_window_until"] = (now + _DEFAULT_EDIT_WINDOW).isoformat()
                 target_booking["sink_write_status"] = sink_status
@@ -4008,6 +4040,29 @@ class IntakeWorkflowService:
             target_booking["sink_write_status"] = sink_status
             target_booking["sink_record_ref"] = sink_ref
             target_booking["updated_at"] = _utc_now_iso()
+            if self._should_enforce_completion_reply(workflow=workflow) and (
+                reply_action != "send_reply" or not reply_text
+            ):
+                missing_field = self._missing_field_for_follow_up(
+                    workflow=workflow,
+                    decision=decision,
+                    active_booking=target_booking,
+                )
+                follow_up_reply = build_missing_field_follow_up_reply(
+                    missing_field=missing_field,
+                    workflow=workflow,
+                    conversation_summary=conversation_summary,
+                )
+                if follow_up_reply:
+                    reply_action = "send_reply"
+                    reply_text = follow_up_reply
+                    self._emit_observability(
+                        event="intake.reply.normalized_missing_field_follow_up",
+                        workflow=workflow,
+                        conversation_summary=conversation_summary,
+                        booking_id=str(target_booking.get("booking_id", "") or "").strip(),
+                        reply_text=reply_text,
+                    )
             if sink_action == "upsert_partial" and sink_payload:
                 sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
                 if sink_type not in {"google_sheets_composio", "generic_composio_write"}:
@@ -4279,6 +4334,7 @@ class IntakeWorkflowService:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
         if sink_type == "local_csv":
@@ -4287,6 +4343,7 @@ class IntakeWorkflowService:
                 booking=booking,
                 conversation_summary=conversation_summary,
                 payload=payload,
+                record_status=record_status,
             )
         if sink_type in {"google_sheets_composio", "generic_composio_write"}:
             return self._write_to_composio_sink(
@@ -4295,6 +4352,7 @@ class IntakeWorkflowService:
                 conversation_summary=conversation_summary,
                 payload=payload,
                 sink_arguments=sink_arguments,
+                record_status=record_status,
             )
         return {}, f"unsupported sink_type={sink_type}"
 
@@ -4305,6 +4363,7 @@ class IntakeWorkflowService:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         sink_config = _safe_dict(workflow.get("sink_config"))
         relative_path = str(sink_config.get("file_path", "") or "").strip()
@@ -4318,10 +4377,12 @@ class IntakeWorkflowService:
             "workflow_name": str(workflow["name"]),
             "conversation_id": str(booking["conversation_id"]),
             "customer_id": str(workflow["customer_id"]),
-            "status": "completed",
+            "status": str(record_status or "completed").strip() or "completed",
             "completed_at": _utc_now_iso(),
         }
         for key, value in payload.items():
+            if str(key) in _LOCAL_CSV_SYSTEM_COLUMNS:
+                continue
             base_row[str(key)] = str(value or "")
         rows: list[dict[str, str]] = []
         fieldnames: list[str] = list(base_row.keys())
@@ -4365,6 +4426,7 @@ class IntakeWorkflowService:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
             return {}, "Composio is not available for sink execution"
@@ -4401,8 +4463,11 @@ class IntakeWorkflowService:
             except ValueError as exc:
                 return {}, str(exc)
             override_arguments = _normalize_google_sheets_arguments(override_arguments)
-        enriched_payload = {
-            **payload,
+        enriched_payload = dict(payload)
+        if record_status:
+            enriched_payload["status"] = str(record_status).strip()
+        enriched_payload.update(
+            {
             "booking_id": str(booking["booking_id"]),
             "workflow_id": str(workflow["workflow_id"]),
             "conversation_id": str(booking["conversation_id"]),
@@ -4411,7 +4476,8 @@ class IntakeWorkflowService:
             "latest_inbound_sender_id": _incoming_user_id(conversation_summary),
             "username": _incoming_username(conversation_summary),
             "latest_inbound_sender_username": _incoming_username(conversation_summary),
-        }
+            }
+        )
         toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
         tool_slug = self._resolve_composio_sink_tool_slug(
             sink_type=sink_type,

@@ -63,6 +63,32 @@ class _OpenRouterCostModel(_TraceModel):
         return _OpenRouterCostResponse()
 
 
+class _ProviderBodyError(Exception):
+    def __init__(self) -> None:
+        super().__init__("Provider returned error")
+        self.status_code = 400
+        self.body = '{"error":{"message":"Thinking mode does not support this tool_choice"}}'
+        self.data = {
+            "error": {
+                "message": "Thinking mode does not support this tool_choice",
+                "code": 400,
+            }
+        }
+
+
+class _FailingTraceModel:
+    async def ainvoke(self, messages: object, **kwargs: object) -> _TraceResponse:
+        del messages, kwargs
+        raise _ProviderBodyError()
+
+
+class _FailingStreamTraceModel:
+    async def astream(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        raise _ProviderBodyError()
+        yield _TraceResponse()
+
+
 @lc_tool
 def _trace_lookup_tool(query: str) -> str:
     """Look up trace fixture data."""
@@ -167,6 +193,65 @@ async def test_ainvoke_model_extracts_openrouter_upstream_cost_details(tmp_path:
     assert record["native_cost_usd"] == 0.01
     assert record["native_cost_prompt_usd"] == 0.004
     assert record["native_cost_completion_usd"] == 0.006
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_traces_provider_error_body(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+
+    with pytest.raises(_ProviderBodyError):
+        await runtime.ainvoke_model(
+            _FailingTraceModel(),
+            [HumanMessage(content="break")],
+            model_name="deepseek/deepseek-v4-pro",
+            call_context={"call_site": "graph_agent", "trace_id": "turn_provider_error"},
+        )
+
+    record = json.loads(runtime._llm_call_trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["trace_id"] == "turn_provider_error"
+    assert "Provider returned error" in record["error"]
+    assert "Thinking mode does not support this tool_choice" in record["provider_error_body"]
+    assert "Thinking mode does not support this tool_choice" in record["provider_error_response_data"]
+
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    error_event = next(item for item in behavior if item["event"] == "llm.invoke.error")
+    assert error_event["phase"] == "ainvoke"
+    assert "Thinking mode does not support this tool_choice" in error_event["provider_error_body"]
+
+
+@pytest.mark.asyncio
+async def test_astream_model_traces_provider_error_body(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+
+    with pytest.raises(_ProviderBodyError):
+        await runtime.astream_model(
+            _FailingStreamTraceModel(),
+            [HumanMessage(content="break stream")],
+            model_name="deepseek/deepseek-v4-pro",
+            call_context={"call_site": "graph_agent", "trace_id": "turn_stream_provider_error"},
+        )
+
+    record = json.loads(runtime._llm_call_trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["trace_id"] == "turn_stream_provider_error"
+    assert "Provider returned error" in record["error"]
+    assert "Thinking mode does not support this tool_choice" in record["provider_error_body"]
 
 
 @pytest.mark.asyncio

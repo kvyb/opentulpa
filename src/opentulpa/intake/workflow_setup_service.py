@@ -112,6 +112,91 @@ def _normalize_schedule_for_channel(draft: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_channel_provider_pair(draft: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(draft)
+    channel = str(normalized.get("channel", "") or "").strip().lower()
+    provider = str(normalized.get("provider", "") or "").strip().lower()
+    if provider in {"telegram", "telegram_business"}:
+        provider = "telegram_bot_api"
+    if channel == "telegram_business_dm" and provider != "telegram_bot_api":
+        provider = "telegram_bot_api"
+    if channel == "instagram_dm" and provider != "composio":
+        provider = "composio"
+    if not channel and provider == "telegram_bot_api":
+        channel = "telegram_business_dm"
+    if not channel and provider == "composio":
+        channel = "instagram_dm"
+    normalized["channel"] = channel
+    normalized["provider"] = provider
+    return normalized
+
+
+def _validate_draft_patch_shape(draft_patch: dict[str, Any] | None) -> None:
+    if not isinstance(draft_patch, dict):
+        return
+    for nested_key in ("draft", "draft_upsert", "workflow", "workflow_upsert"):
+        if isinstance(draft_patch.get(nested_key), dict):
+            raise ValueError(
+                "draft_patch must contain workflow fields directly; "
+                f"move fields from draft_patch.{nested_key} into draft_patch"
+            )
+
+
+def _source_intent_patch(draft_patch: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(draft_patch, dict):
+        return {}
+    source_patch: dict[str, Any] = {}
+    if "channel" in draft_patch:
+        source_patch["current_requested_channel"] = str(
+            draft_patch.get("channel", "") or ""
+        ).strip().lower()
+    if "provider" in draft_patch:
+        source_patch["current_requested_provider"] = str(
+            draft_patch.get("provider", "") or ""
+        ).strip().lower()
+    if not source_patch:
+        return {}
+    normalized = _normalize_channel_provider_pair(
+        {
+            "channel": source_patch.get("current_requested_channel", ""),
+            "provider": source_patch.get("current_requested_provider", ""),
+        }
+    )
+    if "current_requested_channel" in source_patch:
+        source_patch["current_requested_channel"] = str(normalized.get("channel", "") or "")
+    if "current_requested_provider" in source_patch:
+        source_patch["current_requested_provider"] = str(normalized.get("provider", "") or "")
+    return source_patch
+
+
+def _source_intent_mismatches(
+    *,
+    draft: dict[str, Any],
+    scratchpad: dict[str, Any],
+) -> list[str]:
+    requested_channel = str(scratchpad.get("current_requested_channel", "") or "").strip().lower()
+    requested_provider = str(scratchpad.get("current_requested_provider", "") or "").strip().lower()
+    if not requested_channel and not requested_provider:
+        return []
+    normalized_draft = _normalize_channel_provider_pair(draft)
+    draft_channel = str(normalized_draft.get("channel", "") or "").strip().lower()
+    draft_provider = str(normalized_draft.get("provider", "") or "").strip().lower()
+    blockers: list[str] = []
+    if requested_channel and draft_channel != requested_channel:
+        blockers.append(
+            "User currently requested "
+            f"channel={requested_channel}, but draft channel is {draft_channel or 'missing'}. "
+            "Update draft_patch.channel before proposing or finalizing."
+        )
+    if requested_provider and draft_provider != requested_provider:
+        blockers.append(
+            "User currently requested "
+            f"provider={requested_provider}, but draft provider is {draft_provider or 'missing'}. "
+            "Update draft_patch.provider before proposing or finalizing."
+        )
+    return blockers
+
+
 def _normalize_reply_mode_for_origin(draft: dict[str, Any], *, thread_id: str) -> dict[str, Any]:
     _ = thread_id
     normalized = dict(draft)
@@ -164,8 +249,8 @@ class WorkflowSetupService:
             _normalize_schedule_for_channel(
                 {
                     "name": "",
-                    "channel": "instagram_dm",
-                    "provider": "composio",
+                    "channel": "",
+                    "provider": "",
                     "source_config": {},
                     "intent_description": "",
                     "required_fields": [],
@@ -199,6 +284,8 @@ class WorkflowSetupService:
             "candidate_files": [],
             "proposal_summary": "",
             "last_user_confirmable_summary": "",
+            "current_requested_channel": "",
+            "current_requested_provider": "",
         }
 
     @staticmethod
@@ -341,7 +428,7 @@ class WorkflowSetupService:
                     "reply_mode": str(workflow_snapshot.get("reply_mode", "auto") or "auto"),
                 }
             )
-            draft = _normalize_schedule_for_channel(draft)
+            draft = _normalize_schedule_for_channel(_normalize_channel_provider_pair(draft))
         draft = _normalize_reply_mode_for_origin(draft, thread_id=thread_id)
         return self._store.create_session(
             customer_id=customer_id,
@@ -368,15 +455,20 @@ class WorkflowSetupService:
         )
         if session is None:
             raise ValueError("active workflow setup session not found")
+        _validate_draft_patch_shape(draft_patch)
         updated_draft = _merge_draft(
             _safe_dict(session.get("draft_upsert")), _safe_dict(draft_patch)
         )
         updated_draft = _normalize_local_csv_draft_sink_config(
-            _normalize_schedule_for_channel(updated_draft)
+            _normalize_schedule_for_channel(_normalize_channel_provider_pair(updated_draft))
         )
         updated_draft = _normalize_reply_mode_for_origin(updated_draft, thread_id=thread_id)
         updated_scratchpad = _deep_merge(
-            _safe_dict(session.get("scratchpad")), _safe_dict(scratchpad_patch)
+            _deep_merge(
+                _safe_dict(session.get("scratchpad")),
+                _safe_dict(scratchpad_patch),
+            ),
+            _source_intent_patch(draft_patch),
         )
         return self._store.update_session(
             session_id=str(session["session_id"]),
@@ -394,9 +486,28 @@ class WorkflowSetupService:
         if session is None:
             raise ValueError("active workflow setup session not found")
         draft = _normalize_reply_mode_for_origin(
-            _safe_dict(session.get("draft_upsert")),
+            _normalize_channel_provider_pair(_safe_dict(session.get("draft_upsert"))),
             thread_id=thread_id,
         )
+        intent_blockers = _source_intent_mismatches(
+            draft=draft,
+            scratchpad=_safe_dict(session.get("scratchpad")),
+        )
+        if intent_blockers:
+            blocked = {
+                "ok": False,
+                "status": "needs_clarification",
+                "next_action": "update_draft_source_to_match_latest_owner_request",
+                "commit_blockers": intent_blockers,
+                "errors": intent_blockers,
+                "warnings": [],
+                "follow_up_questions": intent_blockers,
+                "draft_hash": self._draft_hash(draft),
+                "cache_hit": False,
+            }
+            blocked_session = dict(session)
+            blocked_session["preflight"] = blocked
+            return blocked_session
         session_id = str(session.get("session_id", "") or "").strip()
         draft_hash = self._draft_hash(draft)
         cached_preflight = self._cached_ready_preflight(session, draft_hash=draft_hash)
@@ -434,8 +545,8 @@ class WorkflowSetupService:
                 customer_id=customer_id,
                 workflow_id=target_workflow_id,
                 name=str(draft.get("name", "") or ""),
-                channel=str(draft.get("channel", "instagram_dm") or "instagram_dm"),
-                provider=str(draft.get("provider", "composio") or "composio"),
+                channel=str(draft.get("channel", "") or ""),
+                provider=str(draft.get("provider", "") or ""),
                 source_config=_safe_dict(draft.get("source_config")),
                 intent_description=str(draft.get("intent_description", "") or ""),
                 required_fields=_safe_list(draft.get("required_fields")),
@@ -539,6 +650,7 @@ class WorkflowSetupService:
         """Apply final edits, validate, mark, confirm, and commit in one explicit owner-confirmation path."""
 
         if isinstance(draft_patch, dict) or isinstance(scratchpad_patch, dict):
+            _validate_draft_patch_shape(draft_patch)
             self.update_session(
                 customer_id=customer_id,
                 thread_id=thread_id,
@@ -582,6 +694,20 @@ class WorkflowSetupService:
         committed = self.commit(customer_id=customer_id, thread_id=thread_id)
         committed["preflight"] = preflight
         return committed
+
+    def propose_current(self, *, customer_id: str, thread_id: str) -> dict[str, Any]:
+        """Preflight the current draft and mark it proposed when it is ready."""
+
+        preflight_session = self.preflight_current(customer_id=customer_id, thread_id=thread_id)
+        preflight = _safe_dict(preflight_session.get("preflight"))
+        if (
+            not bool(preflight.get("ok", False))
+            or str(preflight.get("status", "") or "") != "ready"
+        ):
+            return preflight_session
+        proposed = self.mark_proposed(customer_id=customer_id, thread_id=thread_id)
+        proposed["preflight"] = preflight
+        return proposed
 
     def _preflight_knowledge_scope(
         self,
@@ -677,7 +803,7 @@ class WorkflowSetupService:
         if session is None:
             raise ValueError("active workflow setup session not found")
         draft = _normalize_reply_mode_for_origin(
-            _safe_dict(session.get("draft_upsert")),
+            _normalize_channel_provider_pair(_safe_dict(session.get("draft_upsert"))),
             thread_id=thread_id,
         )
         current_hash = self._draft_hash(draft)

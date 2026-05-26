@@ -118,7 +118,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
           and has provided the required workflow fields.
         - Prefer intake_workflow_list and intake_workflow_get before editing an existing workflow.
         - In setup mode, call intake_workflow_upsert only when the draft already contains the exact workflow fields to save.
-        - In workflow setup mode, call intake_workflow_setup_preflight before showing the final proposal.
+        - In workflow setup mode, call intake_workflow_setup_propose_current before showing the final proposal.
         - For a brand-new workflow, omit workflow_id or pass an empty string.
         - For updates, pass the existing workflow_id.
         - If the user is refining or editing an existing workflow, prefer intake_workflow_list and
@@ -314,7 +314,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         safe_workflow_id = str(workflow_id or "").strip()
         if not safe_workflow_id:
             return {"error": "intake_workflow_delete failed: workflow_id is required"}
-        return await http.request(
+        result = await http.request(
             "intake_workflow_delete",
             "POST",
             "/internal/intake/workflows/delete",
@@ -324,6 +324,9 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
             },
             timeout=10.0,
         )
+        if isinstance(result, dict) and bool(result.get("deleted", False)):
+            result["final_response_hint"] = "Deleted the intake workflow. It is gone now."
+        return result
 
     @tool
     async def intake_workflow_run(workflow_id: str, force: bool = False) -> Any:

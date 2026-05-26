@@ -378,6 +378,29 @@ async def test_tool_group_gateway_repairs_common_intake_update_shape(tmp_path: P
     assert result["ok"] is True
     assert captured["kwargs"]["json_body"]["draft_patch"]["provider"] == "telegram_bot_api"
 
+    result = await runtime._tools["tool_group_exec"].ainvoke(
+        {
+            "group": "intake",
+            "command": "intake_workflow_setup_update",
+            "args_json": {
+                "draft_patch": {
+                    "draft": {
+                        "name": "E2E Telegram Car Wash",
+                        "provider": "telegram_business",
+                        "channel": "telegram_business_dm",
+                    }
+                }
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert captured["kwargs"]["json_body"]["draft_patch"] == {
+        "name": "E2E Telegram Car Wash",
+        "provider": "telegram_bot_api",
+        "channel": "telegram_business_dm",
+    }
+
 
 @pytest.mark.asyncio
 async def test_tool_group_exec_returns_compact_repair_hint_for_missing_args(tmp_path: Path) -> None:
@@ -473,11 +496,16 @@ class _ProviderAwareStructuredRunner:
 class _ProviderAwareStructuredModel:
     def __init__(self) -> None:
         self.runners: list[_ProviderAwareStructuredRunner] = []
+        self.fallback_calls: list[dict[str, Any]] = []
 
     def with_structured_output(self, _schema: type[BaseModel]) -> _ProviderAwareStructuredRunner:
         runner = _ProviderAwareStructuredRunner()
         self.runners.append(runner)
         return runner
+
+    async def ainvoke(self, messages: object, **kwargs: Any) -> _FallbackResponse:
+        self.fallback_calls.append({"messages": messages, "kwargs": kwargs})
+        return _FallbackResponse('{"ok": true, "reason": "fallback_route"}')
 
 
 @pytest.mark.asyncio
@@ -571,7 +599,7 @@ async def test_invoke_structured_model_repairs_invalid_json_fallback_once() -> N
 
 
 @pytest.mark.asyncio
-async def test_invoke_structured_model_uses_deepseek_v4_pro_default_medium_reasoning() -> None:
+async def test_invoke_structured_model_skips_deepseek_v4_pro_native_structured_output() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime.model_name = "deepseek/deepseek-v4-pro"
@@ -589,10 +617,11 @@ async def test_invoke_structured_model_uses_deepseek_v4_pro_default_medium_reaso
 
     assert isinstance(parsed, _Schema)
     assert parsed.ok is True
-    assert parsed.reason == "default_route"
+    assert parsed.reason == "fallback_route"
     assert error is None
-    assert len(model.runners) == 1
-    assert model.runners[0].calls[0]["kwargs"] == {}
+    assert model.runners == []
+    assert len(model.fallback_calls) == 1
+    assert model.fallback_calls[0]["kwargs"] == {}
 
 
 @pytest.mark.asyncio
@@ -614,10 +643,11 @@ async def test_invoke_structured_model_omits_legacy_deepseek_disable_payload_for
 
     assert isinstance(parsed, _Schema)
     assert parsed.ok is True
-    assert parsed.reason == "default_route"
+    assert parsed.reason == "fallback_route"
     assert error is None
-    assert len(model.runners) == 1
-    assert model.runners[0].calls[0]["kwargs"] == {}
+    assert model.runners == []
+    assert len(model.fallback_calls) == 1
+    assert model.fallback_calls[0]["kwargs"] == {}
 
 
 @pytest.mark.asyncio

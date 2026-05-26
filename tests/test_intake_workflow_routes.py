@@ -205,6 +205,8 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
                 "thread_id": "thread_123",
                 "draft_patch": {
                     "name": "Car Wash Intake",
+                    "channel": "instagram_dm",
+                    "provider": "composio",
                     "intent_description": "Handle booking requests that arrive in Instagram DMs.",
                     "required_fields": ["day", "time", "car_type", "wash_type"],
                     "sink_type": "local_csv",
@@ -252,6 +254,40 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
         assert session["workflow"]["name"] == "Car Wash Intake"
 
 
+def test_intake_workflow_setup_propose_current_route_preflights_and_marks(tmp_path: Path) -> None:
+    with _mk_client(tmp_path) as client:
+        assert client.post(
+            "/internal/intake/setup/begin",
+            json={"customer_id": "telegram_123", "thread_id": "thread_123", "mode": "create"},
+        ).status_code == 200
+        assert client.post(
+            "/internal/intake/setup/update",
+            json={
+                "customer_id": "telegram_123",
+                "thread_id": "thread_123",
+                "draft_patch": {
+                    "name": "Car Wash Intake",
+                    "channel": "instagram_dm",
+                    "provider": "composio",
+                    "intent_description": "Handle booking requests that arrive in Instagram DMs.",
+                    "required_fields": ["day", "time"],
+                    "sink_type": "local_csv",
+                    "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+                },
+            },
+        ).status_code == 200
+
+        proposed = client.post(
+            "/internal/intake/setup/propose_current",
+            json={"customer_id": "telegram_123", "thread_id": "thread_123"},
+        )
+
+        assert proposed.status_code == 200
+        payload = proposed.json()
+        assert payload["preflight"]["status"] == "ready"
+        assert payload["session"]["last_proposed_draft_hash"]
+
+
 def test_intake_workflow_setup_finalize_confirmation_route_commits(tmp_path: Path) -> None:
     with _mk_client(tmp_path) as client:
         begin = client.post(
@@ -271,6 +307,8 @@ def test_intake_workflow_setup_finalize_confirmation_route_commits(tmp_path: Pat
                 "thread_id": "thread_123",
                 "draft_patch": {
                     "name": "Car Wash Intake",
+                    "channel": "instagram_dm",
+                    "provider": "composio",
                     "intent_description": "Handle booking requests that arrive in Instagram DMs.",
                     "required_fields": ["day", "time", "car_type", "wash_type"],
                     "sink_type": "local_csv",

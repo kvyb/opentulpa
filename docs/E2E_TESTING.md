@@ -59,16 +59,43 @@ Run only Telegram scenario tests:
 uv run pytest tests/e2e/scenarios -m telegram --run-e2e -q -rs
 ```
 
-Run only the Telegram intake workflow real-chat scenarios with live LLM calls:
+Run live e2e by default with the parallel section runner:
 
 ```bash
-uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py --run-e2e --run-live-llm -s
+uv run python scripts/run_live_e2e_sections.py --workers 4
 ```
 
-Run all e2e tests, including `tests/e2e/live/`:
+The section runner is the canonical full live-LLM command. It launches separate
+pytest processes with isolated `--basetemp` directories, writes per-section
+logs, and emits a `summary.json` with trace token/cost totals from
+`llm_call_traces.jsonl`.
+
+Run only the Telegram intake workflow real-chat section with live LLM calls:
+
+```bash
+uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1
+```
+
+Run all e2e tests in one pytest process only for debugging section-runner issues:
 
 ```bash
 uv run pytest tests/e2e --run-e2e --run-live-llm -q -rs
+```
+
+Useful variants:
+
+```bash
+# Show section boundaries.
+uv run python scripts/run_live_e2e_sections.py --list
+
+# Run only intake workflow and interactive sections.
+uv run python scripts/run_live_e2e_sections.py \
+  --section intake_workflow \
+  --section interactive \
+  --workers 2
+
+# Add normal pytest flags after --.
+uv run python scripts/run_live_e2e_sections.py --workers 4 -- -vv -s
 ```
 
 Some standalone live smokes have their own env gates and are skipped unless those gates are set. See "How env loading works" above for the exact flags.
@@ -76,7 +103,7 @@ Some standalone live smokes have their own env gates and are skipped unless thos
 Run opted-in scenario-level real Composio tests only when you intentionally want real connected-account access:
 
 ```bash
-uv run pytest tests/e2e --run-e2e --run-live-llm --run-real-composio -q -rs
+uv run python scripts/run_live_e2e_sections.py --workers 4 -- --run-real-composio
 ```
 
 Standalone live Composio smokes under `tests/e2e/live/` are controlled by their `OPENTULPA_ENABLE_LIVE_COMPOSIO_*` env flags instead of `--run-real-composio`.
@@ -129,7 +156,7 @@ uv run pytest \
 3. Real Telegram intake e2e
 
 ```bash
-uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py --run-e2e --run-live-llm -s
+uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1 -- -s
 ```
 
 This catches the exact class of bugs we hit recently:
@@ -187,7 +214,7 @@ You can still override them explicitly for e2e-only runs:
 OPENTULPA_E2E_MODEL=...
 OPENTULPA_E2E_WAKE_MODEL=...
 OPENTULPA_E2E_LEAD_SIM_MODEL=google/gemini-3-flash-preview
-uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py --run-e2e --run-live-llm -s
+uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1 -- -s
 ```
 
 `OPENTULPA_E2E_LEAD_SIM_MODEL` controls the incoming-lead simulator used by the simulator-backed Telegram intake scenario.
@@ -211,7 +238,7 @@ The status report includes the concrete file paths so you can inspect what happe
 When a scenario fails, rerun with:
 
 ```bash
-uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py --run-e2e --run-live-llm -vv -s
+uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1 -- -vv -s
 ```
 
 ## Common failure modes
@@ -222,7 +249,7 @@ Run pytest from the repo root:
 
 ```bash
 cd /path/to/opentulpa
-uv run pytest tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py --run-e2e --run-live-llm -q -rs
+uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1
 ```
 
 The skip gate uses the same settings loader as the app, so `.env` should count. You still need the opt-in flags: `--run-e2e` for all e2e tests and `--run-live-llm` for live model tests.
