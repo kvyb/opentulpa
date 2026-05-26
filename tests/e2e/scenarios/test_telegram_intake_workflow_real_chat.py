@@ -443,6 +443,12 @@ def _booking_category(row: dict[str, str]) -> str:
     return str(row.get("service_category") or row.get("category") or "").strip().lower()
 
 
+def _service_text_matches_two_phase_wash(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    compact = text.replace(" ", "").replace("-", "")
+    return "2" in compact and "фаз" in compact
+
+
 def _lead_source_messages(
     harness: E2EHarness,
     *,
@@ -1934,8 +1940,11 @@ def test_live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated
         tire_row = by_conversation.get("39102") or {}
         assert str(wash_row.get("status", "")).strip().lower() == "completed"
         assert _booking_category(wash_row) == "мойка"
-        assert "2х-фазная" in str(wash_row.get("service_name", "")).lower()
-        assert str(wash_row.get("quoted_price", "")).strip()
+        assert _service_text_matches_two_phase_wash(wash_row.get("service_name", ""))
+        wash_quoted_price_digits = "".join(
+            ch for ch in str(wash_row.get("quoted_price", "")) if ch.isdigit()
+        )
+        assert "1200" in wash_quoted_price_digits
         assert str(wash_row.get("lead_name", "")).strip().lower() == "алексей"
         assert str(wash_row.get("phone", "")).strip() == "+79990001001"
         assert str(tire_row.get("status", "")).strip().lower() == "completed"

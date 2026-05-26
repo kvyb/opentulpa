@@ -8,6 +8,7 @@ import pytest
 from langchain_core.tools import tool as lc_tool
 
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
+from opentulpa.agent.model_error_trace import exception_trace_fields, exception_trace_text
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 
 
@@ -76,6 +77,20 @@ class _ProviderBodyError(Exception):
         }
 
 
+class _UnreadStreamingResponse:
+    status_code = 429
+
+    @property
+    def text(self) -> str:
+        raise RuntimeError("streaming response was not read")
+
+
+class _UnreadResponseProviderError(Exception):
+    def __init__(self) -> None:
+        super().__init__("Provider returned error")
+        self.response = _UnreadStreamingResponse()
+
+
 class _FailingTraceModel:
     async def ainvoke(self, messages: object, **kwargs: object) -> _TraceResponse:
         del messages, kwargs
@@ -86,6 +101,30 @@ class _FailingStreamTraceModel:
     async def astream(self, messages: object, **kwargs: object) -> Any:
         del messages, kwargs
         raise _ProviderBodyError()
+        yield _TraceResponse()
+
+
+class _TransientTraceModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> _TraceResponse:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            raise _UnreadResponseProviderError()
+        return _TraceResponse()
+
+
+class _TransientStreamTraceModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            raise _UnreadResponseProviderError()
         yield _TraceResponse()
 
 
@@ -252,6 +291,79 @@ async def test_astream_model_traces_provider_error_body(tmp_path: Path) -> None:
     assert record["trace_id"] == "turn_stream_provider_error"
     assert "Provider returned error" in record["error"]
     assert "Thinking mode does not support this tool_choice" in record["provider_error_body"]
+
+
+def test_model_error_trace_handles_unread_streaming_response_text() -> None:
+    exc = _UnreadResponseProviderError()
+
+    text = exception_trace_text(exc)
+    fields = exception_trace_fields(exc)
+
+    assert "Provider returned error" in text
+    assert fields["provider_http_status_code"] == "429"
+    assert "streaming response was not read" in fields["provider_http_text"]
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_retries_transient_provider_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _TransientTraceModel()
+
+    result = await runtime.ainvoke_model(
+        model,
+        [HumanMessage(content="retry please")],
+        model_name="deepseek/deepseek-v4-pro",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_transient_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_transient_retry"
+    assert "streaming response was not read" in retry["provider_http_text"]
+
+
+@pytest.mark.asyncio
+async def test_astream_model_retries_transient_provider_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _TransientStreamTraceModel()
+
+    result = await runtime.astream_model(
+        model,
+        [HumanMessage(content="retry stream please")],
+        model_name="deepseek/deepseek-v4-pro",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_stream_transient_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_stream_transient_retry"
+    assert "streaming response was not read" in retry["provider_http_text"]
 
 
 @pytest.mark.asyncio

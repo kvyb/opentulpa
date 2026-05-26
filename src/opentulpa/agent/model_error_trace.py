@@ -19,6 +19,13 @@ def _compact_provider_value(value: Any) -> str:
     return str(text or "").strip()[:2000]
 
 
+def _safe_getattr(value: Any, attr_name: str) -> Any:
+    try:
+        return getattr(value, attr_name, None)
+    except Exception as exc:
+        return f"<unavailable {type(exc).__name__}: {exc}>"
+
+
 def exception_trace_fields(exc: Exception) -> dict[str, str]:
     fields: dict[str, str] = {}
     for attr_name, field_name in (
@@ -30,19 +37,19 @@ def exception_trace_fields(exc: Exception) -> dict[str, str]:
         ("message", "provider_error_message"),
         ("code", "provider_error_code"),
     ):
-        value = getattr(exc, attr_name, None)
+        value = _safe_getattr(exc, attr_name)
         if value is None:
             continue
         text = _compact_provider_value(value)
         if text:
             fields[field_name] = text[:2000]
-    response = getattr(exc, "raw_response", None) or getattr(exc, "response", None)
+    response = _safe_getattr(exc, "raw_response") or _safe_getattr(exc, "response")
     if response is not None:
         for attr_name, field_name in (
             ("status_code", "provider_http_status_code"),
             ("text", "provider_http_text"),
         ):
-            value = getattr(response, attr_name, None)
+            value = _safe_getattr(response, attr_name)
             if callable(value):
                 continue
             text = _compact_provider_value(value)

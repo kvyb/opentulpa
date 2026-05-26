@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from datetime import timedelta
+from typing import Any, Protocol
 
 from opentulpa.intake.workflow_boundaries import (
     ConversationCursorSignals,
@@ -39,10 +41,172 @@ class DecisionContext:
     decision: dict[str, Any]
 
 
+class WorkflowRunService(Protocol):
+    def get_workflow(self, *, customer_id: str, workflow_id: str) -> dict[str, Any] | None: ...
+
+    def _load_source_items(
+        self,
+        *,
+        workflow: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], str | None, list[dict[str, str]]]: ...
+
+    def _enrich_conversation_summary(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def _conversation_lock(self, *, workflow_id: str, conversation_id: str) -> asyncio.Lock: ...
+
+    def _get_cursor(self, *, workflow_id: str, conversation_id: str) -> dict[str, str]: ...
+
+    def _has_new_inbound_signal(
+        self,
+        *,
+        conversation_summary: dict[str, Any],
+        cursor: dict[str, str],
+        force: bool,
+    ) -> bool: ...
+
+    def _conversation_debounce_seconds(self, *, workflow: dict[str, Any], event_type: str) -> float: ...
+
+    def _reload_conversation_summary(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        fallback: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]: ...
+
+    def _latest_inbound_max_age_for_event(
+        self,
+        *,
+        event_type: str,
+        workflow: dict[str, Any],
+    ) -> timedelta: ...
+
+    def _load_source_conversation(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], str | None]: ...
+
+    def _get_active_booking(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any] | None: ...
+
+    def _get_recent_completed_booking(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def _decide_workflow_action(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        conversation: dict[str, Any],
+        active_booking: dict[str, Any] | None,
+        recent_completed_booking: dict[str, Any] | None,
+        execution_feedback: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], str | None]: ...
+
+    def _uses_latest_inbound_stale_guard(
+        self,
+        *,
+        workflow: dict[str, Any],
+        event_type: str,
+        force: bool,
+    ) -> bool: ...
+
+    def _conversation_became_stale(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        decided_summary: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any], str | None]: ...
+
+    def _refreshes_stale_decision_inline(self, *, workflow: dict[str, Any]) -> bool: ...
+
+    def _emit_observability(
+        self,
+        *,
+        event: str,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        **extra: Any,
+    ) -> None: ...
+
+    def _requeue_if_conversation_stale(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        conversation_summary: dict[str, Any],
+        matched: bool,
+    ) -> dict[str, Any] | None: ...
+
+    def _fallback_out_of_scope_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        decision: dict[str, Any],
+    ) -> str: ...
+
+    async def _send_intake_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        reply_text: str,
+    ) -> str | None: ...
+
+    async def _apply_decision(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        conversation: dict[str, Any],
+        active_booking: dict[str, Any] | None,
+        recent_completed_booking: dict[str, Any] | None,
+        decision: dict[str, Any],
+        stale_guard: bool = False,
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]: ...
+
+    def _set_cursor(
+        self,
+        *,
+        workflow_id: str,
+        conversation_id: str,
+        latest_inbound_message_id: str,
+        latest_inbound_message_time: str,
+        conversation_updated_time: str,
+        latest_outbound_message_id: str,
+        agent_action_at: str = "",
+    ) -> None: ...
+
+
 class WorkflowRunner:
     """Runs intake workflow polling and per-conversation decisions."""
 
-    def __init__(self, service: Any, *, is_older_than: Any, utc_now_iso: Any) -> None:
+    def __init__(
+        self,
+        service: WorkflowRunService,
+        *,
+        is_older_than: Callable[..., bool],
+        utc_now_iso: Callable[[], str],
+    ) -> None:
         self._service = service
         self._is_older_than = is_older_than
         self._utc_now_iso = utc_now_iso

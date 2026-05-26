@@ -51,6 +51,47 @@ def _model_transient_retry_delay_seconds(retry_index: int) -> float:
     return float(min(6.0, 0.75 * (2 ** max(0, int(retry_index)))))
 
 
+async def _run_with_transient_model_retries(
+    runtime: Any,
+    *,
+    model_name: str,
+    attempt_context: dict[str, Any],
+    operation: Any,
+) -> Any:
+    transient_retries = _model_transient_retry_limit()
+    provider_retry_index = 0
+    while True:
+        try:
+            return await operation()
+        except Exception as exc:
+            retry_error_text = model_error_trace.exception_trace_text(exc)
+            retry_error_fields = model_error_trace.exception_trace_fields(exc)
+            if (
+                provider_retry_index >= transient_retries
+                or not _is_retryable_model_error(retry_error_text)
+            ):
+                raise
+            delay_seconds = _model_transient_retry_delay_seconds(provider_retry_index)
+            provider_retry_index += 1
+            runtime.log_behavior_event(
+                event="llm.invoke.transient_retry",
+                model_name=model_name,
+                call_site=str(attempt_context.get("call_site") or "runtime_model_invoke"),
+                trace_id=str(attempt_context.get("trace_id") or ""),
+                thread_id=str(attempt_context.get("thread_id") or ""),
+                customer_id=str(attempt_context.get("customer_id") or ""),
+                provider_attempt_name=str(
+                    attempt_context.get("provider_attempt_name") or "default"
+                ),
+                retry_index=provider_retry_index,
+                retry_limit=transient_retries,
+                delay_seconds=delay_seconds,
+                error=retry_error_text,
+                **retry_error_fields,
+            )
+            await asyncio.sleep(delay_seconds)
+
+
 def prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
     cache_control: dict[str, Any] = {"type": "ephemeral"}
     if ttl_1h:
@@ -525,10 +566,20 @@ async def ainvoke_model(
         error_text: str | None = None
         error_fields: dict[str, str] = {}
         try:
-            if supports_ainvoke_kwargs(callback_target, invoke_extras):
-                response = await callback_target.ainvoke(prepared_messages, **invoke_extras)
-            else:
-                response = await callback_target.ainvoke(prepared_messages)
+            async def invoke_once(
+                callback_target: Any = callback_target,
+                invoke_extras: dict[str, Any] = invoke_extras,
+            ) -> Any:
+                if supports_ainvoke_kwargs(callback_target, invoke_extras):
+                    return await callback_target.ainvoke(prepared_messages, **invoke_extras)
+                return await callback_target.ainvoke(prepared_messages)
+
+            response = await _run_with_transient_model_retries(
+                runtime,
+                model_name=resolved_model_name,
+                attempt_context=attempt_context,
+                operation=invoke_once,
+            )
             return response
         except Exception as exc:
             error_text, error_fields = model_error_trace.log_invoke_error(runtime, exc=exc, model_name=resolved_model_name, attempt_context=attempt_context, phase="ainvoke")
@@ -618,27 +669,38 @@ async def astream_model(
         error_text: str | None = None
         error_fields: dict[str, str] = {}
         try:
-            accumulated: Any | None = None
-            stream_kwargs = dict(invoke_extras)
-            if stream_config is not None:
-                stream_kwargs["config"] = stream_config
-            if supports_astream_kwargs(callback_target, invoke_extras):
-                if supports_astream_kwargs(callback_target, stream_kwargs):
-                    stream = astream(prepared_messages, **stream_kwargs)
+            async def stream_once(
+                callback_target: Any = callback_target,
+                invoke_extras: dict[str, Any] = invoke_extras,
+                astream: Any = astream,
+            ) -> Any:
+                accumulated: Any | None = None
+                stream_kwargs = dict(invoke_extras)
+                if stream_config is not None:
+                    stream_kwargs["config"] = stream_config
+                if supports_astream_kwargs(callback_target, invoke_extras):
+                    if supports_astream_kwargs(callback_target, stream_kwargs):
+                        stream = astream(prepared_messages, **stream_kwargs)
+                    else:
+                        stream = astream(prepared_messages, **invoke_extras)
+                elif stream_config is not None and supports_astream_kwargs(
+                    callback_target, {"config": stream_config}
+                ):
+                    stream = astream(prepared_messages, config=stream_config)
                 else:
-                    stream = astream(prepared_messages, **invoke_extras)
-            elif stream_config is not None and supports_astream_kwargs(
-                callback_target, {"config": stream_config}
-            ):
-                stream = astream(prepared_messages, config=stream_config)
-            else:
-                stream = astream(prepared_messages)
-            async for chunk in stream:
-                accumulated = chunk if accumulated is None else accumulated + chunk
-            if accumulated is None:
-                response = AIMessage(content="")
-            else:
-                response = _ai_message_from_stream_chunk(accumulated)
+                    stream = astream(prepared_messages)
+                async for chunk in stream:
+                    accumulated = chunk if accumulated is None else accumulated + chunk
+                if accumulated is None:
+                    return AIMessage(content="")
+                return _ai_message_from_stream_chunk(accumulated)
+
+            response = await _run_with_transient_model_retries(
+                runtime,
+                model_name=resolved_model_name,
+                attempt_context=attempt_context,
+                operation=stream_once,
+            )
             return response
         except Exception as exc:
             error_text, error_fields = model_error_trace.log_invoke_error(runtime, exc=exc, model_name=resolved_model_name, attempt_context=attempt_context, phase="astream")

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, Protocol
 
 from opentulpa.intake.reply_policy import build_missing_field_follow_up_reply
-from opentulpa.intake.workflow_boundaries import DecisionActions
+from opentulpa.intake.workflow_boundaries import BookingTargetResolution, DecisionActions
 from opentulpa.intake.workflow_runtime import (
     DEFAULT_EDIT_WINDOW as _DEFAULT_EDIT_WINDOW,
 )
@@ -21,6 +23,109 @@ from opentulpa.intake.workflow_runtime import (
 )
 
 ApplyResult = tuple[dict[str, Any], str | None, dict[str, Any] | None]
+
+
+class DecisionApplyService(Protocol):
+    def _emit_observability(
+        self,
+        *,
+        event: str,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        **extra: Any,
+    ) -> None: ...
+
+    def _resolve_booking_target(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        booking_action: str,
+        active_booking: dict[str, Any] | None,
+        recent_completed_booking: dict[str, Any] | None,
+    ) -> BookingTargetResolution: ...
+
+    def _upsert_booking(self, booking: dict[str, Any]) -> None: ...
+
+    def _build_recovery_feedback(
+        self,
+        *,
+        phase: str,
+        error: str,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def _build_saved_summary(
+        self,
+        *,
+        workflow: dict[str, Any],
+        booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> str: ...
+
+    def _write_to_sink(
+        self,
+        *,
+        workflow: dict[str, Any],
+        booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        payload: dict[str, Any],
+        sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
+    ) -> tuple[dict[str, Any], str | None]: ...
+
+    async def _send_intake_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        reply_text: str,
+    ) -> str | None: ...
+
+    def _emit_apply_decision_validation_error(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        error: str,
+        booking_action: str,
+        sink_action: str,
+    ) -> None: ...
+
+    def _build_cancellation_confirmation_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> str: ...
+
+    def _should_enforce_completion_reply(self, *, workflow: dict[str, Any]) -> bool: ...
+
+    def _build_completion_confirmation_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        booking: dict[str, Any],
+        conversation_summary: dict[str, Any],
+    ) -> str: ...
+
+    def _missing_field_for_follow_up(
+        self,
+        *,
+        workflow: dict[str, Any],
+        decision: dict[str, Any],
+        active_booking: dict[str, Any],
+    ) -> str: ...
+
+    def _requeue_if_conversation_stale(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_id: str,
+        conversation_summary: dict[str, Any],
+        matched: bool,
+    ) -> dict[str, Any] | None: ...
 
 
 @dataclass
@@ -49,7 +154,13 @@ class ApplyState:
 class DecisionApplier:
     """Applies model decisions to bookings, sinks, and replies."""
 
-    def __init__(self, service: Any, *, utc_now: Any, utc_now_iso: Any) -> None:
+    def __init__(
+        self,
+        service: DecisionApplyService,
+        *,
+        utc_now: Callable[[], datetime],
+        utc_now_iso: Callable[[], str],
+    ) -> None:
         self._service = service
         self._utc_now = utc_now
         self._utc_now_iso = utc_now_iso

@@ -2325,7 +2325,6 @@ class IntakeWorkflowService:
         )
 
     @staticmethod
-    @staticmethod
     def _select_composio_sink_candidate(
         *,
         sink_type: str,
