@@ -134,11 +134,14 @@ def test_workflow_setup_begin_create_persists_session(tmp_path: Path) -> None:
 
     assert session["status"] == "active"
     assert session["mode"] == "create"
-    assert session["draft_upsert"]["channel"] == "instagram_dm"
+    assert session["draft_upsert"]["channel"] == ""
+    assert session["draft_upsert"]["provider"] == ""
     assert session["draft_upsert"]["reply_mode"] == "auto"
     assert session["scratchpad"]["mode"] == "create"
     assert session["scratchpad"]["source_file_ids"] == []
     assert session["scratchpad"]["knowledge_source_file_ids"] == []
+    assert session["scratchpad"]["current_requested_channel"] == ""
+    assert session["scratchpad"]["current_requested_provider"] == ""
 
 
 def test_workflow_setup_begin_web_create_defaults_to_auto_reply_mode(tmp_path: Path) -> None:
@@ -150,7 +153,8 @@ def test_workflow_setup_begin_web_create_defaults_to_auto_reply_mode(tmp_path: P
         mode="create",
     )
 
-    assert session["draft_upsert"]["channel"] == "instagram_dm"
+    assert session["draft_upsert"]["channel"] == ""
+    assert session["draft_upsert"]["provider"] == ""
     assert session["draft_upsert"]["reply_mode"] == "auto"
 
 
@@ -206,6 +210,8 @@ def test_workflow_setup_confirm_requires_fresh_proposal(tmp_path: Path) -> None:
         thread_id="thread_123",
         draft_patch={
             "name": "Car Wash Intake",
+            "channel": "instagram_dm",
+            "provider": "composio",
             "intent_description": "Handle booking requests from Instagram DMs.",
             "required_fields": ["day", "time", "car_type", "wash_type"],
             "sink_type": "local_csv",
@@ -231,6 +237,8 @@ def test_workflow_setup_commit_create_persists_active_workflow(tmp_path: Path) -
         thread_id="thread_123",
         draft_patch={
             "name": "Car Wash Intake",
+            "channel": "instagram_dm",
+            "provider": "composio",
             "intent_description": "Handle booking requests from Instagram DMs.",
             "required_fields": ["day", "time", "car_type", "wash_type"],
             "assistant_instructions": "Be direct.",
@@ -260,6 +268,8 @@ def test_workflow_setup_finalize_confirmation_applies_final_patch_and_commits(
         thread_id="thread_123",
         draft_patch={
             "name": "Car Wash Intake",
+            "channel": "instagram_dm",
+            "provider": "composio",
             "intent_description": "Handle booking requests from Instagram DMs.",
             "required_fields": ["day", "time", "car_type", "wash_type"],
             "assistant_instructions": "Be direct.",
@@ -297,6 +307,8 @@ def test_workflow_setup_web_finalize_keeps_explicit_instagram_reply_mode(
         thread_id="dashboard-owner-dep_123",
         draft_patch={
             "name": "Car Wash Intake",
+            "channel": "instagram_dm",
+            "provider": "composio",
             "intent_description": "Handle booking requests from Instagram DMs.",
             "required_fields": ["day", "time"],
             "sink_type": "local_csv",
@@ -376,13 +388,99 @@ def test_workflow_setup_update_clears_schedule_for_telegram_channel(tmp_path: Pa
         thread_id="thread_123",
         draft_patch={
             "channel": "telegram_business_dm",
-            "provider": "telegram_bot_api",
             "schedule": "*/2 * * * *",
         },
     )
 
     assert session["draft_upsert"]["channel"] == "telegram_business_dm"
+    assert session["draft_upsert"]["provider"] == "telegram_bot_api"
     assert session["draft_upsert"]["schedule"] == ""
+
+
+def test_workflow_setup_rejects_nested_draft_patch_shape(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+
+    with pytest.raises(ValueError, match="workflow fields directly"):
+        setup.update_session(
+            customer_id="telegram_123",
+            thread_id="thread_123",
+            draft_patch={
+                "draft": {
+                    "name": "Car Wash Intake",
+                    "channel": "telegram_business_dm",
+                }
+            },
+        )
+
+
+def test_workflow_setup_latest_source_request_wins(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    session = setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={"channel": "telegram_business_dm"},
+    )
+    assert session["draft_upsert"]["provider"] == "telegram_bot_api"
+    assert session["scratchpad"]["current_requested_channel"] == "telegram_business_dm"
+
+    session = setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={"channel": "instagram_dm"},
+    )
+
+    assert session["draft_upsert"]["channel"] == "instagram_dm"
+    assert session["draft_upsert"]["provider"] == "composio"
+    assert session["scratchpad"]["current_requested_channel"] == "instagram_dm"
+
+
+def test_workflow_setup_preflight_blocks_stale_source_mismatch(tmp_path: Path) -> None:
+    setup, _, _ = _mk_setup_service(tmp_path)
+    setup.begin_session(customer_id="telegram_123", thread_id="thread_123", mode="create")
+    setup.update_session(
+        customer_id="telegram_123",
+        thread_id="thread_123",
+        draft_patch={
+            "channel": "telegram_business_dm",
+            "name": "Telegram booking",
+            "intent_description": "Book inbound Telegram leads.",
+            "required_fields": ["name", "time"],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+        },
+    )
+    setup._store.update_session(  # type: ignore[attr-defined]
+        session_id=setup.get_thread_session(
+            customer_id="telegram_123",
+            thread_id="thread_123",
+        )["session_id"],
+        draft_upsert={
+            "name": "Telegram booking",
+            "channel": "instagram_dm",
+            "provider": "composio",
+            "source_config": {},
+            "intent_description": "Book inbound Telegram leads.",
+            "required_fields": ["name", "time"],
+            "field_guidance": {},
+            "assistant_instructions": "",
+            "business_facts": {},
+            "knowledge_file_ids": [],
+            "sink_type": "local_csv",
+            "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
+            "schedule": "*/2 * * * *",
+            "notify_user": True,
+            "enabled": True,
+            "reply_mode": "auto",
+        },
+    )
+
+    session = setup.preflight_current(customer_id="telegram_123", thread_id="thread_123")
+
+    preflight = session["preflight"]
+    assert preflight["status"] == "needs_clarification"
+    assert "currently requested channel=telegram_business_dm" in preflight["errors"][0]
 
 
 def test_workflow_setup_update_replaces_field_guidance_and_sink_field_mapping(
@@ -494,6 +592,8 @@ def test_workflow_setup_preflight_normalizes_single_google_sheet_tab_and_dry_run
         thread_id="thread_123",
         draft_patch={
             "name": "AutoSpa Telegram Intake",
+            "channel": "instagram_dm",
+            "provider": "composio",
             "intent_description": "Записывать клиентов на мойку.",
             "required_fields": ["тип услуги", "телефон клиента"],
             "sink_type": "google_sheets_composio",
@@ -541,6 +641,8 @@ def test_workflow_setup_preflight_reuses_ready_result_for_unchanged_draft(
         thread_id="thread_123",
         draft_patch={
             "name": "AutoSpa Telegram Intake",
+            "channel": "instagram_dm",
+            "provider": "composio",
             "intent_description": "Записывать клиентов на мойку.",
             "required_fields": ["тип услуги", "телефон клиента"],
             "sink_type": "google_sheets_composio",

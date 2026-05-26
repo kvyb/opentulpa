@@ -40,6 +40,18 @@ from opentulpa.intake.workflow_runtime import (
     utc_now_iso as _utc_now_iso,
 )
 
+_LOCAL_CSV_SYSTEM_COLUMNS = frozenset(
+    {
+        "booking_id",
+        "workflow_id",
+        "workflow_name",
+        "conversation_id",
+        "customer_id",
+        "status",
+        "completed_at",
+    }
+)
+
 
 class SinkWriter:
     """Writes completed or partial bookings to configured sinks."""
@@ -56,6 +68,7 @@ class SinkWriter:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
         if sink_type == "local_csv":
@@ -63,6 +76,7 @@ class SinkWriter:
                 workflow=workflow,
                 booking=booking,
                 payload=payload,
+                record_status=record_status,
             )
         if sink_type in {"google_sheets_composio", "generic_composio_write"}:
             return self.write_to_composio_sink(
@@ -71,6 +85,7 @@ class SinkWriter:
                 conversation_summary=conversation_summary,
                 payload=payload,
                 sink_arguments=sink_arguments,
+                record_status=record_status,
             )
         return {}, f"unsupported sink_type={sink_type}"
 
@@ -80,13 +95,19 @@ class SinkWriter:
         workflow: dict[str, Any],
         booking: dict[str, Any],
         payload: dict[str, Any],
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         sink_config = _safe_dict(workflow.get("sink_config"))
         relative_path = str(sink_config.get("file_path", "") or "").strip()
         if not relative_path:
             return {}, "local_csv sink is missing file_path"
         absolute_path = (self._project_root / relative_path).resolve()
-        base_row = self._local_csv_row(workflow=workflow, booking=booking, payload=payload)
+        base_row = self._local_csv_row(
+            workflow=workflow,
+            booking=booking,
+            payload=payload,
+            record_status=record_status,
+        )
         rows, fieldnames = self._read_existing_csv(absolute_path, base_row)
         self._upsert_csv_row(rows=rows, row=base_row, booking_id=str(booking["booking_id"]))
         self._write_csv_rows(absolute_path=absolute_path, fieldnames=fieldnames, rows=rows)
@@ -104,6 +125,7 @@ class SinkWriter:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
             return {}, "Composio is not available for sink execution"
@@ -122,6 +144,7 @@ class SinkWriter:
             conversation_summary=conversation_summary,
             payload=payload,
             sink_arguments=sink_arguments,
+            record_status=record_status,
         )
         if isinstance(arguments_result, str):
             return {}, arguments_result
@@ -233,6 +256,7 @@ class SinkWriter:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None,
+        record_status: str | None,
     ) -> dict[str, Any] | str:
         sink_config = _safe_dict(workflow.get("sink_config"))
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
@@ -254,6 +278,7 @@ class SinkWriter:
             booking=booking,
             conversation_summary=conversation_summary,
             payload=payload,
+            record_status=record_status,
         )
         if sink_type == "google_sheets_composio":
             arguments = self._google_sheets_arguments(
@@ -380,8 +405,9 @@ class SinkWriter:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
+        record_status: str | None,
     ) -> dict[str, Any]:
-        return {
+        enriched = {
             **payload,
             "booking_id": str(booking["booking_id"]),
             "workflow_id": str(workflow["workflow_id"]),
@@ -392,6 +418,9 @@ class SinkWriter:
             "username": _incoming_username(conversation_summary),
             "latest_inbound_sender_username": _incoming_username(conversation_summary),
         }
+        if record_status:
+            enriched["status"] = str(record_status).strip()
+        return enriched
 
     @staticmethod
     def _local_csv_row(
@@ -399,6 +428,7 @@ class SinkWriter:
         workflow: dict[str, Any],
         booking: dict[str, Any],
         payload: dict[str, Any],
+        record_status: str | None,
     ) -> dict[str, str]:
         base_row = {
             "booking_id": str(booking["booking_id"]),
@@ -406,10 +436,12 @@ class SinkWriter:
             "workflow_name": str(workflow["name"]),
             "conversation_id": str(booking["conversation_id"]),
             "customer_id": str(workflow["customer_id"]),
-            "status": "completed",
+            "status": str(record_status or "completed").strip() or "completed",
             "completed_at": _utc_now_iso(),
         }
         for key, value in payload.items():
+            if str(key) in _LOCAL_CSV_SYSTEM_COLUMNS:
+                continue
             base_row[str(key)] = str(value or "")
         return base_row
 

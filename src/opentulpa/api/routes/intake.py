@@ -256,6 +256,20 @@ def register_intake_workflow_routes(
             return JSONResponse(status_code=400, content={"detail": str(exc)})
         return {"ok": True, "session": session, "preflight": session.get("preflight", {})}
 
+    @app.post("/internal/intake/setup/propose_current")
+    async def internal_intake_setup_propose_current(request: Request) -> Any:
+        service = get_workflow_setup_service()
+        body = await request.json()
+        customer_id = resolve_body_customer_id(body, resolve_customer_id)
+        try:
+            session = service.propose_current(
+                customer_id=customer_id,
+                thread_id=str(body.get("thread_id", "")).strip(),
+            )
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+        return {"ok": True, "session": session, "preflight": session.get("preflight", {})}
+
     @app.post("/internal/intake/setup/confirm_current")
     async def internal_intake_setup_confirm_current(request: Request) -> Any:
         service = get_workflow_setup_service()

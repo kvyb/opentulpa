@@ -13,7 +13,7 @@ import httpx
 import pytest
 from evaluation.judge import DEFAULT_JUDGE_MODEL, evaluate_e2e_scenario_with_llm_judge
 from harness.lead_simulator import DEFAULT_LEAD_SIMULATOR_MODEL, LeadProfile
-from harness.runner import E2EHarness
+from harness.runner import E2EHarness, effective_live_llm_timeout_seconds
 
 from tests.workbook_fixtures import (
     SAMPLE_VEHICLE_SERVICES_XLSX_FILENAME,
@@ -1799,7 +1799,10 @@ def test_live_ai_owner_creates_autospa_business_knowledge_workflow_and_simulated
             file_uploaded = file_uploaded or attach_file
             if _wait_until(
                 lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) >= 1,
-                timeout_seconds=8.0,
+                timeout_seconds=effective_live_llm_timeout_seconds(
+                    8.0,
+                    override_env="OPENTULPA_E2E_OWNER_SETUP_WAIT_TIMEOUT_SECONDS",
+                ),
             ):
                 break
 
@@ -2912,6 +2915,7 @@ def test_live_lead_simulator_can_complete_telegram_car_wash_booking(
                 "Use the workflow name 'E2E Simulated Lead Car Wash'. "
                 "Collect exactly these fields: car_model, car_type, wash_type, date, time. "
                 "If a lead asks for price, answer directly first and then ask only for the next missing booking detail. "
+                "Use these prices: small car full wash 1000 rubles, SUV full wash 2500 rubles. "
                 "Do not repeat already known details. "
                 "Do not save until all required fields are known. "
                 f"Save completed bookings to local CSV {csv_relative_path}. "

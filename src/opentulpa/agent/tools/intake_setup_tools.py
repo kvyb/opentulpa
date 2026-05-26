@@ -9,6 +9,34 @@ from langchain.tools import tool
 from opentulpa.agent.tools.common import require_customer_id, require_thread_id
 
 
+def _proposal_final_response_hint(session: dict[str, Any]) -> str:
+    if not str(session.get("last_proposed_draft_hash", "") or "").strip():
+        return ""
+    preflight = session.get("preflight")
+    if not isinstance(preflight, dict) or str(preflight.get("status", "") or "") != "ready":
+        return ""
+    draft = session.get("draft_upsert")
+    if not isinstance(draft, dict):
+        return ""
+    raw_fields = draft.get("required_fields")
+    fields = ", ".join(
+        str(item or "").strip()
+        for item in (raw_fields if isinstance(raw_fields, list) else [])
+        if str(item or "").strip()
+    )
+    sink = str(draft.get("sink_type", "") or "").strip() or "unspecified"
+    channel = str(draft.get("channel", "") or "").strip() or "unspecified"
+    name = str(draft.get("name", "") or "").strip() or "Untitled workflow"
+    return (
+        "Workflow proposal is ready.\n"
+        f"- Name: {name}\n"
+        f"- Channel: {channel}\n"
+        f"- Required fields: {fields or 'none'}\n"
+        f"- Sink: {sink}\n"
+        "Confirm/save to activate it, or tell me what to change."
+    )
+
+
 def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
     @tool
     async def intake_workflow_setup_begin(mode: str, workflow_id: str = "") -> Any:
@@ -65,6 +93,10 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         """Patch the workflow setup draft and scratchpad for the current thread.
 
         Use this inside workflow setup mode to record newly learned workflow fields and internal setup notes.
+        Put workflow fields directly inside draft_patch; do not nest them under draft, draft_upsert,
+        workflow, or workflow_upsert.
+        If the owner changes source/channel later, latest explicit owner request wins: update
+        draft_patch.channel and draft_patch.provider in the same call before proposing.
         For local_csv workflows, use draft_patch.sink_config={"file_path": "..."}.
         For google_sheets_composio workflows, put spreadsheet targets in
         draft_patch.sink_config.static_arguments, for example spreadsheetId and sheetName;
@@ -107,6 +139,8 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         """Run workflow setup preflight validation on the current draft before proposing it.
 
         Use this after the draft has the intended channel, source, sink, required_fields, and knowledge files.
+        Prefer intake_workflow_setup_propose_current when the next step is to show a proposal; use this
+        tool only when you need validation details without marking the draft proposed.
         It is non-destructive: it may normalize safe sink details like a single discovered Google Sheets tab,
         and it returns a dry-run preview of what the sink write would look like without writing rows.
         If status is not ready, ask the returned focused follow-up question instead of proposing the workflow.
@@ -124,10 +158,38 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         return r.json().get("preflight", {})
 
     @tool
+    async def intake_workflow_setup_propose_current() -> Any:
+        """Preflight the current workflow setup draft and mark it proposed when ready.
+
+        Use this after the draft has the intended channel, source, sink, required_fields,
+        and knowledge files, when you are ready to show the owner a proposal. If status is
+        ready, this tool marks the exact current draft as proposed in the same backend step.
+        Then summarize the returned draft/preflight and ask the owner to confirm before saving.
+        If status is not ready, ask the returned focused follow-up question instead.
+        """
+        customer_id = require_customer_id(runtime)
+        thread_id = require_thread_id(runtime)
+        r = await runtime._request_with_backoff(
+            "POST",
+            "/internal/intake/setup/propose_current",
+            json_body={"customer_id": customer_id, "thread_id": thread_id},
+            timeout=30.0,
+        )
+        if r.status_code != 200:
+            return {"error": f"intake_workflow_setup_propose_current failed: {r.text}"}
+        session = r.json().get("session", {})
+        if isinstance(session, dict):
+            hint = _proposal_final_response_hint(session)
+            if hint:
+                session["final_response_hint"] = hint
+        return session
+
+    @tool
     async def intake_workflow_setup_mark_proposed() -> Any:
         """Mark the current workflow setup draft as the proposal shown to the user.
 
-        Call this after ready preflight and before showing the proposal summary.
+        Prefer intake_workflow_setup_propose_current. Call this only when you already ran
+        preflight in a previous step and still need to mark that exact current draft.
         Without this marker, owner confirmation cannot be committed safely.
         """
         customer_id = require_customer_id(runtime)
@@ -193,6 +255,8 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         scratchpad_patch; this tool will persist them, preflight, mark the current
         draft as proposed, confirm it, and commit it. Do not call the separate
         preflight/mark_proposed/confirm_current/commit tools after this succeeds.
+        Put workflow fields directly inside draft_patch; do not nest them under draft,
+        draft_upsert, workflow, or workflow_upsert.
         """
         customer_id = require_customer_id(runtime)
         thread_id = require_thread_id(runtime)
@@ -246,6 +310,7 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         "intake_workflow_setup_get": intake_workflow_setup_get,
         "intake_workflow_setup_update": intake_workflow_setup_update,
         "intake_workflow_setup_preflight": intake_workflow_setup_preflight,
+        "intake_workflow_setup_propose_current": intake_workflow_setup_propose_current,
         "intake_workflow_setup_mark_proposed": intake_workflow_setup_mark_proposed,
         "intake_workflow_setup_confirm_current": intake_workflow_setup_confirm_current,
         "intake_workflow_setup_commit": intake_workflow_setup_commit,

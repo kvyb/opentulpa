@@ -104,3 +104,20 @@ def workflow_requires_intent_match(workflow: dict[str, Any]) -> bool:
             matching.get("intent_match_required"),
         )
     )
+
+
+def normalize_source_config(source_config: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(safe_dict(source_config))
+    for key in ("intent_match_required", "strict_intent_matching", "filter_by_intent"):
+        if key in normalized and not truthy_config_flag(normalized.get(key)):
+            normalized.pop(key, None)
+    matching = dict(safe_dict(normalized.get("matching")))
+    if "intent_match_required" in matching and not truthy_config_flag(
+        matching.get("intent_match_required")
+    ):
+        matching.pop("intent_match_required", None)
+    if matching:
+        normalized["matching"] = matching
+    else:
+        normalized.pop("matching", None)
+    return normalized

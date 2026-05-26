@@ -21,6 +21,9 @@ from opentulpa.intake.messaging_adapters import (
     build_messaging_adapter_registry,
     messaging_adapter_context,
 )
+from opentulpa.intake.reply_policy import (
+    looks_like_cyrillic as _looks_like_cyrillic,
+)
 from opentulpa.intake.sink_utils import (
     clean_mapping as _clean_mapping,
 )
@@ -58,6 +61,9 @@ from opentulpa.intake.workflow_boundaries import (
     BookingTargetResolution,
 )
 from opentulpa.intake.workflow_runner import WorkflowRunner
+from opentulpa.intake.workflow_runtime import (
+    normalize_source_config as _normalize_source_config,
+)
 from opentulpa.intake.workflow_runtime import (
     parse_datetime as _parse_datetime,
 )
@@ -216,11 +222,6 @@ def _normalize_optional_id(value: Any) -> str:
     if text.lower() in {"none", "null"}:
         return ""
     return text
-
-
-def _looks_like_cyrillic(*values: Any) -> bool:
-    text = " ".join(str(value or "") for value in values)
-    return any("\u0400" <= char <= "\u04ff" for char in text)
 
 
 def _extract_phone_hint(value: Any) -> str:
@@ -854,7 +855,7 @@ class IntakeWorkflowService:
         safe_intent = str(intent_description or "").strip()
         safe_schedule = str(schedule or _DEFAULT_SCHEDULE).strip() or _DEFAULT_SCHEDULE
         safe_required_fields = _unique_string_list(required_fields)
-        safe_source_config = _safe_dict(source_config)
+        safe_source_config = _normalize_source_config(source_config)
         safe_field_guidance = _safe_dict(field_guidance)
         safe_assistant_instructions = str(assistant_instructions or "").strip()
         safe_business_facts = _normalize_business_facts(business_facts)
@@ -878,6 +879,7 @@ class IntakeWorkflowService:
                 customer_id=safe_customer,
                 source_config=safe_source_config,
             )
+            safe_source_config = _normalize_source_config(safe_source_config)
             business_connection_id = str(safe_source_config.get("business_connection_id", "") or "").strip()
             if not business_connection_id:
                 raise ValueError("telegram_business_dm workflows require source_config.business_connection_id")
@@ -2265,6 +2267,7 @@ class IntakeWorkflowService:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         return self._sink_writer.write_to_sink(
             workflow=workflow,
@@ -2272,6 +2275,7 @@ class IntakeWorkflowService:
             conversation_summary=conversation_summary,
             payload=payload,
             sink_arguments=sink_arguments,
+            record_status=record_status,
         )
 
     def _write_to_local_csv(
@@ -2281,11 +2285,13 @@ class IntakeWorkflowService:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         return self._sink_writer.write_to_local_csv(
             workflow=workflow,
             booking=booking,
             payload=payload,
+            record_status=record_status,
         )
 
     def _write_to_composio_sink(
@@ -2296,6 +2302,7 @@ class IntakeWorkflowService:
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
         sink_arguments: dict[str, Any] | None = None,
+        record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         return self._sink_writer.write_to_composio_sink(
             workflow=workflow,
@@ -2303,6 +2310,7 @@ class IntakeWorkflowService:
             conversation_summary=conversation_summary,
             payload=payload,
             sink_arguments=sink_arguments,
+            record_status=record_status,
         )
 
     def _resolve_composio_sink_tool_slug(

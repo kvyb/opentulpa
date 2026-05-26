@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from opentulpa.intake.reply_policy import build_missing_field_follow_up_reply
 from opentulpa.intake.workflow_boundaries import DecisionActions
 from opentulpa.intake.workflow_runtime import (
     DEFAULT_EDIT_WINDOW as _DEFAULT_EDIT_WINDOW,
@@ -198,6 +199,7 @@ class DecisionApplier:
         state.target_booking["sink_write_status"] = state.sink_status
         state.target_booking["sink_record_ref"] = state.sink_ref
         state.target_booking["updated_at"] = self._utc_now_iso()
+        self._normalize_active_missing_field_reply(request, state)
         if request.actions.sink_action == "upsert_partial" and request.actions.sink_payload:
             partial_result = self._write_partial_sink(request, state)
             if partial_result is not None:
@@ -292,6 +294,7 @@ class DecisionApplier:
             conversation_summary=request.conversation_summary,
             payload=save_payload,
             sink_arguments=state.sink_arguments,
+            record_status=self._completed_record_status(state),
         )
         if sink_error is not None:
             return self._sink_error(request, state, sink_error)
@@ -562,6 +565,41 @@ class DecisionApplier:
         )
         self._service._emit_observability(
             event="intake.reply.normalized_completion_confirmation",
+            workflow=request.workflow,
+            conversation_summary=request.conversation_summary,
+            booking_id=self._booking_id(state),
+            reply_text=state.reply_text,
+        )
+
+    @staticmethod
+    def _completed_record_status(state: ApplyState) -> str:
+        return "cancelled" if state.reply_action == "mark_cancelled" else "completed"
+
+    def _normalize_active_missing_field_reply(
+        self,
+        request: ApplyRequest,
+        state: ApplyState,
+    ) -> None:
+        if not self._service._should_enforce_completion_reply(workflow=request.workflow):
+            return
+        if state.reply_action == "send_reply" and state.reply_text:
+            return
+        missing_field = self._service._missing_field_for_follow_up(
+            workflow=request.workflow,
+            decision=request.decision,
+            active_booking=state.target_booking,
+        )
+        follow_up_reply = build_missing_field_follow_up_reply(
+            missing_field=missing_field,
+            workflow=request.workflow,
+            conversation_summary=request.conversation_summary,
+        )
+        if not follow_up_reply:
+            return
+        state.reply_action = "send_reply"
+        state.reply_text = follow_up_reply
+        self._service._emit_observability(
+            event="intake.reply.normalized_missing_field_follow_up",
             workflow=request.workflow,
             conversation_summary=request.conversation_summary,
             booking_id=self._booking_id(state),

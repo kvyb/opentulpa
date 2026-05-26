@@ -13,6 +13,7 @@ from langchain.chat_models import init_chat_model
 from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
+from opentulpa.agent import model_error_trace
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
@@ -522,6 +523,7 @@ async def ainvoke_model(
         callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
         response: Any | None = None
         error_text: str | None = None
+        error_fields: dict[str, str] = {}
         try:
             if supports_ainvoke_kwargs(callback_target, invoke_extras):
                 response = await callback_target.ainvoke(prepared_messages, **invoke_extras)
@@ -529,7 +531,7 @@ async def ainvoke_model(
                 response = await callback_target.ainvoke(prepared_messages)
             return response
         except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_text, error_fields = model_error_trace.log_invoke_error(runtime, exc=exc, model_name=resolved_model_name, attempt_context=attempt_context, phase="ainvoke")
             last_exc = exc
             if attempt_index + 1 >= len(attempts):
                 raise
@@ -556,6 +558,7 @@ async def ainvoke_model(
                 error=error_text,
                 call_context={
                     **attempt_context,
+                    **error_fields,
                     "cacheable_prefix_count": cacheable_prefix_count,
                 },
             )
@@ -613,6 +616,7 @@ async def astream_model(
             )
         response: Any | None = None
         error_text: str | None = None
+        error_fields: dict[str, str] = {}
         try:
             accumulated: Any | None = None
             stream_kwargs = dict(invoke_extras)
@@ -637,7 +641,7 @@ async def astream_model(
                 response = _ai_message_from_stream_chunk(accumulated)
             return response
         except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_text, error_fields = model_error_trace.log_invoke_error(runtime, exc=exc, model_name=resolved_model_name, attempt_context=attempt_context, phase="astream")
             last_exc = exc
             if attempt_index + 1 >= len(attempts):
                 raise
@@ -664,6 +668,7 @@ async def astream_model(
                 error=error_text,
                 call_context={
                     **attempt_context,
+                    **error_fields,
                     "cacheable_prefix_count": cacheable_prefix_count,
                 },
             )
@@ -710,6 +715,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
         attempt_context["provider_attempt_count"] = len(attempts)
         callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
         structured = getattr(callback_target, "with_structured_output", None)
+        skip_native_structured = model_error_trace.skip_native_structured_output(resolved_model_name)
         payload: Any | None = None
         error_text: str | None = None
         trace_recorded = False
@@ -728,9 +734,10 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
             provider_attempt_count=int(attempt_context.get("provider_attempt_count") or 1),
             prompt_message_count=len(prepared_messages),
             stable_prefix_count=int(stable_prefix_count),
-            structured_output_supported=bool(callable(structured)),
+            structured_output_supported=bool(callable(structured) and not skip_native_structured),
+            native_structured_output_skipped=skip_native_structured,
         )
-        if callable(structured):
+        if callable(structured) and not skip_native_structured:
             phase = "structured_output"
             try:
                 structured_started = time.monotonic()
@@ -770,7 +777,8 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                             payload = await runner.ainvoke(prepared_messages)
                         break
                     except Exception as exc:
-                        retry_error_text = f"{type(exc).__name__}: {exc}"
+                        retry_error_text = model_error_trace.exception_trace_text(exc)
+                        retry_error_fields = model_error_trace.exception_trace_fields(exc)
                         if (
                             provider_retry_index >= transient_retries
                             or not _is_retryable_model_error(retry_error_text)
@@ -794,6 +802,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                             retry_limit=transient_retries,
                             delay_seconds=delay_seconds,
                             error=retry_error_text,
+                            **retry_error_fields,
                         )
                         await asyncio.sleep(delay_seconds)
                 provider_elapsed_ms = int((time.monotonic() - provider_started) * 1000)
@@ -859,7 +868,8 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                     f"{type(payload).__name__}"
                 )
             except Exception as exc:
-                error_text = f"{type(exc).__name__}: {exc}"
+                error_text = model_error_trace.exception_trace_text(exc)
+                error_fields = model_error_trace.exception_trace_fields(exc)
                 runtime.log_behavior_event(
                     event="llm.invoke.error",
                     model_name=resolved_model_name,
@@ -873,6 +883,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                     phase=phase,
                     elapsed_ms=int((time.monotonic() - invoke_started) * 1000),
                     error=error_text,
+                    **error_fields,
                 )
             finally:
                 if not trace_recorded and (payload is not None or error_text):
@@ -924,7 +935,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
             try:
                 return schema.model_validate_json(clean_json_text_block(raw)), None
             except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+                last_error = model_error_trace.exception_trace_text(exc)
                 repair_messages = list(messages) + [
                     SystemMessage(
                         content=(
@@ -970,5 +981,5 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                 if repair_raw:
                     return schema.model_validate_json(clean_json_text_block(repair_raw)), None
     except Exception as exc:
-        last_error = f"{type(exc).__name__}: {exc}"
+        last_error = model_error_trace.exception_trace_text(exc)
     return None, last_error

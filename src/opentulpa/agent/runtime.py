@@ -87,6 +87,7 @@ from opentulpa.agent.tools_registry import register_runtime_tools
 from opentulpa.agent.turn_policy import (
     normalize_turn_mode as _normalize_turn_mode,
 )
+from opentulpa.agent.turn_runtime_policy import recursion_limit_for_turn
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
 )
@@ -636,6 +637,7 @@ WORKFLOW_SETUP_TOOL_NAMES: set[str] = {
     "intake_workflow_setup_get",
     "intake_workflow_setup_update",
     "intake_workflow_setup_preflight",
+    "intake_workflow_setup_propose_current",
     "intake_workflow_setup_mark_proposed",
     "intake_workflow_setup_confirm_current",
     "intake_workflow_setup_commit",
@@ -3251,9 +3253,16 @@ class OpenTulpaLangGraphRuntime:
                     customer_id=customer_id,
                     user_text=user_text,
                 )
+        requested_limit = self._effective_recursion_limit(recursion_limit_override)
         config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id},
-            "recursion_limit": self._effective_recursion_limit(recursion_limit_override),
+            "recursion_limit": recursion_limit_for_turn(
+                self,
+                customer_id=customer_id,
+                thread_id=thread_id,
+                requested_turn_mode=turn_mode,
+                requested_limit=requested_limit,
+            ),
         }
         callbacks = self._build_langfuse_callbacks(
             customer_id=customer_id,
@@ -4252,7 +4261,7 @@ class OpenTulpaLangGraphRuntime:
                 first_visible_yield_ms=first_visible_yield_ms,
                 turn_mode=normalized_turn_mode,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "runtime.astream_text failed thread_id=%s customer_id=%s",
                 thread_id,
@@ -4264,6 +4273,7 @@ class OpenTulpaLangGraphRuntime:
                 mode="astream",
                 thread_id=thread_id,
                 customer_id=customer_id,
+                error=f"{type(exc).__name__}: {exc}"[:500],
                 turn_mode=normalized_turn_mode,
             )
             raise

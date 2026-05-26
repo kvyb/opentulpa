@@ -28,6 +28,12 @@ LoopLimitNearFn = Callable[[AgentState], bool]
 RemainingStepsFn = Callable[[AgentState], int | None]
 ValidateToolsNode = Callable[[AgentState], Awaitable[ValidateToolsCommand]]
 _MAX_WEB_SEARCH_CALLS_PER_TURN = 2
+LOOP_LIMIT_REPAIR_MESSAGE = (
+    "LOOP_LIMIT_APPROACHING: Do not call more tools in this turn. Write natural "
+    "user-facing prose now using the previous tool results and current context. "
+    "If enough information exists, give the proposal, confirmation, or answer. "
+    "If not, state the exact blocker and next step."
+)
 
 
 def _successful_tool_calls_in_latest_turn(messages: list[Any]) -> list[dict[str, Any]]:
@@ -96,7 +102,6 @@ def build_validate_tool_calls_node(
     log: GraphLogFn,
     loop_limit_near: LoopLimitNearFn,
     remaining_steps: RemainingStepsFn,
-    loop_limit_final_status_text: str,
 ) -> ValidateToolsNode:
     async def validate_tool_calls_node(state: AgentState) -> ValidateToolsCommand:
         messages = state.get("messages", [])
@@ -124,14 +129,28 @@ def build_validate_tool_calls_node(
                 remaining_steps=remaining_steps(state),
                 turn_mode=turn_mode,
             )
+            blocked_messages = [
+                ToolMessage(
+                    content=(
+                        "TOOL_NOT_RUN_LOOP_LIMIT: this requested tool call was not executed "
+                        "because the turn is near its graph step budget. Use previous tool "
+                        "results and current context to write the final user-facing reply now."
+                    ),
+                    tool_call_id=str(call.get("id", "")),
+                    additional_kwargs={"opentulpa_control": {"status": "error"}},
+                )
+                for call in last.tool_calls
+            ]
             return Command(
                 update={
-                    "messages": [AIMessage(content=loop_limit_final_status_text)],
+                    "messages": [
+                        *blocked_messages,
+                        SystemMessage(content=LOOP_LIMIT_REPAIR_MESSAGE),
+                    ],
                     "tool_validation_passed": False,
                     "turn_status": "running",
-                    "loop_limit_status_update_sent": True,
                 },
-                goto="finalize_turn",
+                goto="agent",
             )
         for msg in reversed(messages[:-1]):
             if isinstance(msg, AIMessage):
