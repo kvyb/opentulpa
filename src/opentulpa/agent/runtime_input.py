@@ -1,4 +1,4 @@
-"""Thread-level turn input coordination for runtime debounce and coalescing."""
+"""Thread-level turn input coordination for runtime debounce and steering."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 
 class MergedInputSuppressedError(Exception):
-    """Raised when a queued input was already merged into a previous in-flight turn."""
+    """Raised when a queued input was already consumed by a previous turn."""
 
 
 @dataclass
@@ -19,7 +19,7 @@ class _ThreadInputState:
 
 
 class ThreadInputCoordinator:
-    """Per-thread input queue with start-time debounce + coalescing semantics."""
+    """Per-thread input queue with start-time debounce and checkpoint steering."""
 
     def __init__(self, *, debounce_seconds: float = 0.65) -> None:
         self._debounce_seconds = max(0.0, min(float(debounce_seconds), 3.0))
@@ -35,11 +35,14 @@ class ThreadInputCoordinator:
                 self._states[tid] = state
             return state
 
-    async def begin_turn(self, *, thread_id: str, text: str) -> tuple[_ThreadInputState | None, str]:
+    async def begin_turn(
+        self, *, thread_id: str, text: str
+    ) -> tuple[_ThreadInputState | None, str]:
         """
-        Returns `(state, merged_text)`.
+        Returns `(state, active_text)`.
 
-        If state is `None`, this request was already merged into an earlier in-flight turn.
+        Each request keeps its own active text. Other pending requests wait for
+        their own turn instead of being merged into the current prompt.
         """
         state = await self._get_state(thread_id)
         request_id = f"req_{id(asyncio.current_task())}"
@@ -56,17 +59,27 @@ class ThreadInputCoordinator:
                 if request_id not in ids:
                     state.turn_lock.release()
                     return None, ""
-                batch = state.pending_inputs[:]
-                state.pending_inputs.clear()
-            parts = [chunk.strip() for _, chunk in batch if chunk.strip()]
-            merged_text = "\n\n".join(parts).strip()
-            if not merged_text:
-                merged_text = safe_text
-            return state, merged_text
+                active_text = safe_text
+                state.pending_inputs = [
+                    (rid, chunk) for rid, chunk in state.pending_inputs if rid != request_id
+                ]
+            return state, active_text
         except Exception:
             with suppress(Exception):
                 state.turn_lock.release()
             raise
+
+    async def drain_steering_inputs(self, *, thread_id: str) -> list[str]:
+        """Consume queued inputs so an active graph turn can see them at its next checkpoint."""
+        state = await self._get_state(thread_id)
+        async with state.pending_lock:
+            if not state.pending_inputs:
+                return []
+            drained = [text for _, text in state.pending_inputs if text]
+            state.pending_inputs.clear()
+        assert isinstance(drained, list)
+        assert all(isinstance(item, str) for item in drained)
+        return drained
 
     @staticmethod
     def end_turn(state: _ThreadInputState | None) -> None:

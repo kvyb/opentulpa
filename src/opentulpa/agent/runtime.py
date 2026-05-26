@@ -189,6 +189,25 @@ def _json_safe(value: Any) -> Any:
     return _redact_inline_trace_string(str(value))
 
 
+def _langchain_callback_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        safe_key = str(key)
+        safe_value = _json_safe(value)
+        if isinstance(safe_value, str):
+            safe[safe_key] = safe_value
+            continue
+        safe[safe_key] = json.dumps(
+            safe_value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return safe
+
+
 def _openrouter_app_headers(
     *,
     base_url: str | None,
@@ -509,7 +528,9 @@ def _prompt_cache_trace_fields(
     if stable_count:
         stable_messages = serialized_messages[:stable_count]
         fields["stable_prefix_hash"] = _hash_json(stable_messages)
-        fields["stable_prefix_chars"] = sum(len(str(item.get("text", "") or "")) for item in stable_messages)
+        fields["stable_prefix_chars"] = sum(
+            len(str(item.get("text", "") or "")) for item in stable_messages
+        )
     cache_breakpoint_indexes: list[int] = []
     for index, message in enumerate(serialized_messages):
         content = message.get("content")
@@ -1554,7 +1575,9 @@ class OpenTulpaLangGraphRuntime:
             self._context_compaction_model = self._wake_execution_model
         elif self._context_compaction_model_name == self._telegram_media_model_name:
             self._context_compaction_model = self._telegram_media_model
-        elif self._context_compaction_model_name == self._workflow_setup_input_classifier_model_name:
+        elif (
+            self._context_compaction_model_name == self._workflow_setup_input_classifier_model_name
+        ):
             self._context_compaction_model = self._workflow_setup_input_classifier_model
         else:
             try:
@@ -1603,7 +1626,9 @@ class OpenTulpaLangGraphRuntime:
         workflow_setup_service: Any | None = None,
     ) -> None:
         assert composio_service is None or hasattr(composio_service, "status")
-        assert workflow_setup_service is None or hasattr(workflow_setup_service, "get_thread_session")
+        assert workflow_setup_service is None or hasattr(
+            workflow_setup_service, "get_thread_session"
+        )
         if link_alias_service is not None and self._link_alias_service is None:
             self._link_alias_service = link_alias_service
         if composio_service is not None:
@@ -1828,9 +1853,7 @@ class OpenTulpaLangGraphRuntime:
         alias = _PROGRESS_TOOL_NAME_ALIASES.get(name)
         if alias is not None:
             return alias
-        return cls._humanize_tool_identifier(
-            name.replace("tulpa_", "").replace("browser_use_", "")
-        )
+        return cls._humanize_tool_identifier(name.replace("tulpa_", "").replace("browser_use_", ""))
 
     @staticmethod
     def _safe_tool_names_for_status(tool_calls: list[Any]) -> list[str]:
@@ -1848,8 +1871,7 @@ class OpenTulpaLangGraphRuntime:
     @staticmethod
     def _describe_tool_calls_for_progress(tool_calls: list[Any]) -> str:
         labels = [
-            OpenTulpaLangGraphRuntime._tool_call_progress_label(call)
-            for call in tool_calls[:2]
+            OpenTulpaLangGraphRuntime._tool_call_progress_label(call) for call in tool_calls[:2]
         ]
         labels = [label for label in labels if label]
         if not labels:
@@ -3178,6 +3200,7 @@ class OpenTulpaLangGraphRuntime:
             "tool_error_count": 0,
             "workflow_setup_no_progress_retry_count": 0,
             "workflow_setup_repair_instruction": "",
+            "live_user_steering": [],
             "stream_model_calls": False,
             **skill_state,
         }
@@ -3264,7 +3287,7 @@ class OpenTulpaLangGraphRuntime:
                 "prompt_mode": str(prompt_mode or "").strip(),
             }
             config_metadata.update(_tool_schema_trace_fields(self, turn_mode))
-            config["metadata"] = config_metadata
+            config["metadata"] = _langchain_callback_metadata(config_metadata)
             config["tags"] = list(config_metadata["langfuse_tags"])
             graph_langfuse_callback_attached = True
         else:
@@ -3370,8 +3393,7 @@ class OpenTulpaLangGraphRuntime:
                 "thread_id": str(context.get("thread_id") or "").strip(),
                 "turn_mode": str(context.get("turn_mode") or "").strip(),
                 "prompt_mode": str(context.get("prompt_mode") or "").strip(),
-                "call_site": str(context.get("call_site") or "").strip()
-                or "runtime_model_invoke",
+                "call_site": str(context.get("call_site") or "").strip() or "runtime_model_invoke",
             }
             metadata.update(
                 _tool_schema_trace_fields(
@@ -3382,7 +3404,7 @@ class OpenTulpaLangGraphRuntime:
             configured_model = with_config(
                 {
                     "callbacks": callbacks,
-                    "metadata": metadata,
+                    "metadata": _langchain_callback_metadata(metadata),
                     "tags": list(metadata["langfuse_tags"]),
                 }
             )
@@ -3992,7 +4014,8 @@ class OpenTulpaLangGraphRuntime:
                         if stream_incremental_deltas:
                             visible_output = (
                                 expanded[len(emitted_visible_text) :]
-                                if emitted_visible_text and expanded.startswith(emitted_visible_text)
+                                if emitted_visible_text
+                                and expanded.startswith(emitted_visible_text)
                                 else expanded
                             )
                             emitted_visible_text = expanded
@@ -4471,18 +4494,29 @@ class OpenTulpaLangGraphRuntime:
         return {"ok": True, "sent": True}
 
     async def drain_interactive_fragments(self, *, thread_id: str) -> list[str]:
+        fragments: list[str] = []
         session = await self._get_registered_interactive_session(thread_id=thread_id)
-        if session is None or not hasattr(session, "drain_graph_fragments"):
-            return []
-        try:
-            drained = await session.drain_graph_fragments()
-        except Exception:
-            logger.exception(
-                "Failed to drain interactive fragments for thread_id=%s",
-                thread_id,
-            )
-            return []
-        return [str(item).strip() for item in drained if str(item).strip()]
+        if session is not None and hasattr(session, "drain_graph_fragments"):
+            try:
+                drained = await session.drain_graph_fragments()
+                fragments.extend(str(item).strip() for item in drained if str(item).strip())
+            except Exception:
+                logger.exception(
+                    "Failed to drain interactive fragments for thread_id=%s",
+                    thread_id,
+                )
+        coordinator = getattr(self, "_thread_inputs", None)
+        drain_steering_inputs = getattr(coordinator, "drain_steering_inputs", None)
+        if callable(drain_steering_inputs):
+            try:
+                drained = await drain_steering_inputs(thread_id=thread_id)
+                fragments.extend(str(item).strip() for item in drained if str(item).strip())
+            except Exception:
+                logger.exception(
+                    "Failed to drain queued steering inputs for thread_id=%s",
+                    thread_id,
+                )
+        return fragments
 
     async def classify_workflow_setup_interruption(
         self,

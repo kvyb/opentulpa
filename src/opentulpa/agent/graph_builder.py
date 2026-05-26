@@ -248,7 +248,7 @@ def _build_late_turn_control_text(
             "Customer scope for customer-scoped tools is resolved automatically from runtime state."
         ),
         (
-            "Time context is available through tool_group_exec(group=\"memory\", command=\"server_time\", args_json={}). "
+            'Time context is available through tool_group_exec(group="memory", command="server_time", args_json={}). '
             "Call it before interpreting relative dates, times, reminders, schedules, deadlines, or timezone-sensitive wording. "
             "Do not infer current time from stale conversation history."
         ),
@@ -309,7 +309,9 @@ async def _build_connected_composio_toolkits_context(runtime: Any, customer_id: 
                 )
                 items = response.get("items") if isinstance(response, dict) else []
                 seen: set[str] = set()
-                for item in items[:_COMPOSIO_PROMPT_TOOLKIT_LIMIT] if isinstance(items, list) else []:
+                for item in (
+                    items[:_COMPOSIO_PROMPT_TOOLKIT_LIMIT] if isinstance(items, list) else []
+                ):
                     if not isinstance(item, dict):
                         continue
                     status = str(item.get("status", "") or "").strip().upper()
@@ -335,10 +337,7 @@ async def _build_connected_composio_toolkits_context(runtime: Any, customer_id: 
 
 
 def _prompt_overhead_tokens(messages: list[AnyMessage]) -> int:
-    return sum(
-        _approx_tokens(_content_to_text(getattr(msg, "content", "")))
-        for msg in messages
-    )
+    return sum(_approx_tokens(_content_to_text(getattr(msg, "content", ""))) for msg in messages)
 
 
 def _select_optional_prompt_entries(
@@ -360,6 +359,7 @@ def _select_optional_prompt_entries(
         kept.append((section, SystemMessage(content=content)))
         used_tokens += msg_tokens
     return kept, used_tokens
+
 
 def _build_relevant_skill_discovery_context(
     *,
@@ -573,7 +573,9 @@ def build_runtime_graph(runtime: Any):
         "browser_use_task_control",
         "browser_use_owner_input_submit",
     }
-    forbidden_tool_args: dict[str, set[str]] = {name: {"customer_id"} for name in customer_scoped_tools}
+    forbidden_tool_args: dict[str, set[str]] = {
+        name: {"customer_id"} for name in customer_scoped_tools
+    }
     forbidden_tool_args["routine_create"] = {"customer_id", "message"}
 
     def _model_uses_current_turn_raw_history_only() -> bool:
@@ -682,9 +684,9 @@ def build_runtime_graph(runtime: Any):
                 visible_text,
             ]
         )
-        dedupe_key = "tool_call_preamble:" + hashlib.sha256(
-            dedupe_source.encode("utf-8")
-        ).hexdigest()[:32]
+        dedupe_key = (
+            "tool_call_preamble:" + hashlib.sha256(dedupe_source.encode("utf-8")).hexdigest()[:32]
+        )
         try:
             result = await emitter(
                 text=visible_text,
@@ -715,7 +717,7 @@ def build_runtime_graph(runtime: Any):
 
     async def agent_node(
         state: AgentState,
-        config: Any | None = None,
+        config=None,
     ) -> Command[Literal["agent", "validate_tools", "finalize_turn"]]:
         customer_id = state.get("customer_id", "")
         thread_id = state.get("thread_id", "")
@@ -737,18 +739,21 @@ def build_runtime_graph(runtime: Any):
                 turn_mode=turn_mode,
             )
         messages = state.get("messages", [])
-        injected_messages: list[HumanMessage] = []
+        live_user_steering = [
+            str(item).strip()
+            for item in (state.get("live_user_steering") or [])
+            if str(item).strip()
+        ]
+        new_steering: list[str] = []
         if turn_mode == "interactive":
             drain_fragments = getattr(runtime, "drain_interactive_fragments", None)
             if callable(drain_fragments):
                 drained = await drain_fragments(thread_id=thread_id)
-                injected_messages = [
-                    HumanMessage(content=str(fragment).strip())
-                    for fragment in drained
-                    if str(fragment).strip()
+                new_steering = [
+                    str(fragment).strip() for fragment in drained if str(fragment).strip()
                 ]
-                if injected_messages:
-                    messages = [*messages, *injected_messages]
+                if new_steering:
+                    live_user_steering = [*live_user_steering, *new_steering][-8:]
         latest_user = _latest_user_text(messages)
         _log(
             state,
@@ -756,7 +761,7 @@ def build_runtime_graph(runtime: Any):
             message_count=len(messages),
             latest_user_chars=len(latest_user),
             turn_mode=turn_mode,
-            injected_user_messages=len(injected_messages),
+            injected_user_messages=len(new_steering),
         )
         cached_query = str(state.get("active_skill_query", "")).strip()
         cached_names = state.get("active_skill_names", []) or []
@@ -1039,7 +1044,9 @@ def build_runtime_graph(runtime: Any):
 
         stable_prompt_messages: list[AnyMessage] = [stable_system_message]
         stable_prompt_sections = ["stable_core_policy"]
-        stable_entries = _normalize_prompt_context_entries(frozen_prompt_context.get("stable_entries"))
+        stable_entries = _normalize_prompt_context_entries(
+            frozen_prompt_context.get("stable_entries")
+        )
         late_entries = _normalize_prompt_context_entries(frozen_prompt_context.get("late_entries"))
         late_control_content = str(frozen_prompt_context.get("late_control_content", "")).strip()
         late_control_sections = [
@@ -1072,7 +1079,9 @@ def build_runtime_graph(runtime: Any):
             "cache_sticky_routing_anchor",
         ]
 
-        late_control_message = SystemMessage(content=late_control_content) if late_control_content else None
+        late_control_message = (
+            SystemMessage(content=late_control_content) if late_control_content else None
+        )
         selected_frozen_late_entries, used_optional_tokens = _select_optional_prompt_entries(
             late_entries,
             initial_used_tokens=used_optional_tokens,
@@ -1099,7 +1108,9 @@ def build_runtime_graph(runtime: Any):
         sanitized_history = _sanitize_history_messages_for_model(messages)
         sanitized_history = _enforce_tool_message_protocol(sanitized_history)
         frozen_history_projection_raw = state.get("frozen_history_projection")
-        turn_history_messages = _enforce_tool_message_protocol(_latest_turn_messages(sanitized_history))
+        turn_history_messages = _enforce_tool_message_protocol(
+            _latest_turn_messages(sanitized_history)
+        )
         turn_start_index = max(0, len(sanitized_history) - len(turn_history_messages))
         older_history_messages: list[AnyMessage] = []
         stale_summary_text = ""
@@ -1110,7 +1121,8 @@ def build_runtime_graph(runtime: Any):
         if (
             isinstance(frozen_history_projection_raw, dict)
             and int(frozen_history_projection_raw.get("turn_start_index", -1)) >= 0
-            and int(frozen_history_projection_raw.get("turn_start_index", -1)) <= len(sanitized_history)
+            and int(frozen_history_projection_raw.get("turn_start_index", -1))
+            <= len(sanitized_history)
         ):
             turn_start_index = int(frozen_history_projection_raw.get("turn_start_index", 0))
             older_history_messages = _enforce_tool_message_protocol(
@@ -1120,9 +1132,13 @@ def build_runtime_graph(runtime: Any):
                     )
                 )
             )
-            stale_summary_text = str(frozen_history_projection_raw.get("stale_summary_text", "")).strip()
+            stale_summary_text = str(
+                frozen_history_projection_raw.get("stale_summary_text", "")
+            ).strip()
         else:
-            initial_turn_messages = _enforce_tool_message_protocol(_latest_turn_messages(sanitized_history))
+            initial_turn_messages = _enforce_tool_message_protocol(
+                _latest_turn_messages(sanitized_history)
+            )
             turn_start_index = max(0, len(sanitized_history) - len(initial_turn_messages))
             summary_entry = None
             if history_working_set.summary_text:
@@ -1224,6 +1240,12 @@ def build_runtime_graph(runtime: Any):
         if _loop_limit_near(state):
             dynamic_late_messages.append(SystemMessage(content=LOOP_LIMIT_REPAIR_INSTRUCTION))
             dynamic_late_sections.append("loop_limit_repair")
+        if live_user_steering:
+            steering_lines = [
+                f"- User steers with message: {fragment}" for fragment in live_user_steering
+            ]
+            dynamic_late_messages.append(SystemMessage(content="\n".join(steering_lines)))
+            dynamic_late_sections.append("live_user_steering")
         if turn_mode == "workflow_setup":
             workflow_setup_context = str(
                 frozen_prompt_context.get("workflow_setup_control_context", "") or ""
@@ -1261,8 +1283,12 @@ def build_runtime_graph(runtime: Any):
         raw_chat_history_count = sum(
             1 for msg in actual_history_messages if isinstance(msg, (HumanMessage, AIMessage))
         )
-        raw_tool_history_count = sum(1 for msg in actual_history_messages if isinstance(msg, ToolMessage))
-        protected_history_count = len(context_engineer._protected_suffix_indices(actual_history_messages))
+        raw_tool_history_count = sum(
+            1 for msg in actual_history_messages if isinstance(msg, ToolMessage)
+        )
+        protected_history_count = len(
+            context_engineer._protected_suffix_indices(actual_history_messages)
+        )
         stable_prefix_tokens = _message_tokens(prefix_messages)
         frozen_late_tokens = _message_tokens(frozen_late_messages)
         dynamic_late_tokens = _message_tokens(dynamic_late_messages)
@@ -1385,9 +1411,10 @@ def build_runtime_graph(runtime: Any):
             **usage_fields,
         )
         update: dict[str, Any] = {
-            "messages": [*injected_messages, response],
+            "messages": [response],
             "turn_status": "running",
             "workflow_setup_repair_instruction": "",
+            "live_user_steering": live_user_steering,
             **prompt_context_update,
         }
         if skill_query:
@@ -1419,7 +1446,6 @@ def build_runtime_graph(runtime: Any):
                     turn_mode=turn_mode,
                 )
                 update["messages"] = [
-                    *injected_messages,
                     response,
                 ]
                 update["workflow_setup_repair_instruction"] = (
@@ -1454,7 +1480,9 @@ def build_runtime_graph(runtime: Any):
         remaining_steps=_remaining_steps,
     )
 
-    async def tools_node(state: AgentState) -> Command[Literal["agent", "finalize_turn", "__end__"]]:
+    async def tools_node(
+        state: AgentState,
+    ) -> Command[Literal["agent", "finalize_turn", "__end__"]]:
         messages = state.get("messages", [])
         if not messages:
             return Command(update={"turn_status": "running"}, goto="agent")
@@ -1490,9 +1518,10 @@ def build_runtime_graph(runtime: Any):
             if isinstance(invoked_skill_names, list)
             else []
         )
-        invoked_skill_context = str(state.get("active_invoked_skill_context", "")).strip() or str(
-            state.get("active_skill_context", "")
-        ).strip()
+        invoked_skill_context = (
+            str(state.get("active_invoked_skill_context", "")).strip()
+            or str(state.get("active_skill_context", "")).strip()
+        )
         for call in last.tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
@@ -1516,8 +1545,12 @@ def build_runtime_graph(runtime: Any):
                 if callable(set_customer_scope):
                     scope_token = set_customer_scope(customer_id)
                 tool_span = None
-                span_factory = getattr(getattr(runtime, "_langfuse_tracer", None), "tool_span", None)
-                if callable(span_factory) and not bool(state.get("langfuse_graph_callback_attached")):
+                span_factory = getattr(
+                    getattr(runtime, "_langfuse_tracer", None), "tool_span", None
+                )
+                if callable(span_factory) and not bool(
+                    state.get("langfuse_graph_callback_attached")
+                ):
                     tool_span = span_factory(
                         trace_id=str(state.get("agent_trace_id", "")).strip() or None,
                         tool_name=call_name,
@@ -1584,7 +1617,9 @@ def build_runtime_graph(runtime: Any):
                 )
                 if call_name == "skill_get":
                     requested_name = str(args.get("name", "")).strip()
-                    snapshot = _extract_invoked_skill_snapshot(result, requested_name=requested_name)
+                    snapshot = _extract_invoked_skill_snapshot(
+                        result, requested_name=requested_name
+                    )
                     if snapshot is not None:
                         skill_name, skill_text = snapshot
                         merged_names = [*invoked_skill_list]
@@ -1592,7 +1627,9 @@ def build_runtime_graph(runtime: Any):
                             merged_names.append(skill_name)
                         invoked_skill_list = merged_names[-3:]
                         if invoked_skill_context:
-                            invoked_skill_context = f"{invoked_skill_context}\n\n---\n\n{skill_text}"
+                            invoked_skill_context = (
+                                f"{invoked_skill_context}\n\n---\n\n{skill_text}"
+                            )
                         else:
                             invoked_skill_context = skill_text
             except Exception as exc:
@@ -1710,7 +1747,9 @@ def build_runtime_graph(runtime: Any):
             if isinstance(turn_messages[idx], HumanMessage):
                 keep_indices.add(idx)
                 break
-        dropped_messages = [message for idx, message in enumerate(turn_messages) if idx not in keep_indices]
+        dropped_messages = [
+            message for idx, message in enumerate(turn_messages) if idx not in keep_indices
+        ]
         if dropped_messages:
             turn_summary = context_engineer._summarize_stale_messages(
                 dropped_messages,
@@ -1720,8 +1759,12 @@ def build_runtime_graph(runtime: Any):
                 stale_summary_text = "\n".join(
                     part for part in [stale_summary_text, turn_summary] if part.strip()
                 )
-                stale_summary_text = _trim_text_to_token_budget(stale_summary_text, token_budget=900)
-        kept_messages = [message for idx, message in enumerate(turn_messages) if idx in keep_indices]
+                stale_summary_text = _trim_text_to_token_budget(
+                    stale_summary_text, token_budget=900
+                )
+        kept_messages = [
+            message for idx, message in enumerate(turn_messages) if idx in keep_indices
+        ]
         return _enforce_tool_message_protocol(kept_messages), stale_summary_text
 
     async def finalize_turn_node(state: AgentState) -> dict[str, Any]:
@@ -1730,7 +1773,9 @@ def build_runtime_graph(runtime: Any):
         for index, message in enumerate(messages):
             if isinstance(message, HumanMessage):
                 latest_human_index = index
-        current_turn_messages = messages[latest_human_index + 1 :] if latest_human_index >= 0 else messages
+        current_turn_messages = (
+            messages[latest_human_index + 1 :] if latest_human_index >= 0 else messages
+        )
         for message in reversed(current_turn_messages):
             if isinstance(message, AIMessage):
                 if bool(getattr(message, "tool_calls", [])):

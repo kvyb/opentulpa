@@ -8,7 +8,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opentulpa.agent.graph_builder import build_runtime_graph
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.interfaces.telegram import chat_service as chat_module
 
@@ -35,7 +35,9 @@ class _InteractiveRuntime:
         del session
         self.registered_thread_ids.append(thread_id)
 
-    async def clear_interactive_session(self, *, thread_id: str, session: Any | None = None) -> None:
+    async def clear_interactive_session(
+        self, *, thread_id: str, session: Any | None = None
+    ) -> None:
         del session
         self.cleared_thread_ids.append(thread_id)
 
@@ -371,7 +373,9 @@ async def test_telegram_interactive_failed_voice_reply_does_not_stream_reply_con
         del kwargs
         return []
 
-    monkeypatch.setattr(chat_module, "_ingest_attachments_with_typing", _fake_ingest_attachments_with_typing)
+    monkeypatch.setattr(
+        chat_module, "_ingest_attachments_with_typing", _fake_ingest_attachments_with_typing
+    )
 
     await chat_module._materialize_interactive_submission(
         session=session,
@@ -437,8 +441,12 @@ async def test_telegram_interactive_inbox_merges_slow_media_then_followup_text(
         captured_turn_texts.append(str(kwargs.get("text", "")))
         return "done", False
 
-    monkeypatch.setattr(chat_module, "_ingest_attachments_with_typing", _fake_ingest_attachments_with_typing)
-    monkeypatch.setattr(chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram)
+    monkeypatch.setattr(
+        chat_module, "_ingest_attachments_with_typing", _fake_ingest_attachments_with_typing
+    )
+    monkeypatch.setattr(
+        chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram
+    )
 
     image_body = {
         "message": {
@@ -524,7 +532,9 @@ async def test_telegram_interactive_session_allows_explicit_owner_update(
         )
         return "Черновик готов.", False
 
-    monkeypatch.setattr(chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram)
+    monkeypatch.setattr(
+        chat_module, "stream_langgraph_reply_to_telegram", _fake_stream_langgraph_reply_to_telegram
+    )
 
     result = await service.handle_update(
         body={
@@ -642,7 +652,13 @@ async def test_graph_agent_injects_interactive_fragments_before_second_model_cal
     assert len(captured_model_messages) == 2
     second_call = captured_model_messages[1]
     assert any(
-        isinstance(message, HumanMessage)
+        isinstance(message, SystemMessage)
+        and "user steers with message:" in str(getattr(message, "content", "")).lower()
         and "sleeping cat on the chair" in str(getattr(message, "content", "")).lower()
+        for message in second_call
+    )
+    assert any(
+        isinstance(message, ToolMessage)
+        and "status" in str(getattr(message, "content", "")).lower()
         for message in second_call
     )

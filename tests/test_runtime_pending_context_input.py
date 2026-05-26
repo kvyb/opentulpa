@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -73,10 +74,12 @@ class _FakeWorkflowSetupService:
 class _CapturingGraph:
     def __init__(self) -> None:
         self.last_state: dict[str, Any] | None = None
+        self.states: list[dict[str, Any]] = []
 
     async def ainvoke(self, state: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
         del config
         self.last_state = state
+        self.states.append(state)
         return {"messages": [AIMessage(content="ok")]}
 
 
@@ -651,8 +654,7 @@ async def test_graph_adds_loop_limit_instruction_for_final_prose() -> None:
         del model, stable_prefix_count, kwargs
         nonlocal saw_loop_instruction
         saw_loop_instruction = any(
-            "LOOP_LIMIT_APPROACHING" in str(getattr(message, "content", ""))
-            for message in messages
+            "LOOP_LIMIT_APPROACHING" in str(getattr(message, "content", "")) for message in messages
         )
         return AIMessage(content="Current status: I am near the turn limit and stopping tools now.")
 
@@ -1071,7 +1073,9 @@ async def test_workflow_setup_prompt_injects_authoritative_next_action() -> None
     )
 
     assert result["final_response_text"] == "Готово, показываю предложение."
-    prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
+    prompt_text = "\n\n".join(
+        str(getattr(message, "content", "")) for message in captured_prompts[0]
+    )
     assert "WORKFLOW_SETUP_CONTROL_CARD" in prompt_text
     assert "draft_status: preflight_ready" in prompt_text
     assert "proposal_status: not_proposed" in prompt_text
@@ -1123,7 +1127,9 @@ async def test_interactive_turn_promotes_to_workflow_setup_when_session_becomes_
     assert result["turn_mode"] == "workflow_setup"
     assert result["prompt_mode"] == "workflow_setup"
     assert "graph.workflow_setup.promoted_turn_mode" in behavior_events
-    prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
+    prompt_text = "\n\n".join(
+        str(getattr(message, "content", "")) for message in captured_prompts[0]
+    )
     assert "WORKFLOW_SETUP_CONTROL_CARD" in prompt_text
     assert "Call intake_workflow_setup_propose_current" in prompt_text
 
@@ -1151,6 +1157,7 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
     async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
         del thread_id, customer_id
         return None
+
     async def _capture_skill_state(*, customer_id: str, user_text: str) -> dict[str, Any]:
         del customer_id
         captured_skill_user_text["value"] = user_text
@@ -1180,6 +1187,62 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
     assert "scan my telegram" not in pending_text
     assert "raw_prompt" not in pending_text
     assert events.cleared == ("telegram_test", 42)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_input_enqueues_next_turn_not_active_user_message() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    graph = _CapturingGraph()
+
+    runtime._graph = graph
+    runtime._thread_inputs = ThreadInputCoordinator(debounce_seconds=0.05)
+    runtime._context_events = None
+    runtime._link_alias_service = None
+    runtime.recursion_limit = 8
+    runtime.log_behavior_event = lambda **kwargs: None  # type: ignore[assignment]
+    runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
+    runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
+
+    async def _noop_start() -> None:
+        return None
+
+    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+        del thread_id, customer_id
+        return None
+
+    async def _skill_state(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {}
+
+    runtime.start = _noop_start  # type: ignore[method-assign]
+    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
+    runtime._pre_resolve_skill_state = _skill_state  # type: ignore[method-assign]
+
+    async def _submit(text: str, delay: float) -> str:
+        await asyncio.sleep(delay)
+        return await runtime.ainvoke_text(
+            thread_id="chat_test",
+            customer_id="telegram_test",
+            text=text,
+            include_pending_context=True,
+        )
+
+    first, second = await asyncio.gather(
+        _submit("first message", 0.0),
+        _submit("are you here?", 0.01),
+    )
+
+    assert first == "ok"
+    assert second == "ok"
+    assert len(graph.states) == 2
+    first_messages = graph.states[0]["messages"]
+    second_messages = graph.states[1]["messages"]
+    assert len(first_messages) == 1
+    assert len(second_messages) == 1
+    assert isinstance(first_messages[0], HumanMessage)
+    assert isinstance(second_messages[0], HumanMessage)
+    assert first_messages[0].content == "first message"
+    assert second_messages[0].content == "are you here?"
 
 
 class _GraphModel:
@@ -1229,6 +1292,7 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     async def _directive(customer_id: str) -> str | None:
         del customer_id
         return None
+
     runtime._model_with_tools = model
     runtime._checkpointer = InMemorySaver()
     runtime._list_available_skills = _unexpected_list  # type: ignore[method-assign]
@@ -1276,8 +1340,7 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     assert resolve_calls == 0
     assert model.seen_messages is not None
     assert any(
-        "browser-use-operator" in str(getattr(msg, "content", ""))
-        for msg in model.seen_messages
+        "browser-use-operator" in str(getattr(msg, "content", "")) for msg in model.seen_messages
     )
 
 
@@ -1343,12 +1406,15 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
             "Technical or code facts:\n- Telegram bot uses Gemini Flash for media analysis."
         )
 
-    async def _ainvoke_model(model: Any, messages: list[Any], *, stable_prefix_count: int = 0, **kwargs: Any) -> AIMessage:
+    async def _ainvoke_model(
+        model: Any, messages: list[Any], *, stable_prefix_count: int = 0, **kwargs: Any
+    ) -> AIMessage:
         del model
         captured["messages"] = messages
         captured["stable_prefix_count"] = stable_prefix_count
         captured["call_context"] = kwargs.get("call_context")
         return AIMessage(content="ok")
+
     runtime._checkpointer = InMemorySaver()
     runtime._model_with_tools = object()
     runtime._thread_rollup_service = None
@@ -1393,7 +1459,8 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     older_assistant_index = next(
         idx
         for idx, msg in enumerate(prompt_messages)
-        if isinstance(msg, AIMessage) and "Gemini Flash for media analysis" in str(getattr(msg, "content", ""))
+        if isinstance(msg, AIMessage)
+        and "Gemini Flash for media analysis" in str(getattr(msg, "content", ""))
     )
     grounding_index = next(
         idx
@@ -1402,9 +1469,7 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     )
     assert older_assistant_index < grounding_index
     last_human_index = max(
-        idx
-        for idx, msg in enumerate(prompt_messages)
-        if isinstance(msg, HumanMessage)
+        idx for idx, msg in enumerate(prompt_messages) if isinstance(msg, HumanMessage)
     )
     assert grounding_index < last_human_index
     assert isinstance(captured["call_context"], dict)
@@ -1463,6 +1528,7 @@ async def test_agent_uses_server_time_tool_guidance_instead_of_live_time_context
                 tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {}}],
             )
         return AIMessage(content="Done.")
+
     runtime._checkpointer = InMemorySaver()
     runtime._model_with_tools = object()
     runtime._thread_rollup_service = None
@@ -1516,7 +1582,10 @@ async def test_agent_uses_server_time_tool_guidance_instead_of_live_time_context
     second_time_guidance = _time_tool_guidance(captured_messages[1])
     assert "Live time context (auto-injected this turn)" not in first_time_guidance
     assert second_time_guidance == first_time_guidance
-    assert captured_messages[0][:captured_prefix_counts[0]] == captured_messages[1][:captured_prefix_counts[1]]
+    assert (
+        captured_messages[0][: captured_prefix_counts[0]]
+        == captured_messages[1][: captured_prefix_counts[1]]
+    )
 
 
 @pytest.mark.asyncio
@@ -1565,9 +1634,12 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
                 tool_calls=[{"id": "call_1", "name": "fake_tool", "args": {}}],
             )
         return AIMessage(content="Done.")
+
     prior_messages: list[Any] = []
     for idx in range(14):
-        prior_messages.append(HumanMessage(content=f"Earlier user note {idx}: keep this thread moving."))
+        prior_messages.append(
+            HumanMessage(content=f"Earlier user note {idx}: keep this thread moving.")
+        )
         prior_messages.append(AIMessage(content=f"Earlier assistant reply {idx}: acknowledged."))
 
     runtime._checkpointer = InMemorySaver()
@@ -1591,7 +1663,10 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
         {
-            "messages": [*prior_messages, HumanMessage(content="run the fake tool and then answer")],
+            "messages": [
+                *prior_messages,
+                HumanMessage(content="run the fake tool and then answer"),
+            ],
             "customer_id": "telegram_test",
             "thread_id": "chat_test",
             "turn_mode": "interactive",
@@ -1606,7 +1681,10 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
     assert result["final_response_text"] == "Done."
     assert len(captured_messages) == 2
     assert captured_prefix_counts[1] == captured_prefix_counts[0]
-    assert captured_messages[0][:captured_prefix_counts[0]] == captured_messages[1][:captured_prefix_counts[1]]
+    assert (
+        captured_messages[0][: captured_prefix_counts[0]]
+        == captured_messages[1][: captured_prefix_counts[1]]
+    )
 
     def _summary_block(messages: list[Any]) -> str:
         return next(
@@ -1654,6 +1732,7 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
         del model, stable_prefix_count, kwargs
         captured_messages.extend(messages)
         return AIMessage(content="Done.")
+
     prior_messages: list[Any] = []
     for idx in range(14):
         prior_messages.append(HumanMessage(content=f"Earlier user note {idx}: old raw chat."))
@@ -1695,8 +1774,14 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
     )
 
     assert result["final_response_text"] == "Done."
-    human_texts = [str(getattr(msg, "content", "")) for msg in captured_messages if isinstance(msg, HumanMessage)]
-    assistant_texts = [str(getattr(msg, "content", "")) for msg in captured_messages if isinstance(msg, AIMessage)]
+    human_texts = [
+        str(getattr(msg, "content", ""))
+        for msg in captured_messages
+        if isinstance(msg, HumanMessage)
+    ]
+    assistant_texts = [
+        str(getattr(msg, "content", "")) for msg in captured_messages if isinstance(msg, AIMessage)
+    ]
     assert "current live ask" in human_texts
     assert not any(text.startswith("Earlier user note") for text in human_texts)
     assert not any(text.startswith("Earlier assistant reply") for text in assistant_texts)
@@ -1750,6 +1835,7 @@ async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
                 tool_calls=[{"id": "call_2", "name": "fake_tool", "args": {"step": 2}}],
             )
         return AIMessage(content="Done.")
+
     runtime.model_name = "deepseek/deepseek-v4-pro"
     runtime.openrouter_base_url = "https://openrouter.ai/api/v1"
     runtime._checkpointer = InMemorySaver()
@@ -1804,17 +1890,44 @@ async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
     assert raw_ai_tool_ids == ["call_2"]
 
 
-
 def test_memory_grounding_block_stays_compact() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     memories = [
-        {"kind": "directive_fact", "text": "Always be concise, direct, and avoid filler.", "score": 0.9},
-        {"kind": "life_fact", "text": "Timezone is UTC+8 and works mostly in the afternoon.", "score": 0.8},
-        {"kind": "aspirations_fact", "text": "Wants to launch more reliable Telegram and Instagram automation.", "score": 0.7},
-        {"kind": "workflow_fact", "text": "Runs an Instagram intake workflow that writes bookings to Google Sheets.", "score": 0.6},
-        {"kind": "code_fact", "text": "Main chat model is GLM 5.1 while media and memory use Gemini Flash.", "score": 0.65},
-        {"kind": "file_fact", "text": "Uploaded planning PDF is stored in tulpa_stuff/uploads for later recall.", "score": 0.55},
-        {"kind": "thread_context_rollup", "text": "Older thread context mentioning long implementation notes and stale discussion that should be deprioritized.", "score": 0.2},
+        {
+            "kind": "directive_fact",
+            "text": "Always be concise, direct, and avoid filler.",
+            "score": 0.9,
+        },
+        {
+            "kind": "life_fact",
+            "text": "Timezone is UTC+8 and works mostly in the afternoon.",
+            "score": 0.8,
+        },
+        {
+            "kind": "aspirations_fact",
+            "text": "Wants to launch more reliable Telegram and Instagram automation.",
+            "score": 0.7,
+        },
+        {
+            "kind": "workflow_fact",
+            "text": "Runs an Instagram intake workflow that writes bookings to Google Sheets.",
+            "score": 0.6,
+        },
+        {
+            "kind": "code_fact",
+            "text": "Main chat model is GLM 5.1 while media and memory use Gemini Flash.",
+            "score": 0.65,
+        },
+        {
+            "kind": "file_fact",
+            "text": "Uploaded planning PDF is stored in tulpa_stuff/uploads for later recall.",
+            "score": 0.55,
+        },
+        {
+            "kind": "thread_context_rollup",
+            "text": "Older thread context mentioning long implementation notes and stale discussion that should be deprioritized.",
+            "score": 0.2,
+        },
     ]
 
     block = runtime._build_memory_grounding_block(memories, token_budget=500)
@@ -1873,7 +1986,9 @@ async def test_graph_preserves_frozen_history_projection_across_user_turns() -> 
         ),
         config=config,
     )
-    captured_projection_starts.append(first.get("frozen_history_projection", {}).get("turn_start_index"))
+    captured_projection_starts.append(
+        first.get("frozen_history_projection", {}).get("turn_start_index")
+    )
 
     second = await graph.ainvoke(
         OpenTulpaLangGraphRuntime._build_graph_input(
@@ -1888,6 +2003,8 @@ async def test_graph_preserves_frozen_history_projection_across_user_turns() -> 
         ),
         config=config,
     )
-    captured_projection_starts.append(second.get("frozen_history_projection", {}).get("turn_start_index"))
+    captured_projection_starts.append(
+        second.get("frozen_history_projection", {}).get("turn_start_index")
+    )
 
     assert captured_projection_starts == [0, 0]
