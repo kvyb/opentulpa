@@ -51,4 +51,3 @@ class AgentState(TypedDict, total=False):
     live_user_steering: list[str]
     stream_model_calls: bool
     remaining_steps: RemainingSteps
-    tool_preamble_update_sent: bool

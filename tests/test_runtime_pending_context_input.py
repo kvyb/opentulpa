@@ -241,6 +241,71 @@ async def test_graph_surfaces_tool_call_preamble_as_live_update() -> None:
 
 
 @pytest.mark.asyncio
+async def test_graph_tool_call_preamble_not_suppressed_by_checkpointed_flag() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    sequence: list[str] = []
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            sequence.append("tool")
+            return {"status": "ok"}
+
+    async def _emit_update(
+        *, text: str, dedupe_key: str = "", thread_id: str | None = None
+    ) -> dict[str, bool]:
+        assert dedupe_key.startswith("tool_call_preamble:")
+        assert thread_id == "chat_tool_preamble_repeat"
+        sequence.append(f"emit:{text}")
+        return {"sent": True, "duplicate": False}
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="Starting another tool call.",
+                tool_calls=[{"id": "call_repeat", "name": "fake_tool", "args": {}}],
+            )
+        return AIMessage(content="Done.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"fake_tool": _FakeTool()}
+    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="again")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_tool_preamble_repeat",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_tool_preamble_repeat",
+            "tool_preamble_update_sent": True,
+        },
+        config={
+            "configurable": {"thread_id": "chat_tool_preamble_repeat"},
+            "recursion_limit": 8,
+        },
+    )
+
+    assert result["final_response_text"] == "Done."
+    assert sequence == ["emit:Starting another tool call.", "tool"]
+
+
+@pytest.mark.asyncio
 async def test_graph_surfaces_tool_call_preamble_for_workflow_setup() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     sequence: list[str] = []

@@ -59,7 +59,7 @@ def recursion_limit_for_turn(
     requested_turn_mode: str,
     requested_limit: int,
 ) -> int:
-    base = max(5, min(int(requested_limit), 200))
+    base = max(5, int(requested_limit))
     if effective_turn_mode(
         runtime,
         customer_id=customer_id,
@@ -67,4 +67,4 @@ def recursion_limit_for_turn(
         requested_turn_mode=requested_turn_mode,
     ) != "workflow_setup":
         return base
-    return max(base, min(WORKFLOW_SETUP_RECURSION_LIMIT, 200))
+    return max(base, WORKFLOW_SETUP_RECURSION_LIMIT)

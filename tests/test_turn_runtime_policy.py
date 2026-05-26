@@ -65,3 +65,26 @@ def test_recursion_limit_for_turn_boosts_workflow_setup_only() -> None:
         )
         == 80
     )
+
+
+def test_recursion_limit_for_turn_preserves_high_configured_limit() -> None:
+    assert (
+        recursion_limit_for_turn(
+            _Runtime(None),
+            customer_id="customer",
+            thread_id="thread",
+            requested_turn_mode="interactive",
+            requested_limit=256,
+        )
+        == 256
+    )
+    assert (
+        recursion_limit_for_turn(
+            _Runtime({"status": "active"}),
+            customer_id="customer",
+            thread_id="thread",
+            requested_turn_mode="interactive",
+            requested_limit=256,
+        )
+        == 256
+    )

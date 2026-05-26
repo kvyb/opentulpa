@@ -623,8 +623,6 @@ def build_runtime_graph(runtime: Any):
     ) -> bool:
         if turn_mode not in {"interactive", "workflow_setup"}:
             return False
-        if bool(state.get("tool_preamble_update_sent")):
-            return False
         text = _content_to_text(getattr(message, "content", "")).strip()
         tool_calls = getattr(message, "tool_calls", []) or []
         tool_names = [
@@ -1502,9 +1500,7 @@ def build_runtime_graph(runtime: Any):
             execution_origin=execution_origin,
             turn_mode=turn_mode,
         )
-        tool_preamble_update_sent = await _emit_tool_call_preamble_update(
-            state, message=last, turn_mode=turn_mode
-        )
+        await _emit_tool_call_preamble_update(state, message=last, turn_mode=turn_mode)
 
         tool_messages: list[ToolMessage] = []
         tool_outcomes: list[dict[str, Any]] = []
@@ -1675,8 +1671,6 @@ def build_runtime_graph(runtime: Any):
             "active_invoked_skill_context": invoked_skill_context,
             "active_skill_context": invoked_skill_context,
         }
-        if tool_preamble_update_sent:
-            update["tool_preamble_update_sent"] = True
         if had_error:
             next_tool_error_count = int(state.get("tool_error_count", 0)) + 1
             last_tool_error = next(
