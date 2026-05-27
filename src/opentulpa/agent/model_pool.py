@@ -14,6 +14,7 @@ from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
 from opentulpa.agent import model_error_trace
+from opentulpa.agent import model_transport_policy as transport_policy
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
@@ -21,34 +22,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENROUTER_APP_REFERER = "https://github.com/kvyb/opentulpa"
 DEFAULT_OPENROUTER_APP_TITLE = "OpenTulpa"
-_RETRYABLE_MODEL_ERROR_MARKERS = (
-    "429",
-    "rate limit",
-    "ratelimit",
-    "too many requests",
-    "toomanyrequests",
-    "temporarily unavailable",
-    "provider returned error",
-)
-
-
-def _model_transient_retry_limit() -> int:
-    raw = str(os.getenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "2") or "2").strip()
-    try:
-        return max(0, min(5, int(raw)))
-    except ValueError:
-        return 2
-
-
-def _is_retryable_model_error(error_text: str) -> bool:
-    normalized = str(error_text or "").strip().lower()
-    if not normalized:
-        return False
-    return any(marker in normalized for marker in _RETRYABLE_MODEL_ERROR_MARKERS)
-
-
-def _model_transient_retry_delay_seconds(retry_index: int) -> float:
-    return float(min(6.0, 0.75 * (2 ** max(0, int(retry_index)))))
 
 
 async def _run_with_transient_model_retries(
@@ -58,7 +31,7 @@ async def _run_with_transient_model_retries(
     attempt_context: dict[str, Any],
     operation: Any,
 ) -> Any:
-    transient_retries = _model_transient_retry_limit()
+    transient_retries = transport_policy.model_transient_retry_limit()
     provider_retry_index = 0
     while True:
         try:
@@ -68,10 +41,12 @@ async def _run_with_transient_model_retries(
             retry_error_fields = model_error_trace.exception_trace_fields(exc)
             if (
                 provider_retry_index >= transient_retries
-                or not _is_retryable_model_error(retry_error_text)
+                or not transport_policy.is_retryable_model_exception(exc)
             ):
                 raise
-            delay_seconds = _model_transient_retry_delay_seconds(provider_retry_index)
+            delay_seconds = transport_policy.model_transient_retry_delay_seconds(
+                provider_retry_index
+            )
             provider_retry_index += 1
             runtime.log_behavior_event(
                 event="llm.invoke.transient_retry",
@@ -313,7 +288,13 @@ def init_runtime_chat_model(
             "temperature": base_kwargs.get("temperature"),
             "max_completion_tokens": base_kwargs.get("max_completion_tokens"),
             "streaming": bool(base_kwargs.get("streaming", True)),
+            "max_retries": transport_policy.openrouter_max_retries(),
+            "timeout": transport_policy.openrouter_timeout_seconds(),
         }
+        if provider_routing := transport_policy.openrouter_provider_routing_for_model(
+            model_name
+        ):
+            adapter_kwargs["openrouter_provider"] = provider_routing
         if uses_reasoning:
             adapter_kwargs["reasoning"] = openrouter_reasoning_config(reasoning_effort)
         if referer := app_headers.get("HTTP-Referer"):
@@ -829,7 +810,7 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                         attempt_context.get("provider_attempt_name") or "default"
                     ),
                 )
-                transient_retries = _model_transient_retry_limit()
+                transient_retries = transport_policy.model_transient_retry_limit()
                 provider_retry_index = 0
                 while True:
                     try:
@@ -843,10 +824,12 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
                         retry_error_fields = model_error_trace.exception_trace_fields(exc)
                         if (
                             provider_retry_index >= transient_retries
-                            or not _is_retryable_model_error(retry_error_text)
+                            or not transport_policy.is_retryable_model_exception(exc)
                         ):
                             raise
-                        delay_seconds = _model_transient_retry_delay_seconds(provider_retry_index)
+                        delay_seconds = transport_policy.model_transient_retry_delay_seconds(
+                            provider_retry_index
+                        )
                         provider_retry_index += 1
                         runtime.log_behavior_event(
                             event="llm.invoke.transient_retry",

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from langchain_core.tools import tool as lc_tool
 
@@ -126,6 +127,21 @@ class _TransientStreamTraceModel:
         if self.calls == 1:
             raise _UnreadResponseProviderError()
         yield _TraceResponse()
+
+
+class _RemoteProtocolTransientModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> _TraceResponse:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(incomplete chunked read)"
+            )
+        return _TraceResponse()
 
 
 @lc_tool
@@ -364,6 +380,39 @@ async def test_astream_model_retries_transient_provider_error(tmp_path: Path, mo
     retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
     assert retry["trace_id"] == "turn_stream_transient_retry"
     assert "streaming response was not read" in retry["provider_http_text"]
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_retries_remote_protocol_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _RemoteProtocolTransientModel()
+
+    result = await runtime.ainvoke_model(
+        model,
+        [HumanMessage(content="retry remote protocol please")],
+        model_name="deepseek/deepseek-v4-pro",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_remote_protocol_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_remote_protocol_retry"
+    assert "incomplete chunked read" in retry["error"]
 
 
 @pytest.mark.asyncio
