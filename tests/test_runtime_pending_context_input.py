@@ -10,6 +10,7 @@ from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
+from opentulpa.agent.tools.turn_plan_tools import register_turn_plan_tools
 from opentulpa.agent.utils import approx_tokens as _approx_tokens
 
 
@@ -177,6 +178,291 @@ def _install_minimal_graph_runtime_stubs(
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
     runtime._workflow_setup_service = None
+
+
+@pytest.mark.asyncio
+async def test_graph_keeps_turn_plan_in_state_for_next_agent_step() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_second_pass_messages: list[Any] = []
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_plan",
+                        "name": "turn_plan",
+                        "args": {
+                            "items": [
+                                {
+                                    "id": "scope",
+                                    "content": "Define research scope",
+                                    "status": "completed",
+                                },
+                                {
+                                    "id": "search",
+                                    "content": "Gather current sources",
+                                    "status": "in_progress",
+                                },
+                                {
+                                    "id": "report",
+                                    "content": "Synthesize report",
+                                    "status": "pending",
+                                },
+                            ]
+                        },
+                    },
+                    {
+                        "id": "call_plan_merge",
+                        "name": "turn_plan",
+                        "args": {
+                            "merge": True,
+                            "items": [
+                                {
+                                    "id": "search",
+                                    "content": "Gather current sources",
+                                    "status": "completed",
+                                },
+                                {
+                                    "id": "report",
+                                    "content": "Synthesize report",
+                                    "status": "in_progress",
+                                },
+                            ],
+                        },
+                    },
+                ],
+            )
+        captured_second_pass_messages.extend(messages)
+        return AIMessage(content="Done.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = register_turn_plan_tools(runtime)
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="research current AI news")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_turn_plan_state",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_plan_state",
+            "turn_plan": [],
+        },
+        config={"configurable": {"thread_id": "chat_turn_plan_state"}, "recursion_limit": 8},
+    )
+
+    plan_context = next(
+        str(getattr(message, "content", ""))
+        for message in captured_second_pass_messages
+        if "CURRENT_TURN_PLAN" in str(getattr(message, "content", ""))
+    )
+    assert result["final_response_text"] == "Done."
+    assert result["turn_plan"] == [
+        {"id": "scope", "content": "Define research scope", "status": "completed"},
+        {"id": "search", "content": "Gather current sources", "status": "completed"},
+        {"id": "report", "content": "Synthesize report", "status": "in_progress"},
+    ]
+    assert "CURRENT_TURN_PLAN" in plan_context
+    assert "Synthesize report" in plan_context
+    assert "Define research scope" not in plan_context
+    assert "Gather current sources" not in plan_context
+
+
+@pytest.mark.asyncio
+async def test_graph_turn_plan_validation_error_returns_to_model() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_bad_plan",
+                        "name": "turn_plan",
+                        "args": {
+                            "items": [
+                                {
+                                    "id": "search",
+                                    "content": "Gather sources",
+                                    "status": "working",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            )
+        assert any(
+            "status must be one of" in str(getattr(message, "content", "")) for message in messages
+        )
+        return AIMessage(content="Fixed.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = register_turn_plan_tools(runtime)
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="research current AI news")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_turn_plan_validation",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_plan_validation",
+            "turn_plan": [],
+        },
+        config={"configurable": {"thread_id": "chat_turn_plan_validation"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Fixed."
+    assert result["turn_plan"] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_resets_turn_plan_for_new_user_turn() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_prompts: list[list[Any]] = []
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        captured_prompts.append(messages)
+        if calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_plan",
+                        "name": "turn_plan",
+                        "args": {
+                            "items": [
+                                {
+                                    "id": "search",
+                                    "content": "Search current evidence",
+                                    "status": "in_progress",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            )
+        return AIMessage(content=f"Done {calls}.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = register_turn_plan_tools(runtime)
+
+    graph = build_runtime_graph(runtime)
+    base_state = {
+        "customer_id": "telegram_test",
+        "thread_id": "chat_turn_plan_reset",
+        "turn_mode": "interactive",
+        "turn_status": "running",
+        "final_response_text": "",
+        "pending_context_summary": "",
+        "agent_trace_id": "turn_plan_reset",
+        "turn_plan": [],
+    }
+    first = await graph.ainvoke(
+        {**base_state, "messages": [HumanMessage(content="do complex research")]},
+        config={"configurable": {"thread_id": "chat_turn_plan_reset"}, "recursion_limit": 8},
+    )
+    second = await graph.ainvoke(
+        {
+            **base_state,
+            "messages": [HumanMessage(content="simple follow up")],
+            "agent_trace_id": "turn_plan_reset_second",
+        },
+        config={"configurable": {"thread_id": "chat_turn_plan_reset"}, "recursion_limit": 8},
+    )
+
+    assert first["final_response_text"] == "Done 2."
+    assert second["final_response_text"] == "Done 3."
+    second_turn_prompt = "\n".join(
+        str(getattr(message, "content", "")) for message in captured_prompts[-1]
+    )
+    assert "CURRENT_TURN_PLAN" not in second_turn_prompt
+    assert second.get("turn_plan") == []
+
+
+@pytest.mark.asyncio
+async def test_graph_does_not_inject_turn_plan_context_outside_interactive() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_messages: list[Any] = []
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        captured_messages.extend(messages)
+        return AIMessage(content="Wake done.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="wake task")],
+            "customer_id": "telegram_test",
+            "thread_id": "routine_wake_plan_block",
+            "turn_mode": "routine_wake",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "routine_wake_plan_block",
+            "turn_plan": [
+                {
+                    "id": "search",
+                    "content": "This stale plan should not be injected",
+                    "status": "in_progress",
+                }
+            ],
+        },
+        config={"configurable": {"thread_id": "routine_wake_plan_block"}, "recursion_limit": 8},
+    )
+
+    prompt_text = "\n".join(str(getattr(message, "content", "")) for message in captured_messages)
+    assert result["final_response_text"] == "Wake done."
+    assert "CURRENT_TURN_PLAN" not in prompt_text
+    assert "This stale plan should not be injected" not in prompt_text
 
 
 @pytest.mark.asyncio
@@ -470,7 +756,11 @@ async def test_graph_finalizes_successful_workflow_delete_when_model_omits_confi
             return AIMessage(
                 content="I'll look up the workflow and delete it.",
                 tool_calls=[
-                    {"id": "call_delete", "name": "intake_workflow_delete", "args": {"workflow_id": "iwf_123"}}
+                    {
+                        "id": "call_delete",
+                        "name": "intake_workflow_delete",
+                        "args": {"workflow_id": "iwf_123"},
+                    }
                 ],
             )
         if calls == 3:
@@ -540,7 +830,13 @@ async def test_graph_finalizes_ready_workflow_proposal_when_model_omits_summary(
         if calls == 1:
             return AIMessage(
                 content="",
-                tool_calls=[{"id": "call_propose", "name": "intake_workflow_setup_propose_current", "args": {}}],
+                tool_calls=[
+                    {
+                        "id": "call_propose",
+                        "name": "intake_workflow_setup_propose_current",
+                        "args": {},
+                    }
+                ],
             )
         if calls == 3:
             return AIMessage(
@@ -1217,8 +1513,12 @@ async def test_workflow_setup_control_card_refreshes_after_tool_results() -> Non
 
     assert result["final_response_text"] == "Workflow active with workflow_id=iwf_autospa."
     assert len(captured_prompts) == 2
-    first_prompt = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
-    second_prompt = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[1])
+    first_prompt = "\n\n".join(
+        str(getattr(message, "content", "")) for message in captured_prompts[0]
+    )
+    second_prompt = "\n\n".join(
+        str(getattr(message, "content", "")) for message in captured_prompts[1]
+    )
     assert "session_status: active" in first_prompt
     assert "session_status: completed" in second_prompt
     assert "workflow_id=iwf_autospa" in second_prompt
@@ -1554,6 +1854,7 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
         del model
         captured["messages"] = messages
         captured["stable_prefix_count"] = stable_prefix_count
+        captured["cacheable_prefix_count"] = kwargs.get("cacheable_prefix_count")
         captured["call_context"] = kwargs.get("call_context")
         return AIMessage(content="ok")
 
@@ -1589,6 +1890,13 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
             "final_response_text": "",
             "pending_context_summary": "",
             "agent_trace_id": "turn_test",
+            "turn_plan": [
+                {
+                    "id": "search",
+                    "content": "Search current evidence",
+                    "status": "in_progress",
+                }
+            ],
         },
         config={"configurable": {"thread_id": "chat_test"}, "recursion_limit": 8},
     )
@@ -1614,10 +1922,17 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
         idx for idx, msg in enumerate(prompt_messages) if isinstance(msg, HumanMessage)
     )
     assert grounding_index < last_human_index
+    plan_index = next(
+        idx
+        for idx, msg in enumerate(prompt_messages)
+        if "CURRENT_TURN_PLAN" in str(getattr(msg, "content", ""))
+    )
+    assert plan_index >= captured["cacheable_prefix_count"]
     assert isinstance(captured["call_context"], dict)
     assert captured["call_context"]["call_site"] == "graph_agent"
     assert captured["call_context"]["_langfuse_graph_callback_covers_call"] is False
     assert "memory_grounding" in captured["call_context"]["prompt_sections"]
+    assert "turn_plan" in captured["call_context"]["prompt_sections"]
 
 
 @pytest.mark.asyncio
@@ -2030,7 +2345,9 @@ async def test_deepseek_prompt_collapses_completed_tool_segments() -> None:
     ]
     assert raw_tool_ids == []
     assert raw_ai_tool_ids == []
-    third_prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in third_prompt)
+    third_prompt_text = "\n\n".join(
+        str(getattr(message, "content", "")) for message in third_prompt
+    )
     assert "VERIFIED_TOOL_RESULTS" in third_prompt_text
     assert "fake_tool" in third_prompt_text
     assert "step=1" in third_prompt_text

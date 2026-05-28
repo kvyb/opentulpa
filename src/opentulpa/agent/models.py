@@ -22,6 +22,15 @@ class ToolOutcome(TypedDict, total=False):
     final_response_hint: str
 
 
+TurnPlanStatus = Literal["pending", "in_progress", "completed", "cancelled"]
+
+
+class TurnPlanItem(TypedDict):
+    id: str
+    content: str
+    status: TurnPlanStatus
+
+
 class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     agent_trace_id: str
@@ -41,6 +50,7 @@ class AgentState(TypedDict, total=False):
     active_invoked_skill_names: list[str]
     active_skill_context: str
     tool_outcomes: Annotated[list[ToolOutcome], add_tool_outcomes]
+    turn_plan: list[TurnPlanItem]
     tool_validation_passed: bool
     tool_error_count: int
     last_tool_error: str

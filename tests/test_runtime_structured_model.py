@@ -19,6 +19,7 @@ from opentulpa.agent.tools.tool_gateway_tools import (
     TOOL_GATEWAY_TOOL_NAMES,
     TOOL_GROUP_DEFINITIONS,
 )
+from opentulpa.agent.turn_plan import build_turn_plan_prompt_context
 
 
 class _Schema(BaseModel):
@@ -93,16 +94,47 @@ class _BrokenStructuredThenFallbackModel(_FallbackModel):
 def test_tools_for_routine_wake_excludes_interactive_owner_update_tool() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     send_owner_update = object()
+    turn_plan = object()
     server_time = object()
     gateway = object()
     runtime._tools = {
         "send_owner_update": send_owner_update,
+        "turn_plan": turn_plan,
         "server_time": server_time,
         "tool_group_exec": gateway,
     }
 
-    assert runtime.tools_for_turn_mode("interactive") == [send_owner_update, server_time, gateway]
+    assert runtime.tools_for_turn_mode("interactive") == [
+        send_owner_update,
+        turn_plan,
+        server_time,
+        gateway,
+    ]
     assert runtime.tools_for_turn_mode("routine_wake") == [server_time, gateway]
+    assert runtime.tools_for_turn_mode("workflow_setup") == [
+        send_owner_update,
+        server_time,
+        gateway,
+    ]
+
+
+def test_turn_plan_context_only_includes_active_items() -> None:
+    context = build_turn_plan_prompt_context(
+        {
+            "turn_plan": [
+                {"id": "done", "content": "Already done", "status": "completed"},
+                {
+                    "id": "next",
+                    "content": "Use gathered evidence",
+                    "status": "in_progress",
+                },
+            ]
+        }
+    )
+
+    assert "CURRENT_TURN_PLAN" in context
+    assert "Use gathered evidence" in context
+    assert "Already done" not in context
 
 
 @lc_tool
@@ -185,7 +217,7 @@ def test_real_workflow_setup_profile_removes_large_irrelevant_schemas(tmp_path: 
     assert "browser_use_run" not in workflow_tool_ids
     assert "routine_create" not in workflow_tool_ids
     assert "tulpa_run_terminal" not in workflow_tool_ids
-    assert len(workflow_tools) == len(interactive_tools)
+    assert len(workflow_tools) == len(interactive_tools) - 1
     assert _tool_schema_chars(workflow_tools) < 2500
 
 

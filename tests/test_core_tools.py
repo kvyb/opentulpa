@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import pytest
 
+from opentulpa.agent.graph_control_tools import execute_graph_control_tool
 from opentulpa.agent.tools_registry import register_runtime_tools
+from opentulpa.agent.turn_plan import TurnPlanValidationError, update_turn_plan
 from tests.tool_test_helpers import DummyRuntime, Response
 
 CORE_TOOL_NAMES = {
     "send_owner_update",
+    "turn_plan",
     "memory_search",
     "memory_add",
     "uploaded_file_search",
@@ -91,6 +94,71 @@ async def test_send_owner_update_noops_without_interactive_emitter() -> None:
         "sent": False,
         "reason": "interactive_update_unavailable",
     }
+
+
+@pytest.mark.asyncio
+async def test_turn_plan_direct_tool_is_graph_control_only() -> None:
+    runtime = DummyRuntime([])
+    tools = register_runtime_tools(runtime)
+
+    result = await tools["turn_plan"].ainvoke(
+        {
+            "items": [
+                {"id": "scope", "content": "Define the deliverable", "status": "completed"},
+                {"id": "search", "content": "Gather evidence", "status": "in_progress"},
+            ]
+        }
+    )
+
+    assert result["ok"] is False
+    assert "GRAPH_CONTROL_TOOL_ONLY" in result["error"]
+
+
+def test_turn_plan_graph_control_tracks_current_turn_items() -> None:
+    result = execute_graph_control_tool(
+        tool_name="turn_plan",
+        args={
+            "items": [
+                {"id": "scope", "content": "Define the deliverable", "status": "completed"},
+                {"id": "search", "content": "Gather evidence", "status": "in_progress"},
+            ]
+        },
+        state={"turn_plan": []},
+    ).result
+
+    assert result["ok"] is True
+    assert result["summary"] == {
+        "total": 2,
+        "pending": 0,
+        "in_progress": 1,
+        "completed": 1,
+        "cancelled": 0,
+    }
+    assert result["items"][1]["content"] == "Gather evidence"
+
+
+def test_turn_plan_merge_updates_existing_items() -> None:
+    result = update_turn_plan(
+        [
+            {"id": "search", "content": "Gather evidence", "status": "in_progress"},
+            {"id": "answer", "content": "Report answer", "status": "pending"},
+        ],
+        items=[{"id": "search", "content": "Gather evidence", "status": "completed"}],
+        merge=True,
+    )
+
+    assert result == [
+        {"id": "search", "content": "Gather evidence", "status": "completed"},
+        {"id": "answer", "content": "Report answer", "status": "pending"},
+    ]
+
+
+def test_turn_plan_rejects_invalid_status() -> None:
+    with pytest.raises(TurnPlanValidationError, match="status must be one of"):
+        update_turn_plan(
+            [],
+            items=[{"id": "search", "content": "Gather evidence", "status": "working"}],
+        )
 
 
 @pytest.mark.asyncio

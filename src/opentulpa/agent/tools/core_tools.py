@@ -483,12 +483,14 @@ def register_core_tools(runtime: Any) -> dict[str, Any]:
     from opentulpa.agent.tools.server_time_tools import register_server_time_tools
     from opentulpa.agent.tools.task_tools import register_task_tools
     from opentulpa.agent.tools.time_profile_tools import register_time_profile_tools
+    from opentulpa.agent.tools.turn_plan_tools import register_turn_plan_tools
     from opentulpa.agent.tools.tulpa_workspace_tools import register_tulpa_workspace_tools
     from opentulpa.agent.tools.user_context_tools import register_user_context_tools
     from opentulpa.agent.tools.web_tools import register_web_tools
 
     tools: dict[str, Any] = {}
     tools.update(register_owner_update_tools(runtime))
+    tools.update(register_turn_plan_tools(runtime))
     tools.update(register_memory_tools(runtime))
     tools.update(register_file_tools(runtime))
     tools.update(register_business_knowledge_tools(runtime))

@@ -17,6 +17,12 @@ from opentulpa.agent.context_engineer import (
 from opentulpa.agent.context_engineer import (
     trim_text_to_token_budget as _trim_text_to_token_budget,
 )
+from opentulpa.agent.graph_control_tools import (
+    execute_graph_control_tool as _execute_graph_control_tool,
+)
+from opentulpa.agent.graph_control_tools import (
+    is_graph_control_tool as _is_graph_control_tool,
+)
 from opentulpa.agent.graph_nodes.tool_validation import build_validate_tool_calls_node
 from opentulpa.agent.lc_messages import (
     AIMessage,
@@ -74,6 +80,12 @@ from opentulpa.agent.tool_outcome_finalizers import (
 )
 from opentulpa.agent.tool_outcome_finalizers import (
     generate_final_response_from_tool_hint as _generate_final_response_from_tool_hint,
+)
+from opentulpa.agent.turn_plan import (
+    build_turn_plan_prompt_context as _build_turn_plan_prompt_context,
+)
+from opentulpa.agent.turn_plan import (
+    turn_plan_enabled_for_turn_mode as _turn_plan_enabled_for_turn_mode,
 )
 from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message as _build_turn_mode_system_message,
@@ -1225,6 +1237,14 @@ def build_runtime_graph(runtime: Any):
         dynamic_late_sections: list[str] = []
         dynamic_late_messages.append(_build_current_web_search_backend_prompt_message())
         dynamic_late_sections.append("web_search_backend")
+        turn_plan_context = (
+            _build_turn_plan_prompt_context(state)
+            if _turn_plan_enabled_for_turn_mode(turn_mode)
+            else ""
+        )
+        if turn_plan_context:
+            dynamic_late_messages.append(SystemMessage(content=turn_plan_context))
+            dynamic_late_sections.append("turn_plan")
         if current_turn_context_content:
             dynamic_late_messages.append(SystemMessage(content=current_turn_context_content))
             dynamic_late_sections.extend(current_turn_context_sections)
@@ -1507,6 +1527,8 @@ def build_runtime_graph(runtime: Any):
         had_error = False
         failed_tool_names: list[str] = []
         failed_tool_errors: list[str] = []
+        graph_control_state: dict[str, Any] = {"turn_plan": state.get("turn_plan")}
+        graph_control_updates: dict[str, Any] = {}
         invoked_skill_names = state.get("active_invoked_skill_names", []) or []
         invoked_skill_list = (
             [str(n).strip() for n in invoked_skill_names if str(n).strip()]
@@ -1534,41 +1556,51 @@ def build_runtime_graph(runtime: Any):
                     args=args,
                     messages=messages,
                 )
-                args = runtime.resolve_link_aliases_in_args(customer_id=customer_id, args=args)
-                scope_token = None
-                set_customer_scope = getattr(runtime, "set_active_customer_id", None)
-                if callable(set_customer_scope):
-                    scope_token = set_customer_scope(customer_id)
-                tool_span = None
-                span_factory = getattr(
-                    getattr(runtime, "_langfuse_tracer", None), "tool_span", None
-                )
-                if callable(span_factory) and not bool(
-                    state.get("langfuse_graph_callback_attached")
-                ):
-                    tool_span = span_factory(
-                        trace_id=str(state.get("agent_trace_id", "")).strip() or None,
+                if _is_graph_control_tool(call_name):
+                    control_result = _execute_graph_control_tool(
                         tool_name=call_name,
-                        tool_call_id=call_id,
                         args=args,
-                        metadata={
-                            "thread_id": thread_id,
-                            "customer_id": customer_id,
-                            "turn_mode": turn_mode,
-                            "execution_origin": execution_origin,
-                        },
+                        state={**state, **graph_control_state},
                     )
-                try:
-                    if tool_span is None:
-                        result = await tool_fn.ainvoke(args)
-                    else:
-                        with tool_span:
+                    graph_control_state.update(control_result.state_update)
+                    graph_control_updates.update(control_result.state_update)
+                    result = control_result.result
+                else:
+                    args = runtime.resolve_link_aliases_in_args(customer_id=customer_id, args=args)
+                    scope_token = None
+                    set_customer_scope = getattr(runtime, "set_active_customer_id", None)
+                    if callable(set_customer_scope):
+                        scope_token = set_customer_scope(customer_id)
+                    tool_span = None
+                    span_factory = getattr(
+                        getattr(runtime, "_langfuse_tracer", None), "tool_span", None
+                    )
+                    if callable(span_factory) and not bool(
+                        state.get("langfuse_graph_callback_attached")
+                    ):
+                        tool_span = span_factory(
+                            trace_id=str(state.get("agent_trace_id", "")).strip() or None,
+                            tool_name=call_name,
+                            tool_call_id=call_id,
+                            args=args,
+                            metadata={
+                                "thread_id": thread_id,
+                                "customer_id": customer_id,
+                                "turn_mode": turn_mode,
+                                "execution_origin": execution_origin,
+                            },
+                        )
+                    try:
+                        if tool_span is None:
                             result = await tool_fn.ainvoke(args)
-                            tool_span.set_result(result, status="ok")
-                finally:
-                    reset_customer_scope = getattr(runtime, "reset_active_customer_id", None)
-                    if scope_token is not None and callable(reset_customer_scope):
-                        reset_customer_scope(scope_token)
+                        else:
+                            with tool_span:
+                                result = await tool_fn.ainvoke(args)
+                                tool_span.set_result(result, status="ok")
+                    finally:
+                        reset_customer_scope = getattr(runtime, "reset_active_customer_id", None)
+                        if scope_token is not None and callable(reset_customer_scope):
+                            reset_customer_scope(scope_token)
                 runtime.register_links_from_text(
                     customer_id=customer_id,
                     text=_safe_json(result),
@@ -1701,6 +1733,7 @@ def build_runtime_graph(runtime: Any):
                 ]
                 update["turn_status"] = "failed"
                 return Command(update=update, goto="finalize_turn")
+        update.update(graph_control_updates)
         _log(
             state,
             "graph.tools.complete",

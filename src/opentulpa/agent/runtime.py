@@ -85,6 +85,7 @@ from opentulpa.agent.runtime_input import (
     ThreadInputCoordinator,
 )
 from opentulpa.agent.tools_registry import register_runtime_tools
+from opentulpa.agent.turn_plan import turn_plan_enabled_for_turn_mode
 from opentulpa.agent.turn_policy import (
     normalize_turn_mode as _normalize_turn_mode,
 )
@@ -649,6 +650,7 @@ WORKFLOW_SETUP_TOOL_NAMES: set[str] = {
 
 INTERACTIVE_NATIVE_TOOL_NAMES: set[str] = {
     "send_owner_update",
+    "turn_plan",
     "server_time",
     "tool_group_list",
     "tool_group_describe",
@@ -1688,18 +1690,14 @@ class OpenTulpaLangGraphRuntime:
 
     def tools_for_turn_mode(self, turn_mode: str) -> list[Any]:
         normalized_turn_mode = str(turn_mode or "").strip().lower()
-        if normalized_turn_mode == "workflow_setup":
-            return [
-                tool
-                for name, tool in self._tools.items()
-                if str(name or "").strip() in INTERACTIVE_NATIVE_TOOL_NAMES
-            ]
         native_names = (
             ROUTINE_WAKE_NATIVE_TOOL_NAMES
             if normalized_turn_mode == "routine_wake"
             else INTERACTIVE_NATIVE_TOOL_NAMES
         )
         blocked_tools: set[str] = set()
+        if not turn_plan_enabled_for_turn_mode(normalized_turn_mode):
+            blocked_tools.add("turn_plan")
         if normalized_turn_mode == "routine_wake":
             blocked_tools.add("send_owner_update")
         if normalized_turn_mode not in {"interactive", "workflow_setup"}:
@@ -3191,6 +3189,7 @@ class OpenTulpaLangGraphRuntime:
             "agent_trace_id": trace_id,
             "langfuse_graph_callback_attached": False,
             "tool_error_count": 0,
+            "turn_plan": [],
             "workflow_setup_no_progress_retry_count": 0,
             "workflow_setup_repair_instruction": "",
             "live_user_steering": [],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -27,7 +28,7 @@ GraphLogFn = Callable[..., None]
 LoopLimitNearFn = Callable[[AgentState], bool]
 RemainingStepsFn = Callable[[AgentState], int | None]
 ValidateToolsNode = Callable[[AgentState], Awaitable[ValidateToolsCommand]]
-_MAX_WEB_SEARCH_CALLS_PER_TURN = 2
+_MAX_WEB_SEARCH_CALLS_PER_TURN = 5
 LOOP_LIMIT_REPAIR_MESSAGE = (
     "LOOP_LIMIT_APPROACHING: Do not call more tools in this turn. Write natural "
     "user-facing prose now using the previous tool results and current context. "
@@ -69,12 +70,45 @@ def _successful_tool_calls_in_latest_turn(messages: list[Any]) -> list[dict[str,
     return successful
 
 
-def _successful_tool_count_in_latest_turn(messages: list[Any], *, tool_name: str) -> int:
-    return sum(
-        1
-        for call in _successful_tool_calls_in_latest_turn(messages)
-        if str(call.get("name", "")) == tool_name
-    )
+def _web_search_call_count(call: Any) -> int:
+    if not isinstance(call, dict):
+        return 0
+    call_name = str(call.get("name", "")).strip()
+    args = call.get("args", {}) or {}
+    if call_name == "web_search":
+        return 1
+    if call_name != "tool_group_exec" or not isinstance(args, dict):
+        return 0
+    group = str(args.get("group", "")).strip().lower()
+    command = str(args.get("command", "")).strip()
+    if group == "web" and command == "web_search":
+        return 1
+    calls = _coerce_tool_group_calls(args.get("calls"))
+    count = 0
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        item_group = str(item.get("group", "")).strip().lower()
+        item_command = str(item.get("command", "")).strip()
+        if item_group == "web" and item_command == "web_search":
+            count += 1
+    return count
+
+
+def _coerce_tool_group_calls(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _web_search_success_count_in_latest_turn(messages: list[Any]) -> int:
+    return sum(_web_search_call_count(call) for call in _successful_tool_calls_in_latest_turn(messages))
 
 
 def _web_search_budget_error(*, prior_success_count: int) -> str:
@@ -82,15 +116,18 @@ def _web_search_budget_error(*, prior_success_count: int) -> str:
         return (
             "WEB_SEARCH_BUDGET_EXCEEDED: web_search is limited to "
             f"{_MAX_WEB_SEARCH_CALLS_PER_TURN} calls per turn. Do not call web_search again "
-            "in this turn. Use browser_use_run for dynamic web investigation, "
-            "fetch_url_content for already found URLs, or synthesize from existing results."
+            "in this turn. Tell the user the maximum web_search cap was reached if more "
+            "web discovery is needed. Otherwise use browser_use_run for dynamic web "
+            "investigation, fetch_url_content for already found URLs, or synthesize and "
+            "report the best current answer from existing results."
         )
     remaining = _MAX_WEB_SEARCH_CALLS_PER_TURN - prior_success_count
     return (
         "WEB_SEARCH_BATCH_TOO_LARGE: web_search is limited to "
         f"{_MAX_WEB_SEARCH_CALLS_PER_TURN} calls per turn. This turn has {remaining} "
         "web_search call(s) remaining. Retry with no more than that many web_search calls "
-        "in the same batch, or use browser_use_run for dynamic web investigation."
+        "in the same batch. If that is not enough, use browser_use_run for dynamic web "
+        "investigation or report to the user that the maximum web_search cap was reached."
     )
 
 
@@ -162,21 +199,21 @@ def build_validate_tool_calls_node(
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
             args = call.get("args", {}) or {}
-            if call_name == "web_search":
-                prior_web_search_count = _successful_tool_count_in_latest_turn(
-                    messages[:-1],
-                    tool_name="web_search",
-                )
+            requested_web_search_count = _web_search_call_count(call)
+            if requested_web_search_count:
+                prior_web_search_count = _web_search_success_count_in_latest_turn(messages[:-1])
                 current_batch_web_search_count = sum(
-                    1
-                    for existing_call in last.tool_calls[:call_idx]
-                    if str(existing_call.get("name", "")) == "web_search"
+                    _web_search_call_count(existing_call) for existing_call in last.tool_calls[:call_idx]
                 )
-                if prior_web_search_count + current_batch_web_search_count >= _MAX_WEB_SEARCH_CALLS_PER_TURN:
+                consumed_web_search_count = prior_web_search_count + current_batch_web_search_count
+                if (
+                    consumed_web_search_count >= _MAX_WEB_SEARCH_CALLS_PER_TURN
+                    or consumed_web_search_count + requested_web_search_count > _MAX_WEB_SEARCH_CALLS_PER_TURN
+                ):
                     validation_errors.append(
                         ToolMessage(
                             content=_web_search_budget_error(
-                                prior_success_count=prior_web_search_count,
+                                prior_success_count=consumed_web_search_count,
                             ),
                             tool_call_id=call_id,
                         )

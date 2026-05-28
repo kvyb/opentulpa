@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from opentulpa.agent.graph_builder import (
@@ -89,6 +91,11 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "For long-running owner/support work" in text
     assert "inbound lead/intake workflow execution" in text
     assert "concrete result or a plain blocker/failure report" in text
+    assert "In interactive chat only" in text
+    assert "call turn_plan when a private current-turn checklist would help" in text
+    assert "realistic current-turn plan with a clear goal" in text
+    assert "routine wakes, workflow setup, or inbound/customer-message execution" in text
+    assert "Do not use turn_plan for simple chat" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
     assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text
@@ -193,6 +200,8 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "live user-guided turn" in interactive
     assert "attach one concise visible progress sentence" in interactive
     assert "call send_owner_update as the first tool call" in interactive
+    assert "use turn_plan when a private current-turn checklist would help" in interactive
+    assert "realistic for this turn's runtime with a clear goal" in interactive
     assert "Apply retrieved user preferences, directive facts, and style facts" in interactive
     assert "store a concise preference with tool_group_exec" in interactive
     assert "stop making Telegram answers look like Markdown documents" in interactive
@@ -564,7 +573,7 @@ def test_build_tool_validation_repair_message_is_generic_for_tooling_errors() ->
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_blocks_web_search_after_two_successes() -> None:
+async def test_validate_tool_calls_blocks_web_search_after_five_successes() -> None:
     events: list[tuple[str, dict[str, object]]] = []
 
     def _log(state: dict[str, object], event: str, **kwargs: object) -> None:
@@ -603,8 +612,35 @@ async def test_validate_tool_calls_blocks_web_search_after_two_successes() -> No
                     additional_kwargs={"opentulpa_control": {"status": "ok"}},
                 ),
                 AIMessage(
-                    content="searching again",
+                    content="searching",
                     tool_calls=[{"id": "call_3", "name": "web_search", "args": {"query": "three"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_3",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching",
+                    tool_calls=[{"id": "call_4", "name": "web_search", "args": {"query": "four"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_4",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching",
+                    tool_calls=[{"id": "call_5", "name": "web_search", "args": {"query": "five"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_5",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching again",
+                    tool_calls=[{"id": "call_6", "name": "web_search", "args": {"query": "six"}}],
                 ),
             ],
             "turn_mode": "interactive",
@@ -616,12 +652,13 @@ async def test_validate_tool_calls_blocks_web_search_after_two_successes() -> No
     assert isinstance(update_messages[0], ToolMessage)
     assert "WEB_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
     assert "browser_use_run" in str(update_messages[0].content)
+    assert "maximum web_search cap was reached" in str(update_messages[0].content)
     assert isinstance(update_messages[1], SystemMessage)
     assert any(event == "graph.validate_tools.failed" for event, _ in events)
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_rejects_oversized_web_search_batch_with_retry_instruction() -> None:
+async def test_validate_tool_calls_rejects_sixth_web_search_call() -> None:
     node = build_validate_tool_calls_node(
         runtime=object(),
         required_args={},
@@ -641,6 +678,79 @@ async def test_validate_tool_calls_rejects_oversized_web_search_batch_with_retry
                         {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
                         {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
                         {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+                        {"id": "call_4", "name": "web_search", "args": {"query": "four"}},
+                        {"id": "call_5", "name": "web_search", "args": {"query": "five"}},
+                        {"id": "call_6", "name": "web_search", "args": {"query": "six"}},
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "WEB_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
+    assert "report the best current answer from existing results" in str(update_messages[0].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_counts_nested_tool_group_web_search_budget() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find leads"),
+                AIMessage(
+                    content="too many nested searches",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "tool_group_exec",
+                            "args": {
+                                "calls": [
+                                    {
+                                        "group": "web",
+                                        "command": "web_search",
+                                        "args_json": {"query": "one"},
+                                    },
+                                    {
+                                        "group": "web",
+                                        "command": "web_search",
+                                        "args_json": {"query": "two"},
+                                    },
+                                    {
+                                        "group": "web",
+                                        "command": "web_search",
+                                        "args_json": {"query": "three"},
+                                    },
+                                    {
+                                        "group": "web",
+                                        "command": "web_search",
+                                        "args_json": {"query": "four"},
+                                    },
+                                    {
+                                        "group": "web",
+                                        "command": "web_search",
+                                        "args_json": {"query": "five"},
+                                    },
+                                    {
+                                        "group": "web",
+                                        "command": "web_search",
+                                        "args_json": {"query": "six"},
+                                    },
+                                ]
+                            },
+                        }
                     ],
                 ),
             ],
@@ -652,7 +762,47 @@ async def test_validate_tool_calls_rejects_oversized_web_search_batch_with_retry
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
     assert "WEB_SEARCH_BATCH_TOO_LARGE" in str(update_messages[0].content)
-    assert "Retry with no more than" in str(update_messages[0].content)
+    assert "maximum web_search cap was reached" in str(update_messages[0].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_counts_json_string_nested_tool_group_web_search_budget() -> None:
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+    )
+
+    calls = [
+        {"group": "web", "command": "web_search", "args_json": {"query": str(index)}}
+        for index in range(6)
+    ]
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find leads"),
+                AIMessage(
+                    content="too many nested searches",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "tool_group_exec",
+                            "args": {"calls": json.dumps(calls)},
+                        }
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "WEB_SEARCH_BATCH_TOO_LARGE" in str(update_messages[0].content)
 
 
 @pytest.mark.asyncio
@@ -676,15 +826,21 @@ async def test_validate_tool_calls_does_not_count_blocked_web_search_as_success(
                         {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
                         {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
                         {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+                        {"id": "call_4", "name": "web_search", "args": {"query": "four"}},
+                        {"id": "call_5", "name": "web_search", "args": {"query": "five"}},
+                        {"id": "call_6", "name": "web_search", "args": {"query": "six"}},
                     ],
                 ),
-                ToolMessage(content="WEB_SEARCH_BUDGET_EXCEEDED", tool_call_id="call_3"),
+                ToolMessage(content="WEB_SEARCH_BUDGET_EXCEEDED", tool_call_id="call_6"),
                 SystemMessage(content="repair"),
                 AIMessage(
-                    content="try two searches",
+                    content="try five searches",
                     tool_calls=[
-                        {"id": "call_4", "name": "web_search", "args": {"query": "one"}},
-                        {"id": "call_5", "name": "web_search", "args": {"query": "two"}},
+                        {"id": "call_7", "name": "web_search", "args": {"query": "one"}},
+                        {"id": "call_8", "name": "web_search", "args": {"query": "two"}},
+                        {"id": "call_9", "name": "web_search", "args": {"query": "three"}},
+                        {"id": "call_10", "name": "web_search", "args": {"query": "four"}},
+                        {"id": "call_11", "name": "web_search", "args": {"query": "five"}},
                     ],
                 ),
             ],
