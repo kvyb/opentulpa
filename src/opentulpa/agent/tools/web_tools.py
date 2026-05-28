@@ -19,12 +19,34 @@ from opentulpa.agent.utils import html_to_text as _html_to_text
 
 def register_web_tools(runtime: Any) -> dict[str, Any]:
     @tool
-    async def web_search(query: str) -> Any:
-        """Search the web for current information."""
+    async def web_search(
+        query: str,
+        search_type: str | None = None,
+        category: str | None = None,
+        start_published_date: str | None = None,
+        end_published_date: str | None = None,
+    ) -> Any:
+        """
+        Search the web for current information.
+
+        Exa-only optional args when EXA_API_KEY is configured: search_type
+        (auto, fast, neural, deep), category (news, research paper, github, pdf,
+        company, people, personal site, financial report, tweet), and
+        start_published_date/end_published_date ISO strings. Exa search returns
+        20 results by default. Without EXA_API_KEY, only query is used.
+        """
+        payload: dict[str, Any] = {"query": query}
+        optional_args = {
+            "search_type": search_type,
+            "category": category,
+            "start_published_date": start_published_date,
+            "end_published_date": end_published_date,
+        }
+        payload.update({key: value for key, value in optional_args.items() if value is not None})
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/web_search",
-            json_body={"query": query},
+            json_body=payload,
             timeout=90.0,
         )
         if r.status_code != 200:

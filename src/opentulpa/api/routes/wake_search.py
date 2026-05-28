@@ -19,7 +19,7 @@ def register_wake_and_search_routes(
     llm_model: str | None,
     resolve_customer_id: Callable[[str], str] | None = None,
 ) -> None:
-    """Register wake queue APIs and OpenRouter-backed web search endpoint."""
+    """Register wake queue APIs and provider-backed web search endpoint."""
     _ = llm_model
 
     @app.post("/internal/wake")
@@ -47,10 +47,16 @@ def register_wake_and_search_routes(
 
     @app.post("/internal/web_search")
     async def internal_web_search(request: Request) -> Any:
-        """Run OpenRouter web search (default: Perplexity Sonar Pro Search)."""
+        """Run configured web search provider."""
         body = await request.json()
         query = body.get("query", "").strip()
         if not query:
             return JSONResponse(status_code=400, content={"detail": "query required"})
-        result = await run_web_search(query)
+        result = await run_web_search(
+            query,
+            search_type=body.get("search_type"),
+            category=body.get("category"),
+            start_published_date=body.get("start_published_date"),
+            end_published_date=body.get("end_published_date"),
+        )
         return {"ok": True, "result": result}

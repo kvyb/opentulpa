@@ -49,8 +49,22 @@ def test_extract_sources_collects_from_payload_and_answer() -> None:
     assert urls.count("https://two.example/b") == 1
 
 
+def test_exa_result_list_answer_formats_twenty_results() -> None:
+    items = [
+        {"title": f"Result {index}", "url": f"https://example.com/{index}"}
+        for index in range(1, 22)
+    ]
+
+    answer = web_search_module._format_result_list_answer(items)
+
+    assert "20. Result 20" in answer
+    assert "21. Result 21" not in answer
+
+
 @pytest.mark.asyncio
-async def test_web_search_requests_medium_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pplx_web_search_requests_medium_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, Any] = {}
 
     async def _fake_post(
@@ -71,17 +85,119 @@ async def test_web_search_requests_medium_reasoning_effort(monkeypatch: pytest.M
             json={"choices": [{"message": {"content": "Answer"}}]},
         )
 
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
     monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
 
     result = await web_search_module.web_search("current news")
 
     assert isinstance(result, dict)
+    assert result["provider"] == "pplx"
     assert captured["json"]["reasoning"] == {"effort": "medium"}
 
 
 @pytest.mark.asyncio
-async def test_web_search_retries_transient_openrouter_errors(
+async def test_web_search_auto_selects_exa_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_post(
+        self: httpx.AsyncClient,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        _ = self
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            status_code=200,
+            request=request,
+            json={
+                "answer": "Exa answer",
+                "citations": [{"url": "https://example.com/source"}],
+            },
+        )
+
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "openrouter-key")
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    result = await web_search_module.web_search("current news")
+
+    assert isinstance(result, dict)
+    assert captured["url"] == "https://api.exa.ai/answer"
+    assert captured["json"] == {"query": "current news", "text": False}
+    assert captured["headers"]["x-api-key"] == "exa-key"
+    assert captured["headers"]["x-exa-integration"] == "opentulpa"
+    assert result["provider"] == "exa"
+    assert result["answer"] == "Exa answer"
+    assert result["source_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_exa_web_search_uses_search_endpoint_for_advanced_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_post(
+        self: httpx.AsyncClient,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        _ = self, headers
+        captured["url"] = url
+        captured["json"] = json
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            status_code=200,
+            request=request,
+            json={
+                "results": [
+                    {
+                        "title": "Fresh item",
+                        "url": "https://news.example/fresh",
+                        "publishedDate": "2026-05-28T00:00:00.000Z",
+                        "highlights": ["Fresh highlight"],
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    result = await web_search_module.web_search(
+        "latest OpenTulpa news",
+        search_type="auto",
+        category="news",
+        start_published_date="2026-05-01T00:00:00.000Z",
+    )
+
+    assert isinstance(result, dict)
+    assert captured["url"] == "https://api.exa.ai/search"
+    assert captured["json"]["query"] == "latest OpenTulpa news"
+    assert captured["json"]["type"] == "auto"
+    assert captured["json"]["category"] == "news"
+    assert captured["json"]["numResults"] == 20
+    assert captured["json"]["startPublishedDate"] == "2026-05-01T00:00:00.000Z"
+    assert "contents" not in captured["json"]
+    assert "outputSchema" not in captured["json"]
+    assert result["provider"] == "exa"
+    assert result["model"] == "exa-search"
+    assert result["answer"] == "1. Fresh item (https://news.example/fresh)"
+    assert result["sources"] == [{"url": "https://news.example/fresh", "domain": "news.example"}]
+
+
+@pytest.mark.asyncio
+async def test_pplx_web_search_retries_transient_openrouter_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"count": 0}
@@ -108,6 +224,7 @@ async def test_web_search_retries_transient_openrouter_errors(
         )
 
     captured_delays: list[float] = []
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
     monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
     monkeypatch.setattr(web_search_module.asyncio, "sleep", _fake_sleep)

@@ -14,6 +14,9 @@ from opentulpa.agent.prompt_classifier import classify_prompt_mode
 from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
 )
+from opentulpa.agent.prompt_policy import (
+    build_web_search_backend_prompt_message as _build_web_search_backend_prompt_message,
+)
 from opentulpa.agent.prompt_sections import (
     build_prompt_mode_message,
 )
@@ -101,6 +104,24 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "empty routine_id/schedule is expected" in text
     assert "Instagram DM intake workflows use scheduled Composio polling" in text
     assert "Do not promise webhook-like handling" in text
+    assert "Follow the WEB_SEARCH_BACKEND prompt note" in text
+    assert "WEB_SEARCH_BACKEND: exa" not in text
+
+
+def test_web_search_backend_prompt_is_provider_specific() -> None:
+    exa_text = str(_build_web_search_backend_prompt_message("exa").content)
+    pplx_text = str(_build_web_search_backend_prompt_message("pplx").content)
+    none_text = str(_build_web_search_backend_prompt_message(None).content)
+
+    assert "WEB_SEARCH_BACKEND: exa" in exa_text
+    assert "search_type" in exa_text
+    assert "category='news'" in exa_text
+    assert "20 raw results" in exa_text
+    assert "WEB_SEARCH_BACKEND: pplx" in pplx_text
+    assert "Pass only query" in pplx_text
+    assert "Do not pass Exa-only args" in pplx_text
+    assert "WEB_SEARCH_BACKEND: none" in none_text
+    assert "web_search is not configured" in none_text
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
