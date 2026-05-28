@@ -185,7 +185,8 @@ For business-intake regressions, split the suite into two lanes:
 
 2. Exploratory realism runs
 
-- keep the same app-level harness, but replace the scripted lead with an LLM-driven lead simulator
+- keep the same app-level harness, but replace brittle scripted owner/lead turns with LLM-driven simulators that act from hidden goal cards
+- keep hard assertions for infrastructure invariants, but score conversation success with the LLM judge against an explicit objective
 - use these on demand or nightly, not as the only gating signal
 - capture full artifacts so you can inspect failures:
   - owner transcript
@@ -218,6 +219,7 @@ uv run python scripts/run_live_e2e_sections.py --section intake_workflow --worke
 ```
 
 `OPENTULPA_E2E_LEAD_SIM_MODEL` controls the incoming-lead simulator used by the simulator-backed Telegram intake scenario.
+`OPENTULPA_E2E_OWNER_SIM_MODEL` controls the owner simulator used by agentic workflow-setup scenarios.
 
 ## Reports and logs
 

@@ -7,6 +7,14 @@ from typing import Any
 from opentulpa.agent.turn_policy import normalize_turn_mode
 
 WORKFLOW_SETUP_RECURSION_LIMIT = 128
+_WORKFLOW_SETUP_BUDGET_TERMS = (
+    "workflow",
+    "work flow",
+    "intake",
+    "воркфлоу",
+    "workflow setup",
+    "telegram business",
+)
 
 
 def active_workflow_setup_session(
@@ -58,13 +66,26 @@ def recursion_limit_for_turn(
     thread_id: str,
     requested_turn_mode: str,
     requested_limit: int,
+    prompt_mode: str = "",
+    user_text: str = "",
 ) -> int:
     base = max(5, int(requested_limit))
-    if effective_turn_mode(
+    effective_mode = effective_turn_mode(
         runtime,
         customer_id=customer_id,
         thread_id=thread_id,
         requested_turn_mode=requested_turn_mode,
-    ) != "workflow_setup":
+    )
+    if effective_mode != "workflow_setup" and not _looks_like_workflow_setup_budget_turn(
+        prompt_mode=prompt_mode,
+        user_text=user_text,
+    ):
         return base
     return max(base, WORKFLOW_SETUP_RECURSION_LIMIT)
+
+
+def _looks_like_workflow_setup_budget_turn(*, prompt_mode: str, user_text: str) -> bool:
+    if str(prompt_mode or "").strip().lower() == "workflow_setup":
+        return True
+    lowered = str(user_text or "").casefold()
+    return any(term in lowered for term in _WORKFLOW_SETUP_BUDGET_TERMS)

@@ -13,6 +13,7 @@ import httpx
 import pytest
 from evaluation.judge import DEFAULT_JUDGE_MODEL, evaluate_e2e_scenario_with_llm_judge
 from harness.lead_simulator import DEFAULT_LEAD_SIMULATOR_MODEL, LeadProfile
+from harness.owner_simulator import OwnerProfile
 from harness.runner import E2EHarness, effective_live_llm_timeout_seconds
 
 from tests.workbook_fixtures import (
@@ -465,6 +466,45 @@ def _lead_source_messages(
     conversation = payload.get("conversation") if isinstance(payload, dict) else {}
     messages = conversation.get("messages") if isinstance(conversation, dict) else []
     return messages if isinstance(messages, list) else []
+
+
+def _car_wash_owner_profile(
+    *,
+    workflow_name: str,
+    csv_relative_path: str,
+    style_rule: str,
+) -> OwnerProfile:
+    return OwnerProfile(
+        objective=(
+            "Create and activate a Telegram Business DM intake workflow for a car wash. "
+            "The workflow must answer pricing questions, collect booking fields, and save "
+            "completed bookings to local CSV."
+        ),
+        initial_message=(
+            "I need a Telegram Business DM intake workflow for my car wash. "
+            "Please help me set it up and activate it."
+        ),
+        known_facts={
+            "workflow_name": workflow_name,
+            "channel": "Telegram Business DM",
+            "provider": "telegram_bot_api",
+            "required_fields": "car_model, car_type, wash_type, date, time",
+            "intent": (
+                "Handle leads asking about full car wash pricing and booking. Full wash only."
+            ),
+            "prices": "small car full wash 1000 rubles; SUV full wash 2500 rubles",
+            "time_slots": "only exact hour slots such as 09:00, 10:00, 11:00",
+            "sink": f"local CSV {csv_relative_path}",
+            "confirmation_rule": "wait for my confirmation, then save and activate",
+            "style_rule": style_rule,
+        },
+        rules=[
+            "If OpenTulpa asks a setup question, answer with the known facts.",
+            "If OpenTulpa proposes a workflow, confirm saving and activation.",
+            "Do not invent extra required fields.",
+        ],
+        max_turns=7,
+    )
 
 
 def _judge_verdict(report_payload: dict[str, Any]) -> str:
@@ -2071,9 +2111,20 @@ def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activa
         )
     )
     assert create_status == 200
-    assert _wait_until(lambda: len(e2e_harness.telegram_client.sent_messages) > initial_owner_message_count)
+    assert _wait_until(
+        lambda: any(
+            _looks_like_owner_proposal_message(item)
+            for item in _messages_for_chat(
+                e2e_harness,
+                chat_id=owner_chat_id,
+                start_index=initial_owner_message_count,
+            )
+        ),
+        timeout_seconds=180.0,
+    )
     assert _list_workflows(e2e_harness, customer_id=customer_id) == []
 
+    confirm_start_index = len(e2e_harness.telegram_client.sent_messages)
     confirm_status = e2e_harness.post_telegram(
         body=_telegram_message(
             chat_id=owner_chat_id,
@@ -2083,7 +2134,10 @@ def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activa
         )
     )
     assert confirm_status == 200
-    assert _wait_until(lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 1, timeout_seconds=60.0)
+    assert _wait_until(
+        lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 1,
+        timeout_seconds=180.0,
+    )
 
     workflows = _list_workflows(e2e_harness, customer_id=customer_id)
     assert len(workflows) == 1
@@ -2098,10 +2152,28 @@ def test_live_owner_telegram_chat_can_create_telegram_intake_workflow_and_activa
     assert source_config["business_connection_id"] == business_connection_id
     assert set(workflow["required_fields"]) == {"car_model", "car_type", "wash_type", "date", "time"}
 
+    assert _wait_until(
+        lambda: any(
+            workflow["workflow_id"] in str(item.get("text", ""))
+            or (
+                "workflow" in str(item.get("text", "")).lower()
+                and any(
+                    marker in str(item.get("text", "")).lower()
+                    for marker in ("created", "active", "saved", "activated")
+                )
+            )
+            for item in _messages_for_chat(
+                e2e_harness,
+                chat_id=owner_chat_id,
+                start_index=confirm_start_index,
+            )
+        ),
+        timeout_seconds=180.0,
+    )
     latest_owner_message = _latest_message_for_chat(
         e2e_harness,
         chat_id=owner_chat_id,
-        start_index=initial_owner_message_count,
+        start_index=confirm_start_index,
     )
     assert latest_owner_message is not None
     _assert_llm_semantic_match(
@@ -2301,164 +2373,24 @@ def test_live_owner_chat_can_create_quality_workflow_over_multiple_turns_and_han
         business_connection_id="bc_e2e_quality",
     )
 
-    fresh_status = e2e_harness.post_telegram(
-        body=_telegram_message(chat_id=owner_chat_id, user_id=owner_user_id, text="/fresh", message_id=50)
-    )
-    assert fresh_status == 200
-    assert _wait_until(
-        lambda: any(
-            int(item.get("chat_id", 0)) == owner_chat_id
-            and "fresh chat context" in str(item.get("text", "")).lower()
-            for item in e2e_harness.telegram_client.sent_messages
-        )
-    )
-    owner_thread_id = _telegram_owner_thread_id(chat_id=owner_chat_id)
-    assert owner_thread_id
-
     start_index = len(e2e_harness.telegram_client.sent_messages)
-    first_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=51,
-            text=(
-                "I want to set up a Telegram Business DM intake workflow for my car wash. "
-                "Please start the workflow setup wizard and help me shape it step by step."
-            ),
-        )
-    )
-    assert first_status == 200
-    assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=start_index)) >= 1)
-    first_wizard_reply = _latest_message_for_chat(
-        e2e_harness,
-        chat_id=owner_chat_id,
-        start_index=start_index,
-    )
-    assert first_wizard_reply is not None
-    _assert_llm_semantic_match(
-        e2e_harness,
-        scenario="quality_owner_first_wizard_reply",
-        expectation="Assistant reply acknowledges workflow/intake setup and asks for or prepares next configuration details.",
-        actual={"assistant_reply": first_wizard_reply},
-    )
-
-    second_turn_start = len(e2e_harness.telegram_client.sent_messages)
-    second_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=52,
-            text=(
-                "Use the workflow name 'E2E Quality Car Wash'. "
-                "Collect exactly: car_model, car_type, wash_type, date, time. "
+    owner_setup = e2e_harness.simulate_telegram_owner_workflow_setup(
+        customer_id=customer_id,
+        owner_chat_id=owner_chat_id,
+        owner_user_id=owner_user_id,
+        profile=_car_wash_owner_profile(
+            workflow_name="E2E Quality Car Wash",
+            csv_relative_path="tulpa_stuff/e2e_quality_carwash.csv",
+            style_rule=(
                 "If a lead asks for price, answer directly before asking anything else. "
                 "As soon as wash_type and car_type are known, give the exact price immediately. "
-                "Use these prices: small car full wash 1000 rubles, SUV full wash 2500 rubles. "
-                "Do not repeat already known details. "
-                "Only offer exact times like 09:00, 10:00, 11:00, not vague parts of day. "
-                "Save bookings to local CSV tulpa_stuff/e2e_quality_carwash.csv."
+                "Do not repeat already known details."
             ),
-        )
-    )
-    assert second_status == 200
-    assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=second_turn_start)) >= 1)
-    assert _wait_until(
-        lambda: "workflow_setup" in _turn_modes_seen(e2e_harness, customer_id=customer_id),
-        timeout_seconds=15.0,
-    )
-    proposal_message = _workflow_setup_owner_proposal_message(
-        e2e_harness,
-        customer_id=customer_id,
-        thread_id=owner_thread_id,
-        owner_chat_id=owner_chat_id,
-        start_index=second_turn_start,
-    )
-    if proposal_message is None:
-        proposal_message = _latest_message_for_chat(
-            e2e_harness,
-            chat_id=owner_chat_id,
-            start_index=second_turn_start,
-        )
-    assert proposal_message is not None
-
-    if not _wait_until(
-        lambda: _workflow_setup_has_proposal(
-            e2e_harness,
-            customer_id=customer_id,
-            thread_id=owner_thread_id,
         ),
-        timeout_seconds=10.0,
-    ):
-        clarification_start = len(e2e_harness.telegram_client.sent_messages)
-        clarification_status = e2e_harness.post_telegram(
-            body=_telegram_message(
-                chat_id=owner_chat_id,
-                user_id=owner_user_id,
-                message_id=53,
-                text=(
-                    "Intent: answer Telegram leads who ask about full car wash pricing and booking, "
-                    "then collect enough details to book them. Full wash only for this test. "
-                    "Treat the listed small car and SUV full-wash prices as complete. "
-                    "Telegram Business DM has no polling or scan schedule; it runs on inbound messages. "
-                    "Use the connected Telegram Business account. Please propose the workflow now and wait for my confirmation."
-                ),
-            )
-        )
-        assert clarification_status == 200
-        assert _wait_until(
-            lambda: _workflow_setup_proposal_and_owner_reply_seen(
-                e2e_harness,
-                customer_id=customer_id,
-                thread_id=owner_thread_id,
-                owner_chat_id=owner_chat_id,
-                start_index=clarification_start,
-            ),
-            timeout_seconds=90.0,
-        )
-        proposal_message = _workflow_setup_owner_proposal_message(
-            e2e_harness,
-            customer_id=customer_id,
-            thread_id=owner_thread_id,
-            owner_chat_id=owner_chat_id,
-            start_index=clarification_start,
-        )
-        assert proposal_message is not None
-
-    assert _wait_until(
-        lambda: _workflow_setup_proposal_and_owner_reply_seen(
-            e2e_harness,
-            customer_id=customer_id,
-            thread_id=owner_thread_id,
-            owner_chat_id=owner_chat_id,
-            start_index=second_turn_start,
-        ),
-        timeout_seconds=60.0,
+        initial_message_id=50,
+        idle_timeout_seconds=90.0,
     )
-    proposal_message = _workflow_setup_owner_proposal_message(
-        e2e_harness,
-        customer_id=customer_id,
-        thread_id=owner_thread_id,
-        owner_chat_id=owner_chat_id,
-        start_index=second_turn_start,
-    )
-    assert proposal_message is not None
-    _assert_llm_semantic_match(
-        e2e_harness,
-        scenario="quality_owner_setup_proposal",
-        expectation="Assistant reply is a workflow setup proposal/configuration and asks owner to confirm or save before activation.",
-        actual={"assistant_reply": proposal_message},
-    )
-
-    confirm_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=54,
-            text="Looks good. Save and activate that workflow now.",
-        )
-    )
-    assert confirm_status == 200
-    assert _wait_until(lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 1, timeout_seconds=60.0)
+    assert owner_setup["ok"] is True, owner_setup
 
     workflows = _list_workflows(e2e_harness, customer_id=customer_id)
     assert len(workflows) == 1
@@ -2580,89 +2512,23 @@ def test_live_owner_chat_can_create_multiturn_telegram_booking_workflow_and_pers
 
     csv_relative_path = "tulpa_stuff/e2e_multiturn_carwash.csv"
 
-    fresh_status = e2e_harness.post_telegram(
-        body=_telegram_message(chat_id=owner_chat_id, user_id=owner_user_id, text="/fresh", message_id=70)
-    )
-    assert fresh_status == 200
-    assert _wait_until(
-        lambda: any(
-            int(item.get("chat_id", 0)) == owner_chat_id
-            and "fresh chat context" in str(item.get("text", "")).lower()
-            for item in e2e_harness.telegram_client.sent_messages
-        )
-    )
-
     owner_start_index = len(e2e_harness.telegram_client.sent_messages)
-    first_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=71,
-            text=(
-                "I want a Telegram Business DM intake workflow for my car wash. "
-                "Start the workflow setup wizard and help me configure it."
-            ),
-        )
-    )
-    assert first_status == 200
-    assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=owner_start_index)) >= 1)
-    owner_thread_id = _telegram_owner_thread_id(chat_id=owner_chat_id)
-    assert owner_thread_id
-
-    second_turn_start = len(e2e_harness.telegram_client.sent_messages)
-    second_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=72,
-            text=(
-                "Use the workflow name 'E2E Multiturn Car Wash'. "
-                "Collect exactly these fields: car_model, car_type, wash_type, date, time. "
-                "When a lead shows booking intent, answer direct questions briefly and then ask only for the next missing field. "
-                "Do not save anything until all required fields are known. "
-                "Do not repeat details the lead already gave you. "
-                "Save completed bookings to local CSV tulpa_stuff/e2e_multiturn_carwash.csv. "
-                "Prepare the exact configuration and wait for my confirmation before saving."
-            ),
-        )
-    )
-    assert second_status == 200
-    assert _wait_until(
-        lambda: _workflow_setup_proposal_and_owner_reply_seen(
-            e2e_harness,
-            customer_id=customer_id,
-            thread_id=owner_thread_id,
-            owner_chat_id=owner_chat_id,
-            start_index=second_turn_start,
-        ),
-        timeout_seconds=210.0,
-    )
-
-    proposal_message = _workflow_setup_owner_proposal_message(
-        e2e_harness,
+    owner_setup = e2e_harness.simulate_telegram_owner_workflow_setup(
         customer_id=customer_id,
-        thread_id=owner_thread_id,
         owner_chat_id=owner_chat_id,
-        start_index=second_turn_start,
+        owner_user_id=owner_user_id,
+        profile=_car_wash_owner_profile(
+            workflow_name="E2E Multiturn Car Wash",
+            csv_relative_path=csv_relative_path,
+            style_rule=(
+                "When a lead shows booking intent, answer direct questions briefly and then "
+                "ask only for the next missing field. Do not repeat details already provided."
+            ),
+        ),
+        initial_message_id=70,
+        idle_timeout_seconds=90.0,
     )
-    assert proposal_message is not None
-    _assert_llm_semantic_match(
-        e2e_harness,
-        scenario="multiturn_owner_setup_proposal",
-        expectation="Assistant reply is a proposed workflow/configuration and clearly asks owner to confirm or save before activation.",
-        actual={"assistant_reply": proposal_message},
-    )
-
-    confirm_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=73,
-            text="Looks correct. Save and activate this workflow now.",
-        )
-    )
-    assert confirm_status == 200
-    assert _wait_until(lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 1, timeout_seconds=60.0)
+    assert owner_setup["ok"] is True, owner_setup
 
     workflows = _list_workflows(e2e_harness, customer_id=customer_id)
     assert len(workflows) == 1
@@ -2887,64 +2753,23 @@ def test_live_lead_simulator_can_complete_telegram_car_wash_booking(
 
     csv_relative_path = "tulpa_stuff/e2e_simulated_lead_carwash.csv"
 
-    fresh_status = e2e_harness.post_telegram(
-        body=_telegram_message(chat_id=owner_chat_id, user_id=owner_user_id, text="/fresh", message_id=80)
-    )
-    assert fresh_status == 200
-    assert _wait_until(
-        lambda: any(
-            int(item.get("chat_id", 0)) == owner_chat_id
-            and "fresh chat context" in str(item.get("text", "")).lower()
-            for item in e2e_harness.telegram_client.sent_messages
-        )
-    )
-
     owner_start_index = len(e2e_harness.telegram_client.sent_messages)
-    first_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=81,
-            text=(
-                "Create a Telegram Business DM intake workflow for my car wash. "
-                "Start the setup wizard and help me configure it."
+    owner_setup = e2e_harness.simulate_telegram_owner_workflow_setup(
+        customer_id=customer_id,
+        owner_chat_id=owner_chat_id,
+        owner_user_id=owner_user_id,
+        profile=_car_wash_owner_profile(
+            workflow_name="E2E Simulated Lead Car Wash",
+            csv_relative_path=csv_relative_path,
+            style_rule=(
+                "If a lead asks for price, answer directly first and then ask only "
+                "for the next missing booking detail. Do not save until all fields are known."
             ),
-        )
+        ),
+        initial_message_id=80,
+        idle_timeout_seconds=90.0,
     )
-    assert first_status == 200
-    assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=owner_start_index)) >= 1)
-
-    second_turn_start = len(e2e_harness.telegram_client.sent_messages)
-    second_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=82,
-            text=(
-                "Use the workflow name 'E2E Simulated Lead Car Wash'. "
-                "Collect exactly these fields: car_model, car_type, wash_type, date, time. "
-                "If a lead asks for price, answer directly first and then ask only for the next missing booking detail. "
-                "Use these prices: small car full wash 1000 rubles, SUV full wash 2500 rubles. "
-                "Do not repeat already known details. "
-                "Do not save until all required fields are known. "
-                f"Save completed bookings to local CSV {csv_relative_path}. "
-                "Prepare the exact configuration and wait for my confirmation before saving."
-            ),
-        )
-    )
-    assert second_status == 200
-    assert _wait_until(lambda: len(_messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=second_turn_start)) >= 1)
-
-    confirm_status = e2e_harness.post_telegram(
-        body=_telegram_message(
-            chat_id=owner_chat_id,
-            user_id=owner_user_id,
-            message_id=83,
-            text="Looks good. Save and activate this workflow now.",
-        )
-    )
-    assert confirm_status == 200
-    assert _wait_until(lambda: len(_list_workflows(e2e_harness, customer_id=customer_id)) == 1, timeout_seconds=60.0)
+    assert owner_setup["ok"] is True, owner_setup
 
     workflows = _list_workflows(e2e_harness, customer_id=customer_id)
     assert len(workflows) == 1

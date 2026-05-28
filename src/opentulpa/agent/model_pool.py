@@ -5,23 +5,31 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import time
 from typing import Any
 
 from langchain.chat_models import init_chat_model
-from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel
 
 from opentulpa.agent import model_error_trace
 from opentulpa.agent import model_transport_policy as transport_policy
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
+from opentulpa.agent.model_call_guards import (
+    next_stream_chunk_with_timeout,
+    raise_if_empty_model_response,
+)
+from opentulpa.agent.model_init_policy import (
+    chat_model_init_kwargs_for_model,
+    deep_merge_dicts,
+    disable_deepseek_v4_pro_thinking_extra,
+)
+from opentulpa.agent.openrouter_chat_factory import (
+    build_openrouter_chat_model,
+    uses_openrouter_reasoning_adapter,
+)
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_OPENROUTER_APP_REFERER = "https://github.com/kvyb/opentulpa"
-DEFAULT_OPENROUTER_APP_TITLE = "OpenTulpa"
 
 
 async def _run_with_transient_model_retries(
@@ -170,102 +178,6 @@ def provider_prompt_cache_invoke_extras(
     return {"extra_body": {"cache_control": dict(profile.get("cache_control") or {})}}
 
 
-def deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merged[key] = deep_merge_dicts(existing, value)
-            continue
-        merged[key] = value
-    return merged
-
-
-def disable_deepseek_v4_pro_thinking_extra(
-    *, model_name: str, reasoning_effort: str | None
-) -> dict[str, Any]:
-    if reasoning_effort:
-        return {}
-    slug = str(model_name or "").strip().lower()
-    if slug != "deepseek/deepseek-v4-pro":
-        return {}
-    return {
-        "extra_body": {
-            "reasoning": {"effort": "none"},
-            "thinking": {"type": "disabled"},
-        },
-    }
-
-
-def cap_max_completion_tokens_for_model(
-    model_kwargs: dict[str, Any], *, model_name: str
-) -> dict[str, Any]:
-    if str(model_name or "").strip().casefold() != "google/gemini-3.1-flash-lite-preview":
-        return model_kwargs
-    capped = dict(model_kwargs)
-    try:
-        current = int(capped.get("max_completion_tokens", 1000) or 1000)
-    except (TypeError, ValueError):
-        current = 1000
-    capped["max_completion_tokens"] = min(max(1, current), 1000)
-    return capped
-
-
-def looks_like_openrouter_base_url(base_url: str | None) -> bool:
-    normalized = str(base_url or "").strip().lower()
-    return "openrouter.ai" in normalized
-
-
-def uses_openrouter_reasoning_adapter(*, model_name: str | None, base_url: str | None) -> bool:
-    return "deepseek" in str(model_name or "").strip().lower() and looks_like_openrouter_base_url(
-        base_url
-    )
-
-
-def uses_openrouter_chat_adapter(*, model_name: str | None, base_url: str | None) -> bool:
-    slug = str(model_name or "").strip().lower()
-    return looks_like_openrouter_base_url(base_url) and (
-        "deepseek" in slug or slug.startswith("qwen/") or "qwen" in slug
-    )
-
-
-def openrouter_reasoning_config(reasoning_effort: str | None) -> dict[str, Any]:
-    effort = str(reasoning_effort or "").strip() or "none"
-    return {"effort": effort, "exclude": False}
-
-
-def openrouter_app_headers(
-    *,
-    base_url: str | None,
-    env: dict[str, str] | None = None,
-) -> dict[str, str]:
-    if not looks_like_openrouter_base_url(base_url):
-        return {}
-    source = env if env is not None else os.environ
-    title = str(source.get("OPENROUTER_APP_TITLE", "")).strip() or DEFAULT_OPENROUTER_APP_TITLE
-    headers: dict[str, str] = {"HTTP-Referer": DEFAULT_OPENROUTER_APP_REFERER}
-    if title:
-        headers["X-OpenRouter-Title"] = title
-    return headers
-
-
-def chat_model_init_kwargs_for_model(
-    base_kwargs: dict[str, Any],
-    *,
-    model_name: str,
-    reasoning_effort: str | None,
-) -> dict[str, Any]:
-    model_kwargs = cap_max_completion_tokens_for_model(dict(base_kwargs), model_name=model_name)
-    model_kwargs.setdefault("streaming", True)
-    extra = disable_deepseek_v4_pro_thinking_extra(
-        model_name=model_name,
-        reasoning_effort=reasoning_effort,
-    )
-    if extra:
-        model_kwargs = deep_merge_dicts(model_kwargs, extra)
-    return model_kwargs
-
-
 def init_runtime_chat_model(
     model_name: str,
     *,
@@ -273,37 +185,17 @@ def init_runtime_chat_model(
     openrouter_base_url: str | None,
     reasoning_effort: str | None,
     init_chat_model_func: Any = init_chat_model,
-    chat_openrouter_cls: Any = ChatOpenRouter,
+    chat_openrouter_cls: Any = None,
 ) -> Any:
-    if uses_openrouter_chat_adapter(model_name=model_name, base_url=openrouter_base_url):
-        uses_reasoning = uses_openrouter_reasoning_adapter(
-            model_name=model_name,
-            base_url=openrouter_base_url,
-        )
-        app_headers = openrouter_app_headers(base_url=openrouter_base_url)
-        adapter_kwargs: dict[str, Any] = {
-            "model": model_name,
-            "api_key": base_kwargs.get("api_key"),
-            "base_url": openrouter_base_url or base_kwargs.get("base_url"),
-            "temperature": base_kwargs.get("temperature"),
-            "max_completion_tokens": base_kwargs.get("max_completion_tokens"),
-            "streaming": bool(base_kwargs.get("streaming", True)),
-            "max_retries": transport_policy.openrouter_max_retries(),
-            "timeout": transport_policy.openrouter_timeout_seconds(),
-        }
-        if provider_routing := transport_policy.openrouter_provider_routing_for_model(
-            model_name
-        ):
-            adapter_kwargs["openrouter_provider"] = provider_routing
-        if uses_reasoning:
-            adapter_kwargs["reasoning"] = openrouter_reasoning_config(reasoning_effort)
-        if referer := app_headers.get("HTTP-Referer"):
-            adapter_kwargs["app_url"] = referer
-        if title := app_headers.get("X-OpenRouter-Title"):
-            adapter_kwargs["app_title"] = title
-        return chat_openrouter_cls(
-            **{key: value for key, value in adapter_kwargs.items() if value is not None}
-        )
+    openrouter_model = build_openrouter_chat_model(
+        model_name=model_name,
+        base_kwargs=base_kwargs,
+        openrouter_base_url=openrouter_base_url,
+        reasoning_effort=reasoning_effort,
+        **({"chat_openrouter_cls": chat_openrouter_cls} if chat_openrouter_cls else {}),
+    )
+    if openrouter_model is not None:
+        return openrouter_model
 
     return init_chat_model_func(
         model_name,
@@ -551,9 +443,21 @@ async def ainvoke_model(
                 callback_target: Any = callback_target,
                 invoke_extras: dict[str, Any] = invoke_extras,
             ) -> Any:
+                timeout_seconds = transport_policy.model_invoke_timeout_seconds()
                 if supports_ainvoke_kwargs(callback_target, invoke_extras):
-                    return await callback_target.ainvoke(prepared_messages, **invoke_extras)
-                return await callback_target.ainvoke(prepared_messages)
+                    invoke_awaitable = callback_target.ainvoke(
+                        prepared_messages,
+                        **invoke_extras,
+                    )
+                else:
+                    invoke_awaitable = callback_target.ainvoke(prepared_messages)
+                result = await asyncio.wait_for(invoke_awaitable, timeout=timeout_seconds)
+                raise_if_empty_model_response(
+                    result,
+                    model_name=resolved_model_name,
+                    phase="ainvoke",
+                )
+                return result
 
             response = await _run_with_transient_model_retries(
                 runtime,
@@ -670,11 +574,32 @@ async def astream_model(
                     stream = astream(prepared_messages, config=stream_config)
                 else:
                     stream = astream(prepared_messages)
-                async for chunk in stream:
-                    accumulated = chunk if accumulated is None else accumulated + chunk
+                stream_iter = stream.__aiter__()
+                timeout_seconds = transport_policy.model_stream_first_chunk_timeout_seconds()
+                try:
+                    while True:
+                        try:
+                            chunk = await next_stream_chunk_with_timeout(
+                                stream_iter,
+                                timeout_seconds=timeout_seconds,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        accumulated = chunk if accumulated is None else accumulated + chunk
+                finally:
+                    aclose = getattr(stream_iter, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
                 if accumulated is None:
-                    return AIMessage(content="")
-                return _ai_message_from_stream_chunk(accumulated)
+                    result = AIMessage(content="")
+                else:
+                    result = _ai_message_from_stream_chunk(accumulated)
+                raise_if_empty_model_response(
+                    result,
+                    model_name=resolved_model_name,
+                    phase="astream",
+                )
+                return result
 
             response = await _run_with_transient_model_retries(
                 runtime,

@@ -49,6 +49,9 @@ from opentulpa.agent.prompt_sections import (
 )
 from opentulpa.agent.tool_execution_policy import ToolExecutionPolicy
 from opentulpa.agent.tool_message_protocol import (
+    collapse_completed_tool_call_segments_for_model as _collapse_completed_tool_call_segments_for_model,
+)
+from opentulpa.agent.tool_message_protocol import (
     enforce_tool_message_protocol as _enforce_tool_message_protocol,
 )
 from opentulpa.agent.tool_message_protocol import (
@@ -996,15 +999,6 @@ def build_runtime_graph(runtime: Any):
                 if grounding_entry is not None:
                     late_entries.append(grounding_entry)
 
-            workflow_setup_control_context = (
-                _build_workflow_setup_prompt_context(
-                    runtime,
-                    customer_id=customer_id,
-                    thread_id=thread_id,
-                )
-                if turn_mode == "workflow_setup"
-                else ""
-            )
             frozen_prompt_context = {
                 "signature": {
                     "latest_user": latest_user,
@@ -1036,7 +1030,6 @@ def build_runtime_graph(runtime: Any):
                 ],
                 "stable_entries": stable_entries,
                 "late_entries": late_entries,
-                "workflow_setup_control_context": workflow_setup_control_context,
             }
             prompt_context_update["frozen_prompt_context"] = frozen_prompt_context
 
@@ -1190,9 +1183,8 @@ def build_runtime_graph(runtime: Any):
             older_history_messages = []
         latest_turn_messages = _enforce_tool_message_protocol(sanitized_history[turn_start_index:])
         if _model_uses_current_turn_raw_history_only():
-            latest_turn_messages, stale_summary_text = _compact_deepseek_turn_raw_history(
-                latest_turn_messages,
-                stale_summary_text=stale_summary_text,
+            latest_turn_messages = _enforce_tool_message_protocol(
+                _collapse_completed_tool_call_segments_for_model(latest_turn_messages)
             )
             prompt_context_update["frozen_history_projection"] = {
                 "turn_start_index": turn_start_index,
@@ -1245,8 +1237,10 @@ def build_runtime_graph(runtime: Any):
             dynamic_late_messages.append(SystemMessage(content="\n".join(steering_lines)))
             dynamic_late_sections.append("live_user_steering")
         if turn_mode == "workflow_setup":
-            workflow_setup_context = str(
-                frozen_prompt_context.get("workflow_setup_control_context", "") or ""
+            workflow_setup_context = _build_workflow_setup_prompt_context(
+                runtime,
+                customer_id=customer_id,
+                thread_id=thread_id,
             ).strip()
             if workflow_setup_context:
                 dynamic_late_messages.append(SystemMessage(content=workflow_setup_context))
@@ -1719,47 +1713,6 @@ def build_runtime_graph(runtime: Any):
                 start = idx
                 break
         return messages[start:]
-
-    def _compact_deepseek_turn_raw_history(
-        turn_messages: list[AnyMessage],
-        *,
-        stale_summary_text: str,
-    ) -> tuple[list[AnyMessage], str]:
-        if not turn_messages or not isinstance(turn_messages[-1], ToolMessage):
-            return turn_messages, stale_summary_text
-        first_tool_idx = len(turn_messages) - 1
-        while first_tool_idx > 0 and isinstance(turn_messages[first_tool_idx - 1], ToolMessage):
-            first_tool_idx -= 1
-        assistant_idx = first_tool_idx - 1
-        if assistant_idx < 0:
-            return turn_messages, stale_summary_text
-        assistant = turn_messages[assistant_idx]
-        if not isinstance(assistant, AIMessage) or not getattr(assistant, "tool_calls", None):
-            return turn_messages, stale_summary_text
-        keep_indices = {assistant_idx, *range(first_tool_idx, len(turn_messages))}
-        for idx in range(len(turn_messages) - 1, -1, -1):
-            if isinstance(turn_messages[idx], HumanMessage):
-                keep_indices.add(idx)
-                break
-        dropped_messages = [
-            message for idx, message in enumerate(turn_messages) if idx not in keep_indices
-        ]
-        if dropped_messages:
-            turn_summary = context_engineer._summarize_stale_messages(
-                dropped_messages,
-                latest_tool_call_ids=set(),
-            )
-            if turn_summary:
-                stale_summary_text = "\n".join(
-                    part for part in [stale_summary_text, turn_summary] if part.strip()
-                )
-                stale_summary_text = _trim_text_to_token_budget(
-                    stale_summary_text, token_budget=900
-                )
-        kept_messages = [
-            message for idx, message in enumerate(turn_messages) if idx in keep_indices
-        ]
-        return _enforce_tool_message_protocol(kept_messages), stale_summary_text
 
     async def finalize_turn_node(state: AgentState) -> dict[str, Any]:
         messages = state.get("messages", [])

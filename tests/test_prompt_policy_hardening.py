@@ -17,6 +17,7 @@ from opentulpa.agent.prompt_policy import (
 from opentulpa.agent.prompt_sections import (
     build_prompt_mode_message,
 )
+from opentulpa.agent.tool_message_protocol import collapse_completed_tool_call_segments_for_model
 from opentulpa.agent.tool_validation import (
     _build_tool_validation_repair_message,
     _routine_create_intent_validation_error,
@@ -1256,6 +1257,47 @@ def test_enforce_tool_message_protocol_keeps_complete_tool_segment_after_system_
     assert bool(getattr(repaired[1], "tool_calls", []))
     assert isinstance(repaired[2], ToolMessage)
     assert isinstance(repaired[3], AIMessage)
+
+
+def test_collapse_completed_tool_segments_keeps_provider_prompt_valid() -> None:
+    messages = [
+        HumanMessage(content="set up workflow"),
+        AIMessage(
+            content="Checking setup.",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "tool_group_exec",
+                    "args": {"group": "intake", "command": "intake_workflow_setup_begin"},
+                },
+                {
+                    "id": "call_2",
+                    "name": "tool_group_exec",
+                    "args": {"group": "knowledge", "command": "business_knowledge_index"},
+                },
+            ],
+        ),
+        ToolMessage(content='{"ok": true, "session_id": "iwsetup_1"}', tool_call_id="call_1"),
+        ToolMessage(content='{"ok": true, "sources": 1}', tool_call_id="call_2"),
+        HumanMessage(content="confirmed, save it"),
+    ]
+
+    collapsed = collapse_completed_tool_call_segments_for_model(messages)
+
+    assert len(collapsed) == 3
+    assert isinstance(collapsed[0], HumanMessage)
+    assert isinstance(collapsed[1], SystemMessage)
+    assert isinstance(collapsed[2], HumanMessage)
+    summary = str(collapsed[1].content)
+    assert "VERIFIED_TOOL_RESULTS" in summary
+    assert "Checking setup." in summary
+    assert "intake_workflow_setup_begin" in summary
+    assert "business_knowledge_index" in summary
+    assert not any(isinstance(message, ToolMessage) for message in collapsed)
+    assert not any(
+        isinstance(message, AIMessage) and getattr(message, "tool_calls", None)
+        for message in collapsed
+    )
 
 
 def test_prompt_mode_classifier_prefers_literal_chat_for_short_definition_question() -> None:

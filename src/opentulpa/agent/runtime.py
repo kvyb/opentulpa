@@ -78,6 +78,7 @@ from opentulpa.agent.file_analysis import (
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.internal_api_client import InternalApiClient
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.openrouter_chat_factory import openrouter_app_headers
 from opentulpa.agent.prompt_classifier import classify_prompt_mode as _classify_prompt_mode
 from opentulpa.agent.runtime_input import (
     MergedInputSuppressedError,
@@ -206,14 +207,6 @@ def _langchain_callback_metadata(metadata: dict[str, Any]) -> dict[str, str]:
             separators=(",", ":"),
         )
     return safe
-
-
-def _openrouter_app_headers(
-    *,
-    base_url: str | None,
-    env: dict[str, str] | None = None,
-) -> dict[str, str]:
-    return _model_pool.openrouter_app_headers(base_url=base_url, env=env)
 
 
 def _message_role(message: Any) -> str:
@@ -1468,7 +1461,7 @@ class OpenTulpaLangGraphRuntime:
             "temperature": 0,
             "max_completion_tokens": self._max_completion_tokens,
         }
-        default_headers = _openrouter_app_headers(base_url=self.openrouter_base_url)
+        default_headers = openrouter_app_headers(base_url=self.openrouter_base_url)
         if default_headers:
             model_init_kwargs["default_headers"] = default_headers
             model_init_kwargs["use_responses_api"] = False
@@ -3262,6 +3255,8 @@ class OpenTulpaLangGraphRuntime:
                 thread_id=thread_id,
                 requested_turn_mode=turn_mode,
                 requested_limit=requested_limit,
+                prompt_mode=prompt_mode,
+                user_text=user_text,
             ),
         }
         callbacks = self._build_langfuse_callbacks(

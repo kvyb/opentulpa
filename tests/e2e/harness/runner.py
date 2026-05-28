@@ -13,6 +13,7 @@ from evaluation.judge import evaluate_e2e_scenario_with_llm_judge
 from fastapi.testclient import TestClient
 from harness.lead_simulator import LeadProfile, LeadSimulator
 from harness.logging import JsonlRecorder
+from harness.owner_simulator import OwnerProfile, OwnerSimulator
 from mocks.composio_instagram import FakeComposioInstagramService
 from mocks.telegram import FakeTelegramClient
 from reports.status_report import write_status_report
@@ -64,6 +65,7 @@ class E2EHarness:
     telegram_client: FakeTelegramClient
     composio_service: Any
     lead_simulator: LeadSimulator
+    owner_simulator: OwnerSimulator
 
     def count_internal_api_calls(self) -> int:
         return self.recorder.count("internal_api_call")
@@ -372,6 +374,221 @@ class E2EHarness:
             ),
         }
 
+    def _owner_messages_for_chat(
+        self, *, owner_chat_id: int, start_index: int = 0
+    ) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.telegram_client.sent_messages[start_index:]
+            if int(item.get("chat_id", 0)) == int(owner_chat_id)
+        ]
+
+    def _owner_workflow_state(self, *, customer_id: str) -> dict[str, Any]:
+        intake_service = self.client.app.state.intake_workflows
+        workflows = intake_service.list_workflows(customer_id=customer_id)
+        return {
+            "workflow_count": len(workflows),
+            "workflows": workflows[-3:],
+        }
+
+    def _post_owner_text(
+        self,
+        *,
+        owner_chat_id: int,
+        owner_user_id: int,
+        message_id: int,
+        text: str,
+    ) -> int:
+        return self.post_telegram(
+            body={
+                "update_id": int(time.time() * 1000),
+                "message": {
+                    "message_id": int(message_id),
+                    "date": int(time.time()),
+                    "chat": {"id": int(owner_chat_id), "type": "private"},
+                    "from": {"id": int(owner_user_id), "is_bot": False},
+                    "text": str(text or "").strip(),
+                },
+            }
+        )
+
+    def _wait_for_owner_response_or_workflow(
+        self,
+        *,
+        customer_id: str,
+        owner_chat_id: int,
+        assistant_start: int,
+        idle_timeout_seconds: float,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        timeout_seconds = effective_live_llm_timeout_seconds(
+            idle_timeout_seconds,
+            override_env="OPENTULPA_E2E_OWNER_SETUP_WAIT_TIMEOUT_SECONDS",
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            workflow_state = self._owner_workflow_state(customer_id=customer_id)
+            assistant_messages = self._owner_messages_for_chat(
+                owner_chat_id=owner_chat_id,
+                start_index=assistant_start,
+            )
+            if int(workflow_state.get("workflow_count") or 0) > 0 or assistant_messages:
+                return workflow_state, assistant_messages
+            time.sleep(0.2)
+        return self._owner_workflow_state(customer_id=customer_id), self._owner_messages_for_chat(
+            owner_chat_id=owner_chat_id,
+            start_index=assistant_start,
+        )
+
+    def _run_owner_setup_turn(
+        self,
+        *,
+        customer_id: str,
+        owner_chat_id: int,
+        owner_user_id: int,
+        message_id: int,
+        owner_text: str,
+        turn_index: int,
+        idle_timeout_seconds: float,
+        transcript: list[dict[str, Any]],
+        turn_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        assistant_start = len(self.telegram_client.sent_messages)
+        status_code = self._post_owner_text(
+            owner_chat_id=owner_chat_id,
+            owner_user_id=owner_user_id,
+            message_id=message_id,
+            text=owner_text,
+        )
+        transcript.append({"role": "owner", "text": owner_text, "message_id": message_id})
+        if status_code != 200:
+            return {
+                "status": "owner_webhook_rejected",
+                "workflow_state": self._owner_workflow_state(customer_id=customer_id),
+            }
+
+        workflow_state, assistant_messages = self._wait_for_owner_response_or_workflow(
+            customer_id=customer_id,
+            owner_chat_id=owner_chat_id,
+            assistant_start=assistant_start,
+            idle_timeout_seconds=idle_timeout_seconds,
+        )
+        for item in assistant_messages:
+            transcript.append(
+                {
+                    "role": "assistant",
+                    "text": str(item.get("text", "") or "").strip(),
+                    "message_id": item.get("message_id"),
+                }
+            )
+        turn_result = {
+            "turn_index": turn_index,
+            "owner_text": owner_text,
+            "assistant_messages": assistant_messages,
+            "workflow_state": workflow_state,
+        }
+        turn_results.append(turn_result)
+        self.recorder.add("owner_simulator_turn_result", **turn_result)
+        workflows = workflow_state.get("workflows") or []
+        if int(workflow_state.get("workflow_count") or 0) > 0 and workflows:
+            return {
+                "status": "workflow_created",
+                "workflow": workflows[-1],
+                "workflow_state": workflow_state,
+            }
+        if not assistant_messages:
+            return {"status": "assistant_did_not_reply", "workflow_state": workflow_state}
+        return {"status": "needs_owner_reply", "workflow_state": workflow_state}
+
+    def simulate_telegram_owner_workflow_setup(
+        self,
+        *,
+        customer_id: str,
+        owner_chat_id: int,
+        owner_user_id: int,
+        profile: OwnerProfile,
+        initial_message_id: int = 100,
+        idle_timeout_seconds: float = 90.0,
+    ) -> dict[str, Any]:
+        transcript: list[dict[str, Any]] = []
+        plans: list[dict[str, Any]] = []
+        turn_results: list[dict[str, Any]] = []
+        max_turns = max(1, int(profile.max_turns or 7))
+        next_message_id = max(1, int(initial_message_id))
+        next_owner_text = str(profile.initial_message or "").strip()
+        if not next_owner_text:
+            raise ValueError("owner profile initial_message is required")
+
+        for turn_index in range(max_turns):
+            turn = self._run_owner_setup_turn(
+                customer_id=customer_id,
+                owner_chat_id=owner_chat_id,
+                owner_user_id=owner_user_id,
+                message_id=next_message_id,
+                owner_text=next_owner_text,
+                turn_index=turn_index,
+                idle_timeout_seconds=idle_timeout_seconds,
+                transcript=transcript,
+                turn_results=turn_results,
+            )
+            status = str(turn.get("status") or "")
+            workflow_state = dict(turn.get("workflow_state") or {})
+            if status == "owner_webhook_rejected":
+                return {
+                    "ok": False,
+                    "reason": "owner_webhook_rejected",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "workflow_state": workflow_state,
+                }
+            if status == "workflow_created":
+                return {
+                    "ok": True,
+                    "reason": "workflow_created",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "workflow": turn.get("workflow") or {},
+                    "workflow_state": workflow_state,
+                }
+            if status == "assistant_did_not_reply":
+                return {
+                    "ok": False,
+                    "reason": "assistant_did_not_reply",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "workflow_state": workflow_state,
+                }
+
+            plan = self.owner_simulator.plan_next_turn(
+                profile=profile,
+                transcript=transcript,
+                workflow_state=workflow_state,
+            )
+            plans.append(plan.as_dict())
+            self.recorder.add("owner_simulator_plan", turn_index=turn_index, plan=plan.as_dict())
+            if plan.done or not str(plan.message or "").strip():
+                return {
+                    "ok": False,
+                    "reason": "owner_simulator_stopped_before_workflow",
+                    "transcript": transcript,
+                    "turn_plans": plans,
+                    "turn_results": turn_results,
+                    "workflow_state": workflow_state,
+                }
+            next_owner_text = str(plan.message or "").strip()
+            next_message_id += 1
+
+        return {
+            "ok": False,
+            "reason": "max_turns_exhausted",
+            "transcript": transcript,
+            "turn_plans": plans,
+            "turn_results": turn_results,
+            "workflow_state": self._owner_workflow_state(customer_id=customer_id),
+        }
+
     def write_status_report(self, *, scenario: str, ok: bool, details: dict[str, Any]) -> Path:
         payload = {
             "scenario": scenario,
@@ -499,11 +716,35 @@ def build_harness(
         openrouter_api_key=api_key,
         openrouter_base_url=base_url,
         model_name=str(os.getenv("OPENTULPA_E2E_MODEL", settings.llm_model)),
+        reasoning_effort=str(
+            os.getenv("OPENTULPA_E2E_REASONING_EFFORT", settings.llm_reasoning_effort or "")
+        ),
         wake_classifier_model_name=str(
             os.getenv(
                 "OPENTULPA_E2E_WAKE_MODEL",
                 settings.wake_classifier_model or settings.llm_model,
             )
+        ),
+        wake_execution_model_name=str(
+            os.getenv(
+                "OPENTULPA_E2E_WAKE_EXECUTION_MODEL",
+                settings.wake_execution_model or settings.llm_model,
+            )
+        ),
+        telegram_media_model_name=str(
+            os.getenv("OPENTULPA_E2E_TELEGRAM_MEDIA_MODEL", settings.multimodal_llm)
+        ),
+        workflow_setup_input_classifier_model_name=str(
+            os.getenv(
+                "OPENTULPA_E2E_WORKFLOW_SETUP_INPUT_CLASSIFIER_MODEL",
+                settings.workflow_setup_input_classifier_model,
+            )
+        ),
+        context_compaction_model_name=str(
+            os.getenv("OPENTULPA_E2E_CONTEXT_COMPACTION_MODEL", settings.llm_model)
+        ),
+        browser_use_model_override=str(
+            os.getenv("OPENTULPA_E2E_BROWSER_USE_MODEL", settings.browser_use_model)
         ),
         checkpoint_db_path=str(tmp_path / f"{scenario_name}_checkpoints.sqlite"),
         behavior_log_enabled=True,
@@ -533,6 +774,11 @@ def build_harness(
         telegram_client=fake_tg,
         composio_service=composio,
         lead_simulator=LeadSimulator(
+            api_key=api_key,
+            base_url=base_url,
+            recorder=recorder,
+        ),
+        owner_simulator=OwnerSimulator(
             api_key=api_key,
             base_url=base_url,
             recorder=recorder,

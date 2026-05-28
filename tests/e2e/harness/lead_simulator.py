@@ -6,33 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from harness.llm_json import extract_chat_completion_text, normalize_bool, parse_json_object
 from harness.logging import JsonlRecorder
 
 DEFAULT_LEAD_SIMULATOR_MODEL = os.getenv(
     "OPENTULPA_E2E_LEAD_SIM_MODEL",
     "google/gemini-3-flash-preview",
 )
-
-
-def _parse_json_object(text: str) -> dict[str, Any] | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        pass
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    candidate = raw[start : end + 1]
-    try:
-        payload = json.loads(candidate)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _normalize_text_list(value: Any) -> list[str]:
@@ -44,40 +24,6 @@ def _normalize_text_list(value: Any) -> list[str]:
         if text:
             out.append(text[:120])
     return out[:12]
-
-
-def _normalize_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "done"}
-
-
-def _extract_response_text(payload: dict[str, Any]) -> str:
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    first = choices[0] if isinstance(choices[0], dict) else {}
-    message = first.get("message") if isinstance(first, dict) else {}
-    if not isinstance(message, dict):
-        return ""
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.strip()
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for item in content:
-        if isinstance(item, str):
-            text = item.strip()
-            if text:
-                parts.append(text)
-            continue
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("text", "") or "").strip()
-        if text:
-            parts.append(text)
-    return "\n".join(parts).strip()
 
 
 def _booking_completed(booking_state: dict[str, Any] | None) -> bool:
@@ -236,11 +182,11 @@ class LeadSimulator:
                 )
                 response.raise_for_status()
                 response_payload = response.json()
-                raw_text = _extract_response_text(response_payload)
-                parsed = _parse_json_object(raw_text)
+                raw_text = extract_chat_completion_text(response_payload)
+                parsed = parse_json_object(raw_text)
                 if isinstance(parsed, dict):
                     plan = LeadTurnPlan(
-                        done=_normalize_bool(parsed.get("done")),
+                        done=normalize_bool(parsed.get("done")),
                         message=str(parsed.get("message", "") or "").strip(),
                         reason=str(parsed.get("reason", "") or "").strip()[:400],
                         shared_fact_keys=_normalize_text_list(parsed.get("shared_fact_keys")),

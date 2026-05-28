@@ -78,6 +78,21 @@ def test_recursion_limit_for_turn_preserves_high_configured_limit() -> None:
         )
         == 256
     )
+
+
+def test_recursion_limit_for_turn_boosts_initial_workflow_setup_request() -> None:
+    assert (
+        recursion_limit_for_turn(
+            _Runtime(None),
+            customer_id="customer",
+            thread_id="thread",
+            requested_turn_mode="interactive",
+            requested_limit=30,
+            prompt_mode="execution",
+            user_text="Хочу создать workflow для Telegram Business входящих сообщений.",
+        )
+        == 128
+    )
     assert (
         recursion_limit_for_turn(
             _Runtime({"status": "active"}),

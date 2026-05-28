@@ -10,6 +10,7 @@ from typing import Any
 from zipfile import ZipFile
 
 import pytest
+from evaluation.judge import assert_e2e_objective_satisfied
 from harness.runner import E2EHarness
 from openpyxl import Workbook
 
@@ -23,6 +24,29 @@ def _wait_until(predicate: Any, timeout_seconds: float = 180.0) -> bool:
             return True
         time.sleep(0.5)
     return bool(predicate())
+
+
+def _assert_user_context_answer_objective(
+    harness: E2EHarness,
+    *,
+    scenario: str,
+    objective: str,
+    query_calls: list[dict[str, Any]],
+    final_text: str,
+    sources: list[dict[str, Any]],
+) -> None:
+    assert_e2e_objective_satisfied(
+        scenario=scenario,
+        objective=objective,
+        evidence={
+            "query_calls": query_calls[-3:],
+            "final_answer": final_text,
+            "sources": sources,
+        },
+        system_log_path=harness.system_log_path,
+        behavior_log_path=harness.behavior_log_path,
+        llm_trace_path=harness.llm_trace_path,
+    )
 
 
 def _telegram_text_message(
@@ -434,13 +458,18 @@ def test_live_telegram_chat_uploads_real_files_then_queries_user_context(
         _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)[-1].get("text", "")
         or ""
     )
-    query_response_text = str(query_calls()[-1].get("response_text", "") or "")
-    combined = f"{query_response_text}\n{final_text}".lower()
-
-    assert "$900" in combined or "900" in combined
-    assert "weekly" in combined
-    assert "scenario" in combined
-    assert "idea bank" in combined
+    _assert_user_context_answer_objective(
+        e2e_harness,
+        scenario="live_telegram_chat_recalls_uploaded_user_context",
+        objective=(
+            "By the end of the conversation, the assistant answers from uploaded user context "
+            "that the Launch package is $900 and the retainer work includes weekly blog scripts, "
+            "scenario review, and idea bank refresh."
+        ),
+        query_calls=query_calls(),
+        final_text=final_text,
+        sources=sources,
+    )
 
     e2e_harness.recorder.add(
         "live_user_context_real_file_chat_e2e",
@@ -552,13 +581,18 @@ def test_live_telegram_chat_recalls_pdf_user_context(
         _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)[-1].get("text", "")
         or ""
     )
-    query_response_text = str(query_calls()[-1].get("response_text", "") or "")
-    combined = f"{query_response_text}\n{final_text}".lower()
-
-    assert "$1200" in combined or "$1,200" in combined or "1200" in combined
-    assert "weekly" in combined
-    assert "idea bank" in combined
-    assert "scenario" in combined
+    _assert_user_context_answer_objective(
+        e2e_harness,
+        scenario="live_telegram_chat_recalls_pdf_user_context",
+        objective=(
+            "By the end of the conversation, the assistant answers from uploaded PDF context "
+            "that the retainer floor is $1,200 and the in-scope work includes weekly blog "
+            "scripts, idea bank refresh, and scenario review."
+        ),
+        query_calls=query_calls(),
+        final_text=final_text,
+        sources=sources,
+    )
 
     e2e_harness.recorder.add(
         "live_user_context_pdf_recall_e2e",
@@ -671,12 +705,18 @@ def test_live_telegram_chat_recalls_audio_user_context(
         _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)[-1].get("text", "")
         or ""
     )
-    query_response_text = str(query_calls()[-1].get("response_text", "") or "")
-    combined = f"{query_response_text}\n{final_text}".lower()
-
-    assert "blue lantern" in combined
-    assert "weekly" in combined
-    assert "script review" in combined
+    _assert_user_context_answer_objective(
+        e2e_harness,
+        scenario="live_telegram_chat_recalls_audio_user_context",
+        objective=(
+            "By the end of the conversation, the assistant answers from uploaded audio context "
+            "that the audio retainer code is Blue Lantern and the included review is weekly "
+            "script review."
+        ),
+        query_calls=query_calls(),
+        final_text=final_text,
+        sources=sources,
+    )
 
     e2e_harness.recorder.add(
         "live_user_context_audio_recall_e2e",
@@ -921,11 +961,17 @@ def test_live_telegram_chat_recalls_image_and_video_user_context(
         _messages_for_chat(e2e_harness, chat_id=owner_chat_id, start_index=question_start)[-1].get("text", "")
         or ""
     )
-    query_response_text = str(query_calls()[-1].get("response_text", "") or "")
-    combined = f"{query_response_text}\n{final_text}".lower()
-
-    assert "blog sprint" in combined
-    assert "retention loop" in combined
+    _assert_user_context_answer_objective(
+        e2e_harness,
+        scenario="live_telegram_chat_recalls_image_and_video_user_context",
+        objective=(
+            "By the end of the conversation, the assistant answers from uploaded media context "
+            "that the image phrase is Blog Sprint and the video phrase is Retention Loop."
+        ),
+        query_calls=query_calls(),
+        final_text=final_text,
+        sources=sources,
+    )
 
     e2e_harness.recorder.add(
         "live_user_context_media_recall_e2e",

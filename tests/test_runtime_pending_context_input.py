@@ -1149,6 +1149,83 @@ async def test_workflow_setup_prompt_injects_authoritative_next_action() -> None
 
 
 @pytest.mark.asyncio
+async def test_workflow_setup_control_card_refreshes_after_tool_results() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    captured_prompts: list[list[Any]] = []
+    captured_prefix_counts: list[int] = []
+    service = _FakeWorkflowSetupService(_ready_setup_session())
+
+    class _FinalizeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            completed = dict(_ready_setup_session())
+            completed["status"] = "completed"
+            completed["created_or_updated_workflow_id"] = "iwf_autospa"
+            service.session = completed
+            return {
+                "ok": True,
+                "session": completed,
+            }
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, kwargs
+        nonlocal calls
+        calls += 1
+        captured_prompts.append(list(messages))
+        captured_prefix_counts.append(stable_prefix_count)
+        if calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{"id": "call_finalize", "name": "fake_finalize", "args": {}}],
+            )
+        return AIMessage(content="Workflow active with workflow_id=iwf_autospa.")
+
+    async def _emit_update(
+        *, text: str, dedupe_key: str = "", thread_id: str | None = None
+    ) -> dict[str, bool]:
+        del text, dedupe_key, thread_id
+        return {"sent": True, "duplicate": False}
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._workflow_setup_service = service
+    runtime._tools = {"fake_finalize": _FinalizeTool()}
+    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
+    graph = build_runtime_graph(runtime)
+
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Подтверждаю. Сохрани workflow.")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat-workflow-setup-context",
+            "turn_mode": "workflow_setup",
+            "prompt_mode": "workflow_setup",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_context_refresh",
+        },
+        config={"configurable": {"thread_id": "chat-workflow-setup-context"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Workflow active with workflow_id=iwf_autospa."
+    assert len(captured_prompts) == 2
+    first_prompt = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[0])
+    second_prompt = "\n\n".join(str(getattr(message, "content", "")) for message in captured_prompts[1])
+    assert "session_status: active" in first_prompt
+    assert "session_status: completed" in second_prompt
+    assert "workflow_id=iwf_autospa" in second_prompt
+    assert captured_prefix_counts == [2, 2]
+
+
+@pytest.mark.asyncio
 async def test_interactive_turn_promotes_to_workflow_setup_when_session_becomes_active() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     captured_prompts: list[list[Any]] = []
@@ -1853,7 +1930,7 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
+async def test_deepseek_prompt_collapses_completed_tool_segments() -> None:
     runtime = object.__new__(OpenTulpaLangGraphRuntime)
     captured_messages: list[list[Any]] = []
 
@@ -1951,8 +2028,13 @@ async def test_deepseek_prompt_keeps_only_latest_tool_segment_raw() -> None:
         for call in (getattr(message, "tool_calls", []) or [])
         if isinstance(call, dict)
     ]
-    assert raw_tool_ids == ["call_2"]
-    assert raw_ai_tool_ids == ["call_2"]
+    assert raw_tool_ids == []
+    assert raw_ai_tool_ids == []
+    third_prompt_text = "\n\n".join(str(getattr(message, "content", "")) for message in third_prompt)
+    assert "VERIFIED_TOOL_RESULTS" in third_prompt_text
+    assert "fake_tool" in third_prompt_text
+    assert "step=1" in third_prompt_text
+    assert "step=2" in third_prompt_text
 
 
 def test_memory_grounding_block_stays_compact() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -302,3 +303,67 @@ def evaluate_e2e_scenario_with_llm_judge(
         "raw_response": content[:4000],
         "parsed": parsed,
     }
+
+
+def assert_e2e_objective_satisfied(
+    *,
+    scenario: str,
+    objective: str,
+    evidence: dict[str, Any],
+    system_log_path: Path,
+    behavior_log_path: Path,
+    llm_trace_path: Path,
+    model: str = DEFAULT_JUDGE_MODEL,
+    minimum_task_completion: int = 4,
+    minimum_correctness: int = 4,
+) -> dict[str, Any]:
+    judge_model = (
+        os.getenv("OPENTULPA_E2E_ASSERT_JUDGE_MODEL", "").strip()
+        or os.getenv("OPENTULPA_E2E_JUDGE_MODEL", "").strip()
+        or model
+    )
+    result = evaluate_e2e_scenario_with_llm_judge(
+        scenario=f"objective:{scenario}",
+        details={
+            "assertion_type": "objective_satisfied",
+            "objective": objective,
+            "evidence": evidence,
+            "judge_instruction": (
+                "Decide whether the e2e objective was achieved by the end of the conversation. "
+                "Accept wording variations and model-specific phrasing. Fail only when required "
+                "outcome evidence is absent, contradicted, or materially wrong."
+            ),
+        },
+        system_log_path=system_log_path,
+        behavior_log_path=behavior_log_path,
+        llm_trace_path=llm_trace_path,
+        model=judge_model,
+        timeout_seconds=35.0,
+    )
+    parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+    scores = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
+    verdict = str(parsed.get("verdict", "") or "").strip().lower()
+    task_completion = _normalize_score(scores.get("task_completion"))
+    correctness = _normalize_score(scores.get("correctness"))
+    if (
+        not bool(result.get("ok", False))
+        or verdict != "pass"
+        or task_completion < minimum_task_completion
+        or correctness < minimum_correctness
+    ):
+        raise AssertionError(
+            "LLM objective assertion failed: "
+            + json.dumps(
+                {
+                    "scenario": scenario,
+                    "objective": objective,
+                    "verdict": verdict,
+                    "task_completion": task_completion,
+                    "correctness": correctness,
+                    "result": result,
+                },
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
+        )
+    return result

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ import httpx
 import pytest
 from langchain_core.tools import tool as lc_tool
 
-from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
+from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage
 from opentulpa.agent.model_error_trace import exception_trace_fields, exception_trace_text
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
 
@@ -126,6 +127,73 @@ class _TransientStreamTraceModel:
         self.calls += 1
         if self.calls == 1:
             raise _UnreadResponseProviderError()
+        yield _TraceResponse()
+
+
+class _EmptyThenGoodTraceModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(content="")
+        return _TraceResponse()
+
+
+class _SlowThenGoodTraceModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(1.0)
+        return _TraceResponse()
+
+
+class _EmptyThenGoodStreamTraceModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            yield AIMessage(content="")
+            return
+        yield _TraceResponse()
+
+
+class _SlowThenGoodStreamTraceModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(1.0)
+            yield _TraceResponse()
+            return
+        yield _TraceResponse()
+
+
+class _StreamingPreferredTraceModel:
+    def __init__(self) -> None:
+        self.ainvoke_calls = 0
+        self.astream_calls = 0
+
+    async def ainvoke(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.ainvoke_calls += 1
+        return _TraceResponse()
+
+    async def astream(self, messages: object, **kwargs: object) -> Any:
+        del messages, kwargs
+        self.astream_calls += 1
         yield _TraceResponse()
 
 
@@ -290,7 +358,7 @@ async def test_astream_model_traces_provider_error_body(tmp_path: Path) -> None:
     runtime = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
-        model_name="deepseek/deepseek-v4-pro",
+        model_name="z-ai/glm-5.1",
         checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
     )
     runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
@@ -299,7 +367,7 @@ async def test_astream_model_traces_provider_error_body(tmp_path: Path) -> None:
         await runtime.astream_model(
             _FailingStreamTraceModel(),
             [HumanMessage(content="break stream")],
-            model_name="deepseek/deepseek-v4-pro",
+            model_name="z-ai/glm-5.1",
             call_context={"call_site": "graph_agent", "trace_id": "turn_stream_provider_error"},
         )
 
@@ -326,7 +394,7 @@ async def test_ainvoke_model_retries_transient_provider_error(tmp_path: Path, mo
     runtime = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
-        model_name="deepseek/deepseek-v4-pro",
+        model_name="z-ai/glm-5.1",
         checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
         behavior_log_path=str(tmp_path / "behavior.jsonl"),
     )
@@ -366,7 +434,7 @@ async def test_astream_model_retries_transient_provider_error(tmp_path: Path, mo
     result = await runtime.astream_model(
         model,
         [HumanMessage(content="retry stream please")],
-        model_name="deepseek/deepseek-v4-pro",
+        model_name="z-ai/glm-5.1",
         call_context={"call_site": "graph_agent", "trace_id": "turn_stream_transient_retry"},
     )
 
@@ -380,6 +448,170 @@ async def test_astream_model_retries_transient_provider_error(tmp_path: Path, mo
     retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
     assert retry["trace_id"] == "turn_stream_transient_retry"
     assert "streaming response was not read" in retry["provider_http_text"]
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_retries_empty_provider_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _EmptyThenGoodTraceModel()
+
+    result = await runtime.ainvoke_model(
+        model,
+        [HumanMessage(content="do not return empty")],
+        model_name="deepseek/deepseek-v4-pro",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_empty_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_empty_retry"
+    assert "empty model response" in retry["error"]
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_retries_provider_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    monkeypatch.setenv("OPENTULPA_MODEL_INVOKE_TIMEOUT_SECONDS", "0.05")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _SlowThenGoodTraceModel()
+
+    result = await runtime.ainvoke_model(
+        model,
+        [HumanMessage(content="provider call should not hang forever")],
+        model_name="deepseek/deepseek-v4-pro",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_invoke_timeout_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_invoke_timeout_retry"
+    assert "TimeoutError" in retry["error"]
+
+
+@pytest.mark.asyncio
+async def test_astream_model_retries_empty_provider_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _EmptyThenGoodStreamTraceModel()
+
+    result = await runtime.astream_model(
+        model,
+        [HumanMessage(content="do not stream empty")],
+        model_name="z-ai/glm-5.1",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_stream_empty_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_stream_empty_retry"
+    assert "empty model response" in retry["error"]
+
+
+@pytest.mark.asyncio
+async def test_astream_model_retries_stream_first_chunk_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
+    monkeypatch.setenv("OPENTULPA_MODEL_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS", "0.05")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _SlowThenGoodStreamTraceModel()
+
+    result = await runtime.astream_model(
+        model,
+        [HumanMessage(content="stream should not hang forever")],
+        model_name="z-ai/glm-5.1",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_stream_timeout_retry"},
+    )
+
+    assert result.content == "All good."
+    assert model.calls == 2
+    behavior = [
+        json.loads(line)
+        for line in (tmp_path / "behavior.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = next(item for item in behavior if item["event"] == "llm.invoke.transient_retry")
+    assert retry["trace_id"] == "turn_stream_timeout_retry"
+    assert "model stream chunk timeout" in retry["error"]
+
+
+@pytest.mark.asyncio
+async def test_astream_model_streams_openrouter_deepseek(
+    tmp_path: Path,
+) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        model_name="deepseek/deepseek-v4-pro",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        behavior_log_path=str(tmp_path / "behavior.jsonl"),
+    )
+    model = _StreamingPreferredTraceModel()
+
+    result = await runtime.astream_model(
+        model,
+        [HumanMessage(content="tool call response may not stream chunks")],
+        model_name="deepseek/deepseek-v4-pro",
+        call_context={"call_site": "graph_agent", "trace_id": "turn_deepseek_stream"},
+    )
+
+    assert result.content == "All good."
+    assert model.ainvoke_calls == 0
+    assert model.astream_calls == 1
 
 
 @pytest.mark.asyncio

@@ -107,6 +107,14 @@ def _wait_until(predicate: Any, timeout_seconds: float = 2.0) -> bool:
     return bool(predicate())
 
 
+def _sent_texts_for_chat(telegram_client: FakeTelegramClient, chat_id: int) -> list[str]:
+    return [
+        str(message.get("text", "") or "")
+        for message in telegram_client.sent_messages
+        if int(message["chat_id"]) == chat_id
+    ]
+
+
 @pytest.fixture()
 def support_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     fake_tg = FakeTelegramClient("fake-token")
@@ -432,9 +440,16 @@ def test_live_llm_support_can_setup_autospa_workflow_for_bound_customer(
             text=details,
         ) == 200
         assert _wait_until(
-            lambda: len([m for m in harness.telegram_client.sent_messages if int(m["chat_id"]) == support_chat_id])
-            >= 3,
-            timeout_seconds=90.0,
+            lambda: any(
+                "AutoSpa Мойка и Шиномонтаж" in text
+                and (
+                    "Предложение" in text
+                    or "готово к активации" in text
+                    or "подтвержд" in text.lower()
+                )
+                for text in _sent_texts_for_chat(harness.telegram_client, support_chat_id)
+            ),
+            timeout_seconds=300.0,
         )
         assert _post_telegram(
             harness.client,
