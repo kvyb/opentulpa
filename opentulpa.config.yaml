@@ -17,7 +17,7 @@ link_alias_db_path: .opentulpa/link_aliases.db
 agent_behavior_log_path: .opentulpa/logs/agent_behavior.jsonl
 
 # Agent/runtime limits
-agent_recursion_limit: 100
+agent_recursion_limit: 250
 agent_max_completion_tokens: 4096
 agent_max_user_reply_chars: 4000
 agent_context_token_limit: 20000

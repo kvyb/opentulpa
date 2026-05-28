@@ -152,6 +152,12 @@ def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) 
     assert settings.business_knowledge_oracle_model == "oracle-from-yaml"
 
 
+def test_settings_accepts_agent_recursion_limit_250() -> None:
+    settings = Settings(agent_recursion_limit=250)
+
+    assert settings.agent_recursion_limit == 250
+
+
 def test_dotenv_overrides_yaml_runtime_defaults(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text("llm_model: from-yaml\n", encoding="utf-8")

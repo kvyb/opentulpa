@@ -3165,7 +3165,7 @@ class OpenTulpaLangGraphRuntime:
     def _effective_recursion_limit(self, recursion_limit_override: int | None = None) -> int:
         if recursion_limit_override is None:
             return int(self.recursion_limit)
-        return max(5, min(int(recursion_limit_override), 200))
+        return max(5, min(int(recursion_limit_override), 250))
 
     @staticmethod
     def _build_graph_input(

@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     agent_recursion_limit: int = Field(
         default=80,
         ge=5,
-        le=200,
+        le=250,
         description="Maximum LangGraph steps per turn.",
     )
     agent_max_completion_tokens: int = Field(
