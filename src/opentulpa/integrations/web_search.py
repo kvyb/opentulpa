@@ -13,6 +13,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
@@ -159,6 +160,25 @@ def _clean_optional_text(value: object) -> str | None:
     return text or None
 
 
+@dataclass(frozen=True)
+class WebSearchResult:
+    answer: str
+    sources: list[dict[str, str]]
+    provider: str
+    model: str
+
+    def to_payload(self) -> dict[str, object]:
+        assert self.provider
+        assert self.model
+        return {
+            "answer": self.answer,
+            "sources": self.sources,
+            "source_count": len(self.sources),
+            "provider": self.provider,
+            "model": self.model,
+        }
+
+
 def _safe_exa_search_type(value: object) -> str | None:
     text = _clean_optional_text(value)
     if not text:
@@ -177,34 +197,28 @@ def _safe_exa_category(value: object) -> str | None:
 
 def _exa_search_options(kwargs: dict[str, object]) -> dict[str, object]:
     options: dict[str, object] = {}
+    unexpected = sorted(
+        key
+        for key, value in kwargs.items()
+        if value is not None and key not in {"search_type", "category"}
+    )
+    if unexpected:
+        raise ValueError(f"unsupported Exa web_search args: {', '.join(unexpected)}")
     search_type = _safe_exa_search_type(kwargs.get("search_type"))
     category = _safe_exa_category(kwargs.get("category"))
-    start_published_date = _clean_optional_text(kwargs.get("start_published_date"))
-    end_published_date = _clean_optional_text(kwargs.get("end_published_date"))
+    raw_search_type = _clean_optional_text(kwargs.get("search_type"))
+    raw_category = _clean_optional_text(kwargs.get("category"))
+    if raw_search_type and search_type is None:
+        allowed = ", ".join(sorted(EXA_SEARCH_TYPES))
+        raise ValueError(f"invalid Exa search_type '{raw_search_type}' (allowed: {allowed})")
+    if raw_category and category is None:
+        allowed = ", ".join(sorted(EXA_CATEGORIES))
+        raise ValueError(f"invalid Exa category '{raw_category}' (allowed: {allowed})")
     if search_type:
         options["type"] = search_type
     if category:
         options["category"] = category
-    if start_published_date:
-        options["startPublishedDate"] = start_published_date
-    if end_published_date:
-        options["endPublishedDate"] = end_published_date
-    if category in {"company", "people"}:
-        for unsupported in ("startPublishedDate", "endPublishedDate"):
-            options.pop(unsupported, None)
     return options
-
-
-def _uses_advanced_exa_search(options: dict[str, object]) -> bool:
-    return any(
-        key in options
-        for key in (
-            "type",
-            "category",
-            "startPublishedDate",
-            "endPublishedDate",
-        )
-    )
 
 
 class WebSearchProvider(abc.ABC):
@@ -218,7 +232,7 @@ class WebSearchProvider(abc.ABC):
         """Return True when provider has enough local config to run."""
 
     @abc.abstractmethod
-    async def search(self, query: str, **kwargs: object) -> dict[str, object] | str:
+    async def search(self, query: str, **kwargs: object) -> WebSearchResult | str:
         """Run search and return OpenTulpa's existing web_search result shape."""
 
 
@@ -230,43 +244,13 @@ class ExaSearchProvider(WebSearchProvider):
     def is_available(self) -> bool:
         return _exa_api_key() is not None
 
-    async def search(self, query: str, **kwargs: object) -> dict[str, object] | str:
+    async def search(self, query: str, **kwargs: object) -> WebSearchResult | str:
         api_key = _exa_api_key()
         assert api_key is not None
-        options = _exa_search_options(kwargs)
-        if _uses_advanced_exa_search(options):
-            return await self._search_with_filters(query, api_key, options)
-        payload = {"query": query, "text": False}
-        data = await _post_json_with_retries(
-            f"{EXA_BASE}/answer",
-            payload=payload,
-            headers={
-                "x-api-key": api_key,
-                "x-exa-integration": "opentulpa",
-                "Content-Type": "application/json",
-            },
-            provider_name=self.name,
-        )
-        if isinstance(data, str):
-            return data
-        answer = _sanitize_answer_text(str(data.get("answer", "")).strip())
-        if not answer:
-            answer = _format_result_list_answer(_extract_result_items(data))
-        return _result_payload(
-            answer=answer or "No response from web search.",
-            sources=_extract_sources(data, answer),
-            provider=self.name,
-            model="exa-answer",
-        )
-
-    async def _search_with_filters(
-        self,
-        query: str,
-        api_key: str,
-        options: dict[str, object],
-    ) -> dict[str, object] | str:
-        assert api_key
-        assert options
+        try:
+            options = _exa_search_options(kwargs)
+        except ValueError as exc:
+            return f"Web search invalid argument: {exc!s}."
         payload: dict[str, object] = {
             "query": query,
             "numResults": DEFAULT_EXA_SEARCH_RESULTS,
@@ -286,7 +270,7 @@ class ExaSearchProvider(WebSearchProvider):
             return data
         items = _extract_result_items(data)
         answer = _format_result_list_answer(items)
-        return _result_payload(
+        return WebSearchResult(
             answer=answer or "No response from web search.",
             sources=_sources_from_result_items(items),
             provider=self.name,
@@ -302,8 +286,9 @@ class PplxSearchProvider(WebSearchProvider):
     def is_available(self) -> bool:
         return get_openai_compatible_api_key_from_env() is not None
 
-    async def search(self, query: str, **kwargs: object) -> dict[str, object] | str:
-        _ = kwargs
+    async def search(self, query: str, **kwargs: object) -> WebSearchResult | str:
+        if any(value is not None for value in kwargs.values()):
+            return "Web search provider 'pplx' supports only query."
         api_key = get_openai_compatible_api_key_from_env()
         assert api_key is not None
         use_model = _default_search_model()
@@ -341,6 +326,13 @@ def get_web_search_provider() -> WebSearchProvider | None:
         if provider.is_available():
             return provider
     return None
+
+
+def get_web_search_backend_name() -> str:
+    provider = get_web_search_provider()
+    if provider is None:
+        return "none"
+    return provider.name
 
 
 async def _post_json_with_retries(
@@ -405,7 +397,7 @@ async def _sleep_before_retry(
     await asyncio.sleep(delay)
 
 
-def _pplx_response_payload(data: dict[str, object], use_model: str) -> dict[str, object] | str:
+def _pplx_response_payload(data: dict[str, object], use_model: str) -> WebSearchResult | str:
     raw_choices = data.get("choices")
     choices = raw_choices if isinstance(raw_choices, list) else []
     if not choices:
@@ -415,30 +407,12 @@ def _pplx_response_payload(data: dict[str, object], use_model: str) -> dict[str,
     answer = _sanitize_answer_text(_extract_text_content(content))
     if not answer:
         answer = "No content in response."
-    return _result_payload(
+    return WebSearchResult(
         answer=answer,
         sources=_extract_sources(data, answer),
         provider="pplx",
         model=use_model,
     )
-
-
-def _result_payload(
-    *,
-    answer: str,
-    sources: list[dict[str, str]],
-    provider: str,
-    model: str,
-) -> dict[str, object]:
-    assert provider
-    assert model
-    return {
-        "answer": answer,
-        "sources": sources,
-        "source_count": len(sources),
-        "provider": provider,
-        "model": model,
-    }
 
 
 def _extract_result_items(data: dict[str, object]) -> list[dict[str, object]]:
@@ -500,4 +474,7 @@ async def web_search(query: str, **kwargs: object) -> dict[str, object] | str:
     provider = get_web_search_provider()
     if provider is None:
         return _missing_provider_message()
-    return await provider.search(query, **kwargs)
+    result = await provider.search(query, **kwargs)
+    if isinstance(result, WebSearchResult):
+        return result.to_payload()
+    return result

@@ -118,8 +118,12 @@ async def test_web_search_auto_selects_exa_when_available(
             status_code=200,
             request=request,
             json={
-                "answer": "Exa answer",
-                "citations": [{"url": "https://example.com/source"}],
+                "results": [
+                    {
+                        "title": "Exa result",
+                        "url": "https://example.com/source",
+                    }
+                ],
             },
         )
 
@@ -130,17 +134,17 @@ async def test_web_search_auto_selects_exa_when_available(
     result = await web_search_module.web_search("current news")
 
     assert isinstance(result, dict)
-    assert captured["url"] == "https://api.exa.ai/answer"
-    assert captured["json"] == {"query": "current news", "text": False}
+    assert captured["url"] == "https://api.exa.ai/search"
+    assert captured["json"] == {"query": "current news", "numResults": 20}
     assert captured["headers"]["x-api-key"] == "exa-key"
     assert captured["headers"]["x-exa-integration"] == "opentulpa"
     assert result["provider"] == "exa"
-    assert result["answer"] == "Exa answer"
+    assert result["answer"] == "1. Exa result (https://example.com/source)"
     assert result["source_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_exa_web_search_uses_search_endpoint_for_advanced_options(
+async def test_exa_web_search_uses_search_endpoint_for_optional_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -178,7 +182,6 @@ async def test_exa_web_search_uses_search_endpoint_for_advanced_options(
         "latest OpenTulpa news",
         search_type="auto",
         category="news",
-        start_published_date="2026-05-01T00:00:00.000Z",
     )
 
     assert isinstance(result, dict)
@@ -187,13 +190,36 @@ async def test_exa_web_search_uses_search_endpoint_for_advanced_options(
     assert captured["json"]["type"] == "auto"
     assert captured["json"]["category"] == "news"
     assert captured["json"]["numResults"] == 20
-    assert captured["json"]["startPublishedDate"] == "2026-05-01T00:00:00.000Z"
     assert "contents" not in captured["json"]
     assert "outputSchema" not in captured["json"]
     assert result["provider"] == "exa"
     assert result["model"] == "exa-search"
     assert result["answer"] == "1. Fresh item (https://news.example/fresh)"
     assert result["sources"] == [{"url": "https://news.example/fresh", "domain": "news.example"}]
+
+
+@pytest.mark.asyncio
+async def test_exa_web_search_rejects_invalid_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+
+    result = await web_search_module.web_search("current news", search_type="slow")
+
+    assert isinstance(result, str)
+    assert "invalid Exa search_type" in result
+
+
+@pytest.mark.asyncio
+async def test_pplx_web_search_rejects_provider_specific_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
+
+    result = await web_search_module.web_search("current news", category="news")
+
+    assert result == "Web search provider 'pplx' supports only query."
 
 
 @pytest.mark.asyncio

@@ -52,11 +52,10 @@ def register_wake_and_search_routes(
         query = body.get("query", "").strip()
         if not query:
             return JSONResponse(status_code=400, content={"detail": "query required"})
-        result = await run_web_search(
-            query,
-            search_type=body.get("search_type"),
-            category=body.get("category"),
-            start_published_date=body.get("start_published_date"),
-            end_published_date=body.get("end_published_date"),
-        )
+        optional_args = {
+            key: body[key]
+            for key in ("search_type", "category")
+            if key in body and body[key] is not None
+        }
+        result = await run_web_search(query, **optional_args)
         return {"ok": True, "result": result}

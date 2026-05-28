@@ -36,10 +36,10 @@ from opentulpa.agent.prompt_cache_policy import (
     message_tokens as _message_tokens,
 )
 from opentulpa.agent.prompt_policy import (
-    build_system_prompt_message as _build_system_prompt_message,
+    build_current_web_search_backend_prompt_message as _build_current_web_search_backend_prompt_message,
 )
 from opentulpa.agent.prompt_policy import (
-    build_web_search_backend_prompt_message as _build_web_search_backend_prompt_message,
+    build_system_prompt_message as _build_system_prompt_message,
 )
 from opentulpa.agent.prompt_sections import (
     PROMPT_DYNAMIC_BOUNDARY,
@@ -114,20 +114,6 @@ def _graph_retry_budget(runtime: Any) -> int:
 
 def _workflow_setup_no_progress_retry_limit(runtime: Any) -> int:
     return min(2, _graph_retry_budget(runtime))
-
-
-def _resolve_web_search_backend_name() -> str:
-    try:
-        from opentulpa.integrations.web_search import get_web_search_provider
-
-        provider = get_web_search_provider()
-    except Exception:
-        logger.exception("Failed to resolve web_search provider for prompt context")
-        return "unknown"
-    if provider is None:
-        return "none"
-    name = str(getattr(provider, "name", "") or "").strip().lower()
-    return name or "unknown"
 
 
 LOOP_LIMIT_STATUS_REMAINING_STEPS = 3
@@ -1237,11 +1223,8 @@ def build_runtime_graph(runtime: Any):
         ]
         dynamic_late_messages: list[AnyMessage] = []
         dynamic_late_sections: list[str] = []
-        web_search_backend = _resolve_web_search_backend_name()
-        dynamic_late_messages.append(
-            _build_web_search_backend_prompt_message(web_search_backend)
-        )
-        dynamic_late_sections.append(f"web_search_backend:{web_search_backend}")
+        dynamic_late_messages.append(_build_current_web_search_backend_prompt_message())
+        dynamic_late_sections.append("web_search_backend")
         if current_turn_context_content:
             dynamic_late_messages.append(SystemMessage(content=current_turn_context_content))
             dynamic_late_sections.extend(current_turn_context_sections)

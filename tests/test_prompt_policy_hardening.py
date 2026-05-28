@@ -117,6 +117,8 @@ def test_web_search_backend_prompt_is_provider_specific() -> None:
     assert "search_type" in exa_text
     assert "category='news'" in exa_text
     assert "20 raw results" in exa_text
+    assert "start_published_date" not in exa_text
+    assert "end_published_date" not in exa_text
     assert "WEB_SEARCH_BACKEND: pplx" in pplx_text
     assert "Pass only query" in pplx_text
     assert "Do not pass Exa-only args" in pplx_text

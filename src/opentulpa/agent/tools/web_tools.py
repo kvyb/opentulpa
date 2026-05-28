@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -15,34 +15,29 @@ from opentulpa.agent.tools.core_tools import _crawl4ai_extract
 from opentulpa.agent.utils import content_to_text as _content_to_text
 from opentulpa.agent.utils import extract_html_title as _extract_html_title
 from opentulpa.agent.utils import html_to_text as _html_to_text
+from opentulpa.integrations.web_search import get_web_search_backend_name
+
+ExaSearchType = Literal["auto", "fast", "neural", "deep"]
+ExaCategory = Literal[
+    "company",
+    "research paper",
+    "news",
+    "pdf",
+    "github",
+    "tweet",
+    "personal site",
+    "financial report",
+    "people",
+]
 
 
 def register_web_tools(runtime: Any) -> dict[str, Any]:
-    @tool
-    async def web_search(
-        query: str,
-        search_type: str | None = None,
-        category: str | None = None,
-        start_published_date: str | None = None,
-        end_published_date: str | None = None,
-    ) -> Any:
-        """
-        Search the web for current information.
-
-        Exa-only optional args when EXA_API_KEY is configured: search_type
-        (auto, fast, neural, deep), category (news, research paper, github, pdf,
-        company, people, personal site, financial report, tweet), and
-        start_published_date/end_published_date ISO strings. Exa search returns
-        20 results by default. Without EXA_API_KEY, only query is used.
-        """
+    def _web_search_request_payload(query: str, **optional_args: object) -> dict[str, Any]:
         payload: dict[str, Any] = {"query": query}
-        optional_args = {
-            "search_type": search_type,
-            "category": category,
-            "start_published_date": start_published_date,
-            "end_published_date": end_published_date,
-        }
         payload.update({key: value for key, value in optional_args.items() if value is not None})
+        return payload
+
+    async def _run_web_search_payload(payload: dict[str, Any]) -> Any:
         r = await runtime._request_with_backoff(
             "POST",
             "/internal/web_search",
@@ -52,6 +47,34 @@ def register_web_tools(runtime: Any) -> dict[str, Any]:
         if r.status_code != 200:
             return {"error": "web_search request failed"}
         return r.json().get("result", "No result.")
+
+    if get_web_search_backend_name() == "exa":
+        @tool
+        async def web_search(
+            query: str,
+            search_type: ExaSearchType | None = None,
+            category: ExaCategory | None = None,
+        ) -> Any:
+            """
+            Search the web with Exa.
+
+            Optional args: search_type (auto, fast, neural, deep) and category
+            (news, research paper, github, pdf, company, people, personal site,
+            financial report, tweet). Exa returns 20 raw results by default.
+            """
+            payload = _web_search_request_payload(
+                query,
+                search_type=search_type,
+                category=category,
+            )
+            return await _run_web_search_payload(payload)
+
+    else:
+
+        @tool
+        async def web_search(query: str) -> Any:
+            """Search the web for current information."""
+            return await _run_web_search_payload(_web_search_request_payload(query))
 
     async def _fetch_remote_content(
         url: str,

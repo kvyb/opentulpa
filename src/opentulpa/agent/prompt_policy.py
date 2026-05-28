@@ -135,17 +135,15 @@ def build_web_search_backend_prompt_message(provider_name: str | None) -> System
             "WEB_SEARCH_BACKEND: exa\n"
             "web_search uses Exa. You may pass Exa-only optional args: "
             "search_type (auto, fast, neural, deep), category (news, research paper, "
-            "github, pdf, company, people, personal site, financial report, tweet), "
-            "start_published_date, and end_published_date. Use category='news' plus "
-            "published-date bounds for recent/news searches. Exa filtered search returns "
+            "github, pdf, company, people, personal site, financial report, tweet). "
+            "Use category='news' for news/current-event searches. Exa search returns "
             "20 raw results by default. Do not pass provider-unsupported fields."
         )
     elif provider == "pplx":
         content = (
             "WEB_SEARCH_BACKEND: pplx\n"
             "web_search uses Perplexity/Sonar through OpenRouter. Pass only query. "
-            "Do not pass Exa-only args such as search_type, category, "
-            "start_published_date, or end_published_date."
+            "Do not pass Exa-only args such as search_type or category."
         )
     elif provider == "none":
         content = (
@@ -160,3 +158,13 @@ def build_web_search_backend_prompt_message(provider_name: str | None) -> System
             "if search is necessary, then report any tool error exactly."
         )
     return SystemMessage(content=content)
+
+
+def build_current_web_search_backend_prompt_message() -> SystemMessage:
+    try:
+        from opentulpa.integrations.web_search import get_web_search_backend_name
+
+        provider = get_web_search_backend_name()
+    except Exception:
+        provider = "unknown"
+    return build_web_search_backend_prompt_message(provider)

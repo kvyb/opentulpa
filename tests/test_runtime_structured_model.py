@@ -217,6 +217,46 @@ async def test_tool_group_gateway_describes_and_executes_commands(tmp_path: Path
     assert "server_time_utc_iso" in result["result"]
 
 
+def test_web_search_tool_schema_is_query_only_without_exa(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "k")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    schema = runtime._tools["web_search"].args_schema.model_json_schema()
+
+    assert set(schema["properties"]) == {"query"}
+    assert schema["required"] == ["query"]
+
+
+def test_web_search_tool_schema_exposes_exa_filters_with_exa(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "k")
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="z-ai/glm-5.1",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+    )
+    runtime._register_tools()
+
+    schema = runtime._tools["web_search"].args_schema.model_json_schema()
+
+    assert set(schema["properties"]) == {"query", "search_type", "category"}
+    assert schema["required"] == ["query"]
+
+
 def test_tool_group_gateway_covers_registered_tools_exactly_once(tmp_path: Path) -> None:
     runtime = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
