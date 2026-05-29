@@ -7,6 +7,7 @@ from typing import Any
 
 from opentulpa.agent.context_engine import (
     ContextEngine,
+    ContextSourceProvider,
     PromptContextSources,
 )
 from opentulpa.agent.context_engine import trim_text_to_token_budget as _trim_text_to_token_budget
@@ -60,7 +61,7 @@ def frozen_prompt_context_matches(
 
 async def build_frozen_prompt_context(
     *,
-    runtime: Any,
+    context_provider: ContextSourceProvider,
     state: AgentState,
     customer_id: str,
     thread_id: str,
@@ -76,9 +77,6 @@ async def build_frozen_prompt_context(
     invoked_skill_names: list[str],
     invoked_skill_context: str,
 ) -> FrozenPromptContextResult:
-    context_provider = getattr(runtime, "context_source_provider", None)
-    if context_provider is None:
-        raise RuntimeError("runtime must expose context_source_provider")
     sources = await context_engine.load_prompt_context_sources(
         provider=context_provider,
         state=dict(state),

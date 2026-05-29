@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from opentulpa.agent.lc_messages import HumanMessage
 from opentulpa.agent.prompt_classifier import classify_prompt_mode as _classify_prompt_mode
@@ -17,6 +17,43 @@ class PreparedTurnContext:
     through_id: int | None
     config: dict[str, Any]
     graph_input: dict[str, Any]
+
+
+class TurnContextProvider(Protocol):
+    def register_links_from_text(
+        self,
+        *,
+        customer_id: str,
+        text: str,
+        source: str,
+        limit: int,
+    ) -> None: ...
+
+    def expand_link_aliases(self, *, customer_id: str, text: str) -> str: ...
+
+    def list_pending_context_events(self, *, customer_id: str, limit: int) -> list[dict[str, Any]]: ...
+
+    async def list_available_skills(self, customer_id: str) -> list[Any]: ...
+
+    async def load_skill_context_by_names(
+        self,
+        *,
+        customer_id: str,
+        skill_names: list[str],
+    ) -> dict[str, Any]: ...
+
+    def effective_recursion_limit(self, override: int | None) -> int: ...
+
+    def recursion_limit_for_turn(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        requested_turn_mode: str,
+        requested_limit: int,
+        prompt_mode: str,
+        user_text: str,
+    ) -> int: ...
 
 
 def summarize_pending_payload(payload: Any, *, payload_limit: int = 240) -> str:
@@ -94,7 +131,7 @@ def build_pending_context_summary(
 
 
 async def pre_resolve_skill_state(
-    context_provider: Any,
+    context_provider: TurnContextProvider,
     *,
     customer_id: str,
     user_text: str,
@@ -198,7 +235,7 @@ def build_graph_input(
 
 
 async def prepare_turn_context(
-    runtime: Any,
+    context_provider: TurnContextProvider,
     *,
     thread_id: str,
     customer_id: str,
@@ -210,13 +247,10 @@ async def prepare_turn_context(
     forced_skill_names: list[str] | None,
     prompt_mode_override: str | None,
     build_langfuse_callbacks: Callable[..., list[Any]],
-    tool_schema_trace_fields: Callable[[Any, str], dict[str, Any]],
+    tool_schema_trace_fields: Callable[[str], dict[str, Any]],
     langchain_callback_metadata: Callable[[dict[str, Any]], dict[str, str]],
 ) -> PreparedTurnContext | None:
     user_text = str(text or "")
-    context_provider = getattr(runtime, "context_source_provider", None)
-    if context_provider is None:
-        raise RuntimeError("runtime must expose context_source_provider")
     context_provider.register_links_from_text(
         customer_id=customer_id,
         text=user_text,
@@ -276,7 +310,7 @@ async def prepare_turn_context(
             "turn_mode": str(turn_mode or "").strip(),
             "prompt_mode": str(prompt_mode or "").strip(),
         }
-        config_metadata.update(tool_schema_trace_fields(runtime, turn_mode))
+        config_metadata.update(tool_schema_trace_fields(turn_mode))
         config["metadata"] = langchain_callback_metadata(config_metadata)
         config["tags"] = list(config_metadata["langfuse_tags"])
     graph_input = build_graph_input(

@@ -603,7 +603,7 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
     runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
     runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
     prepared = await prepare_turn_context(
-        runtime,
+        runtime.context_source_provider,
         thread_id="chat_test",
         customer_id="telegram_test",
         text="hello",
@@ -614,7 +614,7 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
         forced_skill_names=None,
         prompt_mode_override=None,
         build_langfuse_callbacks=runtime._build_langfuse_callbacks,
-        tool_schema_trace_fields=_tool_schema_trace_fields,
+        tool_schema_trace_fields=lambda mode: _tool_schema_trace_fields(runtime, mode),
         langchain_callback_metadata=_langchain_callback_metadata,
     )
 

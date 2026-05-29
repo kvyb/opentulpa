@@ -33,16 +33,31 @@ def duplicate_tool_error(label: str) -> str:
 
 
 def tool_action_signature(call_name: str, args: Any) -> ToolActionSignature | None:
+    signatures = tool_action_signatures(call_name, args)
+    if not signatures:
+        return None
+    if len(signatures) == 1:
+        return signatures[0]
+    signature_keys = [signature.key for signature in signatures]
+    return ToolActionSignature(
+        key=_signature_key("tool_group_exec.batch", signature_keys),
+        label=f"tool_group_exec batch({_short_json([item.label for item in signatures])})",
+    )
+
+
+def tool_action_signatures(call_name: str, args: Any) -> list[ToolActionSignature]:
     name = str(call_name or "").strip()
     if not name:
-        return None
+        return []
     if name == "tool_group_exec":
-        return _tool_group_exec_signature(args)
+        return _tool_group_exec_signatures(args)
     normalized_args = _canonicalize(args)
-    return ToolActionSignature(
-        key=_signature_key(name, normalized_args),
-        label=f"{name}({_short_json(normalized_args)})",
-    )
+    return [
+        ToolActionSignature(
+            key=_signature_key(name, normalized_args),
+            label=f"{name}({_short_json(normalized_args)})",
+        )
+    ]
 
 
 def find_duplicate_tool_calls(
@@ -51,86 +66,117 @@ def find_duplicate_tool_calls(
     prior_tool_outcomes: Any,
     trace_id: str,
 ) -> list[DuplicateToolCall]:
-    last_success_signature = _last_success_signature(prior_tool_outcomes, trace_id=trace_id)
+    last_success_signatures = _last_success_signatures(prior_tool_outcomes, trace_id=trace_id)
     seen_in_request: set[str] = set()
     duplicates: list[DuplicateToolCall] = []
     for call in requested_calls:
         if not isinstance(call, dict):
             continue
         call_id = str(call.get("id", "") or "").strip()
-        signature = tool_action_signature(
+        signatures = tool_action_signatures(
             str(call.get("name", "") or "").strip(),
             call.get("args", {}) or {},
         )
-        if signature is None:
+        if not signatures:
             continue
-        if signature.key == last_success_signature or signature.key in seen_in_request:
+        duplicate_signature = next(
+            (
+                signature
+                for signature in signatures
+                if signature.key in last_success_signatures or signature.key in seen_in_request
+            ),
+            None,
+        )
+        if duplicate_signature is not None:
             duplicates.append(
                 DuplicateToolCall(
                     tool_call_id=call_id,
-                    error=duplicate_tool_error(signature.label),
-                    signature=signature.key,
+                    error=duplicate_tool_error(duplicate_signature.label),
+                    signature=duplicate_signature.key,
                 )
             )
             continue
-        seen_in_request.add(signature.key)
+        seen_in_request.update(signature.key for signature in signatures)
     return duplicates
 
 
-def _tool_group_exec_signature(args: Any) -> ToolActionSignature | None:
+def _tool_group_exec_signatures(args: Any) -> list[ToolActionSignature]:
     if not isinstance(args, dict):
-        return None
+        return []
     batch = coerce_tool_group_calls(args.get("calls"))
     if batch:
-        normalized_batch: list[dict[str, Any]] = []
+        signatures: list[ToolActionSignature] = []
         for item in batch:
             if not isinstance(item, dict):
                 continue
             command = str(item.get("command", "") or "").strip()
-            normalized_batch.append(
-                {
-                    "group": str(item.get("group", "") or "").strip().lower(),
-                    "command": command,
-                    "args_json": _canonicalize(_parse_args_json(item.get("args_json"))),
-                }
+            normalized = _normalized_tool_group_action(
+                group=item.get("group"),
+                command=command,
+                args_json=item.get("args_json"),
             )
-        if not normalized_batch:
-            return None
-        return ToolActionSignature(
-            key=_signature_key("tool_group_exec.batch", normalized_batch),
-            label=f"tool_group_exec batch({_short_json(normalized_batch)})",
-        )
+            signatures.append(
+                ToolActionSignature(
+                    key=_signature_key("tool_group_exec", normalized),
+                    label=(
+                        f'tool_group_exec(command="{command}", '
+                        f'args_json={_short_json(normalized["args_json"])})'
+                    ),
+                )
+            )
+        return signatures
     command = str(args.get("command", "") or "").strip()
-    normalized = {
-        "group": str(args.get("group", "") or "").strip().lower(),
-        "command": command,
-        "args_json": _canonicalize(_parse_args_json(args.get("args_json"))),
-    }
-    return ToolActionSignature(
-        key=_signature_key("tool_group_exec", normalized),
-        label=f'tool_group_exec(command="{command}", args_json={_short_json(normalized["args_json"])})',
+    normalized = _normalized_tool_group_action(
+        group=args.get("group"),
+        command=command,
+        args_json=args.get("args_json"),
     )
+    return [
+        ToolActionSignature(
+            key=_signature_key("tool_group_exec", normalized),
+            label=f'tool_group_exec(command="{command}", args_json={_short_json(normalized["args_json"])})',
+        )
+    ]
 
 
-def _last_success_signature(prior_tool_outcomes: Any, *, trace_id: str) -> str:
+def _normalized_tool_group_action(*, group: Any, command: str, args_json: Any) -> dict[str, Any]:
+    return {
+        "group": str(group or "").strip().lower(),
+        "command": str(command or "").strip(),
+        "args_json": _canonicalize(_parse_args_json(args_json)),
+    }
+
+
+def _last_success_signatures(prior_tool_outcomes: Any, *, trace_id: str) -> set[str]:
     if not isinstance(prior_tool_outcomes, list):
-        return ""
+        return set()
     active_trace_id = str(trace_id or "").strip()
     for outcome in reversed(prior_tool_outcomes):
         if not isinstance(outcome, dict):
             continue
         if str(outcome.get("status", "") or "").strip() != "ok":
             continue
-        signature = str(outcome.get("tool_signature", "") or "").strip()
-        if not signature:
+        signatures = _outcome_signatures(outcome)
+        if not signatures:
             continue
         outcome_trace_id = str(outcome.get("trace_id", "") or "").strip()
         if active_trace_id and outcome_trace_id and outcome_trace_id != active_trace_id:
             continue
         if active_trace_id and not outcome_trace_id:
             continue
-        return signature
-    return ""
+        return signatures
+    return set()
+
+
+def _outcome_signatures(outcome: dict[str, Any]) -> set[str]:
+    raw_signatures = outcome.get("tool_signatures")
+    signatures: set[str] = set()
+    if isinstance(raw_signatures, list):
+        signatures.update(str(item).strip() for item in raw_signatures if str(item).strip())
+    signature = str(outcome.get("tool_signature", "") or "").strip()
+    if signature:
+        signatures.add(signature)
+    return signatures
 
 
 def _parse_args_json(value: Any) -> Any:

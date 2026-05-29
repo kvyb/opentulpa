@@ -7,6 +7,7 @@ from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, 
 from opentulpa.agent.tool_loop_guardrails import (
     find_duplicate_tool_calls,
     tool_action_signature,
+    tool_action_signatures,
 )
 
 
@@ -63,6 +64,77 @@ def test_duplicate_guardrail_blocks_same_request_duplicate() -> None:
     assert len(duplicates) == 1
     assert duplicates[0].tool_call_id == "call_2"
     assert "DUPLICATE_TOOL_CALL_BLOCKED" in duplicates[0].error
+
+
+def test_tool_group_exec_batch_exposes_nested_action_signatures() -> None:
+    signatures = tool_action_signatures(
+        "tool_group_exec",
+        {
+            "calls": [
+                {
+                    "group": "knowledge",
+                    "command": "user_context_add_files",
+                    "args_json": {"file_ids": ["file_1"]},
+                },
+                {
+                    "group": "memory",
+                    "command": "memory_add",
+                    "args_json": {"summary": "User prefers concise replies"},
+                },
+            ]
+        },
+    )
+
+    assert len(signatures) == 2
+    assert "user_context_add_files" in signatures[0].label
+    assert "memory_add" in signatures[1].label
+
+
+def test_duplicate_guardrail_blocks_nested_batch_repeat_after_prior_batch_success() -> None:
+    prior_signatures = tool_action_signatures(
+        "tool_group_exec",
+        {
+            "calls": [
+                {
+                    "group": "knowledge",
+                    "command": "user_context_add_files",
+                    "args_json": {"file_ids": ["file_1"]},
+                },
+                {
+                    "group": "memory",
+                    "command": "memory_add",
+                    "args_json": {"summary": "User prefers concise replies"},
+                },
+            ]
+        },
+    )
+    assert len(prior_signatures) == 2
+
+    duplicates = find_duplicate_tool_calls(
+        requested_calls=[
+            {
+                "id": "call_2",
+                "name": "tool_group_exec",
+                "args": {
+                    "group": "knowledge",
+                    "command": "user_context_add_files",
+                    "args_json": {"file_ids": ["file_1"]},
+                },
+            }
+        ],
+        prior_tool_outcomes=[
+            {
+                "status": "ok",
+                "tool_signatures": [signature.key for signature in prior_signatures],
+                "trace_id": "turn_a",
+            }
+        ],
+        trace_id="turn_a",
+    )
+
+    assert len(duplicates) == 1
+    assert duplicates[0].tool_call_id == "call_2"
+    assert "user_context_add_files" in duplicates[0].error
 
 
 def test_duplicate_guardrail_ignores_prior_success_from_other_trace() -> None:

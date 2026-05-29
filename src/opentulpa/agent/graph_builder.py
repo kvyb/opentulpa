@@ -23,7 +23,7 @@ from opentulpa.agent.lc_messages import (
 )
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.tool_execution_policy import ToolExecutionPolicy
-from opentulpa.agent.tool_loop_guardrails import tool_action_signature
+from opentulpa.agent.tool_loop_guardrails import tool_action_signatures
 from opentulpa.agent.tool_outcome_context import (
     compact_tool_result_for_model as _compact_tool_result_for_model,
 )
@@ -484,6 +484,7 @@ def build_runtime_graph(runtime: Any):
             base_prompt_context_update=prompt_context_update,
             live_user_steering=live_user_steering,
             context_engine=context_engine,
+            context_provider=runtime.context_source_provider,
             loop_limit_near=_loop_limit_near,
         )
         prompt_context_update = turn_prompt.prompt_context_update
@@ -642,7 +643,8 @@ def build_runtime_graph(runtime: Any):
             call_id = str(call.get("id", ""))
             args = call.get("args", {}) or {}
             original_args = args
-            tool_signature = tool_action_signature(call_name, original_args)
+            tool_signatures = tool_action_signatures(call_name, original_args)
+            primary_tool_signature = tool_signatures[0].key if tool_signatures else ""
             try:
                 tool_fn = runtime._tools.get(call_name)
                 if tool_fn is None:
@@ -754,7 +756,8 @@ def build_runtime_graph(runtime: Any):
                         "status": "ok",
                         "result_text": model_visible_result_text,
                         "final_response_hint": final_response_hint,
-                        "tool_signature": tool_signature.key if tool_signature else "",
+                        "tool_signature": primary_tool_signature,
+                        "tool_signatures": [signature.key for signature in tool_signatures],
                         "trace_id": str(state.get("agent_trace_id", "") or "").strip(),
                     }
                 )

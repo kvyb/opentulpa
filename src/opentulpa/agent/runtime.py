@@ -3238,7 +3238,7 @@ class OpenTulpaLangGraphRuntime:
                     customer_id=customer_id,
                 )
                 prepared = await prepare_turn_context(
-                    self,
+                    self.context_source_provider,
                     thread_id=thread_id,
                     customer_id=customer_id,
                     text=str(effective_text or ""),
@@ -3249,7 +3249,7 @@ class OpenTulpaLangGraphRuntime:
                     forced_skill_names=forced_skill_names,
                     prompt_mode_override=prompt_mode_override,
                     build_langfuse_callbacks=self._build_langfuse_callbacks,
-                    tool_schema_trace_fields=_tool_schema_trace_fields,
+                    tool_schema_trace_fields=lambda mode: _tool_schema_trace_fields(self, mode),
                     langchain_callback_metadata=_langchain_callback_metadata,
                 )
                 result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
@@ -3493,7 +3493,7 @@ class OpenTulpaLangGraphRuntime:
                 customer_id=customer_id,
             )
             prepared = await prepare_turn_context(
-                self,
+                self.context_source_provider,
                 thread_id=thread_id,
                 customer_id=customer_id,
                 text=str(effective_text or ""),
@@ -3504,7 +3504,7 @@ class OpenTulpaLangGraphRuntime:
                 forced_skill_names=forced_skill_names,
                 prompt_mode_override=prompt_mode_override,
                 build_langfuse_callbacks=self._build_langfuse_callbacks,
-                tool_schema_trace_fields=_tool_schema_trace_fields,
+                tool_schema_trace_fields=lambda mode: _tool_schema_trace_fields(self, mode),
                 langchain_callback_metadata=_langchain_callback_metadata,
             )
             config = prepared.config

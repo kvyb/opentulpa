@@ -6,13 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from opentulpa.agent.context_engine import ContextEngine
+from opentulpa.agent.context_engine import ContextEngine, ContextSourceProvider
 from opentulpa.agent.lc_messages import (
-    AIMessage,
     AnyMessage,
     HumanMessage,
     SystemMessage,
-    ToolMessage,
 )
 from opentulpa.agent.models import AgentState
 from opentulpa.agent.prompt_cache_policy import CACHE_STICKY_ROUTING_ANCHOR
@@ -22,22 +20,12 @@ from opentulpa.agent.prompt_policy import (
 from opentulpa.agent.prompt_policy import (
     build_system_prompt_message as _build_system_prompt_message,
 )
-from opentulpa.agent.tool_message_protocol import (
-    collapse_completed_tool_call_segments_for_model as _collapse_completed_tool_call_segments_for_model,
-)
-from opentulpa.agent.tool_message_protocol import (
-    enforce_tool_message_protocol as _enforce_tool_message_protocol,
-)
-from opentulpa.agent.tool_message_protocol import (
-    sanitize_history_messages_for_model as _sanitize_history_messages_for_model,
-)
 from opentulpa.agent.turn_budget import budget_status_context as _budget_status_context
 from opentulpa.agent.turn_context import build_dynamic_turn_context as _build_dynamic_turn_context
 from opentulpa.agent.turn_prompt_builder.cache_metadata import (
     build_prompt_cache_metadata,
 )
 from opentulpa.agent.turn_prompt_builder.entries import (
-    make_retrieved_context_entry,
     normalize_prompt_context_entries,
     select_optional_prompt_entries,
 )
@@ -48,6 +36,7 @@ from opentulpa.agent.turn_prompt_builder.frozen_context import (
     build_frozen_prompt_context,
     frozen_prompt_context_matches,
 )
+from opentulpa.agent.turn_prompt_builder.history_projection import build_history_projection
 from opentulpa.agent.utils import latest_user_text as _latest_user_text
 
 LOOP_LIMIT_REPAIR_INSTRUCTION = (
@@ -80,6 +69,7 @@ async def build_turn_prompt(
     base_prompt_context_update: dict[str, Any],
     live_user_steering: list[str],
     context_engine: ContextEngine,
+    context_provider: ContextSourceProvider,
     loop_limit_near: Callable[[AgentState], bool],
 ) -> TurnPrompt:
     messages = state.get("messages", [])
@@ -118,7 +108,7 @@ async def build_turn_prompt(
         frozen_prompt_context = dict(frozen_prompt_context_raw or {})
     else:
         frozen_result = await build_frozen_prompt_context(
-            runtime=runtime,
+            context_provider=context_provider,
             state=state,
             customer_id=customer_id,
             thread_id=thread_id,
@@ -211,116 +201,25 @@ async def build_turn_prompt(
         ]
         prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
 
-    history_budget = max(800, prompt_budget - prompt_overhead_tokens)
-    sanitized_history = _enforce_tool_message_protocol(_sanitize_history_messages_for_model(messages))
-    frozen_history_projection_raw = state.get("frozen_history_projection")
-    turn_history_messages = _enforce_tool_message_protocol(_latest_turn_messages(sanitized_history))
-    turn_start_index = max(0, len(sanitized_history) - len(turn_history_messages))
-    older_history_messages: list[AnyMessage] = []
-    stale_summary_text = ""
-    history_working_set = context_engine.build_history_working_set(
-        sanitized_history,
-        token_budget=history_budget,
+    history_projection = build_history_projection(
+        runtime=runtime,
+        state=state,
+        messages=messages,
+        context_engine=context_engine,
+        prompt_context_update=prompt_context_update,
+        prompt_messages_base=prompt_messages_base,
+        selected_frozen_late_entries=selected_frozen_late_entries,
+        used_optional_tokens=used_optional_tokens,
+        optional_context_budget=optional_context_budget,
+        max_overhead_tokens=max_overhead_tokens,
+        prompt_budget=prompt_budget,
     )
-    if _valid_frozen_history_projection(frozen_history_projection_raw, len(sanitized_history)):
-        assert isinstance(frozen_history_projection_raw, dict)
-        turn_start_index = int(frozen_history_projection_raw.get("turn_start_index", 0))
-        older_history_messages = _enforce_tool_message_protocol(
-            _sanitize_history_messages_for_model(
-                _normalize_frozen_history_messages(
-                    frozen_history_projection_raw.get("older_history_messages")
-                )
-            )
-        )
-        stale_summary_text = str(frozen_history_projection_raw.get("stale_summary_text", "")).strip()
-    else:
-        summary_entry = (
-            make_retrieved_context_entry(
-                section="stale_history_summary",
-                title="Compressed older in-thread context.",
-                body=history_working_set.summary_text,
-            )
-            if history_working_set.summary_text
-            else None
-        )
-        projected_summary_entries: list[tuple[str, SystemMessage]] = []
-        if summary_entry is not None:
-            projected_summary_entries, _ = select_optional_prompt_entries(
-                [summary_entry],
-                initial_used_tokens=used_optional_tokens,
-                optional_context_budget=optional_context_budget,
-            )
-        prompt_messages = [
-            *prompt_messages_base,
-            *(message for _, message in selected_frozen_late_entries),
-            *(message for _, message in projected_summary_entries),
-        ]
-        prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
-        while projected_summary_entries and prompt_overhead_tokens > max_overhead_tokens:
-            projected_summary_entries.pop()
-            prompt_messages = [
-                *prompt_messages_base,
-                *(message for _, message in selected_frozen_late_entries),
-                *(message for _, message in projected_summary_entries),
-            ]
-            prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
-        if projected_summary_entries:
-            history_budget = max(800, prompt_budget - prompt_overhead_tokens)
-            history_working_set = context_engine.build_history_working_set(
-                sanitized_history,
-                token_budget=history_budget,
-            )
-        bounded_messages = _enforce_tool_message_protocol(history_working_set.raw_messages)
-        if not _model_uses_current_turn_raw_history_only(runtime):
-            bounded_latest_turn = _latest_turn_messages(bounded_messages)
-            bounded_latest_turn_count = len(bounded_latest_turn)
-            older_history_messages = (
-                bounded_messages[:-bounded_latest_turn_count]
-                if 0 < bounded_latest_turn_count < len(bounded_messages)
-                else []
-            )
-        stale_summary_text = history_working_set.summary_text
-        prompt_context_update["frozen_history_projection"] = {
-            "turn_start_index": turn_start_index,
-            "older_history_messages": older_history_messages,
-            "stale_summary_text": stale_summary_text,
-        }
-
-    if _model_uses_current_turn_raw_history_only(runtime):
-        older_history_messages = []
-    latest_turn_messages = _enforce_tool_message_protocol(sanitized_history[turn_start_index:])
-    if _model_uses_current_turn_raw_history_only(runtime):
-        latest_turn_messages = _enforce_tool_message_protocol(
-            _collapse_completed_tool_call_segments_for_model(latest_turn_messages)
-        )
-        prompt_context_update["frozen_history_projection"] = {
-            "turn_start_index": turn_start_index,
-            "older_history_messages": [],
-            "stale_summary_text": stale_summary_text,
-        }
-
-    summary_entry = (
-        make_retrieved_context_entry(
-            section="stale_history_summary",
-            title="Compressed older in-thread context.",
-            body=stale_summary_text,
-        )
-        if stale_summary_text
-        else None
-    )
-    selected_summary_entries: list[tuple[str, SystemMessage]] = []
-    if summary_entry is not None:
-        selected_summary_entries, _ = select_optional_prompt_entries(
-            [summary_entry],
-            initial_used_tokens=used_optional_tokens,
-            optional_context_budget=optional_context_budget,
-        )
-    prompt_messages = [
-        *prompt_messages_base,
-        *(message for _, message in selected_frozen_late_entries),
-        *(message for _, message in selected_summary_entries),
-    ]
-    prompt_overhead_tokens = _prompt_overhead_tokens(prompt_messages)
+    prompt_context_update = history_projection.prompt_context_update
+    older_history_messages = history_projection.older_history_messages
+    latest_turn_messages = history_projection.latest_turn_messages
+    selected_summary_entries = history_projection.selected_summary_entries
+    history_budget = history_projection.history_budget
+    prompt_overhead_tokens = history_projection.prompt_overhead_tokens
     frozen_late_messages: list[AnyMessage] = [
         *([late_control_message] if late_control_message is not None else []),
         *(message for _, message in selected_frozen_late_entries),
@@ -399,32 +298,3 @@ async def build_turn_prompt(
         call_context=cache_metadata.call_context,
         prompt_ready_log_fields=cache_metadata.prompt_ready_log_fields,
     )
-
-
-def _normalize_frozen_history_messages(raw: Any) -> list[AnyMessage]:
-    if not isinstance(raw, list):
-        return []
-    return [item for item in raw if isinstance(item, (HumanMessage, AIMessage, ToolMessage))]
-
-
-def _valid_frozen_history_projection(raw: Any, message_count: int) -> bool:
-    return (
-        isinstance(raw, dict)
-        and int(raw.get("turn_start_index", -1)) >= 0
-        and int(raw.get("turn_start_index", -1)) <= message_count
-    )
-
-
-def _latest_turn_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
-    if not messages:
-        return []
-    start = 0
-    for idx in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[idx], HumanMessage):
-            start = idx
-            break
-    return messages[start:]
-
-
-def _model_uses_current_turn_raw_history_only(runtime: Any) -> bool:
-    return "deepseek" in str(getattr(runtime, "model_name", "") or "").strip().lower()
