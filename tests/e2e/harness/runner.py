@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from evaluation.judge import evaluate_e2e_scenario_with_llm_judge
+from evaluation.judge import DEFAULT_JUDGE_MODEL, evaluate_e2e_scenario_with_llm_judge
 from fastapi.testclient import TestClient
 from harness.lead_simulator import LeadProfile, LeadSimulator
 from harness.logging import JsonlRecorder
@@ -600,12 +600,14 @@ class E2EHarness:
             "composio_calls": len(self.composio_service.calls),
             "details": details,
         }
+        judge_model = str(os.getenv("OPENTULPA_E2E_JUDGE_MODEL", "") or "").strip()
         payload["evaluation"] = evaluate_e2e_scenario_with_llm_judge(
             scenario=scenario,
             details=details,
             system_log_path=self.system_log_path,
             behavior_log_path=self.behavior_log_path,
             llm_trace_path=self.llm_trace_path,
+            model=judge_model or DEFAULT_JUDGE_MODEL,
         )
         return write_status_report(self.status_report_path, payload)
 

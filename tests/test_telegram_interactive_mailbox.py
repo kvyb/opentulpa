@@ -621,7 +621,6 @@ async def test_graph_agent_injects_interactive_fragments_before_second_model_cal
     runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]

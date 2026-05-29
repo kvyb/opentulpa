@@ -4,21 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from opentulpa.agent.graph_builder import (
-    _build_connected_composio_toolkits_context,
-    _build_late_turn_control_text,
-)
+from opentulpa.agent.composio_context import load_connected_composio_toolkits_context
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.model_pool import prompt_cache_breakpoint_message_index
 from opentulpa.agent.prompt_cache_policy import (
     build_prompt_cache_plan,
-    qwen_cache_safe_history_count,
-    split_qwen_cacheable_history,
-    tail_sized_history_message_count,
 )
 from opentulpa.agent.prompt_policy import build_system_prompt_message
 from opentulpa.agent.prompt_sections import PROMPT_DYNAMIC_BOUNDARY
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.turn_prompt_builder.frozen_context import (
+    _build_late_turn_control_text,
+)
 
 
 class _PromptComposio:
@@ -40,15 +37,6 @@ class _PromptComposio:
         }
 
 
-class _PromptComposioRuntime:
-    def __init__(self, composio: _PromptComposio | None) -> None:
-        self._composio_service = composio
-
-    @property
-    def composio_service(self) -> _PromptComposio | None:
-        return self._composio_service
-
-
 def test_prompt_dynamic_boundary_marker_is_single_line_prefix() -> None:
     assert PROMPT_DYNAMIC_BOUNDARY.startswith("[OPENTULPA_PROMPT_DYNAMIC_BOUNDARY]")
 
@@ -66,9 +54,13 @@ def test_full_runtime_policy_retains_hardened_rules() -> None:
 @pytest.mark.asyncio
 async def test_connected_composio_toolkits_context_is_dynamic_and_cached() -> None:
     composio = _PromptComposio()
-    runtime = _PromptComposioRuntime(composio)
+    cache: dict[str, object] = {}
 
-    text = await _build_connected_composio_toolkits_context(runtime, "telegram_1")
+    text = await load_connected_composio_toolkits_context(
+        composio=composio,
+        cache=cache,
+        customer_id="telegram_1",
+    )
 
     assert text.startswith("Available via Composio tool for this customer: github, instagram.")
     assert 'tool_group_exec(group="composio")' in text
@@ -81,7 +73,11 @@ async def test_connected_composio_toolkits_context_is_dynamic_and_cached() -> No
         }
     ]
 
-    cached_text = await _build_connected_composio_toolkits_context(runtime, "telegram_1")
+    cached_text = await load_connected_composio_toolkits_context(
+        composio=composio,
+        cache=cache,
+        customer_id="telegram_1",
+    )
     assert cached_text == text
     assert len(composio.calls) == 1
 
@@ -199,7 +195,7 @@ def test_prompt_cache_profile_zai_glm_is_automatic() -> None:
     assert profile["supports_breakpoints"] is False
 
 
-def test_prompt_cache_profile_qwen_uses_explicit_committed_breakpoint() -> None:
+def test_prompt_cache_profile_qwen_uses_implicit_stable_prefix() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -210,9 +206,10 @@ def test_prompt_cache_profile_qwen_uses_explicit_committed_breakpoint() -> None:
 
     profile = rt.prompt_cache_profile()
 
-    assert profile["strategy"] == "explicit_committed_breakpoint"
+    assert profile["strategy"] == "implicit_stable_prefix"
     assert profile["supports_top_level"] is False
-    assert profile["supports_breakpoints"] is True
+    assert profile["supports_breakpoints"] is False
+    assert profile["cache_control"] == {}
 
 
 def test_prepare_messages_for_prompt_cache_wraps_stable_system_message_for_gemini_by_default() -> None:
@@ -278,7 +275,7 @@ def test_prepare_messages_for_prompt_cache_prefers_stable_prefix_when_provided()
     assert prepared[2].content == "Dynamic user question"
 
 
-def test_prepare_messages_for_qwen_wraps_latest_cacheable_history_before_current_turn() -> None:
+def test_prepare_messages_for_qwen_leaves_content_unmarked_for_implicit_cache() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
@@ -288,7 +285,7 @@ def test_prepare_messages_for_qwen_wraps_latest_cacheable_history_before_current
     )
     messages = [
         SystemMessage(content="Stable system prompt"),
-        HumanMessage(content="OpenTulpa cache anchor v1"),
+        HumanMessage(content="OpenTulpa cache anchor v1. Real conversation messages follow."),
         AIMessage(content="Prior assistant answer"),
         ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
         HumanMessage(content="Prior user turn"),
@@ -298,19 +295,44 @@ def test_prepare_messages_for_qwen_wraps_latest_cacheable_history_before_current
     prepared = rt.prepare_messages_for_prompt_cache(
         messages,
         stable_prefix_count=2,
-        cacheable_prefix_count=5,
+        cacheable_prefix_count=2,
     )
 
     assert prepared[0].content == "Stable system prompt"
-    assert prepared[1].content == "OpenTulpa cache anchor v1"
+    assert prepared[1].content == "OpenTulpa cache anchor v1. Real conversation messages follow."
     assert prepared[2].content == "Prior assistant answer"
     assert prepared[3].content == '{"ok": true}'
-    assert isinstance(prepared[4].content, list)
-    cache_block = prepared[4].content[0]
-    assert cache_block["type"] == "text"
-    assert cache_block["text"] == "Prior user turn"
-    assert cache_block["cache_control"] == {"type": "ephemeral"}
+    assert prepared[4].content == "Prior user turn"
     assert prepared[5].content == "Current user turn"
+
+
+def test_prompt_cache_plan_qwen_implicit_uses_stable_prefix_only() -> None:
+    messages = [
+        SystemMessage(content="Stable system prompt"),
+        HumanMessage(content="OpenTulpa cache anchor v1. Real conversation messages follow."),
+        HumanMessage(content="Committed history"),
+        HumanMessage(content="Current user turn"),
+    ]
+
+    plan = build_prompt_cache_plan(
+        prefix_messages=messages[:2],
+        older_history_messages=[HumanMessage(content="older " * 900)],
+        frozen_late_messages=[],
+        latest_turn_messages=messages[2:],
+        dynamic_late_messages=[SystemMessage(content="dynamic")],
+        cache_profile={"strategy": "implicit_stable_prefix", "supports_breakpoints": False},
+    )
+
+    assert plan.cache_breakpoint_index is None
+    assert plan.cacheable_prefix_count == 2
+    assert plan.cacheable_prefix_mode == "stable_prefix_only"
+    assert plan.cacheable_history_messages == []
+    assert plan.model_messages == [
+        *messages[:2],
+        HumanMessage(content="older " * 900),
+        *messages[2:],
+        SystemMessage(content="dynamic"),
+    ]
 
 
 def test_prompt_cache_breakpoint_index_matches_actual_cacheable_message() -> None:
@@ -326,80 +348,7 @@ def test_prompt_cache_breakpoint_index_matches_actual_cacheable_message() -> Non
     assert index == 1
 
 
-def test_qwen_tail_sized_history_count_keeps_only_small_suffix_volatile() -> None:
-    assert tail_sized_history_message_count([]) == 0
-    assert tail_sized_history_message_count([120, 120]) == 0
-    assert tail_sized_history_message_count([1000, 1000, 1000, 150, 120]) == 3
-    assert tail_sized_history_message_count([5000, 1000]) == 2
-
-
-def test_qwen_history_split_keeps_current_user_in_frontier() -> None:
-    cacheable, frontier, mode = split_qwen_cacheable_history(
-        older_history_messages=[],
-        latest_turn_messages=[HumanMessage(content="Current user turn")],
-    )
-
-    assert cacheable == []
-    assert len(frontier) == 1
-    assert mode == "stable_prefix_tail_only"
-
-
-def test_qwen_history_split_caches_workflow_tool_loop_head() -> None:
-    latest_turn = [
-        HumanMessage(content="INTERNAL_ONBOARDING_SEED " + ("setup facts " * 1400)),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
-        ToolMessage(content="{\"ok\": true, \"result\": \"" + ("draft " * 1200) + "\"}", tool_call_id="call_1"),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
-        ToolMessage(content="{\"ok\": true, \"result\": \"" + ("preflight " * 1200) + "\"}", tool_call_id="call_2"),
-    ]
-
-    cacheable, frontier, mode = split_qwen_cacheable_history(
-        older_history_messages=[],
-        latest_turn_messages=latest_turn,
-    )
-
-    assert len(cacheable) == 1
-    assert isinstance(cacheable[0], HumanMessage)
-    assert str(cacheable[0].content).startswith("QWEN_CACHEABLE_COMMITTED_HISTORY")
-    assert "INTERNAL_ONBOARDING_SEED" in str(cacheable[0].content)
-    assert frontier == latest_turn[1:]
-    assert mode == "committed_tail_sized_history"
-
-
-def test_qwen_history_split_does_not_end_cacheable_prefix_on_pending_tool_call() -> None:
-    latest_turn = [
-        HumanMessage(content="INTERNAL_ONBOARDING_SEED. " + ("setup facts " * 900)),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
-        ToolMessage(content="{\"ok\": true, \"result\": \"" + ("draft " * 500) + "\"}", tool_call_id="call_1"),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
-    ]
-
-    cacheable, frontier, mode = split_qwen_cacheable_history(
-        older_history_messages=[],
-        latest_turn_messages=latest_turn,
-        target_tail_tokens=0,
-    )
-
-    assert isinstance(cacheable[0], HumanMessage)
-    assert str(cacheable[0].content).startswith("QWEN_CACHEABLE_COMMITTED_HISTORY")
-    assert "internal_onboarding_seed" in str(cacheable[0].content)
-    assert frontier == latest_turn[1:]
-    assert mode == "committed_tail_sized_history"
-
-
-def test_qwen_safe_history_count_rolls_back_pending_tool_call() -> None:
-    latest_turn = [
-        HumanMessage(content="setup facts"),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_1"}]),
-        ToolMessage(content='{"ok": true}', tool_call_id="call_1"),
-        AIMessage(content="", tool_calls=[{"name": "tool_group_exec", "args": {}, "id": "call_2"}]),
-    ]
-
-    assert qwen_cache_safe_history_count(latest_turn, 4) == 3
-    assert qwen_cache_safe_history_count(latest_turn, 2) == 1
-
-
-def test_prompt_cache_plan_encapsulates_qwen_message_order_and_counts() -> None:
+def test_prompt_cache_plan_explicit_stable_prefix_marks_only_stable_boundary() -> None:
     prefix = [
         SystemMessage(content="Stable system prompt"),
         HumanMessage(content="OpenTulpa cache anchor v1"),
@@ -417,22 +366,20 @@ def test_prompt_cache_plan_encapsulates_qwen_message_order_and_counts() -> None:
         frozen_late_messages=[],
         latest_turn_messages=latest,
         dynamic_late_messages=dynamic,
-        cache_profile={"strategy": "explicit_committed_breakpoint", "supports_breakpoints": True},
+        cache_profile={
+            "strategy": "explicit_stable_prefix",
+            "supports_breakpoints": True,
+            "cache_control": {"type": "ephemeral"},
+        },
     )
 
     assert plan.model_messages[:2] == prefix
-    assert plan.requested_cacheable_prefix_count == 3
-    assert plan.cacheable_prefix_count == 3
-    assert plan.cache_breakpoint_index == 2
-    assert plan.cacheable_prefix_mode == "committed_tail_sized_history"
-    assert len(plan.cacheable_history_messages) == 1
-    assert str(plan.cacheable_history_messages[0].content).startswith(
-        "QWEN_CACHEABLE_COMMITTED_HISTORY"
-    )
-    assert str(plan.frontier_history_messages[0].content).startswith(
-        "QWEN_VOLATILE_RECENT_HISTORY"
-    )
-    assert plan.frontier_history_messages[1:] == latest[1:]
+    assert plan.requested_cacheable_prefix_count == 2
+    assert plan.cacheable_prefix_count == 2
+    assert plan.cache_breakpoint_index == 1
+    assert plan.cacheable_prefix_mode == "stable_prefix_only"
+    assert plan.cacheable_history_messages == []
+    assert plan.frontier_history_messages == latest
     assert plan.model_messages[-1] == dynamic[0]
 
 
@@ -628,6 +575,35 @@ def test_extract_response_usage_fields_normalizes_openrouter_usage() -> None:
     }
 
 
+def test_extract_response_usage_fields_normalizes_langchain_stream_usage_metadata() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="qwen/qwen3.7-max",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+
+    class _UsageMetadataResponse:
+        content = "ok"
+        usage_metadata = {
+            "input_tokens": 4519,
+            "output_tokens": 277,
+            "total_tokens": 4796,
+            "input_token_details": {"cache_read": 4504},
+            "output_token_details": {"reasoning": 271},
+        }
+
+    assert rt.extract_response_usage_fields(_UsageMetadataResponse()) == {
+        "native_tokens_prompt": 4519,
+        "native_tokens_completion": 277,
+        "native_tokens_total": 4796,
+        "native_tokens_cached": 4504,
+        "cache_hit": True,
+        "native_tokens_reasoning": 271,
+    }
+
+
 @pytest.mark.asyncio
 async def test_ainvoke_model_adds_breakpoint_to_stable_prefix_for_gemini() -> None:
     rt = OpenTulpaLangGraphRuntime(
@@ -656,6 +632,36 @@ async def test_ainvoke_model_adds_breakpoint_to_stable_prefix_for_gemini() -> No
     assert isinstance(sent_messages, list)
     assert sent_messages[1].content[0]["cache_control"] == {"type": "ephemeral"}
     assert sent_messages[2].content == "Dynamic user question"
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_adds_openrouter_session_id_for_qwen_cache_stickiness() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        model_name="qwen/qwen3.7-max",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+    model = _CaptureModel()
+
+    await rt.ainvoke_model(
+        model,
+        [
+            SystemMessage(content="Stable system prompt"),
+            HumanMessage(content="OpenTulpa cache anchor v1. Real conversation messages follow."),
+            HumanMessage(content="Dynamic user question"),
+        ],
+        model_name="qwen/qwen3.7-max",
+        stable_prefix_count=2,
+        call_context={"thread_id": "thread_1", "customer_id": "cust_1"},
+    )
+
+    call = model.calls[0]
+    extra_body = call["kwargs"]["extra_body"]
+    assert extra_body["session_id"].startswith("opentulpa-")
+    assert len(extra_body["session_id"]) == 42
 
 
 @pytest.mark.asyncio

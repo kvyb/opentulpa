@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from opentulpa.agent import runtime as runtime_module
+from opentulpa.agent.context_compaction import ContextCompactionResult
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage
 from opentulpa.agent.runtime import (
     STREAM_EMPTY_REPLY_FALLBACK,
@@ -16,6 +17,7 @@ from opentulpa.agent.runtime import (
     AgentStreamEvent,
     OpenTulpaLangGraphRuntime,
 )
+from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 
 
@@ -78,6 +80,22 @@ class _StaleFallbackGraph:
                 AIMessage(content=""),
             ]
         }
+
+
+def _install_turn_context_stubs(runtime: OpenTulpaLangGraphRuntime) -> None:
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
+
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
+
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
 
 
 class _ProvisionalOnlyGraph:
@@ -273,17 +291,8 @@ async def test_astream_text_emits_fallback_when_no_visible_output(tmp_path) -> N
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -342,17 +351,8 @@ async def test_astream_text_logs_no_visible_progress_timeout(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -387,17 +387,8 @@ async def test_astream_text_holds_early_schedule_claim_until_repair_finishes(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -434,17 +425,8 @@ async def test_astream_text_does_not_reuse_stale_prior_ai_message_in_fallback(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -474,17 +456,8 @@ async def test_astream_text_discards_provisional_only_reply_and_emits_fallback(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -520,17 +493,8 @@ async def test_astream_text_emits_wait_signal_before_tool_first_result(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -562,17 +526,8 @@ async def test_astream_text_drops_provisional_text_before_tool_with_zero_precomm
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -603,17 +558,8 @@ async def test_astream_text_holds_agent_draft_when_segment_declares_tool_calls(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -645,17 +591,8 @@ async def test_astream_text_streams_post_tool_incremental_chunks(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -689,17 +626,8 @@ async def test_astream_text_keeps_second_tool_draft_buffered_after_tool_phase(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -735,17 +663,8 @@ async def test_astream_text_flushes_post_tool_answer_after_early_visible_chunk(
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str] = []
     async for chunk in runtime.astream_text(
@@ -780,17 +699,8 @@ async def test_astream_text_emits_safe_reasoning_and_tool_status_events(tmp_path
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str | AgentStreamEvent] = []
     async for chunk in runtime.astream_text(
@@ -835,18 +745,15 @@ async def test_astream_text_emits_compaction_status_before_compacting(
         assert thread_id == "chat-compaction-status"
         return True
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
+    async def _compact(_runtime: Any, *, thread_id: str, customer_id: str) -> ContextCompactionResult:
+        assert _runtime is runtime
         compact_calls.append((thread_id, customer_id))
-        return None
+        return ContextCompactionResult(status="compacted", reason="not_needed", attempts=1)
 
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
-
-    monkeypatch.setattr(runtime_module, "_thread_context_needs_compaction", _needs_compaction)
+    monkeypatch.setattr(runtime_module, "thread_context_needs_compaction", _needs_compaction)
+    monkeypatch.setattr(runtime_module, "compact_thread_context_for_turn", _compact)
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    _install_turn_context_stubs(runtime)
 
     chunks: list[str | AgentStreamEvent] = []
     async for chunk in runtime.astream_text(

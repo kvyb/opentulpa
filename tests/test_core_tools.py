@@ -135,6 +135,32 @@ def test_turn_plan_graph_control_tracks_current_turn_items() -> None:
         "cancelled": 0,
     }
     assert result["items"][1]["content"] == "Gather evidence"
+    assert result["next_item"] == {
+        "id": "search",
+        "content": "Gather evidence",
+        "status": "in_progress",
+    }
+
+
+def test_turn_plan_graph_control_accepts_json_encoded_items() -> None:
+    result = execute_graph_control_tool(
+        tool_name="turn_plan",
+        args={
+            "items": (
+                '[{"id":"scope","content":"Define the deliverable","status":"completed"},'
+                '{"id":"search","content":"Gather evidence","status":"in_progress"}]'
+            )
+        },
+        state={"turn_plan": []},
+    ).result
+
+    assert result["ok"] is True
+    assert result["summary"]["total"] == 2
+    assert result["items"][1] == {
+        "id": "search",
+        "content": "Gather evidence",
+        "status": "in_progress",
+    }
 
 
 def test_turn_plan_merge_updates_existing_items() -> None:

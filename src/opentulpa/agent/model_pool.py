@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import time
@@ -25,12 +26,12 @@ from opentulpa.agent.model_init_policy import (
 )
 from opentulpa.agent.openrouter_chat_factory import (
     build_openrouter_chat_model,
+    looks_like_openrouter_base_url,
     uses_openrouter_reasoning_adapter,
 )
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
-
 
 async def _run_with_transient_model_retries(
     runtime: Any,
@@ -119,10 +120,10 @@ def provider_prompt_cache_profile(
     if slug.startswith("qwen/") or "qwen" in slug:
         return {
             "enabled": True,
-            "strategy": "explicit_committed_breakpoint",
+            "strategy": "implicit_stable_prefix",
             "supports_top_level": False,
-            "supports_breakpoints": True,
-            "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
+            "supports_breakpoints": False,
+            "cache_control": {},
             "model_name": model_name,
         }
     if any(
@@ -185,14 +186,14 @@ def init_runtime_chat_model(
     openrouter_base_url: str | None,
     reasoning_effort: str | None,
     init_chat_model_func: Any = init_chat_model,
-    chat_openrouter_cls: Any = None,
+    chat_openai_cls: Any = None,
 ) -> Any:
     openrouter_model = build_openrouter_chat_model(
         model_name=model_name,
         base_kwargs=base_kwargs,
         openrouter_base_url=openrouter_base_url,
         reasoning_effort=reasoning_effort,
-        **({"chat_openrouter_cls": chat_openrouter_cls} if chat_openrouter_cls else {}),
+        **({"chat_openai_cls": chat_openai_cls} if chat_openai_cls else {}),
     )
     if openrouter_model is not None:
         return openrouter_model
@@ -228,6 +229,43 @@ def model_invoke_extras(runtime: Any, *, model_name: str | None = None) -> dict[
             reasoning_effort=getattr(runtime, "_reasoning_effort", None),
         ),
     )
+
+
+def _openrouter_session_id_for_call(
+    runtime: Any,
+    *,
+    model_name: str,
+    call_context: dict[str, Any],
+) -> str:
+    if not looks_like_openrouter_base_url(getattr(runtime, "openrouter_base_url", None)):
+        return ""
+    slug = str(model_name or "").strip().lower()
+    if "qwen" not in slug:
+        return ""
+    thread_id = str(call_context.get("thread_id") or "").strip()
+    customer_id = str(call_context.get("customer_id") or "").strip()
+    if not thread_id and not customer_id:
+        return ""
+    raw = f"{customer_id}:{thread_id}"
+    return f"opentulpa-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _with_openrouter_session_id(
+    runtime: Any,
+    invoke_extras: dict[str, Any],
+    *,
+    model_name: str,
+    call_context: dict[str, Any],
+) -> dict[str, Any]:
+    session_id = _openrouter_session_id_for_call(
+        runtime,
+        model_name=model_name,
+        call_context=call_context,
+    )
+    if not session_id:
+        return invoke_extras
+    call_context["openrouter_session_id"] = session_id
+    return deep_merge_dicts(invoke_extras, {"extra_body": {"session_id": session_id}})
 
 
 def message_content_with_cache_breakpoint(
@@ -318,12 +356,12 @@ def prepare_messages_for_prompt_cache(
 ) -> list[Any]:
     profile = runtime.prompt_cache_profile(model_name=model_name)
     strategy = str(profile.get("strategy") or "")
-    if strategy not in {"breakpoint", "explicit_committed_breakpoint"}:
+    if strategy not in {"breakpoint", "explicit_stable_prefix"}:
         return messages
     cache_control = dict(profile.get("cache_control") or {})
     if not cache_control:
         return messages
-    if strategy == "explicit_committed_breakpoint":
+    if strategy == "explicit_stable_prefix":
         effective_prefix_count = (
             int(cacheable_prefix_count)
             if cacheable_prefix_count is not None and int(cacheable_prefix_count) > 0
@@ -434,6 +472,12 @@ async def ainvoke_model(
         )
         attempt_context["provider_attempt_index"] = attempt_index + 1
         attempt_context["provider_attempt_count"] = len(attempts)
+        invoke_extras = _with_openrouter_session_id(
+            runtime,
+            invoke_extras,
+            model_name=resolved_model_name,
+            call_context=attempt_context,
+        )
         callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
         response: Any | None = None
         error_text: str | None = None
@@ -538,6 +582,12 @@ async def astream_model(
         )
         attempt_context["provider_attempt_index"] = attempt_index + 1
         attempt_context["provider_attempt_count"] = len(attempts)
+        invoke_extras = _with_openrouter_session_id(
+            runtime,
+            invoke_extras,
+            model_name=resolved_model_name,
+            call_context=attempt_context,
+        )
         callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
         astream = getattr(callback_target, "astream", None)
         if not callable(astream):
@@ -681,6 +731,12 @@ async def invoke_structured_model[StructuredModelT: BaseModel](
         )
         attempt_context["provider_attempt_index"] = attempt_index + 1
         attempt_context["provider_attempt_count"] = len(attempts)
+        invoke_extras = _with_openrouter_session_id(
+            runtime,
+            invoke_extras,
+            model_name=resolved_model_name,
+            call_context=attempt_context,
+        )
         callback_target = runtime._model_with_callbacks(model, call_context=attempt_context)
         structured = getattr(callback_target, "with_structured_output", None)
         skip_native_structured = model_error_trace.skip_native_structured_output(resolved_model_name)

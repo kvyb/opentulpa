@@ -24,6 +24,7 @@ from opentulpa.agent.utils import (
 from opentulpa.agent.utils import (
     looks_like_shell_command as _looks_like_shell_command,
 )
+from opentulpa.integrations.web_search import get_web_search_backend_name
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,53 @@ def _tool_group_exec_path_validation_error(args: dict[str, Any]) -> str | None:
     return None
 
 
+def _web_search_args_validation_error(args: dict[str, Any]) -> str | None:
+    try:
+        provider = str(get_web_search_backend_name() or "").strip().lower()
+    except Exception:
+        logger.exception("Failed to resolve web_search backend during validation")
+        provider = ""
+    allowed = {"query", "search_type", "category"} if provider == "exa" else {"query"}
+    extra = sorted(str(key) for key in args if str(key) not in allowed)
+    if extra:
+        allowed_text = ", ".join(sorted(allowed))
+        return (
+            "TOOL_VALIDATION_ERROR: web_search accepts only "
+            f"{allowed_text} for the current backend. Remove unsupported argument(s): "
+            f"{', '.join(extra)}."
+        )
+    return None
+
+
+def _tool_group_exec_web_search_validation_error(args: dict[str, Any]) -> str | None:
+    command = str(args.get("command", "") or "").strip()
+    group = str(args.get("group", "") or "").strip().lower()
+    if group == "web" and command == "web_search":
+        command_args = _coerce_json_object(args.get("args_json")) or {}
+        error = _web_search_args_validation_error(command_args)
+        if error:
+            return f"{error} Nested tool_group_exec web_search command must be repaired."
+        return None
+
+    calls = _coerce_json_list(args.get("calls"))
+    if calls is None:
+        calls = _coerce_json_list(args.get("args_json"))
+    if calls is None:
+        return None
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        item_group = str(item.get("group", "") or "").strip().lower()
+        item_command = str(item.get("command", "") or "").strip()
+        if item_group != "web" or item_command != "web_search":
+            continue
+        command_args = _coerce_json_object(item.get("args_json")) or {}
+        error = _web_search_args_validation_error(command_args)
+        if error:
+            return f"{error} Nested tool_group_exec web_search command must be repaired."
+    return None
+
+
 def _extract_referenced_intake_workflow_id(args: Any) -> str:
     if not isinstance(args, dict):
         return ""
@@ -356,6 +404,14 @@ def _validate_model_tool_call(
         nested_path_error = _tool_group_exec_path_validation_error(args)
         if nested_path_error:
             return nested_path_error
+        nested_web_search_error = _tool_group_exec_web_search_validation_error(args)
+        if nested_web_search_error:
+            return nested_web_search_error
+
+    if call_name == "web_search":
+        web_search_error = _web_search_args_validation_error(args)
+        if web_search_error:
+            return web_search_error
 
     path_error = _path_tool_validation_error(call_name, args)
     if path_error:

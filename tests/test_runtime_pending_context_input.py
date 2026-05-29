@@ -7,10 +7,18 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from opentulpa.agent.graph_builder import build_runtime_graph
+from opentulpa.agent.graph_control_tools import register_graph_control_tools
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
-from opentulpa.agent.tools.turn_plan_tools import register_turn_plan_tools
+from opentulpa.agent.tool_execution_policy import ToolExecutionPolicy
+from opentulpa.agent.tools.owner_update_tools import register_owner_update_tools
+from opentulpa.agent.turn_context_preparer import (
+    build_graph_input,
+    format_pending_context,
+    pre_resolve_skill_state,
+)
 from opentulpa.agent.utils import approx_tokens as _approx_tokens
 
 
@@ -131,6 +139,27 @@ class _FakeCheckpointer:
         return 1
 
 
+class _UnnamedFakeTool:
+    async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True, "args": args}
+
+
+def _install_prompt_source_stubs(runtime: OpenTulpaLangGraphRuntime) -> None:
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
+
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
+
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
+
+
 def _install_minimal_graph_runtime_stubs(
     runtime: OpenTulpaLangGraphRuntime,
     *,
@@ -156,6 +185,16 @@ def _install_minimal_graph_runtime_stubs(
         del kwargs
         return ""
 
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
+
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
+
     runtime._checkpointer = InMemorySaver()
     runtime._model_with_tools = object()
     runtime._thread_rollup_service = None
@@ -163,7 +202,6 @@ def _install_minimal_graph_runtime_stubs(
     runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {}
     runtime.ainvoke_model = ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
@@ -178,6 +216,24 @@ def _install_minimal_graph_runtime_stubs(
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
     runtime._workflow_setup_service = None
+    _install_prompt_source_stubs(runtime)
+
+
+def test_tool_execution_policy_allows_runtime_tools_without_name_attribute() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    runtime._tools = {"tool_group_exec": _UnnamedFakeTool()}
+
+    policy = ToolExecutionPolicy.from_runtime_state(
+        runtime=runtime,
+        state={
+            "customer_id": "telegram_test",
+            "thread_id": "chat_test",
+            "turn_mode": "interactive",
+        },
+    )
+
+    assert "tool_group_exec" in policy.allowed_tool_names
+    policy.validate_call(call_name="tool_group_exec", customer_scoped_tools=set())
 
 
 @pytest.mark.asyncio
@@ -248,7 +304,7 @@ async def test_graph_keeps_turn_plan_in_state_for_next_agent_step() -> None:
         return AIMessage(content="Done.")
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
-    runtime._tools = register_turn_plan_tools(runtime)
+    runtime._tools = register_graph_control_tools(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -279,8 +335,8 @@ async def test_graph_keeps_turn_plan_in_state_for_next_agent_step() -> None:
     ]
     assert "CURRENT_TURN_PLAN" in plan_context
     assert "Synthesize report" in plan_context
-    assert "Define research scope" not in plan_context
-    assert "Gather current sources" not in plan_context
+    assert "[x] scope: Define research scope (completed)" in plan_context
+    assert "[x] search: Gather current sources (completed)" in plan_context
 
 
 @pytest.mark.asyncio
@@ -323,7 +379,7 @@ async def test_graph_turn_plan_validation_error_returns_to_model() -> None:
         return AIMessage(content="Fixed.")
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
-    runtime._tools = register_turn_plan_tools(runtime)
+    runtime._tools = register_graph_control_tools(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -343,6 +399,74 @@ async def test_graph_turn_plan_validation_error_returns_to_model() -> None:
 
     assert result["final_response_text"] == "Fixed."
     assert result["turn_plan"] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_turn_budget_forces_no_tools_finalizer_after_budget_exhaustion() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    call_sites: list[str] = []
+    prompts: list[list[Any]] = []
+
+    class _FakeTool:
+        async def ainvoke(self, args: dict[str, Any]) -> dict[str, Any]:
+            del args
+            return {"found": ["one useful result"]}
+
+    calls = 0
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        call_context: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        call_sites.append(str((call_context or {}).get("call_site", "")))
+        prompts.append(list(messages))
+        if calls <= 2:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": f"call_search_{calls}",
+                        "name": "fake_tool",
+                        "args": {"query": f"q{calls}"},
+                    }
+                ],
+            )
+        assert any("Do not call tools" in str(getattr(message, "content", "")) for message in messages)
+        assert any("one useful result" in str(getattr(message, "content", "")) for message in messages)
+        return AIMessage(content="Final report from gathered results.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = {"fake_tool": _FakeTool()}
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Do long research")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_turn_budget_finalizer",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_budget_finalizer",
+            "turn_plan": [],
+        },
+        config={"configurable": {"thread_id": "chat_turn_budget_finalizer"}, "recursion_limit": 8},
+    )
+
+    assert result["final_response_text"] == "Final report from gathered results."
+    assert call_sites == ["graph_agent", "graph_agent", "graph_turn_budget_finalizer"]
+    assert result["turn_budget"]["used_model_calls"] == 2
+    assert result["turn_budget"]["finalizer_used"] is True
+    second_agent_prompt = "\n".join(str(getattr(message, "content", "")) for message in prompts[1])
+    assert "TURN_BUDGET_STATUS" in second_agent_prompt
 
 
 @pytest.mark.asyncio
@@ -384,7 +508,7 @@ async def test_graph_resets_turn_plan_for_new_user_turn() -> None:
         return AIMessage(content=f"Done {calls}.")
 
     _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
-    runtime._tools = register_turn_plan_tools(runtime)
+    runtime._tools = register_graph_control_tools(runtime)
 
     graph = build_runtime_graph(runtime)
     base_state = {
@@ -399,7 +523,7 @@ async def test_graph_resets_turn_plan_for_new_user_turn() -> None:
     }
     first = await graph.ainvoke(
         {**base_state, "messages": [HumanMessage(content="do complex research")]},
-        config={"configurable": {"thread_id": "chat_turn_plan_reset"}, "recursion_limit": 8},
+        config={"configurable": {"thread_id": "chat_turn_plan_reset"}, "recursion_limit": 13},
     )
     second = await graph.ainvoke(
         {
@@ -407,7 +531,7 @@ async def test_graph_resets_turn_plan_for_new_user_turn() -> None:
             "messages": [HumanMessage(content="simple follow up")],
             "agent_trace_id": "turn_plan_reset_second",
         },
-        config={"configurable": {"thread_id": "chat_turn_plan_reset"}, "recursion_limit": 8},
+        config={"configurable": {"thread_id": "chat_turn_plan_reset"}, "recursion_limit": 13},
     )
 
     assert first["final_response_text"] == "Done 2."
@@ -589,6 +713,68 @@ async def test_graph_tool_call_preamble_not_suppressed_by_checkpointed_flag() ->
 
     assert result["final_response_text"] == "Done."
     assert sequence == ["emit:Starting another tool call.", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_graph_tool_execution_sets_thread_context_from_state() -> None:
+    runtime = object.__new__(OpenTulpaLangGraphRuntime)
+    emitted: list[dict[str, str]] = []
+    calls = 0
+
+    async def _emit_update(
+        *, text: str, dedupe_key: str = "", thread_id: str | None = None
+    ) -> dict[str, bool]:
+        del thread_id
+        emitted.append({"text": text, "dedupe_key": dedupe_key})
+        return {"sent": True, "duplicate": False}
+
+    async def _ainvoke_model(
+        model: Any,
+        messages: list[Any],
+        *,
+        stable_prefix_count: int = 0,
+        **kwargs: Any,
+    ) -> AIMessage:
+        del model, messages, stable_prefix_count, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_update",
+                        "name": "send_owner_update",
+                        "args": {"message": "Searching now."},
+                    }
+                ],
+            )
+        return AIMessage(content="Done.")
+
+    _install_minimal_graph_runtime_stubs(runtime, ainvoke_model=_ainvoke_model)
+    runtime._tools = register_owner_update_tools(runtime)
+    runtime.emit_interactive_update = _emit_update  # type: ignore[method-assign]
+
+    graph = build_runtime_graph(runtime)
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="search for examples")],
+            "customer_id": "telegram_test",
+            "thread_id": "chat_owner_context_from_state",
+            "turn_mode": "interactive",
+            "turn_status": "running",
+            "final_response_text": "",
+            "pending_context_summary": "",
+            "agent_trace_id": "turn_owner_context_from_state",
+        },
+        config={
+            "configurable": {"thread_id": "chat_owner_context_from_state"},
+            "recursion_limit": 13,
+        },
+    )
+
+    assert result["final_response_text"] == "Done."
+    assert emitted == [{"text": "Searching now.", "dedupe_key": ""}]
 
 
 @pytest.mark.asyncio
@@ -1249,7 +1435,7 @@ async def test_graph_keeps_empty_output_without_retry() -> None:
 
 
 def test_pending_context_surfaces_routine_execution_summary() -> None:
-    text = OpenTulpaLangGraphRuntime._format_pending_context(
+    text = format_pending_context(
         [
             {
                 "source": "routine",
@@ -1328,17 +1514,20 @@ async def test_ainvoke_text_does_not_reuse_prior_turn_assistant_reply() -> None:
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
 
-    async def _noop_skills(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {}
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
 
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
 
     reply = await runtime.ainvoke_text(
         thread_id="chat-ainvoke-stale",
@@ -1522,7 +1711,7 @@ async def test_workflow_setup_control_card_refreshes_after_tool_results() -> Non
     assert "session_status: active" in first_prompt
     assert "session_status: completed" in second_prompt
     assert "workflow_id=iwf_autospa" in second_prompt
-    assert captured_prefix_counts == [2, 2]
+    assert captured_prefix_counts == [4, 4]
 
 
 @pytest.mark.asyncio
@@ -1591,23 +1780,23 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
 
-    captured_skill_user_text: dict[str, str] = {}
-
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
-
-    async def _capture_skill_state(*, customer_id: str, user_text: str) -> dict[str, Any]:
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
         del customer_id
-        captured_skill_user_text["value"] = user_text
-        return {}
+        return []
+
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
 
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _capture_skill_state  # type: ignore[method-assign]
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
 
     user_text = "can you try again?"
     reply = await runtime.ainvoke_text(
@@ -1618,8 +1807,8 @@ async def test_pending_context_is_not_merged_into_user_message() -> None:
     )
 
     assert reply == "ok"
-    assert captured_skill_user_text["value"] == user_text
     assert graph.last_state is not None
+    assert graph.last_state["active_skill_query"] == user_text
     model_messages = graph.last_state["messages"]
     assert len(model_messages) == 1
     assert isinstance(model_messages[0], HumanMessage)
@@ -1648,17 +1837,20 @@ async def test_concurrent_input_enqueues_next_turn_not_active_user_message() -> 
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
 
-    async def _skill_state(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {}
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
 
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _skill_state  # type: ignore[method-assign]
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
 
     async def _submit(text: str, delay: float) -> str:
         await asyncio.sleep(delay)
@@ -1720,6 +1912,12 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
         del customer_id, user_text, candidates
         return {"skill_names": [], "context": ""}
 
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
+
     async def _live_time(customer_id: str) -> dict[str, str]:
         del customer_id
         return {
@@ -1739,6 +1937,7 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     runtime._checkpointer = InMemorySaver()
     runtime._list_available_skills = _unexpected_list  # type: ignore[method-assign]
     runtime._resolve_skill_context = _unexpected_resolve  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
     runtime._load_active_directive = _directive  # type: ignore[method-assign]
     runtime._load_thread_rollup = lambda thread_id: None  # type: ignore[assignment]
     runtime._thread_rollup_service = None
@@ -1751,6 +1950,7 @@ async def test_agent_reuses_turn_scoped_available_skills_without_relisting() -> 
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -1809,8 +2009,10 @@ async def test_pre_resolve_skill_state_does_not_call_llm_selector() -> None:
 
     runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
     runtime._select_relevant_skills = _selector  # type: ignore[method-assign]
+    provider = RuntimeContextSourceProvider(runtime)
 
-    state = await runtime._pre_resolve_skill_state(
+    state = await pre_resolve_skill_state(
+        provider,
         customer_id="telegram_test",
         user_text="use browser if needed",
         prompt_mode="task_chat",
@@ -1874,6 +2076,7 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
+    _install_prompt_source_stubs(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -1902,10 +2105,21 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     )
 
     assert result["final_response_text"] == "ok"
-    assert captured["stable_prefix_count"] == 2
+    assert captured["stable_prefix_count"] == 4
     prompt_messages = captured["messages"]
-    assert isinstance(prompt_messages[1], HumanMessage)
-    assert "OpenTulpa cache anchor v1" in str(prompt_messages[1].content)
+    anchor_index = next(
+        idx
+        for idx, msg in enumerate(prompt_messages)
+        if isinstance(msg, HumanMessage)
+        and "OpenTulpa cache anchor v1" in str(getattr(msg, "content", ""))
+    )
+    assert anchor_index == captured["stable_prefix_count"] - 1
+    web_backend_messages = [
+        msg
+        for msg in prompt_messages
+        if "WEB_SEARCH_BACKEND:" in str(getattr(msg, "content", ""))
+    ]
+    assert len(web_backend_messages) == 1
     older_assistant_index = next(
         idx
         for idx, msg in enumerate(prompt_messages)
@@ -1993,7 +2207,6 @@ async def test_agent_uses_server_time_tool_guidance_instead_of_live_time_context
     runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
@@ -2003,6 +2216,7 @@ async def test_agent_uses_server_time_tool_guidance_instead_of_live_time_context
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
+    _install_prompt_source_stubs(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -2022,10 +2236,15 @@ async def test_agent_uses_server_time_tool_guidance_instead_of_live_time_context
     assert result["final_response_text"] == "Done."
     assert len(captured_messages) == 2
     assert live_time_calls == 0
-    assert captured_prefix_counts[0] == 2
+    assert captured_prefix_counts[0] == 4
     assert captured_prefix_counts[1] == captured_prefix_counts[0]
-    assert isinstance(captured_messages[0][1], HumanMessage)
-    assert "OpenTulpa cache anchor v1" in str(captured_messages[0][1].content)
+    anchor_index = next(
+        idx
+        for idx, msg in enumerate(captured_messages[0])
+        if isinstance(msg, HumanMessage)
+        and "OpenTulpa cache anchor v1" in str(getattr(msg, "content", ""))
+    )
+    assert anchor_index == captured_prefix_counts[0] - 1
 
     def _time_tool_guidance(messages: list[Any]) -> str:
         return next(
@@ -2106,7 +2325,6 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
     runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
@@ -2116,6 +2334,7 @@ async def test_agent_freezes_older_history_projection_and_stale_summary_across_t
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
+    _install_prompt_source_stubs(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -2204,7 +2423,6 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
     runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
@@ -2214,6 +2432,7 @@ async def test_deepseek_prompt_uses_only_current_turn_raw_history() -> None:
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 8
+    _install_prompt_source_stubs(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -2302,7 +2521,6 @@ async def test_deepseek_prompt_collapses_completed_tool_segments() -> None:
     runtime._load_memory_grounding_context = _memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime._tools = {"fake_tool": _FakeTool()}
     runtime.ainvoke_model = _ainvoke_model  # type: ignore[method-assign]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
@@ -2312,6 +2530,7 @@ async def test_deepseek_prompt_collapses_completed_tool_segments() -> None:
     runtime._context_token_limit = 12000
     runtime._context_short_term_low_tokens = 3500
     runtime.recursion_limit = 10
+    _install_prompt_source_stubs(runtime)
 
     graph = build_runtime_graph(runtime)
     result = await graph.ainvoke(
@@ -2402,7 +2621,7 @@ def test_memory_grounding_block_stays_compact() -> None:
 
 
 def test_graph_input_preserves_frozen_prompt_state_between_turns() -> None:
-    graph_input = OpenTulpaLangGraphRuntime._build_graph_input(
+    graph_input = build_graph_input(
         user_text="next turn",
         customer_id="telegram_test",
         thread_id="chat_test",
@@ -2438,7 +2657,7 @@ async def test_graph_preserves_frozen_history_projection_across_user_turns() -> 
     config = {"configurable": {"thread_id": "chat_projection"}, "recursion_limit": 8}
 
     first = await graph.ainvoke(
-        OpenTulpaLangGraphRuntime._build_graph_input(
+        build_graph_input(
             user_text="first",
             customer_id="telegram_test",
             thread_id="chat_projection",
@@ -2455,7 +2674,7 @@ async def test_graph_preserves_frozen_history_projection_across_user_turns() -> 
     )
 
     second = await graph.ainvoke(
-        OpenTulpaLangGraphRuntime._build_graph_input(
+        build_graph_input(
             user_text="second",
             customer_id="telegram_test",
             thread_id="chat_projection",

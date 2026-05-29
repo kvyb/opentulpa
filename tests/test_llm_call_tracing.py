@@ -288,11 +288,65 @@ async def test_ainvoke_model_writes_full_llm_call_trace(tmp_path: Path) -> None:
     assert record["sticky_first_system_chars"] == len("Stable system prompt")
     assert len(record["sticky_first_non_system_hash"]) == 64
     assert record["sticky_first_non_system_chars"] == len("What do you remember about pricing?")
+    assert record["prompt_first_changed_message_index"] is None
+    assert record["prompt_changed_message_count"] is None
+    assert record["prompt_previous_message_count"] is None
     assert record["response_text"] == "All good."
     assert record["response_tool_calls"][0]["name"] == "memory_search"
     assert len(record["prompt_messages"]) == 2
     assert record["prompt_messages"][0]["role"] == "system"
     assert record["prompt_messages"][1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_model_traces_first_changed_prompt_message(tmp_path: Path) -> None:
+    runtime = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="google/gemini-3-flash-preview",
+        checkpoint_db_path=str(tmp_path / "checkpoint.sqlite"),
+        prompt_caching_enabled=True,
+    )
+    runtime._llm_call_trace_path = tmp_path / "llm_call_traces.jsonl"
+    model = _TraceModel()
+    call_context = {
+        "call_site": "graph_agent",
+        "thread_id": "chat_test",
+        "customer_id": "telegram_test",
+        "turn_mode": "interactive",
+    }
+
+    await runtime.ainvoke_model(
+        model,
+        [
+            SystemMessage(content="Stable system prompt"),
+            HumanMessage(content="first question"),
+        ],
+        model_name="google/gemini-3-flash-preview",
+        stable_prefix_count=1,
+        call_context=call_context,
+    )
+    await runtime.ainvoke_model(
+        model,
+        [
+            SystemMessage(content="Stable system prompt"),
+            HumanMessage(content="second question"),
+            AIMessage(content="new answer"),
+        ],
+        model_name="google/gemini-3-flash-preview",
+        stable_prefix_count=1,
+        call_context=call_context,
+    )
+
+    records = [
+        json.loads(line)
+        for line in runtime._llm_call_trace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert records[0]["prompt_first_changed_message_index"] is None
+    assert records[1]["prompt_first_changed_message_index"] == 1
+    assert records[1]["prompt_changed_message_count"] == 2
+    assert records[1]["prompt_previous_message_count"] == 2
 
 
 @pytest.mark.asyncio

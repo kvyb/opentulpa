@@ -118,7 +118,7 @@ def test_tools_for_routine_wake_excludes_interactive_owner_update_tool() -> None
     ]
 
 
-def test_turn_plan_context_only_includes_active_items() -> None:
+def test_turn_plan_context_includes_completed_items_as_done() -> None:
     context = build_turn_plan_prompt_context(
         {
             "turn_plan": [
@@ -134,7 +134,7 @@ def test_turn_plan_context_only_includes_active_items() -> None:
 
     assert "CURRENT_TURN_PLAN" in context
     assert "Use gathered evidence" in context
-    assert "Already done" not in context
+    assert "[x] done: Already done (completed)" in context
 
 
 @lc_tool
@@ -1253,4 +1253,4 @@ def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:
     assert gemini["strategy"] == "breakpoint"
     assert auto["strategy"] == "automatic"
     assert zai["strategy"] == "automatic"
-    assert qwen["strategy"] == "explicit_committed_breakpoint"
+    assert qwen["strategy"] == "implicit_stable_prefix"

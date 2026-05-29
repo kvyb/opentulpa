@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from opentulpa.agent.context_engineer import ContextEngineer
+from opentulpa.agent.context_engine import ContextEngine
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, ToolMessage
 
 
-def test_context_engineer_keeps_recent_chat_and_tool_windows() -> None:
-    engineer = ContextEngineer(raw_chat_limit=20, raw_tool_limit=10)
+def test_context_engine_keeps_recent_chat_and_tool_windows() -> None:
+    engineer = ContextEngine(raw_chat_limit=20, raw_tool_limit=10)
     messages = []
     for idx in range(24):
         messages.append(HumanMessage(content=f"user {idx}"))
@@ -22,8 +22,8 @@ def test_context_engineer_keeps_recent_chat_and_tool_windows() -> None:
     assert "user 0" in result.summary_text or "assistant 0" in result.summary_text
 
 
-def test_context_engineer_summarizes_stale_tool_arguments_and_errors() -> None:
-    engineer = ContextEngineer(raw_chat_limit=2, raw_tool_limit=2)
+def test_context_engine_summarizes_stale_tool_arguments_and_errors() -> None:
+    engineer = ContextEngine(raw_chat_limit=2, raw_tool_limit=2)
     messages = [
         HumanMessage(content="book 4pm"),
         AIMessage(
@@ -54,8 +54,8 @@ def test_context_engineer_summarizes_stale_tool_arguments_and_errors() -> None:
     assert "result[" in result.summary_text
 
 
-def test_context_engineer_preserves_active_tool_dependency_suffix() -> None:
-    engineer = ContextEngineer(raw_chat_limit=2, raw_tool_limit=2)
+def test_context_engine_preserves_active_tool_dependency_suffix() -> None:
+    engineer = ContextEngine(raw_chat_limit=2, raw_tool_limit=2)
     messages = [
         HumanMessage(content="old"),
         AIMessage(content="old answer"),
@@ -79,8 +79,8 @@ def test_context_engineer_preserves_active_tool_dependency_suffix() -> None:
     assert any(isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") == "call_live" for msg in result.raw_messages)
 
 
-def test_context_engineer_latest_stale_tool_calls_follow_raw_tool_limit() -> None:
-    engineer = ContextEngineer(raw_chat_limit=1, raw_tool_limit=3, stale_summary_token_budget=5000)
+def test_context_engine_latest_stale_tool_calls_follow_raw_tool_limit() -> None:
+    engineer = ContextEngine(raw_chat_limit=1, raw_tool_limit=3, stale_summary_token_budget=5000)
     long_value = "x" * 140
     messages = [HumanMessage(content="old context"), AIMessage(content="older answer")]
     for idx in range(6):
@@ -125,8 +125,8 @@ def test_context_engineer_latest_stale_tool_calls_follow_raw_tool_limit() -> Non
         assert f"result-{idx}-{long_value}" in preserved_text
 
 
-def test_context_engineer_optional_context_rules() -> None:
-    engineer = ContextEngineer()
+def test_context_engine_optional_context_rules() -> None:
+    engineer = ContextEngine()
 
     assert engineer.should_include_optional_context(kind="thread_rollup", prompt_mode="literal_chat", should_retrieve=True) is False
     assert engineer.should_include_optional_context(kind="thread_rollup", prompt_mode="task_chat", should_retrieve=True) is True
@@ -134,8 +134,8 @@ def test_context_engineer_optional_context_rules() -> None:
     assert engineer.should_include_optional_context(kind="pending_context", prompt_mode="execution", should_retrieve=False) is True
 
 
-def test_context_engineer_defaults_keep_twenty_chat_and_five_tool_messages_in_order() -> None:
-    engineer = ContextEngineer()
+def test_context_engine_defaults_keep_twenty_chat_and_five_tool_messages_in_order() -> None:
+    engineer = ContextEngine()
     messages = []
     for idx in range(24):
         messages.append(HumanMessage(content=f"user {idx}"))

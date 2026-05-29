@@ -1,4 +1,4 @@
-"""Context budgeting and compact prompt working-set helpers."""
+"""History working-set selection for prompt assembly."""
 
 from __future__ import annotations
 
@@ -8,15 +8,9 @@ from typing import Any
 from opentulpa.agent.lc_messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from opentulpa.agent.tool_parser import compact_tool_call_record as _compact_tool_call_record
 from opentulpa.agent.tool_parser import compact_tool_payload as _compact_tool_payload
-from opentulpa.agent.utils import (
-    approx_tokens as _approx_tokens,
-)
-from opentulpa.agent.utils import (
-    content_to_text as _content_to_text,
-)
-from opentulpa.agent.utils import (
-    message_to_text as _message_to_text,
-)
+from opentulpa.agent.utils import approx_tokens as _approx_tokens
+from opentulpa.agent.utils import content_to_text as _content_to_text
+from opentulpa.agent.utils import message_to_text as _message_to_text
 
 
 def trim_text_to_token_budget(text: str, *, token_budget: int) -> str:
@@ -46,7 +40,7 @@ class HistoryWorkingSet:
     protected_count: int
 
 
-class ContextEngineer:
+class ContextHistoryEngine:
     def __init__(
         self,
         *,
@@ -57,27 +51,6 @@ class ContextEngineer:
         self.raw_chat_limit = max(4, int(raw_chat_limit))
         self.raw_tool_limit = max(2, int(raw_tool_limit))
         self.stale_summary_token_budget = max(200, int(stale_summary_token_budget))
-
-    @staticmethod
-    def should_include_optional_context(
-        *,
-        kind: str,
-        prompt_mode: str,
-        should_retrieve: bool,
-    ) -> bool:
-        mode = str(prompt_mode or "").strip().lower()
-        normalized_kind = str(kind or "").strip().lower()
-        if normalized_kind == "pending_context":
-            return mode == "execution"
-        if normalized_kind == "task_directive":
-            return mode != "literal_chat"
-        if normalized_kind == "skill_discovery":
-            return mode != "literal_chat"
-        if normalized_kind in {"thread_rollup", "invoked_skills", "link_aliases"}:
-            return mode != "literal_chat" and bool(should_retrieve)
-        if normalized_kind == "memory_grounding":
-            return mode != "literal_chat"
-        return False
 
     @staticmethod
     def _is_chat_message(message: AnyMessage) -> bool:
@@ -107,7 +80,7 @@ class ContextEngineer:
                     seen.add(call_id)
                     latest_ids.append(call_id)
             elif isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
-                for call_id in reversed(ContextEngineer._tool_call_ids(message)):
+                for call_id in reversed(ContextHistoryEngine._tool_call_ids(message)):
                     if call_id and call_id not in seen:
                         seen.add(call_id)
                         latest_ids.append(call_id)
@@ -124,7 +97,8 @@ class ContextEngineer:
             if isinstance(message, ToolMessage):
                 tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
                 if not pending_ids and idx > 0 and not (
-                    isinstance(messages[idx - 1], AIMessage) and getattr(messages[idx - 1], "tool_calls", None)
+                    isinstance(messages[idx - 1], AIMessage)
+                    and getattr(messages[idx - 1], "tool_calls", None)
                 ):
                     break
                 protected.add(idx)
@@ -156,11 +130,15 @@ class ContextEngineer:
         result_ids = {
             str(getattr(message, "tool_call_id", "") or "").strip()
             for message in messages
-            if isinstance(message, ToolMessage) and str(getattr(message, "tool_call_id", "") or "").strip()
+            if isinstance(message, ToolMessage)
+            and str(getattr(message, "tool_call_id", "") or "").strip()
         }
         for message in messages:
             if isinstance(message, HumanMessage):
-                text = trim_text_to_token_budget(_content_to_text(getattr(message, "content", "")), token_budget=80)
+                text = trim_text_to_token_budget(
+                    _content_to_text(getattr(message, "content", "")),
+                    token_budget=80,
+                )
                 if text:
                     parts.append(f"User: {text}")
                 continue
@@ -178,7 +156,9 @@ class ContextEngineer:
                             "name": str(call.get("name", "") or "").strip() or "tool",
                             "args": _compact_tool_payload(
                                 args,
-                                value_char_limit=None if call_id in latest_tool_call_ids else 100,
+                                value_char_limit=(
+                                    None if call_id in latest_tool_call_ids else 100
+                                ),
                             ),
                         }
                         if call_id in latest_tool_call_ids and call_id not in result_ids:
@@ -192,12 +172,21 @@ class ContextEngineer:
                                 )
                             )
                     names = ", ".join(
-                        sorted({tool_calls_by_id[call_id]["name"] for call_id in tool_calls_by_id if call_id})
+                        sorted(
+                            {
+                                tool_calls_by_id[call_id]["name"]
+                                for call_id in tool_calls_by_id
+                                if call_id
+                            }
+                        )
                     )
                     if names:
                         parts.append(f"Assistant requested tools: {names}")
                     continue
-                text = trim_text_to_token_budget(_content_to_text(getattr(message, "content", "")), token_budget=80)
+                text = trim_text_to_token_budget(
+                    _content_to_text(getattr(message, "content", "")),
+                    token_budget=80,
+                )
                 if text:
                     parts.append(f"Assistant: {text}")
                 continue
@@ -205,16 +194,21 @@ class ContextEngineer:
                 tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
                 call = tool_calls_by_id.get(tool_call_id, {})
                 tool_name = str(call.get("name", "") or "").strip() or "tool"
-                line = _compact_tool_call_record(
-                    tool_name=tool_name,
-                    args=call.get("args", ""),
-                    result=_content_to_text(getattr(message, "content", "")),
-                    args_value_char_limit=None,
-                    result_value_char_limit=None if tool_call_id in latest_tool_call_ids else 100,
+                parts.append(
+                    _compact_tool_call_record(
+                        tool_name=tool_name,
+                        args=call.get("args", ""),
+                        result=_content_to_text(getattr(message, "content", "")),
+                        args_value_char_limit=None,
+                        result_value_char_limit=(
+                            None if tool_call_id in latest_tool_call_ids else 100
+                        ),
+                    )
                 )
-                parts.append(line)
-        joined = "\n".join(parts).strip()
-        return trim_text_to_token_budget(joined, token_budget=self.stale_summary_token_budget)
+        return trim_text_to_token_budget(
+            "\n".join(parts).strip(),
+            token_budget=self.stale_summary_token_budget,
+        )
 
     def build_history_working_set(
         self,
@@ -248,9 +242,12 @@ class ContextEngineer:
                     continue
                 keep_indices.add(idx)
                 raw_chat += 1
-        stale_messages = [msg for idx, msg in enumerate(messages) if idx not in keep_indices]
         for idx, message in enumerate(messages):
-            if idx not in keep_indices or not isinstance(message, AIMessage) or not getattr(message, "tool_calls", None):
+            if (
+                idx not in keep_indices
+                or not isinstance(message, AIMessage)
+                or not getattr(message, "tool_calls", None)
+            ):
                 continue
             call_ids = set(self._tool_call_ids(message))
             if not call_ids:
@@ -261,9 +258,7 @@ class ContextEngineer:
                 if isinstance(tool_msg, ToolMessage)
                 and str(getattr(tool_msg, "tool_call_id", "") or "").strip() in call_ids
             }
-            if not matching_tool_indices:
-                continue
-            if not matching_tool_indices.issubset(keep_indices):
+            if matching_tool_indices and not matching_tool_indices.issubset(keep_indices):
                 keep_indices.discard(idx)
         stale_messages = [msg for idx, msg in enumerate(messages) if idx not in keep_indices]
         latest_tool_call_ids = self._latest_tool_call_ids(messages, limit=self.raw_tool_limit)
@@ -272,7 +267,11 @@ class ContextEngineer:
             latest_tool_call_ids=latest_tool_call_ids,
         )
         summary_tokens = min(self.stale_summary_token_budget, max(0, budget // 4))
-        summary_text = trim_text_to_token_budget(summary_text, token_budget=summary_tokens) if summary_text else ""
+        summary_text = (
+            trim_text_to_token_budget(summary_text, token_budget=summary_tokens)
+            if summary_text
+            else ""
+        )
         raw_budget = max(200, budget - (_approx_tokens(summary_text) if summary_text else 0))
         selected_pairs = [(idx, msg) for idx, msg in enumerate(messages) if idx in keep_indices]
 

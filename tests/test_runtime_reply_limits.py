@@ -9,6 +9,7 @@ import pytest
 
 from opentulpa.agent.lc_messages import AIMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 
 
@@ -69,17 +70,20 @@ def _build_runtime(tmp_path, graph: Any) -> OpenTulpaLangGraphRuntime:
     async def _noop_start() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
 
-    async def _noop_skills(*, customer_id: str, user_text: str) -> dict[str, Any]:
-        del customer_id, user_text
-        return {}
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
 
     runtime.start = _noop_start  # type: ignore[method-assign]
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _noop_skills  # type: ignore[method-assign]
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
     return runtime
 
 

@@ -18,6 +18,7 @@ from mocks.telegram import FakeTelegramClient
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.lc_messages import AIMessage, SystemMessage
 from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime
+from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
 from opentulpa.agent.runtime_input import ThreadInputCoordinator
 from opentulpa.agent.tools_registry import register_runtime_tools
 from opentulpa.api import app as app_module
@@ -165,13 +166,15 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     async def _noop_shutdown() -> None:
         return None
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-        return None
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
 
-    async def _empty_skill_state(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {}
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
 
     async def _empty_memory_grounding(**kwargs: Any) -> str:
         del kwargs
@@ -253,14 +256,13 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
     runtime._behavior_log_enabled = False
     runtime._tools = {}
 
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    runtime._pre_resolve_skill_state = _empty_skill_state  # type: ignore[method-assign]
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
     runtime._load_active_directive = _directive  # type: ignore[method-assign]
     runtime._load_memory_grounding_context = _empty_memory_grounding  # type: ignore[method-assign]
     runtime._build_live_time_context = _live_time  # type: ignore[method-assign]
     runtime._build_link_alias_context = lambda **kwargs: ""  # type: ignore[assignment]
     runtime._load_thread_rollup_sections = lambda thread_id: {}  # type: ignore[assignment]
-    runtime._has_retrieval_evidence = lambda **kwargs: False  # type: ignore[assignment]
     runtime.resolve_link_aliases_in_args = lambda **kwargs: kwargs.get("args", {})  # type: ignore[assignment]
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
@@ -273,6 +275,7 @@ def _build_deterministic_runtime() -> tuple[OpenTulpaLangGraphRuntime, list[list
         raise RuntimeError("internal API requester was not bound")
 
     runtime._request_with_backoff = _request_with_backoff  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
     runtime._tools = register_runtime_tools(runtime)
     runtime._graph = build_runtime_graph(runtime)
     return runtime, model_calls

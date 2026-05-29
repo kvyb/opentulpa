@@ -20,6 +20,8 @@ class ToolOutcome(TypedDict, total=False):
     result_text: str
     error: str
     final_response_hint: str
+    tool_signature: str
+    trace_id: str
 
 
 TurnPlanStatus = Literal["pending", "in_progress", "completed", "cancelled"]
@@ -29,6 +31,16 @@ class TurnPlanItem(TypedDict):
     id: str
     content: str
     status: TurnPlanStatus
+
+
+class TurnBudget(TypedDict, total=False):
+    max_model_calls: int
+    used_model_calls: int
+    used_tool_rounds: int
+    max_search_calls: int
+    used_search_calls: int
+    finalizer_used: bool
+    exhausted_reason: str
 
 
 class AgentState(TypedDict, total=False):
@@ -51,6 +63,8 @@ class AgentState(TypedDict, total=False):
     active_skill_context: str
     tool_outcomes: Annotated[list[ToolOutcome], add_tool_outcomes]
     turn_plan: list[TurnPlanItem]
+    turn_budget: TurnBudget
+    turn_finalization_reason: str
     tool_validation_passed: bool
     tool_error_count: int
     last_tool_error: str

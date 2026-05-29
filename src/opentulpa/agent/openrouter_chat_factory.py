@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from opentulpa.agent import model_transport_policy as transport_policy
 from opentulpa.agent.deepseek_chat_model import OpenRouterDeepSeekChatModel
@@ -57,7 +58,7 @@ def build_openrouter_chat_model(
     base_kwargs: dict[str, Any],
     openrouter_base_url: str | None,
     reasoning_effort: str | None,
-    chat_openrouter_cls: Any = ChatOpenRouter,
+    chat_openai_cls: Any = ChatOpenAI,
 ) -> Any | None:
     if not _uses_openrouter_chat_adapter(
         model_name=model_name,
@@ -69,7 +70,7 @@ def build_openrouter_chat_model(
     if uses_openrouter_reasoning_adapter(model_name=model_name, base_url=openrouter_base_url):
         return OpenRouterDeepSeekChatModel(
             model=model_name,
-            api_key=str(base_kwargs.get("api_key") or ""),
+            api_key=SecretStr(str(base_kwargs.get("api_key") or "")),
             api_base=str(openrouter_base_url or base_kwargs.get("base_url") or ""),
             temperature=base_kwargs.get("temperature"),
             max_tokens=base_kwargs.get("max_completion_tokens"),
@@ -94,12 +95,12 @@ def build_openrouter_chat_model(
         "max_retries": transport_policy.openrouter_max_retries(),
         "timeout": transport_policy.openrouter_timeout_seconds(),
     }
+    if "qwen" in str(model_name or "").strip().lower():
+        adapter_kwargs["stream_usage"] = True
     if provider_routing := transport_policy.openrouter_provider_routing_for_model(model_name):
-        adapter_kwargs["openrouter_provider"] = provider_routing
-    if referer := app_headers.get("HTTP-Referer"):
-        adapter_kwargs["app_url"] = referer
-    if title := app_headers.get("X-OpenRouter-Title"):
-        adapter_kwargs["app_title"] = title
-    return chat_openrouter_cls(
+        adapter_kwargs["extra_body"] = {"provider": provider_routing}
+    if app_headers:
+        adapter_kwargs["default_headers"] = app_headers
+    return chat_openai_cls(
         **{key: value for key, value in adapter_kwargs.items() if value is not None}
     )

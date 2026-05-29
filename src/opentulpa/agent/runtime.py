@@ -30,16 +30,17 @@ from typing import Any, cast
 import httpx
 from langchain.chat_models import init_chat_model
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel, ConfigDict, Field
 
 from opentulpa.agent import model_pool as _model_pool
 from opentulpa.agent.context_compaction import (
-    compress_rollup as _compress_rollup,
+    compact_thread_context_for_turn,
+    thread_context_needs_compaction,
 )
 from opentulpa.agent.context_compaction import (
-    maybe_compact_thread_context as _maybe_compact_thread_context,
+    compress_rollup as _compress_rollup,
 )
 from opentulpa.agent.context_compaction import (
     persist_rollup_memory as _persist_rollup_memory,
@@ -50,11 +51,8 @@ from opentulpa.agent.context_compaction import (
 from opentulpa.agent.context_compaction import (
     split_text_chunks as _split_text_chunks,
 )
-from opentulpa.agent.context_compaction import (
-    thread_context_needs_compaction as _thread_context_needs_compaction,
-)
-from opentulpa.agent.context_engineer import ContextEngineer
-from opentulpa.agent.context_engineer import (
+from opentulpa.agent.context_engine import ContextEngine
+from opentulpa.agent.context_engine import (
     trim_text_to_token_budget as _trim_text_to_token_budget,
 )
 from opentulpa.agent.file_analysis import (
@@ -79,17 +77,17 @@ from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.internal_api_client import InternalApiClient
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.openrouter_chat_factory import openrouter_app_headers
-from opentulpa.agent.prompt_classifier import classify_prompt_mode as _classify_prompt_mode
+from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
 from opentulpa.agent.runtime_input import (
     MergedInputSuppressedError,
     ThreadInputCoordinator,
 )
 from opentulpa.agent.tools_registry import register_runtime_tools
+from opentulpa.agent.turn_context_preparer import prepare_turn_context
 from opentulpa.agent.turn_plan import turn_plan_enabled_for_turn_mode
 from opentulpa.agent.turn_policy import (
     normalize_turn_mode as _normalize_turn_mode,
 )
-from opentulpa.agent.turn_runtime_policy import recursion_limit_for_turn
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,
 )
@@ -162,7 +160,7 @@ def _init_runtime_chat_model(
         openrouter_base_url=openrouter_base_url,
         reasoning_effort=reasoning_effort,
         init_chat_model_func=init_chat_model,
-        chat_openrouter_cls=ChatOpenRouter,
+        chat_openai_cls=ChatOpenAI,
     )
 
 
@@ -321,12 +319,21 @@ def _extract_response_usage_fields(response: Any) -> dict[str, Any]:
     if not usage:
         usage_metadata = getattr(response, "usage_metadata", None)
         if isinstance(usage_metadata, dict) and usage_metadata:
+            input_details = _usage_object_to_dict(usage_metadata.get("input_token_details"))
+            output_details = _usage_object_to_dict(usage_metadata.get("output_token_details"))
             usage = {
                 "prompt_tokens": usage_metadata.get("input_tokens"),
                 "completion_tokens": usage_metadata.get("output_tokens"),
                 "total_tokens": usage_metadata.get("total_tokens"),
                 "input_tokens": usage_metadata.get("input_tokens"),
                 "output_tokens": usage_metadata.get("output_tokens"),
+                "prompt_tokens_details": {
+                    "cached_tokens": input_details.get("cache_read"),
+                    "cache_write_tokens": input_details.get("cache_creation"),
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": output_details.get("reasoning"),
+                },
             }
 
     prompt_details = _usage_object_to_dict(usage.get("prompt_tokens_details"))
@@ -766,13 +773,6 @@ class _IntakeWorkflowDecision(BaseModel):
     knowledge_source_refs: list[Any] = Field(default_factory=list)
     grounding_status: str = ""
     reason: str = ""
-
-
-@dataclass(slots=True)
-class _PreparedTurnContext:
-    through_id: int | None
-    config: dict[str, Any]
-    graph_input: dict[str, Any]
 
 
 def _build_intake_workflow_system_prompt() -> str:
@@ -1409,6 +1409,7 @@ class OpenTulpaLangGraphRuntime:
         self._llm_call_trace_path = self._behavior_log_path.parent / "llm_call_traces.jsonl"
         self._llm_call_trace_lock = threading.Lock()
         self._llm_call_trace_limit = _LLM_CALL_TRACE_LIMIT
+        self._llm_prompt_hashes_by_trace_key: dict[str, list[str]] = {}
         self._thread_checkpoint_locks: dict[str, asyncio.Lock] = {}
         self._thread_checkpoint_locks_guard = asyncio.Lock()
         self._context_compaction_background_tasks: set[asyncio.Task[Any]] = set()
@@ -1430,7 +1431,8 @@ class OpenTulpaLangGraphRuntime:
         self._prompt_caching_enabled = bool(prompt_caching_enabled)
         self._prompt_cache_ttl_1h = bool(prompt_cache_ttl_1h)
         self._langfuse_tracer = langfuse_tracer
-        self._context_engineer = ContextEngineer()
+        self._context_engine = ContextEngine()
+        self._context_source_provider = RuntimeContextSourceProvider(self)
         self._browser_use_local_manager: Any | None = None
         self._headroom_service: Any | None = None
         self._interactive_sessions_lock = asyncio.Lock()
@@ -2022,6 +2024,50 @@ class OpenTulpaLangGraphRuntime:
         with suppress(Exception), lock:
             _commit()
 
+    def _prompt_change_trace_fields(
+        self,
+        *,
+        model_name: str,
+        serialized_prompt_messages: list[dict[str, Any]],
+        call_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        hashes = [_hash_json(message) for message in serialized_prompt_messages]
+        trace_key_parts = [
+            str(call_context.get("customer_id") or ""),
+            str(call_context.get("thread_id") or ""),
+            str(call_context.get("turn_mode") or ""),
+            str(model_name or ""),
+            str(call_context.get("call_site") or ""),
+        ]
+        trace_key = "|".join(trace_key_parts)
+        previous_by_key = getattr(self, "_llm_prompt_hashes_by_trace_key", None)
+        if not isinstance(previous_by_key, dict):
+            self._llm_prompt_hashes_by_trace_key = {}
+            previous_by_key = self._llm_prompt_hashes_by_trace_key
+        previous = previous_by_key.get(trace_key)
+        previous_by_key[trace_key] = hashes
+        if previous is None:
+            return {
+                "prompt_first_changed_message_index": None,
+                "prompt_changed_message_count": None,
+                "prompt_previous_message_count": None,
+            }
+        first_changed: int | None = None
+        changed_count = abs(len(hashes) - len(previous))
+        for index, current_hash in enumerate(hashes[: len(previous)]):
+            if current_hash == previous[index]:
+                continue
+            changed_count += 1
+            if first_changed is None:
+                first_changed = index
+        if first_changed is None and len(hashes) != len(previous):
+            first_changed = min(len(hashes), len(previous))
+        return {
+            "prompt_first_changed_message_index": first_changed,
+            "prompt_changed_message_count": changed_count,
+            "prompt_previous_message_count": len(previous),
+        }
+
     def _record_llm_call_trace(
         self,
         *,
@@ -2048,6 +2094,11 @@ class OpenTulpaLangGraphRuntime:
             serialized_prompt_messages,
             stable_prefix_count=stable_prefix_count,
         )
+        prompt_change_fields = self._prompt_change_trace_fields(
+            model_name=model_name,
+            serialized_prompt_messages=serialized_prompt_messages,
+            call_context=normalized_context,
+        )
         record: dict[str, Any] = {
             "ts": datetime.now(UTC).isoformat(),
             "model_name": str(model_name or "").strip(),
@@ -2066,6 +2117,7 @@ class OpenTulpaLangGraphRuntime:
             **metadata_fields,
             **tool_schema_fields,
             **prompt_cache_fields,
+            **prompt_change_fields,
         }
         for key, value in normalized_context.items():
             record[str(key)] = _json_safe(value)
@@ -2134,92 +2186,6 @@ class OpenTulpaLangGraphRuntime:
 
     def extract_response_usage_fields(self, response: Any) -> dict[str, Any]:
         return dict(_extract_response_usage_fields(response))
-
-    @staticmethod
-    def _summarize_pending_payload(payload: Any, *, payload_limit: int = 240) -> str:
-        if isinstance(payload, dict):
-            allowed_keys = (
-                "status",
-                "action_name",
-                "execution_ok",
-                "execution_status",
-                "execution_summary",
-                "execution_error",
-                "notification_status",
-                "notification_error",
-                "retryable",
-                "event_label",
-                "routine_id",
-                "routine_name",
-                "task_id",
-                "reason",
-            )
-            parts: list[str] = []
-            for key in allowed_keys:
-                value = payload.get(key)
-                if value in (None, ""):
-                    continue
-                text = " ".join(str(value).split())
-                if len(text) > 90:
-                    text = text[:90] + "..."
-                parts.append(f"{key}={text}")
-            if not parts:
-                keys = sorted(str(k) for k in payload if str(k).strip())
-                if keys:
-                    shown = ", ".join(keys[:6])
-                    more = f" (+{len(keys) - 6})" if len(keys) > 6 else ""
-                    return f"payload_keys={shown}{more}"
-                return ""
-            summary = "; ".join(parts)
-        else:
-            summary = " ".join(str(payload).split())
-        if len(summary) > payload_limit:
-            summary = summary[:payload_limit] + "..."
-        return summary
-
-    @staticmethod
-    def _format_pending_context(events: list[dict[str, Any]], *, payload_limit: int = 240) -> str:
-        lines: list[str] = []
-        for idx, event in enumerate(events, start=1):
-            source = str(event.get("source", "event"))
-            event_type = str(event.get("event_type", "update"))
-            payload_text = OpenTulpaLangGraphRuntime._summarize_pending_payload(
-                event.get("payload", {}),
-                payload_limit=payload_limit,
-            )
-            if payload_text:
-                lines.append(f"{idx}. [{source}/{event_type}] {payload_text}")
-            else:
-                lines.append(f"{idx}. [{source}/{event_type}]")
-        return "\n".join(lines)
-
-    def _load_pending_context(
-        self,
-        *,
-        customer_id: str,
-        include_pending_context: bool,
-    ) -> tuple[list[dict[str, Any]], int | None]:
-        if not include_pending_context or self._context_events is None:
-            return [], None
-        pending = self._context_events.list_events(customer_id, limit=20)
-        if not pending:
-            return [], None
-        through_id = int(pending[-1]["id"])
-        return pending, through_id
-
-    def _build_pending_context_summary(
-        self,
-        *,
-        customer_id: str,
-        include_pending_context: bool,
-    ) -> tuple[str, int | None]:
-        pending, through_id = self._load_pending_context(
-            customer_id=customer_id,
-            include_pending_context=include_pending_context,
-        )
-        if not pending:
-            return "", through_id
-        return self._format_pending_context(pending), through_id
 
     def register_links_from_text(
         self,
@@ -2367,41 +2333,6 @@ class OpenTulpaLangGraphRuntime:
             return TimeProfileGetResponse.model_validate(r.json()).utc_offset
         except Exception:
             return None
-
-    @staticmethod
-    def _has_retrieval_evidence(
-        *,
-        user_text: str,
-        prompt_mode: str,
-        skill_candidates: list[dict[str, Any]] | None = None,
-        thread_rollup_sections: dict[str, str] | None = None,
-    ) -> bool:
-        mode = str(prompt_mode or "").strip().lower()
-        if mode == "literal_chat":
-            return False
-        text = str(user_text or "").strip().lower()
-        if not text:
-            return False
-        if mode == "execution":
-            return True
-        tokens = set(re.findall(r"[a-z0-9][a-z0-9._-]{2,}", text))
-        if not tokens:
-            return False
-        if isinstance(skill_candidates, list):
-            for item in skill_candidates:
-                if not isinstance(item, dict):
-                    continue
-                hay = f"{item.get('name', '')} {item.get('description', '')}".lower()
-                if any(tok in hay for tok in tokens):
-                    return True
-        if isinstance(thread_rollup_sections, dict):
-            hay = " ".join(
-                str(thread_rollup_sections.get(k) or "").lower()
-                for k in ("conversation_summary", "open_loops", "durable_facts")
-            )
-            if any(tok in hay for tok in tokens):
-                return True
-        return False
 
     @staticmethod
     def _normalize_memory_search_results(raw: Any) -> list[dict[str, Any]]:
@@ -2954,13 +2885,6 @@ class OpenTulpaLangGraphRuntime:
             rollup=rollup,
         )
 
-    async def _maybe_compact_thread_context(self, *, thread_id: str, customer_id: str) -> None:
-        await _maybe_compact_thread_context(
-            self,
-            thread_id=thread_id,
-            customer_id=customer_id,
-        )
-
     async def _thread_checkpoint_lock(self, thread_id: str) -> asyncio.Lock:
         tid = str(thread_id or "").strip()
         assert tid
@@ -3010,80 +2934,10 @@ class OpenTulpaLangGraphRuntime:
         finally:
             lock.release()
 
-    async def _pre_resolve_skill_state(
-        self,
-        *,
-        customer_id: str,
-        user_text: str,
-        prompt_mode: str,
-        forced_skill_names: list[str] | None = None,
-    ) -> dict[str, Any]:
-        query = str(user_text or "").strip()
-        available_skills = await self._list_available_skills(customer_id)
-        forced_names = [
-            str(item or "").strip()
-            for item in (forced_skill_names or [])
-            if str(item or "").strip()
-        ]
-        forced_skill_context = (
-            await self._load_skill_context_by_names(
-                customer_id=customer_id,
-                skill_names=forced_names,
-            )
-            if forced_names
-            else {"skill_names": [], "context": ""}
-        )
-        if not query:
-            return {
-                "prompt_mode": prompt_mode,
-                "active_skill_query": "",
-                "active_skill_names": forced_names,
-                "active_available_skills": available_skills,
-                "active_skill_discovery_context": "",
-                "active_invoked_skill_context": str(
-                    forced_skill_context.get("context", "")
-                ).strip(),
-                "active_invoked_skill_names": list(
-                    forced_skill_context.get("skill_names", []) or []
-                ),
-                "active_skill_context": str(forced_skill_context.get("context", "")).strip(),
-            }
-        if forced_names:
-            return {
-                "prompt_mode": prompt_mode,
-                "active_skill_query": query,
-                "active_skill_names": forced_names,
-                "active_available_skills": available_skills,
-                "active_skill_discovery_context": "",
-                "active_invoked_skill_context": str(
-                    forced_skill_context.get("context", "")
-                ).strip(),
-                "active_invoked_skill_names": list(
-                    forced_skill_context.get("skill_names", []) or []
-                ),
-                "active_skill_context": str(forced_skill_context.get("context", "")).strip(),
-            }
-        if prompt_mode == "literal_chat":
-            return {
-                "prompt_mode": prompt_mode,
-                "active_skill_query": query,
-                "active_skill_names": [],
-                "active_available_skills": available_skills,
-                "active_skill_discovery_context": "",
-                "active_invoked_skill_context": "",
-                "active_invoked_skill_names": [],
-                "active_skill_context": "",
-            }
-        return {
-            "prompt_mode": prompt_mode,
-            "active_skill_query": query,
-            "active_skill_names": [],
-            "active_available_skills": available_skills,
-            "active_skill_discovery_context": "",
-            "active_invoked_skill_context": "",
-            "active_invoked_skill_names": [],
-            "active_skill_context": "",
-        }
+    @property
+    def context_source_provider(self) -> RuntimeContextSourceProvider:
+        return self._context_source_provider
+
 
     async def start(self) -> None:
         if self._graph is not None:
@@ -3164,144 +3018,6 @@ class OpenTulpaLangGraphRuntime:
         if recursion_limit_override is None:
             return int(self.recursion_limit)
         return max(5, min(int(recursion_limit_override), 250))
-
-    @staticmethod
-    def _build_graph_input(
-        *,
-        user_text: str,
-        customer_id: str,
-        thread_id: str,
-        turn_mode: str,
-        prompt_mode: str,
-        pending_context_summary: str,
-        trace_id: str,
-        skill_state: dict[str, Any],
-    ) -> dict[str, Any]:
-        return {
-            "messages": [HumanMessage(content=user_text)],
-            "customer_id": customer_id,
-            "thread_id": thread_id,
-            "turn_mode": _normalize_turn_mode(turn_mode),
-            "prompt_mode": prompt_mode,
-            "turn_status": "running",
-            "final_response_text": "",
-            "pending_context_summary": pending_context_summary,
-            "agent_trace_id": trace_id,
-            "langfuse_graph_callback_attached": False,
-            "tool_error_count": 0,
-            "turn_plan": [],
-            "workflow_setup_no_progress_retry_count": 0,
-            "workflow_setup_repair_instruction": "",
-            "live_user_steering": [],
-            "stream_model_calls": False,
-            **skill_state,
-        }
-
-    async def _prepare_turn_context(
-        self,
-        *,
-        thread_id: str,
-        customer_id: str,
-        text: str,
-        turn_mode: str,
-        include_pending_context: bool,
-        trace_id: str,
-        recursion_limit_override: int | None = None,
-        forced_skill_names: list[str] | None = None,
-        prompt_mode_override: str | None = None,
-    ) -> _PreparedTurnContext | None:
-        user_text = str(text or "")
-        self.register_links_from_text(
-            customer_id=customer_id,
-            text=user_text,
-            source="user_turn",
-            limit=30,
-        )
-        user_text = self.expand_link_aliases(customer_id=customer_id, text=user_text)
-        pending_context_summary, through_id = self._build_pending_context_summary(
-            customer_id=customer_id,
-            include_pending_context=include_pending_context,
-        )
-        prompt_mode = str(prompt_mode_override or "").strip().lower() or _classify_prompt_mode(
-            user_text, turn_mode=turn_mode
-        )
-        try:
-            skill_state = await self._pre_resolve_skill_state(
-                customer_id=customer_id,
-                user_text=user_text,
-                prompt_mode=prompt_mode,
-                forced_skill_names=forced_skill_names,
-            )
-        except TypeError:
-            try:
-                skill_state = await self._pre_resolve_skill_state(
-                    customer_id=customer_id,
-                    user_text=user_text,
-                    prompt_mode=prompt_mode,
-                )
-            except TypeError:
-                resolver = cast(Any, self._pre_resolve_skill_state)
-                skill_state = await resolver(
-                    customer_id=customer_id,
-                    user_text=user_text,
-                )
-        requested_limit = self._effective_recursion_limit(recursion_limit_override)
-        config: dict[str, Any] = {
-            "configurable": {"thread_id": thread_id},
-            "recursion_limit": recursion_limit_for_turn(
-                self,
-                customer_id=customer_id,
-                thread_id=thread_id,
-                requested_turn_mode=turn_mode,
-                requested_limit=requested_limit,
-                prompt_mode=prompt_mode,
-                user_text=user_text,
-            ),
-        }
-        callbacks = self._build_langfuse_callbacks(
-            customer_id=customer_id,
-            trace_id=trace_id,
-            thread_id=thread_id,
-            turn_mode=turn_mode,
-            prompt_mode=prompt_mode,
-        )
-        if callbacks:
-            config["callbacks"] = callbacks
-            config_metadata = {
-                "langfuse_user_id": str(customer_id or "").strip(),
-                "langfuse_session_id": str(thread_id or "").strip(),
-                "langfuse_tags": [
-                    item
-                    for item in (str(turn_mode or "").strip(), str(prompt_mode or "").strip())
-                    if item
-                ],
-                "opentulpa_trace_id": str(trace_id or "").strip(),
-                "thread_id": str(thread_id or "").strip(),
-                "turn_mode": str(turn_mode or "").strip(),
-                "prompt_mode": str(prompt_mode or "").strip(),
-            }
-            config_metadata.update(_tool_schema_trace_fields(self, turn_mode))
-            config["metadata"] = _langchain_callback_metadata(config_metadata)
-            config["tags"] = list(config_metadata["langfuse_tags"])
-            graph_langfuse_callback_attached = True
-        else:
-            graph_langfuse_callback_attached = False
-        graph_input = self._build_graph_input(
-            user_text=user_text,
-            customer_id=customer_id,
-            thread_id=thread_id,
-            turn_mode=turn_mode,
-            prompt_mode=prompt_mode,
-            pending_context_summary=pending_context_summary,
-            trace_id=trace_id,
-            skill_state=skill_state,
-        )
-        graph_input["langfuse_graph_callback_attached"] = graph_langfuse_callback_attached
-        return _PreparedTurnContext(
-            through_id=through_id,
-            config=config,
-            graph_input=graph_input,
-        )
 
     def _build_langfuse_callbacks(
         self,
@@ -3516,11 +3232,13 @@ class OpenTulpaLangGraphRuntime:
                 trace_id=turn_trace_id,
                 mode="ainvoke",
             ):
-                await self._maybe_compact_thread_context(
+                await compact_thread_context_for_turn(
+                    self,
                     thread_id=thread_id,
                     customer_id=customer_id,
                 )
-                prepared = await self._prepare_turn_context(
+                prepared = await prepare_turn_context(
+                    self,
                     thread_id=thread_id,
                     customer_id=customer_id,
                     text=str(effective_text or ""),
@@ -3530,6 +3248,9 @@ class OpenTulpaLangGraphRuntime:
                     recursion_limit_override=recursion_limit_override,
                     forced_skill_names=forced_skill_names,
                     prompt_mode_override=prompt_mode_override,
+                    build_langfuse_callbacks=self._build_langfuse_callbacks,
+                    tool_schema_trace_fields=_tool_schema_trace_fields,
+                    langchain_callback_metadata=_langchain_callback_metadata,
                 )
                 result = await self._graph.ainvoke(prepared.graph_input, config=prepared.config)
             final_reply = str(result.get("final_response_text", "")).strip()
@@ -3747,7 +3468,7 @@ class OpenTulpaLangGraphRuntime:
                     customer_id=customer_id,
                     waited_ms=checkpoint_waited_ms,
                 )
-            if stream_status_events and await _thread_context_needs_compaction(
+            if stream_status_events and await thread_context_needs_compaction(
                 self,
                 thread_id=thread_id,
             ):
@@ -3766,11 +3487,13 @@ class OpenTulpaLangGraphRuntime:
                         "message": "Compacting chat history...",
                     },
                 )
-            await self._maybe_compact_thread_context(
+            await compact_thread_context_for_turn(
+                self,
                 thread_id=thread_id,
                 customer_id=customer_id,
             )
-            prepared = await self._prepare_turn_context(
+            prepared = await prepare_turn_context(
+                self,
                 thread_id=thread_id,
                 customer_id=customer_id,
                 text=str(effective_text or ""),
@@ -3780,6 +3503,9 @@ class OpenTulpaLangGraphRuntime:
                 recursion_limit_override=None,
                 forced_skill_names=forced_skill_names,
                 prompt_mode_override=prompt_mode_override,
+                build_langfuse_callbacks=self._build_langfuse_callbacks,
+                tool_schema_trace_fields=_tool_schema_trace_fields,
+                langchain_callback_metadata=_langchain_callback_metadata,
             )
             config = prepared.config
             prepared.graph_input["stream_model_calls"] = True

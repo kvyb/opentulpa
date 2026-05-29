@@ -10,7 +10,7 @@ import pytest
 from opentulpa.agent.context_compaction import (
     _select_split_index,
     _trim_text_to_token_budget,
-    maybe_compact_thread_context,
+    compact_thread_context_for_turn,
     persist_rollup_memory,
 )
 from opentulpa.agent.lc_messages import HumanMessage
@@ -135,19 +135,20 @@ class _DummyRuntime:
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_thread_context_enforces_recent_window_and_rollup_cap() -> None:
+async def test_compact_thread_context_for_turn_enforces_recent_window_and_rollup_cap() -> None:
     messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(70)]
     runtime = _DummyRuntime(messages)
 
     before_tokens = sum(approx_tokens(f"[user] {str(m.content)}") for m in messages)
     assert before_tokens >= 40000
 
-    await maybe_compact_thread_context(
+    result = await compact_thread_context_for_turn(
         runtime,
         thread_id="chat-test",
         customer_id="telegram_1",
     )
 
+    assert result.status == "compacted"
     remaining_messages = runtime._graph._messages
     after_tokens = sum(
         approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages
@@ -170,12 +171,13 @@ async def test_compaction_schedules_rollup_memory_persist_off_hot_path() -> None
     runtime = _DummyRuntime(messages)
     runtime.memory_persist_continue = asyncio.Event()
 
-    await maybe_compact_thread_context(
+    result = await compact_thread_context_for_turn(
         runtime,
         thread_id="chat-background",
         customer_id="telegram_1",
     )
 
+    assert result.status == "compacted"
     assert runtime._rollups.get("chat-background")
     assert runtime._checkpointer.deleted is True
     assert runtime._context_compaction_background_tasks
@@ -248,25 +250,26 @@ async def test_persist_rollup_memory_leaves_mem0_inference_enabled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_thread_context_uses_configured_compaction_model() -> None:
+async def test_compact_thread_context_for_turn_uses_configured_compaction_model() -> None:
     messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(70)]
     runtime = _DummyRuntime(messages)
     compaction_model = _DummyModel()
     runtime._context_compaction_model = compaction_model
     runtime._context_compaction_model_name = "google/gemini-3-flash-preview"
 
-    await maybe_compact_thread_context(
+    result = await compact_thread_context_for_turn(
         runtime,
         thread_id="chat-compaction-model",
         customer_id="telegram_1",
     )
 
+    assert result.status == "compacted"
     assert compaction_model.calls
     assert not runtime._model.calls
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_thread_context_chunks_full_removed_context_while_dropping_to_recent_window() -> None:
+async def test_compact_thread_context_for_turn_chunks_full_removed_context_while_dropping_to_recent_window() -> None:
     messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(180)]
     runtime = _DummyRuntime(messages)
     runtime._context_short_term_high_tokens = 12000
@@ -274,12 +277,13 @@ async def test_maybe_compact_thread_context_chunks_full_removed_context_while_dr
     runtime._context_rollup_tokens = 2200
     runtime._context_compaction_source_tokens = 12000
 
-    await maybe_compact_thread_context(
+    result = await compact_thread_context_for_turn(
         runtime,
         thread_id="chat-huge",
         customer_id="telegram_1",
     )
 
+    assert result.status == "compacted"
     remaining_messages = runtime._graph._messages
     remaining_tokens = sum(
         approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages
@@ -298,7 +302,7 @@ async def test_maybe_compact_thread_context_chunks_full_removed_context_while_dr
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_thread_context_noop_inside_hysteresis_window() -> None:
+async def test_compact_thread_context_for_turn_noop_inside_hysteresis_window() -> None:
     # ~30k tokens should not trigger compaction with 20k..40k window.
     messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2200)) for i in range(50)]
     runtime = _DummyRuntime(messages)
@@ -306,12 +310,14 @@ async def test_maybe_compact_thread_context_noop_inside_hysteresis_window() -> N
     before_tokens = sum(approx_tokens(f"[user] {str(m.content)}") for m in before)
     assert 20000 < before_tokens < 40000
 
-    await maybe_compact_thread_context(
+    result = await compact_thread_context_for_turn(
         runtime,
         thread_id="chat-window",
         customer_id="telegram_1",
     )
 
+    assert result.status == "skipped"
+    assert result.reason == "not_needed"
     after = runtime._graph._messages
     assert len(after) == len(before)
     assert runtime._checkpointer.deleted is False

@@ -6,9 +6,10 @@ import asyncio
 import logging
 import re
 from contextlib import suppress
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
-from opentulpa.agent.context_engineer import (
+from opentulpa.agent.context_engine import (
     trim_text_to_token_budget as _ce_trim_text_to_token_budget,
 )
 from opentulpa.agent.lc_messages import HumanMessage, SystemMessage
@@ -29,6 +30,39 @@ _SECRET_PATTERNS = (
 )
 
 logger = logging.getLogger(__name__)
+
+ContextCompactionStatus = Literal["skipped", "compacted", "failed"]
+ContextCompactionReason = Literal[
+    "not_needed",
+    "thread_state_unavailable",
+    "input_context_overflow",
+    "output_token_overflow",
+    "compaction_model_unavailable",
+    "compaction_failed_continue",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCompactionResult:
+    status: ContextCompactionStatus
+    reason: ContextCompactionReason
+    attempts: int = 0
+    compacted_messages: int = 0
+
+
+def _compaction_result(
+    status: ContextCompactionStatus,
+    reason: ContextCompactionReason,
+    *,
+    attempts: int = 0,
+    compacted_messages: int = 0,
+) -> ContextCompactionResult:
+    return ContextCompactionResult(
+        status=status,
+        reason=reason,
+        attempts=max(0, int(attempts)),
+        compacted_messages=max(0, int(compacted_messages)),
+    )
 
 
 def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
@@ -215,7 +249,11 @@ async def compress_rollup(runtime: Any, existing_rollup: str, additional_text: s
             ),
         ]
         ainvoke_model = getattr(runtime, "ainvoke_model", None)
-        model = getattr(runtime, "_context_compaction_model", runtime._model)
+        model = getattr(runtime, "_context_compaction_model", None) or getattr(
+            runtime, "_model", None
+        )
+        if model is None:
+            raise RuntimeError("context compaction model unavailable")
         if callable(ainvoke_model):
             response = await ainvoke_model(
                 model,
@@ -299,19 +337,22 @@ def schedule_rollup_memory_persist(
     task.add_done_callback(background_tasks.discard)
 
 
-async def maybe_compact_thread_context(
+async def compact_thread_context_for_turn(
     runtime: Any,
     *,
     thread_id: str,
     customer_id: str,
-) -> None:
+) -> ContextCompactionResult:
     tid = str(thread_id or "").strip()
     if not tid:
-        return
-    if runtime._graph is None:
-        return
-    if runtime._checkpointer is None or not hasattr(runtime._checkpointer, "adelete_thread"):
-        return
+        return _compaction_result("skipped", "thread_state_unavailable")
+    if getattr(runtime, "_graph", None) is None:
+        return _compaction_result("skipped", "thread_state_unavailable")
+    checkpointer = getattr(runtime, "_checkpointer", None)
+    if checkpointer is None or not hasattr(checkpointer, "adelete_thread"):
+        return _compaction_result("skipped", "thread_state_unavailable")
+    if getattr(runtime, "_context_compaction_model", None) is None and getattr(runtime, "_model", None) is None:
+        return _compaction_result("failed", "compaction_model_unavailable")
 
     config = {"configurable": {"thread_id": tid}, "recursion_limit": runtime.recursion_limit}
     short_term_high_budget = _short_term_high_token_budget(runtime)
@@ -319,29 +360,38 @@ async def maybe_compact_thread_context(
     source_budget = _compaction_source_budget(runtime)
     assert short_term_low_budget < short_term_high_budget
     assert source_budget >= _rollup_token_budget(runtime)
+    attempts = 0
+    compacted_messages = 0
     for _ in range(8):
+        attempts += 1
         try:
             snapshot = await runtime._graph.aget_state(config=config)
             values = getattr(snapshot, "values", {}) or {}
             state_messages = values.get("messages", [])
             if not isinstance(state_messages, list) or not state_messages:
-                return
+                return _compaction_result("skipped", "not_needed", attempts=attempts)
             message_texts = [_message_to_text(m) for m in state_messages]
             message_tokens = [_approx_tokens(t) for t in message_texts]
             total_tokens = sum(message_tokens)
             # Hysteresis window: compact only at/above high watermark.
             if total_tokens < short_term_high_budget:
-                return
+                status: ContextCompactionStatus = "compacted" if compacted_messages else "skipped"
+                return _compaction_result(
+                    status,
+                    "not_needed",
+                    attempts=attempts,
+                    compacted_messages=compacted_messages,
+                )
 
             # Compact enough oldest context to move back near low watermark.
             overflow_tokens = total_tokens - short_term_low_budget
             split_idx = _select_split_index(message_tokens, tokens_to_compact=overflow_tokens)
             if split_idx <= 0:
-                return
+                return _compaction_result("failed", "input_context_overflow", attempts=attempts)
 
             oldest_segment = "\n\n".join(message_texts[:split_idx]).strip()
             if not oldest_segment:
-                return
+                return _compaction_result("failed", "input_context_overflow", attempts=attempts)
 
             existing_rollup = runtime._load_thread_rollup(tid) or ""
             # Removed history can be much larger than the per-call source budget.
@@ -349,7 +399,7 @@ async def maybe_compact_thread_context(
             # without sending an unbounded prompt to the model.
             updated_rollup = await compress_rollup(runtime, existing_rollup, oldest_segment)
             if not updated_rollup:
-                return
+                return _compaction_result("failed", "output_token_overflow", attempts=attempts)
 
             runtime._save_thread_rollup(tid, updated_rollup)
             schedule_rollup_memory_persist(
@@ -366,5 +416,33 @@ async def maybe_compact_thread_context(
                     config=config,
                     values={"messages": remaining_messages},
                 )
+            compacted_messages += split_idx
+        except RuntimeError as exc:
+            if "compaction model unavailable" in str(exc):
+                return _compaction_result(
+                    "failed",
+                    "compaction_model_unavailable",
+                    attempts=attempts,
+                    compacted_messages=compacted_messages,
+                )
+            logger.exception("context_compaction failed but turn can continue")
+            return _compaction_result(
+                "failed",
+                "compaction_failed_continue",
+                attempts=attempts,
+                compacted_messages=compacted_messages,
+            )
         except Exception:
-            return
+            logger.exception("context_compaction failed but turn can continue")
+            return _compaction_result(
+                "failed",
+                "compaction_failed_continue",
+                attempts=attempts,
+                compacted_messages=compacted_messages,
+            )
+    return _compaction_result(
+        "failed",
+        "input_context_overflow",
+        attempts=attempts,
+        compacted_messages=compacted_messages,
+    )

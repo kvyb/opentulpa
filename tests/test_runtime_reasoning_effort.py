@@ -145,18 +145,18 @@ def test_runtime_keeps_explicit_reasoning_effort_for_deepseek_v4_pro(monkeypatch
 
 def test_runtime_uses_deepseek_adapter_for_openrouter_deepseek_reasoning(monkeypatch) -> None:
     init_calls: list[dict[str, Any]] = []
-    openrouter_calls: list[dict[str, Any]] = []
+    openai_calls: list[dict[str, Any]] = []
 
     def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
         init_calls.append({"model": model, **kwargs})
         return object()
 
-    class _FakeChatOpenRouter:
+    class _FakeChatOpenAI:
         def __init__(self, **kwargs: Any) -> None:
-            openrouter_calls.append(kwargs)
+            openai_calls.append(kwargs)
 
     monkeypatch.setattr(runtime_module, "init_chat_model", _fake_init_chat_model)
-    monkeypatch.setattr(runtime_module, "ChatOpenRouter", _FakeChatOpenRouter)
+    monkeypatch.setattr(runtime_module, "ChatOpenAI", _FakeChatOpenAI)
     monkeypatch.delenv("OPENROUTER_APP_TITLE", raising=False)
 
     runtime = runtime_module.OpenTulpaLangGraphRuntime(
@@ -171,7 +171,7 @@ def test_runtime_uses_deepseek_adapter_for_openrouter_deepseek_reasoning(monkeyp
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
-    assert not openrouter_calls
+    assert not openai_calls
     assert type(runtime._model).__name__ == "OpenRouterDeepSeekChatModel"
     assert runtime._model.model_name == "deepseek/deepseek-v4-pro"
     assert all(call["model"] != "deepseek/deepseek-v4-pro" for call in init_calls)
@@ -179,18 +179,18 @@ def test_runtime_uses_deepseek_adapter_for_openrouter_deepseek_reasoning(monkeyp
 
 def test_runtime_uses_openrouter_adapter_for_qwen_prompt_cache(monkeypatch) -> None:
     init_calls: list[dict[str, Any]] = []
-    openrouter_calls: list[dict[str, Any]] = []
+    openai_calls: list[dict[str, Any]] = []
 
     def _fake_init_chat_model(model: str | None = None, **kwargs: Any) -> object:
         init_calls.append({"model": model, **kwargs})
         return object()
 
-    class _FakeChatOpenRouter:
+    class _FakeChatOpenAI:
         def __init__(self, **kwargs: Any) -> None:
-            openrouter_calls.append(kwargs)
+            openai_calls.append(kwargs)
 
     monkeypatch.setattr(runtime_module, "init_chat_model", _fake_init_chat_model)
-    monkeypatch.setattr(runtime_module, "ChatOpenRouter", _FakeChatOpenRouter)
+    monkeypatch.setattr(runtime_module, "ChatOpenAI", _FakeChatOpenAI)
     monkeypatch.delenv("OPENROUTER_APP_TITLE", raising=False)
 
     runtime_module.OpenTulpaLangGraphRuntime(
@@ -205,14 +205,17 @@ def test_runtime_uses_openrouter_adapter_for_qwen_prompt_cache(monkeypatch) -> N
         checkpoint_db_path=".opentulpa/test.sqlite",
     )
 
-    assert openrouter_calls
-    qwen_call = openrouter_calls[0]
+    assert openai_calls
+    qwen_call = openai_calls[0]
     assert qwen_call["model"] == "qwen/qwen3.7-max"
     assert qwen_call["api_key"] == "test-key"
     assert qwen_call["base_url"] == "https://openrouter.ai/api/v1"
     assert qwen_call["streaming"] is True
-    assert qwen_call["app_url"] == "https://github.com/kvyb/opentulpa"
-    assert qwen_call["app_title"] == "OpenTulpa"
+    assert qwen_call["stream_usage"] is True
+    assert qwen_call["default_headers"] == {
+        "HTTP-Referer": "https://github.com/kvyb/opentulpa",
+        "X-OpenRouter-Title": "OpenTulpa",
+    }
     assert "reasoning" not in qwen_call
     assert "openrouter_provider" not in qwen_call
     assert all(call["model"] != "qwen/qwen3.7-max" for call in init_calls)

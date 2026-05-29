@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 
 from opentulpa.agent.lc_messages import HumanMessage
-from opentulpa.agent.runtime import OpenTulpaLangGraphRuntime, _langchain_callback_metadata
+from opentulpa.agent.runtime import (
+    OpenTulpaLangGraphRuntime,
+    _langchain_callback_metadata,
+    _tool_schema_trace_fields,
+)
+from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
+from opentulpa.agent.turn_context_preparer import prepare_turn_context
 from opentulpa.logging.langfuse import (
     LangfuseTracer,
     create_langfuse_tracer,
@@ -579,27 +585,37 @@ async def test_prepare_turn_context_adds_langfuse_callbacks_to_graph_config() ->
     runtime.recursion_limit = 8
     runtime._langfuse_tracer = _FakeCallbackTracer()
     runtime._tools = {}
+    runtime._context_events = None
     runtime.register_links_from_text = lambda **kwargs: []  # type: ignore[assignment]
     runtime.expand_link_aliases = lambda **kwargs: str(kwargs.get("text", ""))  # type: ignore[assignment]
-    runtime._build_pending_context_summary = lambda **kwargs: ("", None)  # type: ignore[assignment]
 
-    async def _skill_state(**kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        return {}
+    async def _list_available_skills(customer_id: str) -> list[dict[str, Any]]:
+        del customer_id
+        return []
 
-    runtime._pre_resolve_skill_state = _skill_state  # type: ignore[assignment]
+    async def _load_skill_context_by_names(
+        *, customer_id: str, skill_names: list[str]
+    ) -> dict[str, Any]:
+        del customer_id, skill_names
+        return {"skill_names": [], "context": ""}
 
-    async def _noop_compact(*, thread_id: str, customer_id: str) -> None:
-        del thread_id, customer_id
-
-    runtime._maybe_compact_thread_context = _noop_compact  # type: ignore[method-assign]
-    prepared = await runtime._prepare_turn_context(
+    runtime._list_available_skills = _list_available_skills  # type: ignore[method-assign]
+    runtime._load_skill_context_by_names = _load_skill_context_by_names  # type: ignore[method-assign]
+    runtime._context_source_provider = RuntimeContextSourceProvider(runtime)
+    prepared = await prepare_turn_context(
+        runtime,
         thread_id="chat_test",
         customer_id="telegram_test",
         text="hello",
         turn_mode="interactive",
         include_pending_context=True,
         trace_id="turn_test",
+        recursion_limit_override=None,
+        forced_skill_names=None,
+        prompt_mode_override=None,
+        build_langfuse_callbacks=runtime._build_langfuse_callbacks,
+        tool_schema_trace_fields=_tool_schema_trace_fields,
+        langchain_callback_metadata=_langchain_callback_metadata,
     )
 
     assert prepared is not None

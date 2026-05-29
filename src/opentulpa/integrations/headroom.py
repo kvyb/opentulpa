@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from opentulpa.agent.context_engineer import trim_text_to_token_budget as _trim_text_to_token_budget
+from opentulpa.agent.context_engine import trim_text_to_token_budget as _trim_text_to_token_budget
 from opentulpa.agent.tool_parser import compact_tool_payload as _compact_tool_payload
 from opentulpa.agent.utils import (
     approx_tokens as _approx_tokens,

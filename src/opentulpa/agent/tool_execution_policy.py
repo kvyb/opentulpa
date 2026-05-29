@@ -32,11 +32,8 @@ class ToolExecutionPolicy:
         tools_for_turn_mode = getattr(runtime, "tools_for_turn_mode", None)
         if callable(tools_for_turn_mode):
             try:
-                allowed_tool_names = {
-                    str(getattr(tool, "name", "") or "").strip()
-                    for tool in tools_for_turn_mode(turn_mode)
-                    if str(getattr(tool, "name", "") or "").strip()
-                }
+                allowed_tools = list(tools_for_turn_mode(turn_mode))
+                allowed_tool_names = _allowed_tool_names(runtime=runtime, tools=allowed_tools)
             except Exception:
                 allowed_tool_names = set()
         return cls(
@@ -82,3 +79,21 @@ class ToolExecutionPolicy:
                 )
                 prepared["schedule"] = run_at_local.isoformat()
         return prepared
+
+
+def _allowed_tool_names(*, runtime: Any, tools: list[Any]) -> set[str]:
+    names = {
+        str(getattr(tool, "name", "") or "").strip()
+        for tool in tools
+        if str(getattr(tool, "name", "") or "").strip()
+    }
+    runtime_tools = getattr(runtime, "_tools", None)
+    if not isinstance(runtime_tools, dict):
+        return names
+    for tool in tools:
+        for key, candidate in runtime_tools.items():
+            if candidate is tool:
+                safe_key = str(key or "").strip()
+                if safe_key:
+                    names.add(safe_key)
+    return names

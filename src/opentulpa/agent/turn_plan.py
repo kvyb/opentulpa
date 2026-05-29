@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -54,6 +55,13 @@ def normalize_turn_plan_items(items: Any) -> list[TurnPlanItem]:
 
 
 def validate_turn_plan_items(items: Any) -> list[TurnPlanItem]:
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except json.JSONDecodeError as exc:
+            raise TurnPlanValidationError(
+                "items must be a list of turn plan items or a JSON-encoded list"
+            ) from exc
     if not isinstance(items, list):
         raise TurnPlanValidationError("items must be a list of turn plan items")
     validated: list[TurnPlanItem] = []
@@ -151,14 +159,27 @@ def update_turn_plan(
 
 
 def build_turn_plan_result(items: list[TurnPlanItem]) -> dict[str, Any]:
+    next_item = next(
+        (
+            _copy_turn_plan_item(item)
+            for item in items
+            if str(item.get("status", "")).strip() in {"in_progress", "pending"}
+        ),
+        None,
+    )
     return {
         "ok": True,
         "items": items,
         "summary": summarize_turn_plan(items),
+        "next_item": next_item,
         "model_instruction": (
             "Use this plan as current-turn control state. Continue with the "
             "in_progress item or first pending item. Update statuses when work "
-            "moves forward; when all items are completed/cancelled, answer the user."
+            "moves forward. Do not treat the plan itself as the deliverable; "
+            "execute the next actionable step in this same turn. Do not mark a "
+            "step completed unless this turn's context/tool results support it. "
+            "When all items are completed/cancelled, answer the user with the "
+            "concrete result."
         ),
     }
 
@@ -174,17 +195,19 @@ def summarize_turn_plan(items: list[TurnPlanItem]) -> dict[str, int]:
 
 
 def format_turn_plan_context(items: list[TurnPlanItem]) -> str:
-    active = [
-        item for item in items if str(item.get("status", "")).strip() in {"pending", "in_progress"}
-    ]
-    if not active:
+    if not items:
         return ""
-    markers = {"pending": "[ ]", "in_progress": "[>]"}
+    markers = {
+        "pending": "[ ]",
+        "in_progress": "[>]",
+        "completed": "[x]",
+        "cancelled": "[-]",
+    }
     lines = [
         "CURRENT_TURN_PLAN",
-        "Use this as the active plan for the current user request. Update it with turn_plan when steps change. Do not redo completed work.",
+        "Use this as the active plan for the current user request. Continue from the in_progress item or first pending item. Update it with turn_plan when steps change. Do not redo completed work. Do not mark a step completed unless this turn's context/tool results support it. The plan is not the deliverable; execute the next actionable step or give the concrete result/blocker now.",
     ]
-    for item in active:
+    for item in items:
         status = str(item.get("status", "pending"))
         lines.append(
             f"- {markers.get(status, '[ ]')} {item.get('id', '')}: {item.get('content', '')} ({status})"

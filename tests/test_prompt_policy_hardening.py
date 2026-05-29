@@ -5,10 +5,7 @@ import json
 import pytest
 
 from opentulpa.agent.graph_builder import (
-    _build_relevant_skill_discovery_context,
-    _enforce_tool_message_protocol,
     _extract_invoked_skill_snapshot,
-    _sanitize_history_messages_for_model,
 )
 from opentulpa.agent.graph_nodes.tool_validation import build_validate_tool_calls_node
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -22,7 +19,15 @@ from opentulpa.agent.prompt_policy import (
 from opentulpa.agent.prompt_sections import (
     build_prompt_mode_message,
 )
-from opentulpa.agent.tool_message_protocol import collapse_completed_tool_call_segments_for_model
+from opentulpa.agent.tool_message_protocol import (
+    collapse_completed_tool_call_segments_for_model,
+)
+from opentulpa.agent.tool_message_protocol import (
+    enforce_tool_message_protocol as _enforce_tool_message_protocol,
+)
+from opentulpa.agent.tool_message_protocol import (
+    sanitize_history_messages_for_model as _sanitize_history_messages_for_model,
+)
 from opentulpa.agent.tool_validation import (
     _build_tool_validation_repair_message,
     _routine_create_intent_validation_error,
@@ -33,6 +38,9 @@ from opentulpa.agent.turn_policy import (
     build_turn_mode_system_message,
     execution_origin_for_turn_mode,
     normalize_turn_mode,
+)
+from opentulpa.agent.turn_prompt_builder.frozen_context import (
+    build_relevant_skill_discovery_context,
 )
 from opentulpa.agent.utils import message_to_text
 
@@ -96,7 +104,9 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "inbound lead/intake workflow execution" in text
     assert "concrete result or a plain blocker/failure report" in text
     assert "In interactive chat only" in text
-    assert "call turn_plan when a private current-turn checklist would help" in text
+    assert "use turn_plan for longer-horizon work" in text
+    assert "research, discovery, comparison, analysis" in text
+    assert "clear goal and stop condition" in text
     assert "realistic current-turn plan with a clear goal" in text
     assert "routine wakes, workflow setup, or inbound/customer-message execution" in text
     assert "Do not use turn_plan for simple chat" in text
@@ -104,6 +114,8 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "answer that status question directly" in text
     assert "Prefer dedicated Tulpa file tools over tulpa_run_terminal" in text
     assert "restate the needed facts in the reply" in text
+    assert "Do not call the same successful tool with the same arguments twice in a row" in text
+    assert "Runtime blocks exact consecutive repeats" in text
     assert "verify current docs/schema for the exact model" in text
     assert "change only the failing parameter or step" in text
     assert "Never embed secrets in generated files or tool arguments" in text
@@ -130,6 +142,7 @@ def test_web_search_backend_prompt_is_provider_specific() -> None:
     assert "20 raw results" in exa_text
     assert "hard cap of 2 calls per turn" in exa_text
     assert "browser_use_run" in exa_text
+    assert "num_results" in exa_text
     assert "start_published_date" not in exa_text
     assert "end_published_date" not in exa_text
     assert "WEB_SEARCH_BACKEND: pplx" in pplx_text
@@ -141,7 +154,7 @@ def test_web_search_backend_prompt_is_provider_specific() -> None:
 
 
 def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
-    text = _build_relevant_skill_discovery_context(
+    text = build_relevant_skill_discovery_context(
         available_skills=[
             {"name": "browser-use-operator", "description": "Use browser steps for dynamic websites.", "scope": "global"},
             {"name": "routine-schedule-composer", "description": "Compose robust routine instructions", "scope": "global"},
@@ -155,7 +168,7 @@ def test_build_relevant_skill_discovery_context_is_discovery_only() -> None:
 
 
 def test_build_relevant_skill_discovery_context_lists_registry_without_selector() -> None:
-    text = _build_relevant_skill_discovery_context(
+    text = build_relevant_skill_discovery_context(
         available_skills=[
             {
                 "name": "browser-use-operator",
@@ -207,7 +220,7 @@ def test_turn_mode_policy_messages_are_mode_specific() -> None:
     assert "live user-guided turn" in interactive
     assert "attach one concise visible progress sentence" in interactive
     assert "call send_owner_update as the first tool call" in interactive
-    assert "use turn_plan when a private current-turn checklist would help" in interactive
+    assert "use turn_plan as a private current-turn checklist" in interactive
     assert "realistic for this turn's runtime with a clear goal" in interactive
     assert "Apply retrieved user preferences, directive facts, and style facts" in interactive
     assert "store a concise preference with tool_group_exec" in interactive
@@ -579,6 +592,57 @@ def test_build_tool_validation_repair_message_is_generic_for_tooling_errors() ->
     assert "schedule" not in message.lower()
 
 
+def test_validate_web_search_rejects_unsupported_exa_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+
+    direct_error = _validate_model_tool_call(
+        call_name="web_search",
+        args={"query": "creators", "num_results": 20},
+        latest_user_text="find creators",
+        turn_mode="interactive",
+        required_args={},
+        forbidden_tool_args={},
+    )
+    nested_error = _validate_model_tool_call(
+        call_name="tool_group_exec",
+        args={
+            "group": "web",
+            "command": "web_search",
+            "args_json": {"query": "creators", "num_results": 20},
+        },
+        latest_user_text="find creators",
+        turn_mode="interactive",
+        required_args={},
+        forbidden_tool_args={},
+    )
+
+    assert direct_error is not None
+    assert "Remove unsupported argument(s): num_results" in direct_error
+    assert nested_error is not None
+    assert "Nested tool_group_exec web_search command must be repaired" in nested_error
+
+
+def test_validate_web_search_rejects_exa_args_when_pplx_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_exa(monkeypatch)
+
+    error = _validate_model_tool_call(
+        call_name="web_search",
+        args={"query": "creators", "search_type": "deep"},
+        latest_user_text="find creators",
+        turn_mode="interactive",
+        required_args={},
+        forbidden_tool_args={},
+    )
+
+    assert error is not None
+    assert "accepts only query" in error
+    assert "search_type" in error
+
+
 @pytest.mark.asyncio
 async def test_validate_tool_calls_blocks_web_search_after_five_successes(
     monkeypatch: pytest.MonkeyPatch,
@@ -654,6 +718,10 @@ async def test_validate_tool_calls_blocks_web_search_after_five_successes(
                 ),
             ],
             "turn_mode": "interactive",
+            "turn_budget": {
+                "max_search_calls": 5,
+                "used_search_calls": 5,
+            },
         }
     )
 
@@ -709,6 +777,10 @@ async def test_validate_tool_calls_blocks_exa_web_search_after_two_successes(
                 ),
             ],
             "turn_mode": "interactive",
+            "turn_budget": {
+                "max_search_calls": 2,
+                "used_search_calls": 2,
+            },
         }
     )
 
@@ -734,19 +806,17 @@ async def test_validate_tool_calls_rejects_third_exa_web_search_call_in_batch(
         remaining_steps=lambda state: 10,
     )
 
+    assistant = AIMessage(
+        content="too many exa searches",
+        tool_calls=[
+            {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
+            {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
+            {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+        ],
+    )
     result = await node(
         {
-            "messages": [
-                HumanMessage(content="find reddit threads"),
-                AIMessage(
-                    content="too many exa searches",
-                    tool_calls=[
-                        {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
-                        {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
-                        {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
-                    ],
-                ),
-            ],
+            "messages": [HumanMessage(content="find reddit threads"), assistant],
             "turn_mode": "interactive",
         }
     )
@@ -754,8 +824,9 @@ async def test_validate_tool_calls_rejects_third_exa_web_search_call_in_batch(
     assert result.goto == "agent"
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
+    assert update_messages[0].tool_call_id == "call_3"
     assert "EXA_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
-    assert "report the best current answer from existing results" in str(update_messages[0].content)
+    assert len(assistant.tool_calls) == 3
 
 
 @pytest.mark.asyncio
@@ -772,22 +843,20 @@ async def test_validate_tool_calls_rejects_sixth_web_search_call(
         remaining_steps=lambda state: 10,
     )
 
+    assistant = AIMessage(
+        content="too many searches",
+        tool_calls=[
+            {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
+            {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
+            {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+            {"id": "call_4", "name": "web_search", "args": {"query": "four"}},
+            {"id": "call_5", "name": "web_search", "args": {"query": "five"}},
+            {"id": "call_6", "name": "web_search", "args": {"query": "six"}},
+        ],
+    )
     result = await node(
         {
-            "messages": [
-                HumanMessage(content="find reddit threads"),
-                AIMessage(
-                    content="too many searches",
-                    tool_calls=[
-                        {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
-                        {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
-                        {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
-                        {"id": "call_4", "name": "web_search", "args": {"query": "four"}},
-                        {"id": "call_5", "name": "web_search", "args": {"query": "five"}},
-                        {"id": "call_6", "name": "web_search", "args": {"query": "six"}},
-                    ],
-                ),
-            ],
+            "messages": [HumanMessage(content="find reddit threads"), assistant],
             "turn_mode": "interactive",
         }
     )
@@ -795,8 +864,9 @@ async def test_validate_tool_calls_rejects_sixth_web_search_call(
     assert result.goto == "agent"
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
+    assert update_messages[0].tool_call_id == "call_6"
     assert "WEB_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
-    assert "report the best current answer from existing results" in str(update_messages[0].content)
+    assert len(assistant.tool_calls) == 6
 
 
 @pytest.mark.asyncio
@@ -813,54 +883,28 @@ async def test_validate_tool_calls_counts_nested_tool_group_web_search_budget(
         remaining_steps=lambda state: 10,
     )
 
+    assistant = AIMessage(
+        content="too many nested searches",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "name": "tool_group_exec",
+                "args": {
+                    "calls": [
+                        {"group": "web", "command": "web_search", "args_json": {"query": "one"}},
+                        {"group": "web", "command": "web_search", "args_json": {"query": "two"}},
+                        {"group": "web", "command": "web_search", "args_json": {"query": "three"}},
+                        {"group": "web", "command": "web_search", "args_json": {"query": "four"}},
+                        {"group": "web", "command": "web_search", "args_json": {"query": "five"}},
+                        {"group": "web", "command": "web_search", "args_json": {"query": "six"}},
+                    ]
+                },
+            }
+        ],
+    )
     result = await node(
         {
-            "messages": [
-                HumanMessage(content="find leads"),
-                AIMessage(
-                    content="too many nested searches",
-                    tool_calls=[
-                        {
-                            "id": "call_1",
-                            "name": "tool_group_exec",
-                            "args": {
-                                "calls": [
-                                    {
-                                        "group": "web",
-                                        "command": "web_search",
-                                        "args_json": {"query": "one"},
-                                    },
-                                    {
-                                        "group": "web",
-                                        "command": "web_search",
-                                        "args_json": {"query": "two"},
-                                    },
-                                    {
-                                        "group": "web",
-                                        "command": "web_search",
-                                        "args_json": {"query": "three"},
-                                    },
-                                    {
-                                        "group": "web",
-                                        "command": "web_search",
-                                        "args_json": {"query": "four"},
-                                    },
-                                    {
-                                        "group": "web",
-                                        "command": "web_search",
-                                        "args_json": {"query": "five"},
-                                    },
-                                    {
-                                        "group": "web",
-                                        "command": "web_search",
-                                        "args_json": {"query": "six"},
-                                    },
-                                ]
-                            },
-                        }
-                    ],
-                ),
-            ],
+            "messages": [HumanMessage(content="find leads"), assistant],
             "turn_mode": "interactive",
         }
     )
@@ -868,8 +912,9 @@ async def test_validate_tool_calls_counts_nested_tool_group_web_search_budget(
     assert result.goto == "agent"
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
+    assert update_messages[0].tool_call_id == "call_1"
     assert "WEB_SEARCH_BATCH_TOO_LARGE" in str(update_messages[0].content)
-    assert "maximum web_search cap was reached" in str(update_messages[0].content)
+    assert len(assistant.tool_calls[0]["args"]["calls"]) == 6
 
 
 @pytest.mark.asyncio
@@ -890,21 +935,19 @@ async def test_validate_tool_calls_counts_json_string_nested_tool_group_web_sear
         {"group": "web", "command": "web_search", "args_json": {"query": str(index)}}
         for index in range(6)
     ]
+    assistant = AIMessage(
+        content="too many nested searches",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "name": "tool_group_exec",
+                "args": {"calls": json.dumps(calls)},
+            }
+        ],
+    )
     result = await node(
         {
-            "messages": [
-                HumanMessage(content="find leads"),
-                AIMessage(
-                    content="too many nested searches",
-                    tool_calls=[
-                        {
-                            "id": "call_1",
-                            "name": "tool_group_exec",
-                            "args": {"calls": json.dumps(calls)},
-                        }
-                    ],
-                ),
-            ],
+            "messages": [HumanMessage(content="find leads"), assistant],
             "turn_mode": "interactive",
         }
     )
@@ -912,7 +955,53 @@ async def test_validate_tool_calls_counts_json_string_nested_tool_group_web_sear
     assert result.goto == "agent"
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
+    assert update_messages[0].tool_call_id == "call_1"
     assert "WEB_SEARCH_BATCH_TOO_LARGE" in str(update_messages[0].content)
+    kept_calls = json.loads(assistant.tool_calls[0]["args"]["calls"])
+    assert len(kept_calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_reports_over_cap_web_search_in_mixed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+    )
+
+    assistant = AIMessage(
+        content="mixed batch",
+        tool_calls=[
+            {"id": "call_1", "name": "turn_plan", "args": {"items": []}},
+            {"id": "call_2", "name": "web_search", "args": {"query": "one"}},
+            {"id": "call_3", "name": "web_search", "args": {"query": "two"}},
+            {"id": "call_4", "name": "web_search", "args": {"query": "three"}},
+        ],
+    )
+    result = await node(
+        {
+            "messages": [HumanMessage(content="find leads"), assistant],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert update_messages[0].tool_call_id == "call_4"
+    assert "EXA_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
+    assert [call["id"] for call in assistant.tool_calls] == [
+        "call_1",
+        "call_2",
+        "call_3",
+        "call_4",
+    ]
 
 
 @pytest.mark.asyncio

@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from langgraph.types import Command
 
-from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.lc_messages import AIMessage, SystemMessage, ToolMessage
 from opentulpa.agent.models import AgentState
+from opentulpa.agent.tool_budget import apply_tool_call_budget
+from opentulpa.agent.tool_loop_guardrails import find_duplicate_tool_calls
 from opentulpa.agent.tool_validation import (
     _build_tool_validation_repair_message,
     _routine_create_intent_validation_error,
     _summarize_tool_validation_errors,
     _validate_model_tool_call,
 )
+from opentulpa.agent.turn_control import graph_recursion_limit_from_config
 from opentulpa.agent.turn_policy import normalize_turn_mode as _normalize_turn_mode
 from opentulpa.agent.utils import content_to_text as _content_to_text
 from opentulpa.agent.utils import latest_user_text as _latest_user_text
-from opentulpa.integrations.web_search import get_web_search_backend_name
 
 logger = logging.getLogger(__name__)
 
@@ -29,129 +30,16 @@ GraphLogFn = Callable[..., None]
 LoopLimitNearFn = Callable[[AgentState], bool]
 RemainingStepsFn = Callable[[AgentState], int | None]
 ValidateToolsNode = Callable[[AgentState], Awaitable[ValidateToolsCommand]]
-_DEFAULT_MAX_WEB_SEARCH_CALLS_PER_TURN = 5
-_MAX_EXA_SEARCH_CALLS_PER_TURN = 2
 LOOP_LIMIT_REPAIR_MESSAGE = (
-    "LOOP_LIMIT_APPROACHING: Do not call more tools in this turn. Write natural "
+    "RUNTIME_BUDGET_APPROACHING: Do not call more tools in this turn. Write natural "
     "user-facing prose now using the previous tool results and current context. "
     "If enough information exists, give the proposal, confirmation, or answer. "
     "If not, state the exact blocker and next step."
 )
 
 
-def _successful_tool_calls_in_latest_turn(messages: list[Any]) -> list[dict[str, Any]]:
-    latest_user_idx = 0
-    for idx in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[idx], HumanMessage):
-            latest_user_idx = idx
-            break
-
-    calls_by_id: dict[str, dict[str, Any]] = {}
-    for message in messages[latest_user_idx:]:
-        if isinstance(message, AIMessage):
-            for call in getattr(message, "tool_calls", []) or []:
-                call_id = str((call or {}).get("id", "")).strip()
-                call_name = str((call or {}).get("name", "")).strip()
-                if call_id and call_name:
-                    calls_by_id[call_id] = {
-                        "name": call_name,
-                        "args": (call or {}).get("args", {}) or {},
-                    }
-
-    successful: list[dict[str, Any]] = []
-    for message in messages[latest_user_idx:]:
-        if not isinstance(message, ToolMessage):
-            continue
-        call_id = str(getattr(message, "tool_call_id", "") or "").strip()
-        control = getattr(message, "additional_kwargs", {}).get("opentulpa_control", {})
-        status = str(control.get("status", "") if isinstance(control, dict) else "").strip()
-        if status == "ok":
-            call = calls_by_id.get(call_id)
-            if call is not None:
-                successful.append(call)
-    return successful
-
-
-def _web_search_call_count(call: Any) -> int:
-    if not isinstance(call, dict):
-        return 0
-    call_name = str(call.get("name", "")).strip()
-    args = call.get("args", {}) or {}
-    if call_name == "web_search":
-        return 1
-    if call_name != "tool_group_exec" or not isinstance(args, dict):
-        return 0
-    group = str(args.get("group", "")).strip().lower()
-    command = str(args.get("command", "")).strip()
-    if group == "web" and command == "web_search":
-        return 1
-    calls = _coerce_tool_group_calls(args.get("calls"))
-    count = 0
-    for item in calls:
-        if not isinstance(item, dict):
-            continue
-        item_group = str(item.get("group", "")).strip().lower()
-        item_command = str(item.get("command", "")).strip()
-        if item_group == "web" and item_command == "web_search":
-            count += 1
-    return count
-
-
-def _coerce_tool_group_calls(raw: Any) -> list[Any]:
-    if isinstance(raw, list):
-        return raw
-    if not isinstance(raw, str) or not raw.strip():
-        return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    return parsed if isinstance(parsed, list) else []
-
-
-def _web_search_success_count_in_latest_turn(messages: list[Any]) -> int:
-    return sum(_web_search_call_count(call) for call in _successful_tool_calls_in_latest_turn(messages))
-
-
-def _current_web_search_limit() -> tuple[int, str]:
-    try:
-        provider = get_web_search_backend_name()
-    except Exception:
-        logger.exception("Failed to resolve web_search backend during tool validation")
-        provider = "unknown"
-    safe_provider = str(provider or "unknown").strip().lower()
-    if safe_provider == "exa":
-        return _MAX_EXA_SEARCH_CALLS_PER_TURN, safe_provider
-    return _DEFAULT_MAX_WEB_SEARCH_CALLS_PER_TURN, safe_provider
-
-
-def _web_search_budget_error(*, prior_success_count: int, max_calls: int, provider: str) -> str:
-    safe_provider = str(provider or "unknown").strip().lower()
-    if safe_provider == "exa":
-        tool_label = "Exa web_search"
-        error_prefix = "EXA_SEARCH"
-    else:
-        tool_label = "web_search"
-        error_prefix = "WEB_SEARCH"
-    if prior_success_count >= max_calls:
-        return (
-            f"{error_prefix}_BUDGET_EXCEEDED: {tool_label} is limited to {max_calls} "
-            "calls per turn. Do not call web_search again in this turn. Use "
-            'tool_group_exec(group="browser", command="browser_use_run", args_json={...}) '
-            "for more web investigation, fetch_url_content for already found URLs, or tell "
-            "the user the maximum web_search cap was reached and report the best current "
-            "answer from existing results."
-        )
-    remaining = max_calls - prior_success_count
-    return (
-        f"{error_prefix}_BATCH_TOO_LARGE: {tool_label} is limited to {max_calls} "
-        f"calls per turn. This turn has {remaining} "
-        "web_search call(s) remaining. Retry with no more than that many web_search calls "
-        "in the same batch. If that is not enough, use "
-        'tool_group_exec(group="browser", command="browser_use_run", args_json={...}) '
-        "for more web investigation or report to the user that the maximum web_search cap "
-        "was reached."
-    )
+def _set_message_tool_calls(message: AIMessage, tool_calls: list[Any]) -> None:
+    message.tool_calls = tool_calls  # type: ignore[assignment]
 
 
 def build_validate_tool_calls_node(
@@ -177,6 +65,8 @@ def build_validate_tool_calls_node(
             turn_mode=_normalize_turn_mode(state.get("turn_mode")),
         )
 
+        original_tool_calls = list(last.tool_calls)
+        original_tool_call_count = len(original_tool_calls)
         validation_errors: list[ToolMessage] = []
         latest_user = _latest_user_text(messages)
         prior_assistant = ""
@@ -193,7 +83,7 @@ def build_validate_tool_calls_node(
                 ToolMessage(
                     content=(
                         "TOOL_NOT_RUN_LOOP_LIMIT: this requested tool call was not executed "
-                        "because the turn is near its graph step budget. Use previous tool "
+                        "because the turn is near its runtime budget. Use previous tool "
                         "results and current context to write the final user-facing reply now."
                     ),
                     tool_call_id=str(call.get("id", "")),
@@ -218,33 +108,46 @@ def build_validate_tool_calls_node(
                 if candidate:
                     prior_assistant = candidate
                     break
-        for call_idx, call in enumerate(last.tool_calls):
+        budget_decision = apply_tool_call_budget(
+            state.get("turn_budget"),
+            original_tool_calls,
+            turn_mode=turn_mode,
+            graph_recursion_limit=graph_recursion_limit_from_config(runtime, None),
+        )
+        allowed_tool_calls: list[Any] = []
+        if budget_decision.trimmed and budget_decision.allowed_tool_calls:
+            log(
+                state,
+                "graph.validate_tools.trimmed_tool_budget",
+                original_tool_call_count=original_tool_call_count,
+                allowed_tool_call_count=len(budget_decision.allowed_tool_calls),
+                turn_mode=turn_mode,
+            )
+        for blocked in budget_decision.blocked_calls:
+            validation_errors.append(
+                ToolMessage(
+                    content=blocked.error,
+                    tool_call_id=blocked.tool_call_id,
+                )
+            )
+        duplicate_tool_calls = find_duplicate_tool_calls(
+            requested_calls=budget_decision.allowed_tool_calls,
+            prior_tool_outcomes=state.get("tool_outcomes"),
+            trace_id=str(state.get("agent_trace_id", "") or "").strip(),
+        )
+        for duplicate in duplicate_tool_calls:
+            validation_errors.append(
+                ToolMessage(
+                    content=duplicate.error,
+                    tool_call_id=duplicate.tool_call_id,
+                )
+            )
+        for call in budget_decision.allowed_tool_calls:
             call_name = str(call.get("name", ""))
             call_id = str(call.get("id", ""))
+            if any(message.tool_call_id == call_id for message in validation_errors):
+                continue
             args = call.get("args", {}) or {}
-            requested_web_search_count = _web_search_call_count(call)
-            if requested_web_search_count:
-                max_web_search_calls, web_search_provider = _current_web_search_limit()
-                prior_web_search_count = _web_search_success_count_in_latest_turn(messages[:-1])
-                current_batch_web_search_count = sum(
-                    _web_search_call_count(existing_call) for existing_call in last.tool_calls[:call_idx]
-                )
-                consumed_web_search_count = prior_web_search_count + current_batch_web_search_count
-                if (
-                    consumed_web_search_count >= max_web_search_calls
-                    or consumed_web_search_count + requested_web_search_count > max_web_search_calls
-                ):
-                    validation_errors.append(
-                        ToolMessage(
-                            content=_web_search_budget_error(
-                                prior_success_count=consumed_web_search_count,
-                                max_calls=max_web_search_calls,
-                                provider=web_search_provider,
-                            ),
-                            tool_call_id=call_id,
-                        )
-                    )
-                    continue
             validation_error = _validate_model_tool_call(
                 call_name=call_name,
                 args=args,
@@ -265,8 +168,14 @@ def build_validate_tool_calls_node(
                     turn_mode=turn_mode,
                 )
                 if intent_error:
-                    validation_errors.append(ToolMessage(content=intent_error, tool_call_id=call_id))
+                    validation_errors.append(
+                        ToolMessage(
+                            content=intent_error,
+                            tool_call_id=call_id,
+                        )
+                    )
                     continue
+            allowed_tool_calls.append(call)
         if validation_errors:
             error_summary = _summarize_tool_validation_errors(validation_errors)
             repair_message = _build_tool_validation_repair_message(validation_errors)
@@ -297,10 +206,19 @@ def build_validate_tool_calls_node(
                 },
                 goto="agent",
             )
+        if budget_decision.trimmed and allowed_tool_calls:
+            _set_message_tool_calls(last, allowed_tool_calls)
+            log(
+                state,
+                "graph.validate_tools.trimmed_tool_budget_validated",
+                original_tool_call_count=original_tool_call_count,
+                allowed_tool_call_count=len(allowed_tool_calls),
+                turn_mode=turn_mode,
+            )
         log(
             state,
             "graph.validate_tools.passed",
-            tool_call_count=len(last.tool_calls),
+            tool_call_count=len(allowed_tool_calls) if budget_decision.trimmed else original_tool_call_count,
             turn_mode=turn_mode,
         )
         return Command(update={"tool_validation_passed": True}, goto="tools")
