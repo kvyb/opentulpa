@@ -20,6 +20,7 @@ from opentulpa.agent.tool_validation import (
 from opentulpa.agent.turn_policy import normalize_turn_mode as _normalize_turn_mode
 from opentulpa.agent.utils import content_to_text as _content_to_text
 from opentulpa.agent.utils import latest_user_text as _latest_user_text
+from opentulpa.integrations.web_search import get_web_search_backend_name
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,8 @@ GraphLogFn = Callable[..., None]
 LoopLimitNearFn = Callable[[AgentState], bool]
 RemainingStepsFn = Callable[[AgentState], int | None]
 ValidateToolsNode = Callable[[AgentState], Awaitable[ValidateToolsCommand]]
-_MAX_WEB_SEARCH_CALLS_PER_TURN = 5
+_DEFAULT_MAX_WEB_SEARCH_CALLS_PER_TURN = 5
+_MAX_EXA_SEARCH_CALLS_PER_TURN = 2
 LOOP_LIMIT_REPAIR_MESSAGE = (
     "LOOP_LIMIT_APPROACHING: Do not call more tools in this turn. Write natural "
     "user-facing prose now using the previous tool results and current context. "
@@ -111,23 +113,44 @@ def _web_search_success_count_in_latest_turn(messages: list[Any]) -> int:
     return sum(_web_search_call_count(call) for call in _successful_tool_calls_in_latest_turn(messages))
 
 
-def _web_search_budget_error(*, prior_success_count: int) -> str:
-    if prior_success_count >= _MAX_WEB_SEARCH_CALLS_PER_TURN:
+def _current_web_search_limit() -> tuple[int, str]:
+    try:
+        provider = get_web_search_backend_name()
+    except Exception:
+        logger.exception("Failed to resolve web_search backend during tool validation")
+        provider = "unknown"
+    safe_provider = str(provider or "unknown").strip().lower()
+    if safe_provider == "exa":
+        return _MAX_EXA_SEARCH_CALLS_PER_TURN, safe_provider
+    return _DEFAULT_MAX_WEB_SEARCH_CALLS_PER_TURN, safe_provider
+
+
+def _web_search_budget_error(*, prior_success_count: int, max_calls: int, provider: str) -> str:
+    safe_provider = str(provider or "unknown").strip().lower()
+    if safe_provider == "exa":
+        tool_label = "Exa web_search"
+        error_prefix = "EXA_SEARCH"
+    else:
+        tool_label = "web_search"
+        error_prefix = "WEB_SEARCH"
+    if prior_success_count >= max_calls:
         return (
-            "WEB_SEARCH_BUDGET_EXCEEDED: web_search is limited to "
-            f"{_MAX_WEB_SEARCH_CALLS_PER_TURN} calls per turn. Do not call web_search again "
-            "in this turn. Tell the user the maximum web_search cap was reached if more "
-            "web discovery is needed. Otherwise use browser_use_run for dynamic web "
-            "investigation, fetch_url_content for already found URLs, or synthesize and "
-            "report the best current answer from existing results."
+            f"{error_prefix}_BUDGET_EXCEEDED: {tool_label} is limited to {max_calls} "
+            "calls per turn. Do not call web_search again in this turn. Use "
+            'tool_group_exec(group="browser", command="browser_use_run", args_json={...}) '
+            "for more web investigation, fetch_url_content for already found URLs, or tell "
+            "the user the maximum web_search cap was reached and report the best current "
+            "answer from existing results."
         )
-    remaining = _MAX_WEB_SEARCH_CALLS_PER_TURN - prior_success_count
+    remaining = max_calls - prior_success_count
     return (
-        "WEB_SEARCH_BATCH_TOO_LARGE: web_search is limited to "
-        f"{_MAX_WEB_SEARCH_CALLS_PER_TURN} calls per turn. This turn has {remaining} "
+        f"{error_prefix}_BATCH_TOO_LARGE: {tool_label} is limited to {max_calls} "
+        f"calls per turn. This turn has {remaining} "
         "web_search call(s) remaining. Retry with no more than that many web_search calls "
-        "in the same batch. If that is not enough, use browser_use_run for dynamic web "
-        "investigation or report to the user that the maximum web_search cap was reached."
+        "in the same batch. If that is not enough, use "
+        'tool_group_exec(group="browser", command="browser_use_run", args_json={...}) '
+        "for more web investigation or report to the user that the maximum web_search cap "
+        "was reached."
     )
 
 
@@ -201,19 +224,22 @@ def build_validate_tool_calls_node(
             args = call.get("args", {}) or {}
             requested_web_search_count = _web_search_call_count(call)
             if requested_web_search_count:
+                max_web_search_calls, web_search_provider = _current_web_search_limit()
                 prior_web_search_count = _web_search_success_count_in_latest_turn(messages[:-1])
                 current_batch_web_search_count = sum(
                     _web_search_call_count(existing_call) for existing_call in last.tool_calls[:call_idx]
                 )
                 consumed_web_search_count = prior_web_search_count + current_batch_web_search_count
                 if (
-                    consumed_web_search_count >= _MAX_WEB_SEARCH_CALLS_PER_TURN
-                    or consumed_web_search_count + requested_web_search_count > _MAX_WEB_SEARCH_CALLS_PER_TURN
+                    consumed_web_search_count >= max_web_search_calls
+                    or consumed_web_search_count + requested_web_search_count > max_web_search_calls
                 ):
                     validation_errors.append(
                         ToolMessage(
                             content=_web_search_budget_error(
                                 prior_success_count=consumed_web_search_count,
+                                max_calls=max_web_search_calls,
+                                provider=web_search_provider,
                             ),
                             tool_call_id=call_id,
                         )

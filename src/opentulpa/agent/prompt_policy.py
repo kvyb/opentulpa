@@ -58,7 +58,7 @@ PROMPT_POLICY_BLOCKS: list[tuple[str, str, list[tuple[str, str]]]] = [
             ("C23", "tool_group_exec also supports batch calls with calls=[{group, command, args_json}, ...] for independent read/search/status/fetch/inspect commands. Batch only when calls do not depend on each other. Do not batch browser-use, terminal, send, write, account-change, workflow mutation, routine mutation, or other side-effecting commands; call those one at a time."),
             ("C01", "If user provides a specific webpage URL to inspect/read/summarize, call tool_group_exec(group=\"web\", command=\"fetch_url_content\", args_json={...}) first."),
             ("C02", "If user provides direct file URL (pdf/docx/image), call tool_group_exec(group=\"web\", command=\"fetch_file_content\", args_json={...})."),
-            ("C03", "For general/current discovery, use at most five tool_group_exec(group=\"web\", command=\"web_search\", args_json={...}) calls per turn, then fetch exact links with fetch_url_content/fetch_file_content or use browser_use_run through the browser group when a real browser snapshot is needed. Follow the WEB_SEARCH_BACKEND prompt note for provider-specific web_search arguments."),
+            ("C03", "For general/current discovery, use tool_group_exec(group=\"web\", command=\"web_search\", args_json={...}) within the provider-specific cap, then fetch exact links with fetch_url_content/fetch_file_content or use browser_use_run through the browser group when a real browser snapshot is needed. Follow the WEB_SEARCH_BACKEND prompt note for provider-specific web_search arguments and caps."),
             ("C04", "Never use legacy ':online' suffix models."),
             ("C05", "Use tool_group_exec(group=\"browser\", command=\"browser_use_run\", args_json={...}) for Browser Use-backed navigation and OpenTulpa-captured page evidence. Do not poll browser_use_task_get after browser_use_run unless browser_use_run returned running or the owner explicitly asks for browser status."),
             ("C21", "For user-authorized account access, do not refuse merely because login, CAPTCHA, MFA, or session persistence may be involved. Use browser_use_run through the browser group for the live browser attempt, reuse/list browser sessions when appropriate, ask for owner input only when the page actually needs it, and report the concrete browser/tool blocker if it fails."),
@@ -138,13 +138,18 @@ def build_web_search_backend_prompt_message(provider_name: str | None) -> System
             "search_type (auto, fast, neural, deep), category (news, research paper, "
             "github, pdf, company, people, personal site, financial report, tweet). "
             "Use category='news' for news/current-event searches. Exa search returns "
-            "20 raw results by default. Do not pass provider-unsupported fields."
+            "20 raw results by default. Exa web_search has a hard cap of 2 calls per "
+            "turn; after that, use tool_group_exec(group=\"browser\", "
+            "command=\"browser_use_run\", args_json={...}) for further web investigation "
+            "or report that the web_search cap was reached. Do not pass "
+            "provider-unsupported fields."
         )
     elif provider == "pplx":
         content = (
             "WEB_SEARCH_BACKEND: pplx\n"
             "web_search uses Perplexity/Sonar through OpenRouter. Pass only query. "
-            "Do not pass Exa-only args such as search_type or category."
+            "Use at most 5 web_search calls per turn. Do not pass Exa-only args such "
+            "as search_type or category."
         )
     elif provider == "none":
         content = (

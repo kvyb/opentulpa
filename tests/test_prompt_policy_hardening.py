@@ -69,6 +69,10 @@ class _RoutineWorkflowRuntime(_RoutineIntentRuntime):
         return _Response(self.workflow)
 
 
+def _disable_exa(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+
+
 def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     message = _build_system_prompt_message()
     text = str(message.content or "")
@@ -124,10 +128,13 @@ def test_web_search_backend_prompt_is_provider_specific() -> None:
     assert "search_type" in exa_text
     assert "category='news'" in exa_text
     assert "20 raw results" in exa_text
+    assert "hard cap of 2 calls per turn" in exa_text
+    assert "browser_use_run" in exa_text
     assert "start_published_date" not in exa_text
     assert "end_published_date" not in exa_text
     assert "WEB_SEARCH_BACKEND: pplx" in pplx_text
     assert "Pass only query" in pplx_text
+    assert "at most 5 web_search calls per turn" in pplx_text
     assert "Do not pass Exa-only args" in pplx_text
     assert "WEB_SEARCH_BACKEND: none" in none_text
     assert "web_search is not configured" in none_text
@@ -573,7 +580,10 @@ def test_build_tool_validation_repair_message_is_generic_for_tooling_errors() ->
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_blocks_web_search_after_five_successes() -> None:
+async def test_validate_tool_calls_blocks_web_search_after_five_successes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_exa(monkeypatch)
     events: list[tuple[str, dict[str, object]]] = []
 
     def _log(state: dict[str, object], event: str, **kwargs: object) -> None:
@@ -658,7 +668,101 @@ async def test_validate_tool_calls_blocks_web_search_after_five_successes() -> N
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_rejects_sixth_web_search_call() -> None:
+async def test_validate_tool_calls_blocks_exa_web_search_after_two_successes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find reddit threads"),
+                AIMessage(
+                    content="searching",
+                    tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "one"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_1",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching again",
+                    tool_calls=[{"id": "call_2", "name": "web_search", "args": {"query": "two"}}],
+                ),
+                ToolMessage(
+                    content='{"status":"ok"}',
+                    tool_call_id="call_2",
+                    additional_kwargs={"opentulpa_control": {"status": "ok"}},
+                ),
+                AIMessage(
+                    content="searching third time",
+                    tool_calls=[{"id": "call_3", "name": "web_search", "args": {"query": "three"}}],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "EXA_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
+    assert "limited to 2 calls per turn" in str(update_messages[0].content)
+    assert 'group="browser", command="browser_use_run"' in str(update_messages[0].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_rejects_third_exa_web_search_call_in_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    node = build_validate_tool_calls_node(
+        runtime=object(),
+        required_args={},
+        forbidden_tool_args={},
+        log=lambda state, event, **kwargs: None,
+        loop_limit_near=lambda state: False,
+        remaining_steps=lambda state: 10,
+    )
+
+    result = await node(
+        {
+            "messages": [
+                HumanMessage(content="find reddit threads"),
+                AIMessage(
+                    content="too many exa searches",
+                    tool_calls=[
+                        {"id": "call_1", "name": "web_search", "args": {"query": "one"}},
+                        {"id": "call_2", "name": "web_search", "args": {"query": "two"}},
+                        {"id": "call_3", "name": "web_search", "args": {"query": "three"}},
+                    ],
+                ),
+            ],
+            "turn_mode": "interactive",
+        }
+    )
+
+    assert result.goto == "agent"
+    update_messages = result.update["messages"]
+    assert isinstance(update_messages[0], ToolMessage)
+    assert "EXA_SEARCH_BUDGET_EXCEEDED" in str(update_messages[0].content)
+    assert "report the best current answer from existing results" in str(update_messages[0].content)
+
+
+@pytest.mark.asyncio
+async def test_validate_tool_calls_rejects_sixth_web_search_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_exa(monkeypatch)
     node = build_validate_tool_calls_node(
         runtime=object(),
         required_args={},
@@ -696,7 +800,10 @@ async def test_validate_tool_calls_rejects_sixth_web_search_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_counts_nested_tool_group_web_search_budget() -> None:
+async def test_validate_tool_calls_counts_nested_tool_group_web_search_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_exa(monkeypatch)
     node = build_validate_tool_calls_node(
         runtime=object(),
         required_args={},
@@ -766,7 +873,10 @@ async def test_validate_tool_calls_counts_nested_tool_group_web_search_budget() 
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_counts_json_string_nested_tool_group_web_search_budget() -> None:
+async def test_validate_tool_calls_counts_json_string_nested_tool_group_web_search_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_exa(monkeypatch)
     node = build_validate_tool_calls_node(
         runtime=object(),
         required_args={},
@@ -806,7 +916,10 @@ async def test_validate_tool_calls_counts_json_string_nested_tool_group_web_sear
 
 
 @pytest.mark.asyncio
-async def test_validate_tool_calls_does_not_count_blocked_web_search_as_success() -> None:
+async def test_validate_tool_calls_does_not_count_blocked_web_search_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_exa(monkeypatch)
     node = build_validate_tool_calls_node(
         runtime=object(),
         required_args={},
