@@ -102,7 +102,6 @@ async def build_frozen_prompt_context(
         context_engine=context_engine,
         prompt_mode=prompt_mode,
     )
-    stable_entries, late_entries = _partition_cacheable_stable_entries(late_entries)
     context = {
         "signature": {
             "latest_user": latest_user,
@@ -126,7 +125,6 @@ async def build_frozen_prompt_context(
                 else []
             ),
         ],
-        "stable_entries": stable_entries,
         "late_entries": late_entries,
     }
     return FrozenPromptContextResult(
@@ -138,22 +136,6 @@ async def build_frozen_prompt_context(
             skill_discovery_context=skill_discovery_context,
         ),
     )
-
-
-def _partition_cacheable_stable_entries(
-    entries: list[dict[str, str]],
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    stable_sections = {"skill_discovery"}
-    stable: list[dict[str, str]] = []
-    late: list[dict[str, str]] = []
-    for entry in entries:
-        section = str(entry.get("section", "")).strip()
-        if section in stable_sections:
-            stable.append(entry)
-        else:
-            late.append(entry)
-    return stable, late
-
 
 def build_late_prompt_entries(
     *,

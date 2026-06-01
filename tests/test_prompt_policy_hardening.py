@@ -103,12 +103,12 @@ def test_system_prompt_uses_structured_sections_and_rule_ids() -> None:
     assert "For long-running owner/support work" in text
     assert "inbound lead/intake workflow execution" in text
     assert "concrete result or a plain blocker/failure report" in text
-    assert "In interactive chat only" in text
+    assert "In live owner/support turns" in text
     assert "use turn_plan for longer-horizon work" in text
     assert "research, discovery, comparison, analysis" in text
     assert "clear goal and stop condition" in text
     assert "realistic current-turn plan with a clear goal" in text
-    assert "routine wakes, workflow setup, or inbound/customer-message execution" in text
+    assert "routine wakes, background event notifications, or inbound/customer-message execution" in text
     assert "Do not use turn_plan for simple chat" in text
     assert "Do not give timing promises" in text
     assert "answer that status question directly" in text
@@ -552,6 +552,26 @@ def test_build_tool_validation_repair_message_requests_exact_argument_repair() -
     assert "scheduled action was not created yet" in message
     assert "Do not claim success" in message
     assert "Repair the tool call arguments and retry" in message
+
+
+def test_build_tool_validation_repair_message_for_duplicate_success_does_not_request_repair() -> None:
+    message = _build_tool_validation_repair_message(
+        [
+            ToolMessage(
+                content=(
+                    "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS: "
+                    'tool_group_exec(command="telegram_business_status", args_json={}) '
+                    "already just succeeded."
+                ),
+                tool_call_id="a",
+            )
+        ]
+    )
+
+    assert "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS" in message
+    assert "Do not repair arguments" in message
+    assert "previous successful tool result" in message
+    assert "requested tool action was not completed yet" not in message
 
 
 def test_build_tool_validation_repair_message_is_generic_for_intake_setup_errors() -> None:

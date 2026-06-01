@@ -25,10 +25,10 @@ class DuplicateToolCall:
 def duplicate_tool_error(label: str) -> str:
     safe_label = str(label or "tool action").strip() or "tool action"
     return (
-        f"DUPLICATE_TOOL_CALL_BLOCKED: {safe_label} already just succeeded. "
-        "Do not call the same tool with the same arguments twice in a row. Use the "
-        "previous tool result, choose a different next action, or write the final "
-        "user-facing answer/blocker now."
+        f"DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS: {safe_label} already just succeeded. "
+        "The action was completed by the previous tool result; this repeat was not run. "
+        "Do not repair arguments or retry this same call. Use the previous result, choose "
+        "the next different action, or write the final user-facing answer/blocker now."
     )
 
 

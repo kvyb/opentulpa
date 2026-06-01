@@ -613,7 +613,7 @@ async def test_astream_model_retries_stream_first_chunk_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENTULPA_MODEL_TRANSIENT_RETRIES", "1")
-    monkeypatch.setenv("OPENTULPA_MODEL_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS", "0.05")
+    monkeypatch.setenv("OPENTULPA_MODEL_STREAM_CHUNK_TIMEOUT_SECONDS", "0.05")
     runtime = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",

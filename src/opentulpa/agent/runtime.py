@@ -76,6 +76,7 @@ from opentulpa.agent.file_analysis import (
 from opentulpa.agent.graph_builder import build_runtime_graph
 from opentulpa.agent.internal_api_client import InternalApiClient
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentulpa.agent.model_provider_profile import provider_prompt_cache_profile
 from opentulpa.agent.openrouter_chat_factory import openrouter_app_headers
 from opentulpa.agent.runtime_context_provider import RuntimeContextSourceProvider
 from opentulpa.agent.runtime_input import (
@@ -1636,7 +1637,7 @@ class OpenTulpaLangGraphRuntime:
     def prompt_cache_profile(self, *, model_name: str | None = None) -> dict[str, Any]:
         target_model_name = str(model_name or getattr(self, "model_name", "") or "").strip()
         return dict(
-            _model_pool.provider_prompt_cache_profile(
+            provider_prompt_cache_profile(
                 enabled=bool(getattr(self, "_prompt_caching_enabled", False)),
                 model_name=target_model_name,
                 ttl_1h=bool(getattr(self, "_prompt_cache_ttl_1h", False)),
