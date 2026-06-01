@@ -2105,7 +2105,7 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
     )
 
     assert result["final_response_text"] == "ok"
-    assert captured["stable_prefix_count"] == 4
+    assert captured["stable_prefix_count"] == 3
     prompt_messages = captured["messages"]
     anchor_index = next(
         idx
@@ -2120,6 +2120,12 @@ async def test_interactive_prompt_keeps_core_policy_as_stable_prefix() -> None:
         if "WEB_SEARCH_BACKEND:" in str(getattr(msg, "content", ""))
     ]
     assert len(web_backend_messages) == 1
+    current_turn_context_index = next(
+        idx
+        for idx, msg in enumerate(prompt_messages)
+        if "OPENTULPA_CURRENT_TURN_CONTEXT" in str(getattr(msg, "content", ""))
+    )
+    assert current_turn_context_index >= captured["cacheable_prefix_count"]
     older_assistant_index = next(
         idx
         for idx, msg in enumerate(prompt_messages)

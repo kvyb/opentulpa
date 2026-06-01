@@ -525,6 +525,15 @@ def _build_tool_validation_repair_message(messages: list[ToolMessage]) -> str:
             "VALIDATION_REPAIR_REQUIRED: Your previous tool call was blocked. Do not claim success. "
             "Repair the tool call or clearly state that the action was not completed yet."
         )
+    duplicate_success = "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS" in summary
+    if duplicate_success:
+        return (
+            "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS: The repeated tool call was not run because "
+            "the same action already succeeded immediately before. Do not repair arguments or "
+            "retry that same call. Continue from the previous successful tool result: choose the "
+            "next different setup/action step, or write the final answer/blocker now. "
+            f"Reason={summary}"
+        )
     is_routine_create_error = "routine_create" in summary or "ROUTINE_" in summary
     needs_clarification = any(
         marker in summary

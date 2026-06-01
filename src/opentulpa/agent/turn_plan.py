@@ -21,7 +21,7 @@ class TurnPlanValidationError(ValueError):
 
 
 def turn_plan_enabled_for_turn_mode(turn_mode: Any) -> bool:
-    return str(turn_mode or "").strip().lower() == "interactive"
+    return str(turn_mode or "").strip().lower() in {"interactive", "workflow_setup"}
 
 
 def normalize_turn_plan_items(items: Any) -> list[TurnPlanItem]:

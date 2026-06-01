@@ -70,14 +70,6 @@ def model_transient_retry_delay_seconds(retry_index: int) -> float:
     return float(min(6.0, 0.75 * (2 ** max(0, int(retry_index)))))
 
 
-def model_stream_first_chunk_timeout_seconds() -> float:
-    raw = str(os.getenv("OPENTULPA_MODEL_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS", "25") or "25").strip()
-    try:
-        return max(0.05, min(120.0, float(raw)))
-    except ValueError:
-        return 25.0
-
-
 def model_invoke_timeout_seconds() -> float:
     raw = str(os.getenv("OPENTULPA_MODEL_INVOKE_TIMEOUT_SECONDS", "60") or "60").strip()
     try:

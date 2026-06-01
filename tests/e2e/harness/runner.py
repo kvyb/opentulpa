@@ -52,6 +52,17 @@ def _effective_lead_idle_timeout_seconds(requested: float) -> float:
     )
 
 
+def _is_owner_setup_interim_message(
+    message: dict[str, Any],
+    *,
+    status_texts: set[str],
+) -> bool:
+    text = str(message.get("text", "") or "").strip().lower()
+    if not text:
+        return True
+    return text in status_texts
+
+
 @dataclass
 class E2EHarness:
     client: TestClient
@@ -383,6 +394,43 @@ class E2EHarness:
             if int(item.get("chat_id", 0)) == int(owner_chat_id)
         ]
 
+    def _owner_final_messages_for_chat(
+        self, *, customer_id: str, owner_chat_id: int, start_index: int = 0
+    ) -> list[dict[str, Any]]:
+        status_texts = self._owner_status_event_texts(customer_id=customer_id)
+        return [
+            item
+            for item in self._owner_messages_for_chat(
+                owner_chat_id=owner_chat_id,
+                start_index=start_index,
+            )
+            if not _is_owner_setup_interim_message(item, status_texts=status_texts)
+        ]
+
+    def _owner_status_event_texts(self, *, customer_id: str) -> set[str]:
+        token = str(getattr(get_settings(), "opentulpa_web_token", "") or "").strip()
+        if not token:
+            return set()
+        response = self.client.get(
+            "/web/events",
+            params={"customer_id": str(customer_id or "").strip(), "limit": 500},
+            headers={"authorization": f"Bearer {token}"},
+        )
+        if response.status_code != 200:
+            return set()
+        payload = response.json()
+        events = payload.get("events") if isinstance(payload, dict) else []
+        if not isinstance(events, list):
+            return set()
+        return {
+            str(event.get("text", "") or "").strip().lower()
+            for event in events
+            if isinstance(event, dict)
+            and str(event.get("source", "") or "") == "chat"
+            and str(event.get("kind", "") or "") == "status"
+            and str(event.get("text", "") or "").strip()
+        }
+
     def _owner_workflow_state(self, *, customer_id: str) -> dict[str, Any]:
         intake_service = self.client.app.state.intake_workflows
         workflows = intake_service.list_workflows(customer_id=customer_id)
@@ -427,14 +475,23 @@ class E2EHarness:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             workflow_state = self._owner_workflow_state(customer_id=customer_id)
-            assistant_messages = self._owner_messages_for_chat(
+            final_messages = self._owner_final_messages_for_chat(
+                customer_id=customer_id,
                 owner_chat_id=owner_chat_id,
                 start_index=assistant_start,
             )
-            if int(workflow_state.get("workflow_count") or 0) > 0 or assistant_messages:
-                return workflow_state, assistant_messages
+            if int(workflow_state.get("workflow_count") or 0) > 0 or final_messages:
+                return workflow_state, final_messages
             time.sleep(0.2)
-        return self._owner_workflow_state(customer_id=customer_id), self._owner_messages_for_chat(
+        workflow_state = self._owner_workflow_state(customer_id=customer_id)
+        final_messages = self._owner_final_messages_for_chat(
+            customer_id=customer_id,
+            owner_chat_id=owner_chat_id,
+            start_index=assistant_start,
+        )
+        if final_messages or int(workflow_state.get("workflow_count") or 0) > 0:
+            return workflow_state, final_messages
+        return workflow_state, self._owner_messages_for_chat(
             owner_chat_id=owner_chat_id,
             start_index=assistant_start,
         )

@@ -24,6 +24,10 @@ from opentulpa.agent.model_init_policy import (
     deep_merge_dicts,
     disable_deepseek_v4_pro_thinking_extra,
 )
+from opentulpa.agent.model_provider_profile import (
+    model_provider_profile,
+    provider_prompt_cache_invoke_extras,
+)
 from opentulpa.agent.openrouter_chat_factory import (
     build_openrouter_chat_model,
     looks_like_openrouter_base_url,
@@ -32,6 +36,7 @@ from opentulpa.agent.openrouter_chat_factory import (
 from opentulpa.agent.utils import content_to_text as _content_to_text
 
 logger = logging.getLogger(__name__)
+
 
 async def _run_with_transient_model_retries(
     runtime: Any,
@@ -74,109 +79,6 @@ async def _run_with_transient_model_retries(
                 **retry_error_fields,
             )
             await asyncio.sleep(delay_seconds)
-
-
-def prompt_cache_control_payload(*, ttl_1h: bool) -> dict[str, Any]:
-    cache_control: dict[str, Any] = {"type": "ephemeral"}
-    if ttl_1h:
-        cache_control["ttl"] = "1h"
-    return cache_control
-
-
-def provider_prompt_cache_profile(
-    *,
-    enabled: bool,
-    model_name: str,
-    ttl_1h: bool,
-) -> dict[str, Any]:
-    slug = (model_name or "").strip().lower()
-    if not enabled:
-        return {
-            "enabled": False,
-            "strategy": "disabled",
-            "supports_top_level": False,
-            "supports_breakpoints": False,
-            "cache_control": {},
-            "model_name": model_name,
-        }
-    if "anthropic/" in slug or "claude" in slug:
-        return {
-            "enabled": True,
-            "strategy": "top_level",
-            "supports_top_level": True,
-            "supports_breakpoints": True,
-            "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
-            "model_name": model_name,
-        }
-    if "gemini" in slug or slug.startswith("google/"):
-        return {
-            "enabled": True,
-            "strategy": "breakpoint",
-            "supports_top_level": False,
-            "supports_breakpoints": True,
-            "cache_control": prompt_cache_control_payload(ttl_1h=ttl_1h),
-            "model_name": model_name,
-        }
-    if slug.startswith("qwen/") or "qwen" in slug:
-        return {
-            "enabled": True,
-            "strategy": "implicit_stable_prefix",
-            "supports_top_level": False,
-            "supports_breakpoints": False,
-            "cache_control": {},
-            "model_name": model_name,
-        }
-    if any(
-        marker in slug
-        for marker in (
-            "openai/",
-            "gpt-",
-            "o1",
-            "o3",
-            "o4",
-            "deepseek",
-            "grok",
-            "x-ai/",
-            "z-ai/",
-            "zai/",
-            "glm",
-            "moonshot",
-            "kimi",
-            "groq/",
-        )
-    ):
-        return {
-            "enabled": True,
-            "strategy": "automatic",
-            "supports_top_level": False,
-            "supports_breakpoints": False,
-            "cache_control": {},
-            "model_name": model_name,
-        }
-    return {
-        "enabled": True,
-        "strategy": "unknown",
-        "supports_top_level": False,
-        "supports_breakpoints": False,
-        "cache_control": {},
-        "model_name": model_name,
-    }
-
-
-def provider_prompt_cache_invoke_extras(
-    *,
-    enabled: bool,
-    model_name: str,
-    ttl_1h: bool,
-) -> dict[str, Any]:
-    profile = provider_prompt_cache_profile(
-        enabled=enabled,
-        model_name=model_name,
-        ttl_1h=ttl_1h,
-    )
-    if profile.get("strategy") != "top_level":
-        return {}
-    return {"extra_body": {"cache_control": dict(profile.get("cache_control") or {})}}
 
 
 def init_runtime_chat_model(
@@ -239,8 +141,7 @@ def _openrouter_session_id_for_call(
 ) -> str:
     if not looks_like_openrouter_base_url(getattr(runtime, "openrouter_base_url", None)):
         return ""
-    slug = str(model_name or "").strip().lower()
-    if "qwen" not in slug:
+    if not model_provider_profile(model_name).openrouter_session_sticky:
         return ""
     thread_id = str(call_context.get("thread_id") or "").strip()
     customer_id = str(call_context.get("customer_id") or "").strip()
@@ -625,7 +526,9 @@ async def astream_model(
                 else:
                     stream = astream(prepared_messages)
                 stream_iter = stream.__aiter__()
-                timeout_seconds = transport_policy.model_stream_first_chunk_timeout_seconds()
+                timeout_seconds = model_provider_profile(
+                    resolved_model_name
+                ).stream_chunk_timeout_seconds()
                 try:
                     while True:
                         try:

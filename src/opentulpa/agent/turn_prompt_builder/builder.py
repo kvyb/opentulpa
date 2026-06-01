@@ -134,7 +134,6 @@ async def build_turn_prompt(
 
     stable_prompt_messages: list[AnyMessage] = [_build_system_prompt_message()]
     stable_prompt_sections = ["stable_core_policy"]
-    stable_entries = normalize_prompt_context_entries(frozen_prompt_context.get("stable_entries"))
     late_entries = normalize_prompt_context_entries(frozen_prompt_context.get("late_entries"))
     late_control_content = str(frozen_prompt_context.get("late_control_content", "")).strip()
     late_control_sections = [
@@ -151,28 +150,18 @@ async def build_turn_prompt(
         if str(section).strip()
     ]
 
-    kept_stable_optional_entries, used_optional_tokens = select_optional_prompt_entries(
-        stable_entries,
-        initial_used_tokens=0,
-        optional_context_budget=optional_context_budget,
-    )
     stable_turn_context_messages: list[AnyMessage] = []
     stable_turn_context_sections: list[str] = []
     stable_turn_context_messages.append(build_current_web_search_backend_prompt_message())
     stable_turn_context_sections.append("web_search_backend")
-    if current_turn_context_content:
-        stable_turn_context_messages.append(SystemMessage(content=current_turn_context_content))
-        stable_turn_context_sections.extend(current_turn_context_sections)
 
     prefix_messages: list[AnyMessage] = [
         *stable_prompt_messages,
-        *(message for _, message in kept_stable_optional_entries),
         *stable_turn_context_messages,
         HumanMessage(content=CACHE_STICKY_ROUTING_ANCHOR),
     ]
     prefix_sections = [
         *stable_prompt_sections,
-        *(section for section, _ in kept_stable_optional_entries),
         *stable_turn_context_sections,
         "cache_sticky_routing_anchor",
     ]
@@ -180,7 +169,7 @@ async def build_turn_prompt(
     late_control_message = SystemMessage(content=late_control_content) if late_control_content else None
     selected_frozen_late_entries, used_optional_tokens = select_optional_prompt_entries(
         late_entries,
-        initial_used_tokens=used_optional_tokens,
+        initial_used_tokens=0,
         optional_context_budget=optional_context_budget,
     )
     prompt_messages_base: list[AnyMessage] = [
@@ -234,8 +223,8 @@ async def build_turn_prompt(
         customer_id=customer_id,
         thread_id=thread_id,
         turn_mode=turn_mode,
-        current_turn_context_content="",
-        current_turn_context_sections=[],
+        current_turn_context_content=current_turn_context_content,
+        current_turn_context_sections=current_turn_context_sections,
         tool_outcomes=state.get("tool_outcomes"),
         budget_context=_budget_status_context(prompt_context_update.get("turn_budget")),
         loop_limit_repair_instruction=LOOP_LIMIT_REPAIR_INSTRUCTION,
@@ -255,8 +244,7 @@ async def build_turn_prompt(
         *dynamic_late_sections,
     ]
     optional_context_messages = (
-        len(kept_stable_optional_entries)
-        + len(selected_frozen_late_entries)
+        len(selected_frozen_late_entries)
         + len(selected_summary_entries)
     )
     cache_metadata = build_prompt_cache_metadata(

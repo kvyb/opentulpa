@@ -5,6 +5,7 @@ import pytest
 from opentulpa.agent.graph_nodes.tool_validation import build_validate_tool_calls_node
 from opentulpa.agent.lc_messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentulpa.agent.tool_loop_guardrails import (
+    duplicate_tool_error,
     find_duplicate_tool_calls,
     tool_action_signature,
     tool_action_signatures,
@@ -63,7 +64,7 @@ def test_duplicate_guardrail_blocks_same_request_duplicate() -> None:
 
     assert len(duplicates) == 1
     assert duplicates[0].tool_call_id == "call_2"
-    assert "DUPLICATE_TOOL_CALL_BLOCKED" in duplicates[0].error
+    assert "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS" in duplicates[0].error
 
 
 def test_tool_group_exec_batch_exposes_nested_action_signatures() -> None:
@@ -284,9 +285,9 @@ async def test_validate_tool_calls_blocks_prior_successful_idempotent_repeat() -
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
     assert update_messages[0].tool_call_id == "call_2"
-    assert "DUPLICATE_TOOL_CALL_BLOCKED" in str(update_messages[0].content)
+    assert "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS" in str(update_messages[0].content)
     assert isinstance(update_messages[1], SystemMessage)
-    assert "Do not claim success" in str(update_messages[1].content)
+    assert "Do not repair arguments or retry that same call" in str(update_messages[1].content)
 
 
 @pytest.mark.asyncio
@@ -356,4 +357,13 @@ async def test_validate_tool_calls_blocks_prior_successful_query_repeat() -> Non
     update_messages = result.update["messages"]
     assert isinstance(update_messages[0], ToolMessage)
     assert update_messages[0].tool_call_id == "call_2"
-    assert "DUPLICATE_TOOL_CALL_BLOCKED" in str(update_messages[0].content)
+    assert "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS" in str(update_messages[0].content)
+
+
+def test_duplicate_tool_error_tells_model_to_use_previous_success_not_repair() -> None:
+    error = duplicate_tool_error('tool_group_exec(command="telegram_business_status", args_json={})')
+
+    assert "DUPLICATE_TOOL_CALL_PREVIOUS_SUCCESS" in error
+    assert "already just succeeded" in error
+    assert "Do not repair arguments or retry" in error
+    assert "Use the previous result" in error

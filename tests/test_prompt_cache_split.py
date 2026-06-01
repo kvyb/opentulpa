@@ -212,6 +212,23 @@ def test_prompt_cache_profile_qwen_uses_implicit_stable_prefix() -> None:
     assert profile["cache_control"] == {}
 
 
+def test_prompt_cache_profile_minimax_uses_implicit_stable_prefix() -> None:
+    rt = OpenTulpaLangGraphRuntime(
+        app_url="http://127.0.0.1:8000",
+        openrouter_api_key="k",
+        model_name="minimax/minimax-m3",
+        checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
+        prompt_caching_enabled=True,
+    )
+
+    profile = rt.prompt_cache_profile()
+
+    assert profile["strategy"] == "implicit_stable_prefix"
+    assert profile["supports_top_level"] is False
+    assert profile["supports_breakpoints"] is False
+    assert profile["cache_control"] == {}
+
+
 def test_prepare_messages_for_prompt_cache_wraps_stable_system_message_for_gemini_by_default() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
@@ -634,13 +651,16 @@ async def test_ainvoke_model_adds_breakpoint_to_stable_prefix_for_gemini() -> No
     assert sent_messages[2].content == "Dynamic user question"
 
 
+@pytest.mark.parametrize("model_name", ["qwen/qwen3.7-max", "minimax/minimax-m3"])
 @pytest.mark.asyncio
-async def test_ainvoke_model_adds_openrouter_session_id_for_qwen_cache_stickiness() -> None:
+async def test_ainvoke_model_adds_openrouter_session_id_for_implicit_cache_stickiness(
+    model_name: str,
+) -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
         openrouter_base_url="https://openrouter.ai/api/v1",
-        model_name="qwen/qwen3.7-max",
+        model_name=model_name,
         checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
         prompt_caching_enabled=True,
     )
@@ -653,7 +673,7 @@ async def test_ainvoke_model_adds_openrouter_session_id_for_qwen_cache_stickines
             HumanMessage(content="OpenTulpa cache anchor v1. Real conversation messages follow."),
             HumanMessage(content="Dynamic user question"),
         ],
-        model_name="qwen/qwen3.7-max",
+        model_name=model_name,
         stable_prefix_count=2,
         call_context={"thread_id": "thread_1", "customer_id": "cust_1"},
     )

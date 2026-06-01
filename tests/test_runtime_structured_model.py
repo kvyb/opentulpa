@@ -113,6 +113,7 @@ def test_tools_for_routine_wake_excludes_interactive_owner_update_tool() -> None
     assert runtime.tools_for_turn_mode("routine_wake") == [server_time, gateway]
     assert runtime.tools_for_turn_mode("workflow_setup") == [
         send_owner_update,
+        turn_plan,
         server_time,
         gateway,
     ]
@@ -1248,9 +1249,11 @@ def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:
     auto = runtime.prompt_cache_profile(model_name="openai/gpt-4.1")
     zai = runtime.prompt_cache_profile(model_name="z-ai/glm-5.1")
     qwen = runtime.prompt_cache_profile(model_name="qwen/qwen3.7-max")
+    minimax = runtime.prompt_cache_profile(model_name="minimax/minimax-m3")
 
     assert anth["strategy"] == "top_level"
     assert gemini["strategy"] == "breakpoint"
     assert auto["strategy"] == "automatic"
     assert zai["strategy"] == "automatic"
     assert qwen["strategy"] == "implicit_stable_prefix"
+    assert minimax["strategy"] == "implicit_stable_prefix"
