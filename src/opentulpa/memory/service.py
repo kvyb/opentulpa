@@ -177,7 +177,10 @@ class MemoryService:
             if not text:
                 return None
             string_metadata: dict[str, Any] = {}
-            kind = cls._infer_memory_kind(text=text, metadata=string_metadata) or "thread_context_rollup"
+            kind = (
+                cls._infer_memory_kind(text=text, metadata=string_metadata)
+                or "thread_context_rollup"
+            )
             return {
                 "id": "",
                 "text": text,
@@ -215,8 +218,12 @@ class MemoryService:
             "metadata": metadata,
             "created_at": item.get("created_at"),
             "updated_at": item.get("updated_at"),
-            "thread_id": str(metadata.get("thread_id", "") or item.get("thread_id", "") or "").strip(),
-            "skill_name": str(metadata.get("skill_name", "") or item.get("skill_name", "") or "").strip(),
+            "thread_id": str(
+                metadata.get("thread_id", "") or item.get("thread_id", "") or ""
+            ).strip(),
+            "skill_name": str(
+                metadata.get("skill_name", "") or item.get("skill_name", "") or ""
+            ).strip(),
             "source": str(metadata.get("source", "") or item.get("source", "") or "").strip(),
         }
 
@@ -261,6 +268,17 @@ class MemoryService:
             score = 0.0
         return priority, -score
 
+    @staticmethod
+    def _mem0_add_has_results(result: Any) -> bool:
+        if isinstance(result, dict):
+            results = result.get("results")
+            if isinstance(results, list):
+                return bool(results)
+            return bool(result)
+        if isinstance(result, list):
+            return bool(result)
+        return result is not None
+
     def add(
         self,
         messages: list[dict[str, str]],
@@ -300,15 +318,25 @@ class MemoryService:
 
             # mem0 may swallow malformed JSON from LLM and return empty results.
             # Retry once to recover transient malformed-output failures.
-            if isinstance(result, dict):
-                results = result.get("results")
-                if isinstance(results, list) and results:
-                    return result
-            elif isinstance(result, list):
-                if result:
-                    return result
-            else:
+            if self._mem0_add_has_results(result):
                 return result
+
+        if bool(infer):
+            fallback_metadata = dict(prepared_metadata)
+            fallback_metadata["inference_fallback"] = "mem0_empty_result"
+            try:
+                return mem.add(
+                    messages,
+                    user_id=uid,
+                    metadata=fallback_metadata,
+                    infer=False,
+                )
+            except TypeError:
+                return mem.add(
+                    messages,
+                    user_id=uid,
+                    metadata=fallback_metadata,
+                )
         return last_result
 
     def add_text(

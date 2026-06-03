@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from opentulpa.memory.service import MemoryService
 
@@ -20,7 +21,7 @@ def test_memory_service_filters_only_mem0_noop_logs(caplog) -> None:
 class _FakeMem0:
     def __init__(self, *, search_result=None) -> None:
         self.search_result = search_result or []
-        self.add_calls: list[dict[str, object]] = []
+        self.add_calls: list[dict[str, Any]] = []
 
     def search(self, query: str, **kwargs: object):
         del query, kwargs
@@ -45,14 +46,34 @@ class _LegacySearchFakeMem0:
     def search(self, query: str, **kwargs: object):
         if "user_id" in kwargs:
             raise TypeError("legacy signature")
+        raw_filters = kwargs.get("filters")
+        assert isinstance(raw_filters, dict)
         self.filters_calls.append(
             {
                 "query": query,
-                "filters": dict(kwargs.get("filters") or {}),
+                "filters": dict(raw_filters),
                 "limit": kwargs.get("limit"),
             }
         )
         return []
+
+
+class _EmptyInferenceFakeMem0:
+    def __init__(self) -> None:
+        self.add_calls: list[dict[str, Any]] = []
+
+    def add(self, messages, *, user_id: str, metadata: dict[str, object], infer: bool = True):
+        self.add_calls.append(
+            {
+                "messages": messages,
+                "user_id": user_id,
+                "metadata": metadata,
+                "infer": infer,
+            }
+        )
+        if infer:
+            return {"results": []}
+        return {"results": [{"memory": "raw fallback", "event": "ADD"}]}
 
 
 def test_memory_service_normalizes_dict_style_search_results() -> None:
@@ -95,12 +116,33 @@ def test_memory_service_infers_typed_kinds_on_write() -> None:
     fake = _FakeMem0()
     memory._memory = fake
 
-    memory.add_text("Telegram bot API key is stored for the sandbox service.", user_id="telegram_test")
+    memory.add_text(
+        "Telegram bot API key is stored for the sandbox service.", user_id="telegram_test"
+    )
     memory.add_text("User wants to launch a paid community this year.", user_id="telegram_test")
     memory.add_text("User timezone is UTC+8.", user_id="telegram_test")
 
     kinds = [str(call["metadata"].get("kind")) for call in fake.add_calls]
     assert kinds == ["credential_fact", "aspirations_fact", "life_fact"]
+
+
+def test_memory_service_falls_back_to_raw_add_after_empty_inference_results() -> None:
+    memory = MemoryService()
+    fake = _EmptyInferenceFakeMem0()
+    memory._memory = fake
+
+    result = memory.add_text(
+        "User prefers concise status updates.",
+        user_id="telegram_test",
+        retries=1,
+    )
+
+    assert result == {"results": [{"memory": "raw fallback", "event": "ADD"}]}
+    assert [call["infer"] for call in fake.add_calls] == [True, True, False]
+    assert fake.add_calls[-1]["metadata"] == {
+        "kind": "preference_fact",
+        "inference_fallback": "mem0_empty_result",
+    }
 
 
 def test_memory_service_preserves_explicit_user_scope_in_legacy_search() -> None:
