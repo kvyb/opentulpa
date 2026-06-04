@@ -24,6 +24,7 @@ _ROUTE_IMPORTS = {
     "register_telegram_webhook_health_routes": "opentulpa.api.routes.telegram_webhook_health",
     "register_telegram_webhook_routes": "opentulpa.api.routes.telegram_webhook",
     "register_tulpa_routes": "opentulpa.api.routes.tulpa",
+    "register_usage_telemetry_routes": "opentulpa.api.routes.usage_telemetry",
     "register_user_context_routes": "opentulpa.api.routes.user_context",
     "register_wake_and_search_routes": "opentulpa.api.routes.wake_search",
     "register_web_event_routes": "opentulpa.api.routes.web_events",

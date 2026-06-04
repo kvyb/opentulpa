@@ -32,6 +32,7 @@ from opentulpa.api.routes import (
     register_telegram_webhook_health_routes,
     register_telegram_webhook_routes,
     register_tulpa_routes,
+    register_usage_telemetry_routes,
     register_user_context_routes,
     register_wake_and_search_routes,
     register_web_event_routes,
@@ -66,6 +67,10 @@ from opentulpa.tasks.sandbox import PROJECT_ROOT
 from opentulpa.tasks.sandbox import delete_file as sandbox_delete_file
 from opentulpa.tasks.service import TaskService
 from opentulpa.tasks.wake_queue import WakeQueueService
+from opentulpa.telemetry.usage import (
+    LocalTraceUsageTelemetryRepository,
+    UsageTelemetryService,
+)
 from opentulpa.web.events import WebEventStore, set_default_web_event_store
 
 logger = logging.getLogger(__name__)
@@ -336,6 +341,16 @@ def create_app(
     def get_web_events() -> WebEventStore:
         return web_event_store
 
+    trace_path = getattr(runtime, "_llm_call_trace_path", None) or (
+        PROJECT_ROOT / ".opentulpa" / "logs" / "llm_call_traces.jsonl"
+    )
+    usage_telemetry = UsageTelemetryService(
+        LocalTraceUsageTelemetryRepository(trace_path=trace_path)
+    )
+
+    def get_usage_telemetry() -> UsageTelemetryService:
+        return usage_telemetry
+
     def get_profiles() -> CustomerProfileService:
         return _require(profile_service, "CustomerProfileService")
 
@@ -599,6 +614,7 @@ def create_app(
             and not path.startswith("/web/files/")
             and not path.startswith("/web/local-files/")
             and path != "/web/telegram/status"
+            and path != "/web/usage"
             and path not in public_health_paths
         ):
             return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
@@ -719,6 +735,12 @@ def create_app(
         app,
         settings=settings,
         get_web_events=get_web_events,
+        resolve_customer_id=profile_service.resolve_customer_id,
+    )
+    register_usage_telemetry_routes(
+        app,
+        web_token=settings.opentulpa_web_token,
+        get_usage_telemetry=get_usage_telemetry,
         resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_tulpa_routes(

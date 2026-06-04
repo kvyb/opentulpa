@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,12 +12,17 @@ from opentulpa.interfaces.telegram.client import TelegramClient
 from opentulpa.skills.service import SkillStoreService
 
 
-def _mk_client(tmp_path: Path, *, client_host: str = "127.0.0.1") -> TestClient:
+def _mk_client(
+    tmp_path: Path,
+    *,
+    client_host: str = "127.0.0.1",
+    agent_runtime: Any | None = None,
+) -> TestClient:
     store = SkillStoreService(
         db_path=tmp_path / "skills.db",
         root_dir=tmp_path / "skills",
     )
-    app = create_app(skill_store_service=store)
+    app = create_app(skill_store_service=store, agent_runtime=agent_runtime)
     return TestClient(app, client=(client_host, 50000))
 
 
@@ -163,4 +169,55 @@ def test_telegram_webhook_status_route_is_public_but_bearer_protected(
     assert accepted.status_code == 200
     assert accepted.json()["ready"] is True
     assert accepted.json()["requires_webhook_reset"] is False
+    get_settings.cache_clear()
+
+
+def test_web_usage_route_public_with_bearer_auth(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    trace_path = tmp_path / "llm_call_traces.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-06-04T00:00:00+00:00",
+                "customer_id": "telegram_1",
+                "thread_id": "dashboard-owner-1",
+                "trace_id": "trace_usage",
+                "native_tokens_prompt": 12,
+                "native_cost_usd": 0.004,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runtime = type("Runtime", (), {"_llm_call_trace_path": trace_path})()
+    monkeypatch.setenv("OPENTULPA_WEB_TOKEN", "web-secret")
+    get_settings.cache_clear()
+    with _mk_client(tmp_path, client_host="8.8.8.8", agent_runtime=runtime) as client:
+        no_header = client.get("/web/usage")
+        missing_customer = client.get(
+            "/web/usage",
+            headers={"authorization": "Bearer web-secret"},
+        )
+        bad_window = client.get(
+            "/web/usage?customer_id=telegram_1&since=2026-06-05T00:00:00Z&until=2026-06-04T00:00:00Z",
+            headers={"authorization": "Bearer web-secret"},
+        )
+        accepted = client.get(
+            "/web/usage?customer_id=telegram_1",
+            headers={"authorization": "Bearer web-secret"},
+        )
+
+    assert no_header.status_code == 401
+    assert missing_customer.status_code == 400
+    assert missing_customer.json() == {"detail": "customer_id is required"}
+    assert bad_window.status_code == 400
+    assert bad_window.json() == {"detail": "since must be before or equal to until"}
+    assert accepted.status_code == 200
+    body = accepted.json()
+    assert body["summary"]["generation_count"] == 1
+    assert body["summary"]["input_tokens"] == 12
+    assert body["summary"]["cost_usd"] == 0.004
+    assert body["generations"][0]["trace_id"] == "trace_usage"
     get_settings.cache_clear()
