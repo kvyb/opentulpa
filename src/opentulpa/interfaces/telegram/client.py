@@ -291,6 +291,11 @@ class TelegramClient:
         result = data.get("result") if isinstance(data, dict) else None
         return result if isinstance(result, dict) else None
 
+    async def get_webhook_info(self) -> dict[str, Any] | None:
+        data = await self._post("getWebhookInfo", {})
+        result = data.get("result") if isinstance(data, dict) else None
+        return result if isinstance(result, dict) else None
+
     async def download_file(self, *, file_id: str) -> dict[str, Any] | None:
         info = await self._post("getFile", {"file_id": file_id})
         if not info:

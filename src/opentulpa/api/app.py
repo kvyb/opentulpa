@@ -29,6 +29,7 @@ from opentulpa.api.routes import (
     register_system_routes,
     register_task_routes,
     register_telegram_business_routes,
+    register_telegram_webhook_health_routes,
     register_telegram_webhook_routes,
     register_tulpa_routes,
     register_user_context_routes,
@@ -597,6 +598,7 @@ def create_app(
             and not path.startswith("/web/intake/workflows")
             and not path.startswith("/web/files/")
             and not path.startswith("/web/local-files/")
+            and path != "/web/telegram/status"
             and path not in public_health_paths
         ):
             return JSONResponse(status_code=403, content={"detail": "forbidden public endpoint"})
@@ -687,6 +689,12 @@ def create_app(
         app,
         get_telegram_business=get_telegram_business,
         resolve_customer_id=profile_service.resolve_customer_id,
+    )
+    register_telegram_webhook_health_routes(
+        app,
+        settings=settings,
+        get_telegram_client=get_telegram_client,
+        web_token=settings.opentulpa_web_token,
     )
     register_system_routes(app)
     register_composio_routes(
