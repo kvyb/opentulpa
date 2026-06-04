@@ -21,23 +21,13 @@ from opentulpa.core.config import get_openai_compatible_api_key_from_env, get_se
 from opentulpa.core.debug_logs import install_process_output_log_capture
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.interfaces.telegram.chat_service import support_bot_commands
+from opentulpa.interfaces.telegram.constants import TELEGRAM_WEBHOOK_ALLOWED_UPDATES
 from opentulpa.interfaces.telegram.security import parse_csv_set
 from opentulpa.logging import create_langfuse_tracer
 from opentulpa.memory.service import MemoryService
 from opentulpa.scheduler.service import SchedulerService
 from opentulpa.skills.service import SkillStoreService
 from opentulpa.tasks.service import TaskService
-
-TELEGRAM_WEBHOOK_ALLOWED_UPDATES = [
-    "message",
-    "edited_message",
-    "callback_query",
-    "my_chat_member",
-    "business_connection",
-    "business_message",
-    "edited_business_message",
-    "deleted_business_messages",
-]
 
 
 async def _wake_callback(payload: dict) -> None:

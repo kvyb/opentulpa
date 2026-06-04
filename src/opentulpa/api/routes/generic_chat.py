@@ -8,7 +8,6 @@ import mimetypes
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
-from hmac import compare_digest
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -19,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from opentulpa.agent.runtime import STREAM_PROGRESS_PREFIX, STREAM_WAIT_SIGNAL, AgentStreamEvent
 from opentulpa.api.customer_ids import resolve_customer_id as resolve_customer_id_value
 from opentulpa.api.file_helpers import sanitize_uploaded_file_record
+from opentulpa.api.web_auth import web_auth_error
 from opentulpa.context.uploaded_files import (
     build_uploaded_files_context,
     should_skip_auto_summary_for_upload,
@@ -55,19 +55,6 @@ class WebFileResponse(BaseModel):
     file: dict[str, Any]
 
 
-def _bearer_token(request: Request) -> str:
-    header = str(request.headers.get("authorization") or "").strip()
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer":
-        return ""
-    return token.strip()
-
-
-def _authorized(request: Request, expected_secret: str) -> bool:
-    token = _bearer_token(request)
-    return bool(token and compare_digest(token, expected_secret))
-
-
 def _sse(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -101,14 +88,9 @@ def register_generic_chat_routes(
         responses={200: {"content": {"text/event-stream": {}}}},
     )
     async def web_chat_turn(payload: WebChatTurnRequest, request: Request) -> Any:
-        secret = str(web_token or "").strip()
-        if not secret:
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "OPENTULPA_WEB_TOKEN is not configured"},
-            )
-        if not _authorized(request, secret):
-            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+        auth_error = web_auth_error(request, web_token)
+        if auth_error is not None:
+            return auth_error
 
         runtime = get_agent_runtime()
         if runtime is None or not (hasattr(runtime, "ainvoke_text") or hasattr(runtime, "astream_text")):
@@ -142,14 +124,9 @@ def register_generic_chat_routes(
         kind: Annotated[str, Form()] = "document",
         caption: Annotated[str | None, Form()] = None,
     ) -> Any:
-        secret = str(web_token or "").strip()
-        if not secret:
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "OPENTULPA_WEB_TOKEN is not configured"},
-            )
-        if not _authorized(request, secret):
-            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+        auth_error = web_auth_error(request, web_token)
+        if auth_error is not None:
+            return auth_error
         safe_customer_id = _resolve_customer_id(customer_id)
         safe_thread_id = str(thread_id or "").strip()
         safe_kind = str(kind or "document").strip() or "document"
@@ -197,9 +174,9 @@ def register_generic_chat_routes(
         request: Request,
         customer_id: Annotated[str, Query(min_length=1)],
     ) -> Any:
-        auth = _authorized_web_request(request, web_token)
-        if auth is not None:
-            return auth
+        auth_error = web_auth_error(request, web_token)
+        if auth_error is not None:
+            return auth_error
         record = get_file_vault().get_file(_resolve_customer_id(customer_id), file_id)
         if not record:
             return JSONResponse(status_code=404, content={"detail": "file not found"})
@@ -211,9 +188,9 @@ def register_generic_chat_routes(
         request: Request,
         customer_id: Annotated[str, Query(min_length=1)],
     ) -> Any:
-        auth = _authorized_web_request(request, web_token)
-        if auth is not None:
-            return auth
+        auth_error = web_auth_error(request, web_token)
+        if auth_error is not None:
+            return auth_error
         safe_customer_id = _resolve_customer_id(customer_id)
         vault = get_file_vault()
         record = vault.get_file(safe_customer_id, file_id)
@@ -235,9 +212,9 @@ def register_generic_chat_routes(
         request: Request,
         local_path: Annotated[str, Query(alias="path", min_length=1)],
     ) -> Any:
-        auth = _authorized_web_request(request, web_token)
-        if auth is not None:
-            return auth
+        auth_error = web_auth_error(request, web_token)
+        if auth_error is not None:
+            return auth_error
         safe_local_path = local_path.strip()
         if not safe_local_path:
             return JSONResponse(status_code=400, content={"detail": "path is required"})
@@ -438,18 +415,6 @@ async def _stream_turn(
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-
-
-def _authorized_web_request(request: Request, web_token: str | None) -> JSONResponse | None:
-    secret = str(web_token or "").strip()
-    if not secret:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "OPENTULPA_WEB_TOKEN is not configured"},
-        )
-    if not _authorized(request, secret):
-        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-    return None
 
 
 async def _postprocess_uploaded_file(

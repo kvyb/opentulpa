@@ -25,18 +25,23 @@ def _file_vault(tmp_path: Path) -> FileVaultService:
     )
 
 
-def _app(service: IntakeWorkflowService, vault: FileVaultService) -> FastAPI:
+def _app(
+    service: IntakeWorkflowService,
+    vault: FileVaultService,
+    *,
+    web_token: str | None = "secret",
+) -> FastAPI:
     app = FastAPI()
     register_intake_workflow_routes(
         app,
         get_intake_workflows=lambda: service,
         get_workflow_setup_service=lambda: None,
         get_file_vault=lambda: vault,
-        web_token="secret",
+        web_token=web_token,
     )
     register_generic_chat_routes(
         app,
-        web_token="secret",
+        web_token=web_token,
         get_agent_runtime=lambda: None,
         get_file_vault=lambda: vault,
         get_workflow_setup_service=lambda: None,
@@ -82,6 +87,20 @@ def test_web_workflow_routes_require_bearer_token(tmp_path: Path) -> None:
     assert rejected.status_code == 401
     assert accepted.status_code == 200
     assert accepted.json() == {"ok": True, "workflows": []}
+
+
+def test_web_workflow_routes_keep_unauthorized_when_web_token_missing(tmp_path: Path) -> None:
+    app = _app(_service(tmp_path), _file_vault(tmp_path), web_token=None)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/web/intake/workflows",
+            params={"customer_id": "dashboard"},
+            headers={"authorization": "Bearer secret"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "unauthorized"}
 
 
 def test_web_workflow_list_and_get_include_knowledge_files(tmp_path: Path) -> None:
@@ -163,10 +182,12 @@ def test_web_workflow_put_validates_and_persists(tmp_path: Path) -> None:
     assert updated.status_code == 200
     assert updated.json()["workflow"]["name"] == "Updated booking"
     assert updated.json()["workflow"]["enabled"] is False
-    assert service.get_workflow(
+    persisted = service.get_workflow(
         customer_id="dashboard",
         workflow_id=str(workflow["workflow_id"]),
-    )["required_fields"] == ["name", "vehicle"]
+    )
+    assert persisted is not None
+    assert persisted["required_fields"] == ["name", "vehicle"]
     assert invalid.status_code == 400
     assert "name is required" in invalid.json()["detail"]
 
