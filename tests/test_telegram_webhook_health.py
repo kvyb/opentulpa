@@ -116,6 +116,27 @@ def test_readiness_accepts_matching_webhook_and_allowed_updates(monkeypatch: Any
     assert result.reasons == ()
 
 
+def test_readiness_reports_last_error_without_blocking_matching_webhook(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://app.example.com")
+    runtime = build_runtime_config(_settings())
+
+    result = evaluate_webhook_readiness(
+        runtime=runtime,
+        telegram=TelegramWebhookInfo(
+            available=True,
+            url="https://app.example.com/webhook/telegram",
+            pending_update_count=0,
+            allowed_updates=tuple(TELEGRAM_WEBHOOK_ALLOWED_UPDATES),
+            last_error_message="historical delivery error",
+        ),
+    )
+
+    assert result.ready is True
+    assert result.requires_webhook_reset is False
+    assert result.last_error_message == "historical delivery error"
+    assert result.reasons == ()
+
+
 def test_web_status_route_reports_ready_with_mocked_telegram(monkeypatch: Any) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://app.example.com")
     fake_client = _FakeTelegramClient(

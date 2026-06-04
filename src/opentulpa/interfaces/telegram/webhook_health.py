@@ -118,8 +118,6 @@ def evaluate_webhook_readiness(
             elif set(telegram.allowed_updates) != set(runtime.allowed_updates):
                 reasons.append("telegram_allowed_updates_mismatch")
                 requires_webhook_reset = True
-            if telegram.last_error_message:
-                reasons.append("telegram_last_error_present")
 
     ready = configured and not reasons
     assert not (ready and requires_webhook_reset)
