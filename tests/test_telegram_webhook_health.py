@@ -173,6 +173,34 @@ def test_web_status_route_reports_ready_with_mocked_telegram(monkeypatch: Any) -
     assert fake_client.calls == 1
 
 
+def test_web_status_route_reports_unavailable_when_web_token_missing(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://app.example.com")
+    fake_client = _FakeTelegramClient(
+        {
+            "url": "https://app.example.com/webhook/telegram",
+            "pending_update_count": 0,
+            "allowed_updates": list(TELEGRAM_WEBHOOK_ALLOWED_UPDATES),
+        }
+    )
+    app = FastAPI()
+    register_telegram_webhook_health_routes(
+        app,
+        settings=_settings(),
+        get_telegram_client=lambda: fake_client,
+        web_token=None,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/web/telegram/status",
+            headers={"authorization": "Bearer web-secret"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "OPENTULPA_WEB_TOKEN is not configured"}
+    assert fake_client.calls == 0
+
+
 def test_web_status_route_returns_unavailable_when_telegram_raises(monkeypatch: Any) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://app.example.com")
     app = FastAPI()

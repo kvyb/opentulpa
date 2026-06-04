@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +13,7 @@ from opentulpa.api.routes.intake_use_cases import (
     workflow_upsert_kwargs,
     workflow_with_knowledge_files,
 )
+from opentulpa.api.web_auth import authorized_web_request
 
 
 def register_intake_workflow_routes(
@@ -28,12 +28,7 @@ def register_intake_workflow_routes(
     """Register internal intake workflow endpoints."""
 
     def _authorized_web_request(request: Request) -> bool:
-        expected = str(web_token or "").strip()
-        if not expected:
-            return False
-        header = str(request.headers.get("authorization", "") or "").strip()
-        scheme, _, token = header.partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(token.strip(), expected)
+        return authorized_web_request(request, web_token)
 
     def _web_customer_id(request: Request) -> str:
         raw = str(request.query_params.get("customer_id", "") or "").strip()

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict
-from hmac import compare_digest
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from opentulpa.api.web_auth import web_auth_error
 from opentulpa.interfaces.telegram.webhook_health import (
     TelegramWebhookInfo,
     build_runtime_config,
@@ -66,7 +65,7 @@ def register_telegram_webhook_health_routes(
         response_model=TelegramWebhookStatusResponse,
     )
     async def web_telegram_status(request: Request) -> Any:
-        auth_error = _web_auth_error(request, web_token)
+        auth_error = web_auth_error(request, web_token)
         if auth_error is not None:
             return auth_error
         return await _telegram_status_response(
@@ -97,20 +96,6 @@ async def _telegram_status_response(
         **asdict(readiness),
         telegram=TelegramWebhookInfoResponse.model_validate(asdict(telegram)),
     )
-
-
-def _web_auth_error(request: Request, expected_token: str | None) -> JSONResponse | None:
-    secret = str(expected_token or "").strip()
-    if not secret:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "OPENTULPA_WEB_TOKEN is not configured"},
-        )
-    incoming = str(request.headers.get("authorization", "") or "").strip()
-    scheme, _, token = incoming.partition(" ")
-    if scheme.lower() != "bearer" or not compare_digest(token.strip(), secret):
-        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-    return None
 
 
 def _telegram_status_error(exc: Exception, *, settings: Any) -> TelegramWebhookInfo:
