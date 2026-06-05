@@ -12,6 +12,8 @@ from typing import Any
 
 from opentulpa.persistence.sqlite import connect_sqlite
 
+_OWNER_HANDOFF_RESUME_EVENT_TYPE = "owner_handoff_resume"
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -71,6 +73,7 @@ class IntakeWorkflowStore:
                     assistant_instructions TEXT NOT NULL DEFAULT '',
                     business_facts_json TEXT NOT NULL DEFAULT '{}',
                     knowledge_file_ids_json TEXT NOT NULL DEFAULT '[]',
+                    handoff_rules_json TEXT NOT NULL DEFAULT '[]',
                     sink_type TEXT NOT NULL,
                     sink_config_json TEXT NOT NULL,
                     schedule TEXT NOT NULL,
@@ -127,6 +130,8 @@ class IntakeWorkflowStore:
                     status TEXT NOT NULL,
                     due_at TEXT NOT NULL,
                     last_inbound_message_id TEXT NOT NULL DEFAULT '',
+                    handoff_id TEXT NOT NULL DEFAULT '',
+                    owner_feedback TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (workflow_id, conversation_id)
@@ -137,6 +142,7 @@ class IntakeWorkflowStore:
             )
             self._ensure_cursor_columns(conn)
             self._ensure_workflow_columns(conn)
+            self._ensure_pending_run_columns(conn)
             self._migrate_legacy_sink_configs(conn, normalize_sink_config=normalize_sink_config)
 
     @staticmethod
@@ -161,11 +167,25 @@ class IntakeWorkflowStore:
             "assistant_instructions": "TEXT NOT NULL DEFAULT ''",
             "business_facts_json": "TEXT NOT NULL DEFAULT '{}'",
             "knowledge_file_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "handoff_rules_json": "TEXT NOT NULL DEFAULT '[]'",
             "reply_mode": "TEXT NOT NULL DEFAULT 'auto'",
         }
         for column, column_type in required_columns.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE intake_workflows ADD COLUMN {column} {column_type}")
+        conn.commit()
+
+    @staticmethod
+    def _ensure_pending_run_columns(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(intake_pending_runs)").fetchall()
+        existing = {str(row["name"] or "") for row in rows}
+        required_columns = {
+            "handoff_id": "TEXT NOT NULL DEFAULT ''",
+            "owner_feedback": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, column_type in required_columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE intake_pending_runs ADD COLUMN {column} {column_type}")
         conn.commit()
 
     @staticmethod
@@ -207,10 +227,10 @@ class IntakeWorkflowStore:
                 INSERT INTO intake_workflows (
                     workflow_id, customer_id, name, channel, provider, source_config_json,
                     intent_description, required_fields_json, field_guidance_json,
-                    assistant_instructions, business_facts_json, knowledge_file_ids_json, sink_type,
-                    sink_config_json, schedule, notify_user, enabled, routine_id,
-                    reply_mode, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    assistant_instructions, business_facts_json, knowledge_file_ids_json,
+                    handoff_rules_json, sink_type, sink_config_json, schedule, notify_user,
+                    enabled, routine_id, reply_mode, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
                     customer_id=excluded.customer_id,
                     name=excluded.name,
@@ -223,6 +243,7 @@ class IntakeWorkflowStore:
                     assistant_instructions=excluded.assistant_instructions,
                     business_facts_json=excluded.business_facts_json,
                     knowledge_file_ids_json=excluded.knowledge_file_ids_json,
+                    handoff_rules_json=excluded.handoff_rules_json,
                     sink_type=excluded.sink_type,
                     sink_config_json=excluded.sink_config_json,
                     schedule=excluded.schedule,
@@ -245,6 +266,7 @@ class IntakeWorkflowStore:
                     workflow["assistant_instructions"],
                     _json_dumps(workflow["business_facts"]),
                     _json_dumps(workflow["knowledge_file_ids"]),
+                    _json_dumps(workflow["handoff_rules"]),
                     workflow["sink_type"],
                     _json_dumps(workflow["sink_config"]),
                     workflow["schedule"],
@@ -467,6 +489,8 @@ class IntakeWorkflowStore:
         due_at: str,
         owner_chat_id: str = "",
         last_inbound_message_id: str = "",
+        handoff_id: str = "",
+        owner_feedback: str = "",
     ) -> dict[str, Any]:
         safe_workflow_id = str(workflow.get("workflow_id", "") or "").strip()
         safe_customer_id = str(workflow.get("customer_id", "") or "").strip()
@@ -477,10 +501,12 @@ class IntakeWorkflowStore:
         safe_owner_chat_id = str(owner_chat_id or "").strip()
         safe_last_inbound_id = str(last_inbound_message_id or "").strip()
         safe_event_type = str(event_type or "").strip()
+        safe_handoff_id = str(handoff_id or "").strip()
+        safe_owner_feedback = str(owner_feedback or "").strip()
         with self.conn() as conn:
             row = conn.execute(
                 """
-                SELECT generation, status, owner_chat_id, created_at
+                SELECT generation, status, owner_chat_id, event_type, handoff_id, owner_feedback, created_at
                 FROM intake_pending_runs
                 WHERE workflow_id = ? AND conversation_id = ?
                 """,
@@ -492,13 +518,22 @@ class IntakeWorkflowStore:
             created_at = str(row["created_at"] or now) if row is not None else now
             if not safe_owner_chat_id and row is not None:
                 safe_owner_chat_id = str(row["owner_chat_id"] or "").strip()
+            if (
+                row is not None
+                and str(row["event_type"] or "").strip() == _OWNER_HANDOFF_RESUME_EVENT_TYPE
+                and not safe_handoff_id
+            ):
+                safe_event_type = _OWNER_HANDOFF_RESUME_EVENT_TYPE
+                safe_handoff_id = str(row["handoff_id"] or "").strip()
+                safe_owner_feedback = str(row["owner_feedback"] or "").strip()
             conn.execute(
                 """
                 INSERT INTO intake_pending_runs (
                     workflow_id, conversation_id, customer_id, event_type, owner_chat_id,
                     generation, running_generation, status, due_at,
-                    last_inbound_message_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                    last_inbound_message_id, handoff_id, owner_feedback,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id, conversation_id) DO UPDATE SET
                     customer_id=excluded.customer_id,
                     event_type=excluded.event_type,
@@ -507,6 +542,8 @@ class IntakeWorkflowStore:
                     status=excluded.status,
                     due_at=excluded.due_at,
                     last_inbound_message_id=excluded.last_inbound_message_id,
+                    handoff_id=excluded.handoff_id,
+                    owner_feedback=excluded.owner_feedback,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -519,6 +556,8 @@ class IntakeWorkflowStore:
                     next_status,
                     due_at,
                     safe_last_inbound_id,
+                    safe_handoff_id,
+                    safe_owner_feedback,
                     created_at,
                     now,
                 ),
@@ -644,6 +683,7 @@ class IntakeWorkflowStore:
             "assistant_instructions": str(row["assistant_instructions"] or ""),
             "business_facts": json.loads(row["business_facts_json"] or "{}"),
             "knowledge_file_ids": json.loads(row["knowledge_file_ids_json"] or "[]"),
+            "handoff_rules": json.loads(row["handoff_rules_json"] or "[]"),
             "sink_type": str(row["sink_type"]),
             "sink_config": json.loads(row["sink_config_json"] or "{}"),
             "schedule": str(row["schedule"]),

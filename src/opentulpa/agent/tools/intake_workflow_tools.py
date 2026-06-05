@@ -99,6 +99,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         assistant_instructions: str = "",
         business_facts: dict[str, Any] | None | str = None,
         knowledge_file_ids: list[str] | None = None,
+        handoff_rules: list[dict[str, Any]] | None = None,
         notify_user: bool = True,
         enabled: bool = True,
         reply_mode: str = "",
@@ -168,6 +169,9 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         - For spreadsheets or broad source docs, call business_knowledge_index on the original uploaded file ids, query the business knowledge with business_knowledge_query for representative business facts, then bind those same source file ids here.
         - The workflow must still work when knowledge_file_ids is empty; in that case rely on the saved instructions
           and other workflow fields instead of pretending files exist.
+        - handoff_rules is optional and must be a list of objects with condition plus optional id,
+          label, owner_prompt, customer_wait_reply, and enabled. Use it only for owner-approved
+          escalation rules; do not bury handoff conditions in assistant_instructions.
         - sink_config must contain the concrete configuration needed by the chosen sink_type.
         - Valid sink_type values here are local_csv, google_sheets_composio, or generic_composio_write.
         - Never invent sink_type=google_sheets.
@@ -200,6 +204,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
         safe_required_fields = _unique_string_list(required_fields)
         safe_knowledge_file_ids = _unique_string_list(knowledge_file_ids)
         safe_sink_config = sink_config if isinstance(sink_config, dict) else {}
+        safe_handoff_rules = handoff_rules if isinstance(handoff_rules, list) else []
         safe_source_config = source_config if isinstance(source_config, dict) else None
         safe_field_guidance = (
             field_guidance
@@ -248,6 +253,7 @@ def register_intake_workflow_tools(runtime: Any) -> dict[str, Any]:
                 "assistant_instructions": safe_assistant_instructions,
                 "business_facts": safe_business_facts,
                 "knowledge_file_ids": safe_knowledge_file_ids,
+                "handoff_rules": safe_handoff_rules,
                 "sink_type": safe_sink_type,
                 "sink_config": safe_sink_config,
                 "schedule": safe_schedule,

@@ -123,6 +123,11 @@ def build_intake_workflow_skill(
     knowledge_file_ids = _unique_string_list(safe_workflow.get("knowledge_file_ids"))
     field_guidance = _safe_dict(safe_workflow.get("field_guidance"))
     business_facts = _safe_dict(safe_workflow.get("business_facts"))
+    handoff_rules = [
+        item
+        for item in list(safe_workflow.get("handoff_rules") or [])
+        if isinstance(item, dict)
+    ]
     source_config = _safe_dict(safe_workflow.get("source_config"))
     intent_match_required = _truthy_config_flag(source_config.get("intent_match_required"))
     sink_config = _safe_dict(safe_workflow.get("sink_config"))
@@ -269,6 +274,7 @@ def build_intake_workflow_skill(
                 "assistant_instructions": safe_workflow.get("assistant_instructions", ""),
                 "business_facts": business_facts,
                 "knowledge_file_ids": knowledge_file_ids,
+                "handoff_rules": handoff_rules,
                 "sink_type": safe_workflow["sink_type"],
                 "sink_config": safe_workflow.get("sink_config", {}),
             }

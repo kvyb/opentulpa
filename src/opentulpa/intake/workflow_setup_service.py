@@ -258,6 +258,7 @@ class WorkflowSetupService:
                     "assistant_instructions": "",
                     "business_facts": {},
                     "knowledge_file_ids": [],
+                    "handoff_rules": [],
                     "sink_type": "",
                     "sink_config": {},
                     "schedule": "*/2 * * * *",
@@ -418,6 +419,7 @@ class WorkflowSetupService:
                         for item in _safe_list(workflow_snapshot.get("knowledge_file_ids"))
                         if str(item or "").strip()
                     ],
+                    "handoff_rules": _safe_list(workflow_snapshot.get("handoff_rules")),
                     "sink_type": str(workflow_snapshot.get("sink_type", "") or ""),
                     "sink_config": _safe_dict(workflow_snapshot.get("sink_config")),
                     "schedule": str(
@@ -554,6 +556,7 @@ class WorkflowSetupService:
                 assistant_instructions=str(draft.get("assistant_instructions", "") or ""),
                 business_facts=_safe_dict(draft.get("business_facts")),
                 knowledge_file_ids=_safe_list(draft.get("knowledge_file_ids")),
+                handoff_rules=_safe_list(draft.get("handoff_rules")),
                 sink_type=str(draft.get("sink_type", "") or ""),
                 sink_config=_safe_dict(draft.get("sink_config")),
                 schedule=str(draft.get("schedule", "*/2 * * * *") or "*/2 * * * *"),

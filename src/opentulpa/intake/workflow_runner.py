@@ -118,6 +118,7 @@ class WorkflowRunService(Protocol):
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None = None,
+        owner_handoff_feedback: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]: ...
 
     def _uses_latest_inbound_stale_guard(
@@ -163,6 +164,15 @@ class WorkflowRunService(Protocol):
         conversation_summary: dict[str, Any],
         decision: dict[str, Any],
     ) -> str: ...
+
+    def _open_or_update_owner_handoff(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        conversation: dict[str, Any],
+        decision: dict[str, Any],
+    ) -> dict[str, Any] | None: ...
 
     async def _send_intake_reply(
         self,
@@ -331,6 +341,8 @@ class WorkflowRunner:
             force=force,
             run_state=run_state,
         ):
+            return
+        if await self._handle_owner_handoff(workflow=workflow, context=context, run_state=run_state):
             return
         await self._apply_matched_decision(
             workflow=workflow,
@@ -556,15 +568,16 @@ class WorkflowRunner:
                 if stale_result is not None:
                     run_state.result_items.append(stale_result)
                 return None
-            context = await self._refresh_stale_context(
+            refreshed = await self._refresh_stale_context(
                 workflow=workflow,
                 context=context,
                 latest_summary=latest_summary,
                 attempt=attempt,
                 run_state=run_state,
             )
-            if context is None:
+            if refreshed is None:
                 return None
+            context = refreshed
         return context
 
     async def _refresh_stale_context(
@@ -633,6 +646,68 @@ class WorkflowRunner:
             )
             return True
         self._record_ignored(workflow=workflow, context=context, run_state=run_state)
+        return True
+
+    async def _handle_owner_handoff(
+        self,
+        *,
+        workflow: dict[str, Any],
+        context: DecisionContext,
+        run_state: WorkflowRunAccumulator,
+    ) -> bool:
+        handoff = self._service._open_or_update_owner_handoff(
+            workflow=workflow,
+            conversation_summary=context.conversation_summary,
+            conversation=context.conversation,
+            decision=context.decision,
+        )
+        if handoff is None:
+            return False
+        wait_reply = str(handoff.get("trigger", {}).get("customer_wait_reply", "") or "").strip()
+        replied = await self._send_handoff_wait_reply(
+            workflow=workflow,
+            context=context,
+            wait_reply=wait_reply,
+            created=bool(handoff.get("created", False)),
+            run_state=run_state,
+        )
+        self._mark_cursor_seen(
+            workflow=workflow,
+            conversation_id=context.conversation_id,
+            signals=context.signals,
+            agent_action_at=self._utc_now_iso() if replied else "",
+        )
+        run_state.result_items.append(
+            {
+                "conversation_id": context.conversation_id,
+                "matched": True,
+                "status": "owner_handoff_awaiting_owner",
+                "handoff_id": str(handoff.get("handoff_id", "")),
+                "replied": replied,
+            }
+        )
+        return True
+
+    async def _send_handoff_wait_reply(
+        self,
+        *,
+        workflow: dict[str, Any],
+        context: DecisionContext,
+        wait_reply: str,
+        created: bool,
+        run_state: WorkflowRunAccumulator,
+    ) -> bool:
+        if not created or not wait_reply:
+            return False
+        reply_error = await self._service._send_intake_reply(
+            workflow=workflow,
+            conversation_summary=context.conversation_summary,
+            reply_text=wait_reply,
+        )
+        if reply_error is not None:
+            run_state.errors.append(f"{context.conversation_id}: {reply_error}")
+            self._emit_error(workflow, context.conversation_summary, "handoff_wait_reply", reply_error)
+            return False
         return True
 
     def _unmatched_reply(
@@ -704,7 +779,7 @@ class WorkflowRunner:
             context=context,
             run_state=run_state,
             replied=True,
-                agent_action_at=self._utc_now_iso(),
+            agent_action_at=self._utc_now_iso(),
         )
 
     async def _apply_matched_decision(
@@ -777,15 +852,16 @@ class WorkflowRunner:
             if attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS or feedback is None:
                 break
             recovery_feedback.append(feedback)
-            current, decision_error = await self._decide_recovery_context(
+            next_context, decision_error = await self._decide_recovery_context(
                 workflow=workflow,
                 conversation_id=current.conversation_id,
                 conversation_summary=current.conversation_summary,
                 conversation=current.conversation,
                 execution_feedback=recovery_feedback,
             )
-            if current is None:
+            if next_context is None:
                 return applied, decision_error or apply_error
+            current = next_context
             if _workflow_requires_intent_match(workflow) and not bool(current.decision.get("matches_workflow")):
                 return applied, "recovery decision no longer matches workflow"
         return applied, apply_error

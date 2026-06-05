@@ -108,6 +108,10 @@ def register_intake_setup_tools(runtime: Any) -> dict[str, Any]:
         Do not paste uploaded file contents, large tables, or extracted document text into business_facts;
         bind files through draft_patch.knowledge_file_ids instead.
         field_guidance keys must match required_fields ids.
+        Store owner-approved escalation conditions in draft_patch.handoff_rules as a list of
+        objects with condition plus optional id, label, owner_prompt, customer_wait_reply, and enabled.
+        Use handoff_rules for "ask me", "human", "approval", "conflict", or "owner guidance" rules;
+        do not bury those conditions in assistant_instructions.
         Do not set draft_patch.source_config.intent_match_required by default; set it to true only
         when the owner explicitly wants the workflow to ignore messages that do not match the stated intent.
         When replacing field-specific guidance or sink_config.field_mapping, send the full current object.

@@ -54,6 +54,13 @@ def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
                 "required_fields": ["day", "time", "car_type", "wash_type"],
                 "assistant_instructions": "Be concise and helpful.",
                 "knowledge_file_ids": ["file_1"],
+                "handoff_rules": [
+                    {
+                        "id": "discount_approval",
+                        "label": "Discount approval",
+                        "condition": "Customer asks for discount approval.",
+                    }
+                ],
                 "sink_type": "local_csv",
                 "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
             },
@@ -77,6 +84,7 @@ def test_intake_workflow_routes_crud(tmp_path: Path) -> None:
         assert fetched.json()["workflow"]["name"] == "Car Wash Intake"
         assert fetched.json()["workflow"]["assistant_instructions"] == "Be concise and helpful."
         assert fetched.json()["workflow"]["knowledge_file_ids"] == ["file_1"]
+        assert fetched.json()["workflow"]["handoff_rules"][0]["id"] == "discount_approval"
 
         deleted = client.post(
             "/internal/intake/workflows/delete",
@@ -209,6 +217,14 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
                     "provider": "composio",
                     "intent_description": "Handle booking requests that arrive in Instagram DMs.",
                     "required_fields": ["day", "time", "car_type", "wash_type"],
+                    "handoff_rules": [
+                        {
+                            "id": "discount_approval",
+                            "label": "Discount approval",
+                            "condition": "Customer asks for discount approval.",
+                            "owner_prompt": "Ask owner before promising a discount.",
+                        }
+                    ],
                     "sink_type": "local_csv",
                     "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
                 },
@@ -229,6 +245,7 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
         assert preflight_payload["sink_preflight"]["dry_run"]["target"] == {
             "file_path": "tulpa_stuff/bookings.csv"
         }
+        assert preflight_payload["normalized_draft"]["handoff_rules"][0]["id"] == "discount_approval"
 
         proposed = client.post(
             "/internal/intake/setup/mark_proposed",
@@ -252,6 +269,9 @@ def test_intake_workflow_setup_routes_create_confirm_commit(tmp_path: Path) -> N
         session = committed.json()["session"]
         assert session["status"] == "completed"
         assert session["workflow"]["name"] == "Car Wash Intake"
+        assert session["workflow"]["handoff_rules"][0]["owner_prompt"] == (
+            "Ask owner before promising a discount."
+        )
 
 
 def test_intake_workflow_setup_propose_current_route_preflights_and_marks(tmp_path: Path) -> None:

@@ -1140,6 +1140,15 @@ async def test_decide_intake_workflow_compacts_prompt_payload() -> None:
                 "prices": {"basic_wash": "1000 RUB"},
                 "long_note": long_text,
             },
+            "handoff_rules": [
+                {
+                    "id": "discount_approval",
+                    "label": "Discount approval",
+                    "condition": "Customer asks for a discount or exception.",
+                    "owner_prompt": "Approve, counter, or decline discount.",
+                    "customer_wait_reply": "Let me check with the owner.",
+                }
+            ],
             "workflow_skill": "Owner-Provided Business Facts\nbasic_wash costs 1000 RUB\n" + long_text,
             "sink_type": "google_sheets_composio",
             "sink_config": {
@@ -1174,6 +1183,8 @@ async def test_decide_intake_workflow_compacts_prompt_payload() -> None:
     assert human_text.count('"phase"') == 2
     assert '"business_facts": {"prices":' in human_text
     assert "1000 RUB" in human_text
+    assert '"handoff_rules": [{"id": "discount_approval"' in human_text
+    assert "Customer asks for a discount or exception." in human_text
     assert "Owner-Provided Business Facts" in human_text
     assert '"static_argument_keys": ["spreadsheet_id"]' in human_text
     assert '"static_arguments": {"spreadsheet_id": "' in human_text

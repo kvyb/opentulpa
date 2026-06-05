@@ -12,6 +12,7 @@ _ROUTE_IMPORTS = {
     "register_file_routes": "opentulpa.api.routes.files",
     "register_generic_chat_routes": "opentulpa.api.routes.generic_chat",
     "register_health_routes": "opentulpa.api.routes.health",
+    "register_handoff_routes": "opentulpa.api.routes.handoffs",
     "register_intake_workflow_routes": "opentulpa.api.routes.intake",
     "register_knowledge_routes": "opentulpa.api.routes.knowledge",
     "register_memory_routes": "opentulpa.api.routes.memory",

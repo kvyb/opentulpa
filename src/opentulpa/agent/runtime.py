@@ -773,6 +773,11 @@ class _IntakeWorkflowDecision(BaseModel):
     business_knowledge_query: str = ""
     knowledge_source_refs: list[Any] = Field(default_factory=list)
     grounding_status: str = ""
+    handoff_action: str = "none"
+    handoff_rule_id: str = ""
+    handoff_reason: str = ""
+    handoff_request: str = ""
+    customer_wait_reply: str = ""
     reason: str = ""
 
 
@@ -790,7 +795,9 @@ def _build_intake_workflow_system_prompt() -> str:
         "save_payload (object), sink_action (string), sink_payload (object), "
         "sink_arguments (object), needs_business_knowledge (bool), "
         "business_knowledge_query (string), knowledge_source_refs (string array), "
-        "grounding_status (string), reason (string).\n\n"
+        "grounding_status (string), handoff_action (string), handoff_rule_id (string), "
+        "handoff_reason (string), handoff_request (string), customer_wait_reply (string), "
+        "reason (string).\n\n"
         "Allowed booking_action values: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "Allowed reply_action values: none, send_reply, mark_cancelled.\n\n"
         "Decision policy:\n"
@@ -848,6 +855,15 @@ def _build_intake_workflow_system_prompt() -> str:
         '- If no reply is needed, use reply_action=none and reply_text="".\n'
         "- Use mark_cancelled only when the customer clearly cancels, abandons, or says they no longer want the booking.\n"
         "- Never ask for extra confirmation. This is background workflow execution.\n\n"
+        "Owner handoff policy:\n"
+        "- workflow.handoff_rules are owner-configured escalation rules. Do not invent extra rules.\n"
+        "- If a configured handoff rule clearly matches, set handoff_action=request_owner, handoff_rule_id to that "
+        "rule id, handoff_reason to the customer-specific trigger, handoff_request to the concise private question "
+        "for the owner, ready_to_save=false, and reply_action=none unless customer_wait_reply is useful.\n"
+        "- If no configured handoff rule matches, set handoff_action=none and leave handoff fields empty.\n"
+        "- owner_handoff_feedback, when present, is private owner guidance for this case. Use it to write your own "
+        "customer-facing response; do not copy internal notes or secrets verbatim.\n"
+        "- If owner_handoff_feedback is present, do not request another owner handoff for the same case.\n\n"
         "Booking action policy:\n"
         "- If there is an active booking and the customer is continuing the same request, use update_active.\n"
         "- If there is a recent completed booking inside the edit window and the customer is correcting or changing that booking, use edit_recent_completed.\n"
@@ -961,6 +977,18 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
     compact_knowledge_answer = _trim_text_chars(
         safe_workflow.get("knowledge_answer", ""), limit=3600
     )
+    compact_handoff_rules = [
+        {
+            "id": _trim_text_chars(item.get("id", ""), limit=80),
+            "label": _trim_text_chars(item.get("label", ""), limit=120),
+            "condition": _trim_text_chars(item.get("condition", ""), limit=500),
+            "owner_prompt": _trim_text_chars(item.get("owner_prompt", ""), limit=500),
+            "customer_wait_reply": _trim_text_chars(item.get("customer_wait_reply", ""), limit=300),
+            "enabled": bool(item.get("enabled", True)),
+        }
+        for item in list(safe_workflow.get("handoff_rules") or [])[:8]
+        if isinstance(item, dict)
+    ]
     return {
         "workflow_id": str(safe_workflow.get("workflow_id", "") or "").strip(),
         "name": _trim_text_chars(safe_workflow.get("name", ""), limit=80),
@@ -980,6 +1008,7 @@ def _compact_workflow_for_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
             limit=400,
         ),
         "business_facts": compact_business_facts,
+        "handoff_rules": compact_handoff_rules,
         "workflow_skill": _trim_text_chars(safe_workflow.get("workflow_skill", ""), limit=3200),
         "knowledge_file_ids": [
             str(item or "").strip()
@@ -1118,12 +1147,14 @@ def _build_intake_workflow_agent_prompt(
     active_booking: dict[str, Any] | None,
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
+    owner_handoff_feedback: dict[str, Any] | None = None,
 ) -> str:
     compact_workflow = _compact_workflow_for_prompt(workflow)
     compact_conversation = _compact_conversation_for_prompt(conversation)
     compact_active_booking = _compact_booking_for_prompt(active_booking)
     compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
     compact_feedback = _compact_execution_feedback(execution_feedback)
+    compact_handoff_feedback = owner_handoff_feedback if isinstance(owner_handoff_feedback, dict) else {}
     return (
         "System update: an intake workflow wake fired for one external DM conversation.\n"
         "Operate like a real OpenTulpa background execution turn and use tools when needed.\n\n"
@@ -1166,7 +1197,8 @@ def _build_intake_workflow_agent_prompt(
         "  matches_workflow, confidence, conversation_summary, extracted_fields, missing_fields, "
         "reply_action, reply_text, ready_to_save, booking_action, save_payload, sink_action, "
         "sink_payload, sink_arguments, needs_business_knowledge, business_knowledge_query, "
-        "knowledge_source_refs, grounding_status, reason.\n"
+        "knowledge_source_refs, grounding_status, handoff_action, handoff_rule_id, "
+        "handoff_reason, handoff_request, customer_wait_reply, reason.\n"
         "- booking_action must be one of: ignore, update_active, edit_recent_completed, create_new_booking.\n"
         "- reply_action must be one of: none, send_reply, mark_cancelled.\n"
         "- If availability is blocked or conflicting, do not set ready_to_save=true.\n"
@@ -1186,6 +1218,9 @@ def _build_intake_workflow_agent_prompt(
         "source-backed business fact is requested.\n"
         "- If execution_feedback is present, you are replanning after a real tool or application error. "
         "Read it carefully, do not repeat the same failing action unchanged, and adapt your next decision.\n"
+        "- If owner_handoff_feedback is present, it is private owner guidance. Use it to write your own "
+        "customer-facing reply/save decision. Do not copy internal notes or secrets verbatim. Do not request "
+        "another owner handoff for this same case.\n"
         "- For business facts in reply_text or save_payload, leave knowledge_source_refs empty and set grounding_status=grounded when workflow.business_facts, workflow.workflow_skill, workflow.knowledge_answer, or business_knowledge_query directly supports the fact. If none supports a fact, set grounding_status=no_source and ask to confirm instead.\n"
         "- sink_arguments is for sink-specific write arguments or overrides discovered during this turn; "
         "leave it empty when not needed.\n"
@@ -1195,7 +1230,8 @@ def _build_intake_workflow_agent_prompt(
         f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
         f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
         f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
-        f"execution_feedback={json.dumps(compact_feedback, ensure_ascii=False)}"
+        f"execution_feedback={json.dumps(compact_feedback, ensure_ascii=False)}\n"
+        f"owner_handoff_feedback={json.dumps(compact_handoff_feedback, ensure_ascii=False)}"
     )
 
 
@@ -1220,12 +1256,14 @@ def _build_intake_workflow_state_prompt(
     active_booking: dict[str, Any] | None,
     recent_completed_booking: dict[str, Any] | None,
     execution_feedback: list[dict[str, Any]] | None = None,
+    owner_handoff_feedback: dict[str, Any] | None = None,
 ) -> str:
     compact_workflow = _compact_workflow_for_prompt(workflow)
     compact_conversation = _compact_conversation_for_prompt(conversation)
     compact_active_booking = _compact_booking_for_prompt(active_booking)
     compact_recent_booking = _compact_booking_for_prompt(recent_completed_booking)
     compact_feedback = _compact_execution_feedback(execution_feedback)
+    compact_handoff_feedback = owner_handoff_feedback if isinstance(owner_handoff_feedback, dict) else {}
     return (
         "INTAKE_CONVERSATION_STATE\n"
         "Volatile conversation state for the current inbound message.\n"
@@ -1233,7 +1271,8 @@ def _build_intake_workflow_state_prompt(
         f"conversation={json.dumps(compact_conversation, ensure_ascii=False)}\n"
         f"active_booking={json.dumps(compact_active_booking, ensure_ascii=False)}\n"
         f"recent_completed_booking={json.dumps(compact_recent_booking, ensure_ascii=False)}\n"
-        f"execution_feedback={json.dumps(compact_feedback, ensure_ascii=False)}"
+        f"execution_feedback={json.dumps(compact_feedback, ensure_ascii=False)}\n"
+        f"owner_handoff_feedback={json.dumps(compact_handoff_feedback, ensure_ascii=False)}"
     )
 
 
@@ -4340,6 +4379,7 @@ class OpenTulpaLangGraphRuntime:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None = None,
+        owner_handoff_feedback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return a structured decision for one intake workflow conversation."""
         invoke_error: str | None = None
@@ -4396,6 +4436,7 @@ class OpenTulpaLangGraphRuntime:
                         active_booking=active_booking,
                         recent_completed_booking=recent_completed_booking,
                         execution_feedback=execution_feedback,
+                        owner_handoff_feedback=owner_handoff_feedback,
                     ),
                     turn_mode="routine_wake",
                     include_pending_context=False,
@@ -4459,6 +4500,7 @@ class OpenTulpaLangGraphRuntime:
                                 active_booking=active_booking,
                                 recent_completed_booking=recent_completed_booking,
                                 execution_feedback=execution_feedback,
+                                owner_handoff_feedback=owner_handoff_feedback,
                             )
                         ),
                     ],
@@ -4508,6 +4550,11 @@ class OpenTulpaLangGraphRuntime:
                 decision.knowledge_source_refs
             ),
             "grounding_status": str(decision.grounding_status).strip().lower(),
+            "handoff_action": str(decision.handoff_action).strip().lower() or "none",
+            "handoff_rule_id": str(decision.handoff_rule_id).strip(),
+            "handoff_reason": str(decision.handoff_reason).strip()[:1000],
+            "handoff_request": str(decision.handoff_request).strip()[:1000],
+            "customer_wait_reply": str(decision.customer_wait_reply).strip()[:500],
             "reason": str(decision.reason).strip()[:500],
         }
 

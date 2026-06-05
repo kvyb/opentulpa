@@ -19,6 +19,7 @@ from opentulpa.api.routes import (
     register_debug_log_routes,
     register_file_routes,
     register_generic_chat_routes,
+    register_handoff_routes,
     register_health_routes,
     register_intake_workflow_routes,
     register_knowledge_routes,
@@ -595,6 +596,7 @@ def create_app(
             and not path.startswith("/webhook/")
             and path != "/web/events"
             and not path.startswith("/web/chat/")
+            and not path.startswith("/web/intake/handoffs")
             and not path.startswith("/web/intake/workflows")
             and not path.startswith("/web/files/")
             and not path.startswith("/web/local-files/")
@@ -684,6 +686,12 @@ def create_app(
         get_file_vault=get_file_vault,
         resolve_customer_id=profile_service.resolve_customer_id,
         web_token=settings.opentulpa_web_token,
+    )
+    register_handoff_routes(
+        app,
+        get_handoffs=lambda: get_intake_workflows().handoffs,
+        web_token=settings.opentulpa_web_token,
+        resolve_customer_id=profile_service.resolve_customer_id,
     )
     register_telegram_business_routes(
         app,

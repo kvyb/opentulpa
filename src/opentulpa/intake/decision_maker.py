@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
+from opentulpa.handoffs import normalize_handoff_rules
 from opentulpa.intake.workflow_runtime import (
     safe_dict as _safe_dict,
 )
@@ -33,12 +34,13 @@ class DecisionMaker:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None = None,
+        owner_handoff_feedback: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         runtime = self._runtime()
         if runtime is None:
-            error = "agent runtime does not support intake workflow decisions"
-            self._emit_decision_error(workflow, conversation_summary, error)
-            return {}, error
+            runtime_error = "agent runtime does not support intake workflow decisions"
+            self._emit_decision_error(workflow, conversation_summary, runtime_error)
+            return {}, runtime_error
         recent_messages = self._service._normalize_conversation_messages(
             workflow=workflow,
             conversation=conversation,
@@ -64,6 +66,7 @@ class DecisionMaker:
             active_booking=active_booking,
             recent_completed_booking=recent_completed_booking,
             execution_feedback=execution_feedback,
+            owner_handoff_feedback=owner_handoff_feedback,
         )
         if error is not None:
             self._emit_decision_error(workflow, conversation_summary, error)
@@ -78,6 +81,7 @@ class DecisionMaker:
             active_booking=active_booking,
             recent_completed_booking=recent_completed_booking,
             execution_feedback=execution_feedback,
+            owner_handoff_feedback=owner_handoff_feedback,
             decision=decision,
         )
         if error is not None:
@@ -107,6 +111,7 @@ class DecisionMaker:
             "field_guidance": workflow.get("field_guidance"),
             "assistant_instructions": workflow.get("assistant_instructions", ""),
             "business_facts": _safe_dict(workflow.get("business_facts")),
+            "handoff_rules": normalize_handoff_rules(workflow.get("handoff_rules") or []),
             "workflow_skill": self._service._workflow_skill_context(
                 customer_id=str(workflow.get("customer_id", "") or ""),
                 workflow_id=str(workflow.get("workflow_id", "") or ""),
@@ -131,6 +136,7 @@ class DecisionMaker:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None,
+        owner_handoff_feedback: dict[str, Any] | None,
     ) -> tuple[dict[str, Any], str | None]:
         try:
             decision = await runtime.decide_intake_workflow(
@@ -144,6 +150,7 @@ class DecisionMaker:
                 active_booking=active_booking,
                 recent_completed_booking=recent_completed_booking,
                 execution_feedback=execution_feedback,
+                owner_handoff_feedback=owner_handoff_feedback,
             )
         except Exception as exc:
             return {}, str(exc)
@@ -161,6 +168,7 @@ class DecisionMaker:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None,
+        owner_handoff_feedback: dict[str, Any] | None,
         decision: dict[str, Any],
     ) -> tuple[dict[str, Any], str | None]:
         if not self._needs_business_knowledge(decision):
@@ -183,6 +191,7 @@ class DecisionMaker:
             active_booking=active_booking,
             recent_completed_booking=recent_completed_booking,
             execution_feedback=execution_feedback,
+            owner_handoff_feedback=owner_handoff_feedback,
             decision=decision,
         )
 
@@ -198,6 +207,7 @@ class DecisionMaker:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None,
+        owner_handoff_feedback: dict[str, Any] | None,
         decision: dict[str, Any],
     ) -> tuple[dict[str, Any], str | None]:
         query = str(decision.get("business_knowledge_query", "") or "").strip()
@@ -230,6 +240,7 @@ class DecisionMaker:
             active_booking=active_booking,
             recent_completed_booking=recent_completed_booking,
             execution_feedback=execution_feedback,
+            owner_handoff_feedback=owner_handoff_feedback,
         )
 
     def _normalize_no_file_decision(
@@ -255,7 +266,7 @@ class DecisionMaker:
             reply_action=str(normalized.get("reply_action", "") or "").strip().lower(),
             missing_fields=_unique_string_list(normalized.get("missing_fields")),
         )
-        return normalized
+        return cast(dict[str, Any], normalized)
 
     @staticmethod
     def _needs_business_knowledge(decision: dict[str, Any]) -> bool:

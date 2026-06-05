@@ -43,6 +43,9 @@ def workflow_upsert_kwargs(
         "knowledge_file_ids": body.get("knowledge_file_ids")
         if isinstance(body.get("knowledge_file_ids"), list)
         else None,
+        "handoff_rules": body.get("handoff_rules")
+        if isinstance(body.get("handoff_rules"), list)
+        else None,
         "sink_type": str(body.get("sink_type", "")).strip(),
         "sink_config": body.get("sink_config") if isinstance(body.get("sink_config"), dict) else None,
         "schedule": str(schedule_value).strip() or "*/2 * * * *",

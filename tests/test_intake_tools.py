@@ -41,6 +41,12 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
             "name": "Car Wash Intake",
             "intent_description": "Handle booking requests from Instagram DMs.",
             "required_fields": ["day", "time", "car_type", "wash_type"],
+            "handoff_rules": [
+                {
+                    "id": "discount_approval",
+                    "condition": "Customer asks for discount approval.",
+                }
+            ],
             "sink_type": "local_csv",
             "sink_config": {"file_path": "tulpa_stuff/bookings.csv"},
         }
@@ -57,6 +63,7 @@ async def test_intake_workflow_upsert_posts_expected_payload() -> None:
     assert payload["provider"] == "composio"
     assert payload["assistant_instructions"] == ""
     assert payload["knowledge_file_ids"] == []
+    assert payload["handoff_rules"][0]["id"] == "discount_approval"
     assert payload["reply_mode"] == "auto"
 
 

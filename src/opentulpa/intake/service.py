@@ -10,14 +10,22 @@ import threading
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
+from opentulpa.handoffs import (
+    OWNER_HANDOFF_RESUME_EVENT_TYPE,
+    IntakeHandoffService,
+    IntakeHandoffStore,
+    normalize_handoff_rules,
+)
 from opentulpa.intake.decision_applier import DecisionApplier
 from opentulpa.intake.decision_maker import DecisionMaker
+from opentulpa.intake.handoff_runner import IntakeHandoffRuntime
 from opentulpa.intake.messaging_adapters import (
     AdapterRegistry,
+    ConversationSummary,
     build_messaging_adapter_registry,
     messaging_adapter_context,
 )
@@ -245,6 +253,7 @@ class IntakeWorkflowService:
         file_vault: FileVaultService | None = None,
         knowledge_service: Any | None = None,
         get_agent_runtime: Any | None = None,
+        handoff_service: IntakeHandoffService | None = None,
     ) -> None:
         self._db_path = db_path.resolve()
         self._store = IntakeWorkflowStore(db_path=self._db_path)
@@ -272,6 +281,14 @@ class IntakeWorkflowService:
         self._file_vault = file_vault
         self._knowledge_service = knowledge_service
         self._get_agent_runtime = get_agent_runtime
+        self._handoff_service = handoff_service or IntakeHandoffService(
+            store=IntakeHandoffStore(db_path=self._db_path)
+        )
+        self._handoff_runtime = IntakeHandoffRuntime(
+            service=self,
+            handoff_service=self._handoff_service,
+        )
+        self._handoff_service.set_queue_callback(self._handoff_runtime.queue_owner_handoff_resume)
         self._conversation_locks_guard = threading.Lock()
         self._conversation_locks: dict[str, asyncio.Lock] = {}
         self._pending_worker_task: asyncio.Task[None] | None = None
@@ -281,6 +298,10 @@ class IntakeWorkflowService:
 
     def _conn(self) -> Any:
         return self._store.conn()
+
+    @property
+    def handoffs(self) -> IntakeHandoffService:
+        return self._handoff_service
 
     async def start(self) -> None:
         if self._pending_worker_task is not None and not self._pending_worker_task.done():
@@ -464,6 +485,8 @@ class IntakeWorkflowService:
     ) -> bool:
         if force:
             return False
+        if str(event_type or "").strip() == OWNER_HANDOFF_RESUME_EVENT_TYPE:
+            return False
         channel = str(workflow.get("channel", "") or "").strip().lower()
         provider = str(workflow.get("provider", "") or "").strip().lower()
         if (
@@ -512,6 +535,8 @@ class IntakeWorkflowService:
         owner_chat_id: str = "",
         delay_seconds: float = _TELEGRAM_BUSINESS_WEBHOOK_SETTLE_SECONDS,
         last_inbound_message_id: str = "",
+        handoff_id: str = "",
+        owner_feedback: str = "",
     ) -> dict[str, Any]:
         safe_workflow_id = str(workflow.get("workflow_id", "") or "").strip()
         safe_customer_id = str(workflow.get("customer_id", "") or "").strip()
@@ -527,6 +552,8 @@ class IntakeWorkflowService:
             owner_chat_id=owner_chat_id,
             due_at=due_at,
             last_inbound_message_id=last_inbound_message_id,
+            handoff_id=handoff_id,
+            owner_feedback=owner_feedback,
         )
         queued["summary"] = NO_NOTIFY_TOKEN
         return queued
@@ -654,11 +681,14 @@ class IntakeWorkflowService:
         generation = int(row.get("generation") or 0)
         result: dict[str, Any]
         try:
-            result = await self.run_workflow(
-                customer_id=customer_id,
-                workflow_id=workflow_id,
-                event_type=_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
-            )
+            if str(row.get("event_type", "") or "").strip() == OWNER_HANDOFF_RESUME_EVENT_TYPE:
+                result = await self._handoff_runtime.run_owner_handoff_resume_row(row)
+            else:
+                result = await self.run_workflow(
+                    customer_id=customer_id,
+                    workflow_id=workflow_id,
+                    event_type=_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
+                )
         except Exception as exc:
             result = {
                 "ok": False,
@@ -840,6 +870,7 @@ class IntakeWorkflowService:
         assistant_instructions: str,
         business_facts: dict[str, Any] | None,
         knowledge_file_ids: list[str],
+        handoff_rules: list[dict[str, Any]] | None,
         sink_type: str,
         sink_config: dict[str, Any] | None,
         schedule: str,
@@ -860,6 +891,7 @@ class IntakeWorkflowService:
         safe_assistant_instructions = str(assistant_instructions or "").strip()
         safe_business_facts = _normalize_business_facts(business_facts)
         safe_knowledge_file_ids = _unique_string_list(knowledge_file_ids)
+        safe_handoff_rules = normalize_handoff_rules(handoff_rules or [])
         safe_reply_mode = "auto"
         if not safe_customer:
             raise ValueError("customer_id is required")
@@ -926,6 +958,7 @@ class IntakeWorkflowService:
             "assistant_instructions": safe_assistant_instructions,
             "business_facts": safe_business_facts,
             "knowledge_file_ids": safe_knowledge_file_ids,
+            "handoff_rules": safe_handoff_rules,
             "sink_type": safe_sink_type,
             "sink_config": safe_sink_config,
             "schedule": safe_schedule,
@@ -1103,6 +1136,7 @@ class IntakeWorkflowService:
                 for item in _safe_list(workflow.get("knowledge_file_ids"))
                 if str(item or "").strip()
             ],
+            "handoff_rules": normalize_handoff_rules(workflow.get("handoff_rules") or []),
             "sink_type": str(workflow.get("sink_type", "") or ""),
             "sink_config": _safe_dict(workflow.get("sink_config")),
             "schedule": str(workflow.get("schedule", _DEFAULT_SCHEDULE) or _DEFAULT_SCHEDULE),
@@ -1126,6 +1160,7 @@ class IntakeWorkflowService:
         assistant_instructions: str = "",
         business_facts: dict[str, Any] | None = None,
         knowledge_file_ids: list[str] | None = None,
+        handoff_rules: list[dict[str, Any]] | None = None,
         sink_type: str,
         sink_config: dict[str, Any] | None = None,
         schedule: str = _DEFAULT_SCHEDULE,
@@ -1147,6 +1182,7 @@ class IntakeWorkflowService:
                 assistant_instructions=assistant_instructions,
                 business_facts=business_facts,
                 knowledge_file_ids=knowledge_file_ids or [],
+                handoff_rules=handoff_rules or [],
                 sink_type=sink_type,
                 sink_config=sink_config,
                 schedule=schedule,
@@ -1356,6 +1392,7 @@ class IntakeWorkflowService:
         assistant_instructions: str = "",
         business_facts: dict[str, Any] | None = None,
         knowledge_file_ids: list[str] | None = None,
+        handoff_rules: list[dict[str, Any]] | None = None,
         sink_type: str,
         sink_config: dict[str, Any] | None = None,
         schedule: str = _DEFAULT_SCHEDULE,
@@ -1399,6 +1436,7 @@ class IntakeWorkflowService:
             assistant_instructions=assistant_instructions,
             business_facts=business_facts,
             knowledge_file_ids=knowledge_file_ids or [],
+            handoff_rules=handoff_rules or [],
             sink_type=sink_type,
             sink_config=sink_config,
             schedule=schedule,
@@ -2055,7 +2093,7 @@ class IntakeWorkflowService:
         adapter = self._messaging_adapters.get(context.key)
         if adapter is not None:
             result = adapter.list_source_items(context=context)
-            return result.items, result.error, result.warnings
+            return [dict(item) for item in result.items], result.error, result.warnings
         return [], (
             f"Workflow {context.workflow_name} failed: unsupported source "
             f"{context.channel}/{context.provider}."
@@ -2071,7 +2109,7 @@ class IntakeWorkflowService:
         adapter = self._messaging_adapters.get(context.key)
         if adapter is not None:
             result = adapter.load_conversation(context=context, conversation_id=conversation_id)
-            return result.summary, result.conversation, result.error
+            return dict(result.summary), result.conversation, result.error
         return {}, {}, "unsupported source"
 
     async def _send_source_reply(
@@ -2086,7 +2124,7 @@ class IntakeWorkflowService:
         if adapter is not None:
             return await adapter.send_reply(
                 context=context,
-                conversation_summary=conversation_summary,
+                conversation_summary=cast(ConversationSummary, conversation_summary),
                 reply_text=reply_text,
             )
         return f"unsupported reply source {context.channel}/{context.provider}"
@@ -2128,6 +2166,7 @@ class IntakeWorkflowService:
         active_booking: dict[str, Any] | None,
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None = None,
+        owner_handoff_feedback: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         return await self._decision_maker.decide_workflow_action(
             workflow=workflow,
@@ -2136,6 +2175,22 @@ class IntakeWorkflowService:
             active_booking=active_booking,
             recent_completed_booking=recent_completed_booking,
             execution_feedback=execution_feedback,
+            owner_handoff_feedback=owner_handoff_feedback,
+        )
+
+    def _open_or_update_owner_handoff(
+        self,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        conversation: dict[str, Any],
+        decision: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        return self._handoff_runtime.open_or_update_owner_handoff(
+            workflow=workflow,
+            conversation_summary=conversation_summary,
+            conversation=conversation,
+            decision=decision,
         )
 
     def _emit_apply_decision_validation_error(
