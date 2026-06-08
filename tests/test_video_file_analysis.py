@@ -62,7 +62,7 @@ async def test_summarize_uploaded_blob_video_uses_segment_pipeline(monkeypatch) 
 @pytest.mark.asyncio
 async def test_summarize_uploaded_blob_video_large_file_returns_guard_message() -> None:
     runtime = _DummyRuntime()
-    too_large = b"x" * (20_000_000 + 1)
+    too_large = b"x" * (file_analysis._VIDEO_INLINE_MAX_BYTES + 1)
 
     summary = await file_analysis.summarize_uploaded_blob(
         runtime,

@@ -299,6 +299,7 @@ async def persist_rollup_memory(
                     "kind": "thread_context_rollup",
                     "thread_id": str(thread_id or ""),
                 },
+                "infer": False,
             },
             timeout=10.0,
             retries=1,

@@ -114,6 +114,7 @@ def register_skill_routes(
                         "skill_name": skill.get("name"),
                         "scope": skill.get("scope"),
                     },
+                    infer=False,
                 )
         return {"ok": True, "skill": skill}
 

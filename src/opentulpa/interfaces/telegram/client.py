@@ -30,6 +30,24 @@ def _supports_message_draft(chat_id: int | str) -> bool:
     return False
 
 
+def _telegram_retry_after_seconds(data: dict[str, Any] | None) -> float | None:
+    params = data.get("parameters", {}) if isinstance(data, dict) else {}
+    if not isinstance(params, dict):
+        return None
+    value = params.get("retry_after")
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(min(value, 15))
+
+
+def _response_json_dict(response: Any) -> dict[str, Any] | None:
+    with suppress(Exception):
+        data = response.json()
+        if isinstance(data, dict):
+            return data
+    return None
+
+
 def _resolve_media_send_target(
     *,
     kind: str,
@@ -87,19 +105,28 @@ class TelegramClient:
                 return None
 
             if not r.is_success:
+                data = _response_json_dict(r)
                 # Telegram returns HTTP 400 for no-op edits:
                 # "Bad Request: message is not modified".
                 # For streaming loader updates this is benign and should not be treated
                 # as a hard failure.
                 if method == "editMessageText":
-                    with suppress(Exception):
-                        data = r.json()
-                        desc = str((data or {}).get("description", "")).lower()
-                        if "message is not modified" in desc:
-                            return {"ok": True, "result": {}}
+                    desc = str((data or {}).get("description", "")).lower()
+                    if "message is not modified" in desc:
+                        return {"ok": True, "result": {}}
                 if r.status_code in retryable_http and attempt < max_attempts - 1:
-                    await asyncio.sleep(0.4 * (2**attempt))
+                    retry_after = _telegram_retry_after_seconds(data)
+                    await asyncio.sleep(
+                        retry_after if retry_after is not None else 0.4 * (2**attempt)
+                    )
                     continue
+                if method == "sendChatAction" and r.status_code == 429:
+                    logger.info(
+                        "Telegram API %s throttled after retries: %s",
+                        method,
+                        (r.text or "")[:400],
+                    )
+                    return None
                 logger.warning(
                     "Telegram API %s HTTP %s: %s",
                     method,
@@ -118,16 +145,15 @@ class TelegramClient:
                 return data
 
             if attempt < max_attempts - 1:
-                retry_after = None
-                if isinstance(data, dict):
-                    params = data.get("parameters", {})
-                    if isinstance(params, dict):
-                        value = params.get("retry_after")
-                        if isinstance(value, int) and value > 0:
-                            retry_after = min(value, 5)
-                await asyncio.sleep(float(retry_after) if retry_after is not None else 0.4 * (2**attempt))
+                retry_after = _telegram_retry_after_seconds(data)
+                await asyncio.sleep(
+                    retry_after if retry_after is not None else 0.4 * (2**attempt)
+                )
                 continue
 
+            if method == "sendChatAction" and _telegram_retry_after_seconds(data) is not None:
+                logger.info("Telegram API %s throttled after retries.", method)
+                return None
             logger.warning("Telegram API %s returned error payload: %s", method, str(data)[:400])
             return None
         return None

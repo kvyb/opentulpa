@@ -32,6 +32,24 @@ def test_extract_attachments_includes_video_note() -> None:
     assert item.mime_type == "video/mp4"
 
 
+def test_extract_attachments_preserves_file_size() -> None:
+    attachments = extract_attachments(
+        {
+            "document": {
+                "file_id": "doc-1",
+                "file_name": "clip.MOV",
+                "mime_type": "video/quicktime",
+                "file_size": 20_500_000,
+            }
+        }
+    )
+
+    assert len(attachments) == 1
+    assert attachments[0].filename == "clip.MOV"
+    assert attachments[0].mime_type == "video/quicktime"
+    assert attachments[0].file_size == 20_500_000
+
+
 def test_uploaded_files_context_is_internal_and_avoids_paths() -> None:
     context = build_uploaded_files_context(
         [
@@ -77,7 +95,9 @@ def test_uploaded_files_context_sanitizes_stale_xlsx_no_text_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_document_ingest_skips_auto_llm_summary(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_document_ingest_skips_auto_llm_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     class FakeTelegramClient:
         def __init__(self, token: str) -> None:
             self.token = token
@@ -97,7 +117,9 @@ async def test_document_ingest_skips_auto_llm_summary(monkeypatch: pytest.Monkey
 
         async def summarize_uploaded_blob(self, **kwargs):
             self.called = True
-            raise AssertionError("document uploads should be indexed/queryable, not auto-summarized")
+            raise AssertionError(
+                "document uploads should be indexed/queryable, not auto-summarized"
+            )
 
     monkeypatch.setattr(attachments_module, "TelegramClient", FakeTelegramClient)
     runtime = Runtime()
@@ -125,3 +147,66 @@ async def test_document_ingest_skips_auto_llm_summary(monkeypatch: pytest.Monkey
     assert records[0]["original_filename"] == "prices.xlsx"
     assert "ai_summary=" not in records[0]["summary"]
     assert runtime.called is False
+
+
+@pytest.mark.asyncio
+async def test_ingest_attachments_records_unavailable_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class FakeTelegramClient:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        async def download_file(self, *, file_id: str):
+            assert file_id == "tg-video-1"
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    class Memory:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def add_text(
+            self, text: str, *, user_id: str, metadata: dict[str, object], infer: bool
+        ) -> None:
+            self.calls.append(
+                {
+                    "text": text,
+                    "user_id": user_id,
+                    "metadata": metadata,
+                    "infer": infer,
+                }
+            )
+
+    monkeypatch.setattr(attachments_module, "TelegramClient", FakeTelegramClient)
+    vault = FileVaultService(root_dir=tmp_path / "vault", db_path=tmp_path / "vault.sqlite")
+    memory = Memory()
+
+    records = await ingest_attachments(
+        attachments=[
+            TelegramAttachment(
+                kind="video",
+                file_id="tg-video-1",
+                filename="clip.MOV",
+                mime_type="video/quicktime",
+                file_size=20_500_000,
+            )
+        ],
+        bot_token="token",
+        file_vault=vault,
+        memory=memory,
+        agent_runtime=None,
+        customer_id="telegram_1",
+        chat_id=1,
+        caption=None,
+    )
+
+    assert len(records) == 1
+    assert records[0]["kind"] == "unavailable_video"
+    assert "clip.MOV" in records[0]["summary"]
+    assert "could not be downloaded" in records[0]["summary"]
+    assert memory.calls
+    assert memory.calls[0]["infer"] is False

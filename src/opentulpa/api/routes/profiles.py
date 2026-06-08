@@ -41,6 +41,7 @@ def _schedule_best_effort_memory_add(
                 text,
                 user_id=user_id,
                 metadata=metadata,
+                infer=False,
             )
 
     with suppress(RuntimeError):

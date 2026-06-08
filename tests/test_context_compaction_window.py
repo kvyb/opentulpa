@@ -150,9 +150,7 @@ async def test_compact_thread_context_for_turn_enforces_recent_window_and_rollup
 
     assert result.status == "compacted"
     remaining_messages = runtime._graph._messages
-    after_tokens = sum(
-        approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages
-    )
+    after_tokens = sum(approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages)
     assert remaining_messages
     assert after_tokens <= 20000
     assert runtime._checkpointer.deleted is True
@@ -189,7 +187,7 @@ async def test_compaction_schedules_rollup_memory_persist_off_hot_path() -> None
     assert runtime.memory_persist_started is True
     assert runtime.memory_add_calls
     body = runtime.memory_add_calls[0]["json_body"]
-    assert "infer" not in body
+    assert body["infer"] is False
     assert body["metadata"] == {
         "kind": "thread_context_rollup",
         "thread_id": "chat-background",
@@ -234,7 +232,7 @@ async def test_runtime_shutdown_drains_compaction_memory_tasks_before_teardown()
 
 
 @pytest.mark.asyncio
-async def test_persist_rollup_memory_leaves_mem0_inference_enabled() -> None:
+async def test_persist_rollup_memory_disables_mem0_inference() -> None:
     runtime = _DummyRuntime([])
 
     await persist_rollup_memory(
@@ -246,7 +244,7 @@ async def test_persist_rollup_memory_leaves_mem0_inference_enabled() -> None:
 
     assert runtime.memory_add_calls
     assert runtime.memory_add_calls[0]["path"] == "/internal/memory/add"
-    assert "infer" not in runtime.memory_add_calls[0]["json_body"]
+    assert runtime.memory_add_calls[0]["json_body"]["infer"] is False
 
 
 @pytest.mark.asyncio
@@ -269,7 +267,9 @@ async def test_compact_thread_context_for_turn_uses_configured_compaction_model(
 
 
 @pytest.mark.asyncio
-async def test_compact_thread_context_for_turn_chunks_full_removed_context_while_dropping_to_recent_window() -> None:
+async def test_compact_thread_context_for_turn_chunks_full_removed_context_while_dropping_to_recent_window() -> (
+    None
+):
     messages = [HumanMessage(content=f"msg_{i} " + ("x" * 2800)) for i in range(180)]
     runtime = _DummyRuntime(messages)
     runtime._context_short_term_high_tokens = 12000
@@ -285,9 +285,7 @@ async def test_compact_thread_context_for_turn_chunks_full_removed_context_while
 
     assert result.status == "compacted"
     remaining_messages = runtime._graph._messages
-    remaining_tokens = sum(
-        approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages
-    )
+    remaining_tokens = sum(approx_tokens(f"[user] {str(m.content)}") for m in remaining_messages)
     assert remaining_messages
     assert remaining_tokens <= 3500
     assert len(runtime._model.calls) > 1

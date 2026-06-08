@@ -65,6 +65,7 @@ def extract_attachments(message: dict[str, Any]) -> list[TelegramAttachment]:
                     file_id=fid,
                     filename=str(document.get("file_name", "")).strip() or None,
                     mime_type=str(document.get("mime_type", "")).strip() or None,
+                    file_size=int(document.get("file_size") or 0) or None,
                 )
             )
 
@@ -86,6 +87,7 @@ def extract_attachments(message: dict[str, Any]) -> list[TelegramAttachment]:
                         file_id=fid,
                         filename=f"{unique}.jpg",
                         mime_type="image/jpeg",
+                        file_size=int(chosen.get("file_size") or 0) or None,
                     )
                 )
 
@@ -110,6 +112,7 @@ def extract_attachments(message: dict[str, Any]) -> list[TelegramAttachment]:
                 file_id=fid,
                 filename=filename,
                 mime_type=str(item.get("mime_type", "")).strip() or None,
+                file_size=int(item.get("file_size") or 0) or None,
             )
         )
     return attachments
@@ -201,6 +204,46 @@ async def ingest_attachments(
         for attachment in attachments:
             downloaded = await client.download_file(file_id=attachment.file_id)
             if not downloaded:
+                original_name = attachment.filename or f"{attachment.kind}.bin"
+                unavailable_note = (
+                    "Telegram file was received but could not be downloaded by the bot. "
+                    f"original_name={original_name} "
+                    f"original_kind={attachment.kind} "
+                    f"original_mime_type={attachment.mime_type or 'unknown'} "
+                    f"telegram_file_id={attachment.file_id} "
+                    f"telegram_file_size_bytes={attachment.file_size or 'unknown'}. "
+                    "This can happen when Telegram refuses Bot API download for the file size "
+                    "or the file is temporarily unavailable. Ask the user for a shorter/compressed "
+                    "clip or a direct video URL before claiming to analyze the video."
+                )
+                record = file_vault.ingest_file(
+                    customer_id=customer_id,
+                    chat_id=chat_id,
+                    kind=f"unavailable_{attachment.kind}",
+                    telegram_file_id=attachment.file_id,
+                    original_filename=f"{_safe_segment(original_name, fallback=attachment.kind)}.download-unavailable.txt",
+                    mime_type="text/plain",
+                    caption=caption,
+                    raw_bytes=unavailable_note.encode("utf-8"),
+                )
+                updated = file_vault.set_ai_summary(
+                    customer_id, str(record.get("id", "")), unavailable_note
+                )
+                if isinstance(updated, dict):
+                    record = updated
+                ingested.append(record)
+                if memory is not None:
+                    with suppress(Exception):
+                        memory.add_text(
+                            unavailable_note,
+                            user_id=customer_id,
+                            metadata={
+                                "kind": "file_fact",
+                                "file_id": record.get("id"),
+                                "file_kind": record.get("kind"),
+                            },
+                            infer=False,
+                        )
                 continue
             raw_bytes = downloaded.get("raw_bytes")
             if not isinstance(raw_bytes, (bytes, bytearray)) or not raw_bytes:
@@ -267,6 +310,7 @@ async def ingest_attachments(
                                     "file_id": record.get("id"),
                                     "file_kind": record.get("kind"),
                                 },
+                                infer=False,
                             )
                     continue
                 with suppress(Exception):
@@ -278,14 +322,20 @@ async def ingest_attachments(
                         caption=caption,
                     )
                     if ai_summary:
-                        updated = file_vault.set_ai_summary(customer_id, str(record.get("id", "")), ai_summary)
+                        updated = file_vault.set_ai_summary(
+                            customer_id, str(record.get("id", "")), ai_summary
+                        )
                         if isinstance(updated, dict):
                             record = updated
             ingested.append(record)
             if memory is not None:
                 with suppress(Exception):
                     record_kind = str(record.get("kind", "")).strip().lower()
-                    memory_kind = "media_fact" if record_kind in {"photo", "video", "video_note", "audio", "voice"} else "file_fact"
+                    memory_kind = (
+                        "media_fact"
+                        if record_kind in {"photo", "video", "video_note", "audio", "voice"}
+                        else "file_fact"
+                    )
                     memory.add_text(
                         (
                             "User file stored in vault. "
@@ -301,6 +351,7 @@ async def ingest_attachments(
                             "file_id": record.get("id"),
                             "file_kind": record.get("kind"),
                         },
+                        infer=False,
                     )
     finally:
         if hasattr(client, "aclose"):

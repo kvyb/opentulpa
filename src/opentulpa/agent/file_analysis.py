@@ -33,7 +33,7 @@ _VIDEO_EXTENSIONS = {
 }
 _VIDEO_SEGMENT_SECONDS = 30
 _VIDEO_MAX_SEGMENTS = 12
-_VIDEO_INLINE_MAX_BYTES = 20_000_000
+_VIDEO_INLINE_MAX_BYTES = 20 * 1024 * 1024
 _VIDEO_FALLBACK_DURATION_SECONDS = 120
 _MEDIA_ANALYSIS_RETRIES = 2
 
@@ -459,7 +459,7 @@ async def _summarize_video_blob(
     if len(content_bytes) > _VIDEO_INLINE_MAX_BYTES:
         return (
             f"Uploaded video '{filename}' is {len(content_bytes)} bytes, which is too large for inline "
-            "video analysis. Please send a shorter/compressed clip (under 20MB) or share a supported video URL."
+            "video analysis. Please send a shorter/compressed clip (under 20MiB) or share a supported video URL."
         )
 
     safe_mime = _video_mime_or_default(mime_type)

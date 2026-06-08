@@ -49,6 +49,7 @@ def register_memory_tools(runtime: Any) -> dict[str, Any]:
                     json_body={
                         "messages": [{"role": "user", "content": summary}],
                         "user_id": customer_id,
+                        "infer": False,
                     },
                     timeout=30.0,
                     retries=0,

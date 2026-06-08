@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
 DRAFT_INITIAL_PUBLISH_DELAY_SECONDS = 0.35
 DRAFT_PUBLISH_MIN_INTERVAL_SECONDS = 0.9
+TELEGRAM_TYPING_MIN_INTERVAL_SECONDS = 5.0
 WORKFLOW_SETUP_FINAL_REPLY_TIMEOUT_SECONDS = 180.0
 WORKFLOW_SETUP_BUSY_REPLY = (
     "I'm still working on the workflow setup. I'll send the proposal here as soon as it's ready."
@@ -88,6 +89,8 @@ class _TelegramStreamResources:
 
 
 _WORKFLOW_SETUP_RUNS: dict[str, _WorkflowSetupRun] = {}
+_TELEGRAM_TYPING_LAST_SENT_AT: dict[int, float] = {}
+_TELEGRAM_TYPING_LOCK = asyncio.Lock()
 
 
 def _clean_thread_id(value: Any) -> str:
@@ -177,8 +180,17 @@ async def _emit_typing_until_done(
     stop_event: asyncio.Event,
 ) -> None:
     while not stop_event.is_set():
-        with suppress(Exception):
-            await client.send_chat_action(chat_id=chat_id, action="typing")
+        safe_chat_id = int(chat_id)
+        should_send = False
+        async with _TELEGRAM_TYPING_LOCK:
+            now = time.monotonic()
+            last_sent = _TELEGRAM_TYPING_LAST_SENT_AT.get(safe_chat_id, 0.0)
+            if now - last_sent >= TELEGRAM_TYPING_MIN_INTERVAL_SECONDS:
+                _TELEGRAM_TYPING_LAST_SENT_AT[safe_chat_id] = now
+                should_send = True
+        if should_send:
+            with suppress(Exception):
+                await client.send_chat_action(chat_id=safe_chat_id, action="typing")
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=4.0)
 

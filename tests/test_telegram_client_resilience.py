@@ -52,6 +52,25 @@ class _NotModifiedEditClient:
         )
 
 
+class _RetryAfterThenSuccessClient:
+    attempts = 0
+
+    async def post(self, *args, **kwargs):
+        del args, kwargs
+        _RetryAfterThenSuccessClient.attempts += 1
+        if _RetryAfterThenSuccessClient.attempts == 1:
+            return httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests: retry after 3",
+                    "parameters": {"retry_after": 3},
+                },
+            )
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+
 class _RecordingSendClient:
     payloads: list[dict]
 
@@ -107,6 +126,28 @@ async def test_post_treats_not_modified_edit_as_success(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_post_honors_retry_after_for_send_chat_action_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    _RetryAfterThenSuccessClient.attempts = 0
+    monkeypatch.setattr(telegram_client_module.httpx, "AsyncClient", _RetryAfterThenSuccessClient)
+    monkeypatch.setattr(telegram_client_module.asyncio, "sleep", _fake_sleep)
+    tg = TelegramClient("dummy")
+
+    result = await tg._post("sendChatAction", {"chat_id": 1, "action": "typing"})
+
+    assert isinstance(result, dict)
+    assert result.get("ok") is True
+    assert sleeps == [3.0]
+    assert _RetryAfterThenSuccessClient.attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_send_message_splits_long_markdown_into_formatted_messages() -> None:
     recorder = _RecordingSendClient()
     tg = TelegramClient("dummy")
@@ -129,7 +170,10 @@ async def test_send_message_splits_long_markdown_into_formatted_messages() -> No
     assert all(len(str(payload.get("text", ""))) <= 3800 for payload in recorder.payloads)
     assert all("## " not in str(payload.get("text", "")) for payload in recorder.payloads)
     assert all("**" not in str(payload.get("text", "")) for payload in recorder.payloads)
-    assert all("[Truncated to fit Telegram.]" not in str(payload.get("text", "")) for payload in recorder.payloads)
+    assert all(
+        "[Truncated to fit Telegram.]" not in str(payload.get("text", ""))
+        for payload in recorder.payloads
+    )
 
 
 @pytest.mark.asyncio

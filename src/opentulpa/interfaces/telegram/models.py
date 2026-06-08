@@ -19,3 +19,4 @@ class TelegramAttachment:
     file_id: str
     filename: str | None
     mime_type: str | None
+    file_size: int | None = None
