@@ -95,6 +95,17 @@ def model_provider_profile(model_name: str | None) -> ModelProviderProfile:
             ),
             stream_chunk_timeout_default_seconds=75.0,
         )
+    if slug.startswith("z-ai/") or slug.startswith("zai/") or "glm" in slug:
+        return ModelProviderProfile(
+            model_name=safe_model_name,
+            cache_strategy="automatic",
+            stream_chunk_timeout_env_names=(
+                "OPENTULPA_ZAI_MODEL_STREAM_CHUNK_TIMEOUT_SECONDS",
+                "OPENTULPA_MODEL_STREAM_CHUNK_TIMEOUT_SECONDS",
+                "OPENTULPA_MODEL_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS",
+            ),
+            stream_chunk_timeout_default_seconds=75.0,
+        )
     automatic_markers = (
         "openai/",
         "gpt-",
@@ -104,9 +115,6 @@ def model_provider_profile(model_name: str | None) -> ModelProviderProfile:
         "deepseek",
         "grok",
         "x-ai/",
-        "z-ai/",
-        "zai/",
-        "glm",
         "moonshot",
         "kimi",
         "groq/",

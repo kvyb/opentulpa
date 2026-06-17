@@ -1247,7 +1247,7 @@ def test_prompt_cache_profile_uses_openrouter_standard_modes() -> None:
     anth = runtime.prompt_cache_profile(model_name="anthropic/claude-sonnet-4.6")
     gemini = runtime.prompt_cache_profile(model_name="google/gemini-3-flash-preview")
     auto = runtime.prompt_cache_profile(model_name="openai/gpt-4.1")
-    zai = runtime.prompt_cache_profile(model_name="z-ai/glm-5.1")
+    zai = runtime.prompt_cache_profile(model_name="z-ai/glm-5.2")
     qwen = runtime.prompt_cache_profile(model_name="qwen/qwen3.7-max")
     minimax = runtime.prompt_cache_profile(model_name="minimax/minimax-m3")
 

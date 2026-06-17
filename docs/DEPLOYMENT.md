@@ -196,7 +196,7 @@ Telegram is optional in server mode. For web/API-only deployments, leave Telegra
 
 - `COMPOSIO_API_KEY` for connector integrations such as Google Sheets and Instagram
 - `OPENTULPA_SHUTDOWN_DRAIN_TIMEOUT_SECONDS=300` to let active web or Telegram turns finish during Railway deploy shutdown
-- Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=qwen/qwen3.7-max`, `LLM_REASONING_EFFORT=medium`, `WAKE_EXECUTION_MODEL=qwen/qwen3.7-max`, Gemini Flash for memory/media, Gemini Flash Lite for the business knowledge oracle)
+- Model defaults live in `opentulpa.config.yaml` (`LLM_MODEL=z-ai/glm-5.2`, `LLM_REASONING_EFFORT=medium`, `WAKE_EXECUTION_MODEL=z-ai/glm-5.2`, Gemini Flash for memory/media, Gemini Flash Lite for the business knowledge oracle)
 
 Browser Use reuses `MULTIMODAL_LLM` by default unless `BROWSER_USE_MODEL` is set.
 

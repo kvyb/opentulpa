@@ -1363,7 +1363,7 @@ class OpenTulpaLangGraphRuntime:
         workflow_setup_classifier_model = (
             str(workflow_setup_input_classifier_model_name).strip()
             if str(workflow_setup_input_classifier_model_name or "").strip()
-            else "z-ai/glm-5.1"
+            else "z-ai/glm-5.2"
         )
         self._workflow_setup_input_classifier_model_name = _normalize_model_name(
             workflow_setup_classifier_model

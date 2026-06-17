@@ -181,11 +181,11 @@ def test_prompt_cache_profile_openai_is_automatic() -> None:
     assert profile["supports_breakpoints"] is False
 
 
-def test_prompt_cache_profile_zai_glm_is_automatic() -> None:
+def test_prompt_cache_profile_zai_glm52_is_automatic() -> None:
     rt = OpenTulpaLangGraphRuntime(
         app_url="http://127.0.0.1:8000",
         openrouter_api_key="k",
-        model_name="z-ai/glm-5.1",
+        model_name="z-ai/glm-5.2",
         checkpoint_db_path=".opentulpa/test-prompt-cache.sqlite",
         prompt_caching_enabled=True,
     )
