@@ -185,7 +185,13 @@ class TelegramInterfaceWorker:
         if not self._webhook_cleared:
             await self._telegram.delete_webhook()
             self._webhook_cleared = True
-        await self.recover()
+        try:
+            await self.recover()
+        except (AgentAPIError, TelegramAPIError) as exc:
+            # The local Agent API does not accept requests until application startup
+            # finishes. Readiness is still gated on Telegram identity validation;
+            # durable recovery is retried by the normal polling loop.
+            logger.warning("Telegram worker deferred startup recovery: %s", exc)
 
     async def poll_once(self) -> int:
         """Poll and serially handle one Telegram update batch."""

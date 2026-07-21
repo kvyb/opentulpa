@@ -153,6 +153,12 @@ class _Agent:
         self.notification_acks.append(notification_id)
 
 
+class _UnavailableAgent(_Agent):
+    async def list_notifications(self, **kwargs: Any) -> list[AgentNotification]:
+        del kwargs
+        raise AgentAPIError("agent API is starting")
+
+
 def _message(update_id: int, *, user_id: int = 7, chat_id: int = 9, text: str) -> dict[str, Any]:
     return {
         "update_id": update_id,
@@ -163,6 +169,24 @@ def _message(update_id: int, *, user_id: int = 7, chat_id: int = 9, text: str) -
             "text": text,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_worker_becomes_ready_while_local_agent_api_is_starting(tmp_path: Path) -> None:
+    telegram = _Telegram()
+    stop = asyncio.Event()
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=_UnavailableAgent(),
+        state=TelegramWorkerState(tmp_path / "worker.json"),
+        pairing_code="pair-code",
+        poll_timeout_seconds=1,
+    )
+
+    await worker.run(stop, on_ready=stop.set)
+
+    assert stop.is_set()
+    assert telegram.webhook_deletes == 1
 
 
 @pytest.mark.asyncio
