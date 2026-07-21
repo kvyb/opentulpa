@@ -16,6 +16,7 @@ from opentulpa.deep_agent.service import DeepAgentService
 from opentulpa.integrations.browser_use_cloud import BrowserUseCloudSessionProvider
 from opentulpa.mcp import SQLiteMCPAuditSink, SQLiteMCPIdempotencyStore
 from opentulpa.notifications import TriggerNotificationSink
+from opentulpa.secrets.host_key import load_or_create_host_cipher
 from opentulpa.tooling import TOOL_SPECS
 
 
@@ -91,9 +92,9 @@ def test_storage_bootstrap_refuses_to_delete_conflicting_source_data(
 def test_secret_vault_host_key_is_created_once_with_private_permissions(
     tmp_path: Path,
 ) -> None:
-    first = main_module._load_or_create_secret_cipher(tmp_path)
+    first = load_or_create_host_cipher(tmp_path)
     encrypted = first.encrypt(b"credential", associated_data=b"tenant")
-    second = main_module._load_or_create_secret_cipher(tmp_path)
+    second = load_or_create_host_cipher(tmp_path)
     key_path = tmp_path / "bootstrap" / "secret-vault.key"
 
     assert key_path.stat().st_mode & 0o777 == 0o600
@@ -107,7 +108,7 @@ def test_secret_vault_refuses_a_group_readable_host_key(tmp_path: Path) -> None:
     key_path.chmod(0o640)
 
     with pytest.raises(RuntimeError, match="permissions"):
-        main_module._load_or_create_secret_cipher(tmp_path)
+        load_or_create_host_cipher(tmp_path)
 
 
 def test_build_application_composes_only_v2_product_services(tmp_path: Path) -> None:

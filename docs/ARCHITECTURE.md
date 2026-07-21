@@ -12,6 +12,9 @@ owner web UI       Telegram worker       time/event trigger       intake ingress
      |                   |                       |                       |
      +-------------------+-----------------------+-----------------------+
                                  |
+                    stable host proxy and auth
+                setup + encrypted config + logs
+                                 |
                     universal Agent API protocol
                 identity + AgentSpec + origin + files
                                  |
@@ -68,6 +71,20 @@ for subsequent model calls. OpenTulpa filters stream chunks marked
 never rendered as the assistant's answer.
 
 ## Fixed Kernel
+
+Normal `serve` deployments have a small stable host process. It owns first-run claim,
+owner authentication, AES-GCM encrypted runtime configuration, child readiness,
+redacted process logs, restart, and HTTP/SSE proxying. The child gets a separate
+internal owner credential. Telegram credentials never enter child process arguments or
+model-visible configuration; the host stores them in the child's capability vault and
+activates the reviewed polling worker through the Agent API.
+
+Configuration replacement is revisioned. The host validates external credentials,
+starts the candidate child, activates its interfaces, and only then advances the active
+revision. If any step fails, it marks that revision failed and restores the prior child.
+The host setup and recovery API remains available throughout.
+
+Managed self-release adds a stronger immutable deployment layer:
 
 The immutable bootstrap is a separate, long-lived host process. It owns:
 
@@ -322,13 +339,12 @@ SQLite, so an activated tool's audit trail and replay protection survive a proce
 restart. Caller-provided idempotency keys are hashed with the trusted tenant,
 capability revision, worker, and tool scope before use.
 
-When a host-level `TELEGRAM_BOT_TOKEN` enables the webhook interface, dynamic Telegram
-activation is blocked so two consumers cannot race on one bot. Without the host token,
-credential ingress can turn a BotFather token pasted in web chat into an encrypted
-tenant secret handle before checkpointing. The owner agent then tests and activates
-the Telegram worker after approval. The first Telegram account pairs once with
-`/start <code>`; the default code is the final eight token characters unless a host
-override is configured.
+The stable host accepts a Telegram token in `/_host` or during non-interactive first
+boot, verifies it with Telegram, writes it to an encrypted tenant secret handle, and
+activates the long-poll worker. A supplied numeric owner ID pre-binds the private chat;
+otherwise the worker uses its one-time `/start <code>` pairing contract. Explicit
+legacy `server` development mode may still compose the webhook adapter, but `serve`
+never starts both consumers for one bot.
 
 Interface generation changes are exclusive: the old worker is stopped before the new
 worker starts, both generations use the same capability-owned `/state`, and a failed

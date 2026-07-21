@@ -26,6 +26,8 @@ dependencies = [
 ]
 
 [project.scripts]
+opentulpa = "opentulpa.host.cli:main"
+opentulpa-host = "opentulpa.host.cli:serve"
 opentulpa-bootstrap = "opentulpa.bootstrap.gateway:main"
 opentulpa-recovery = "opentulpa.bootstrap.recovery_cli:main"
 opentulpa-migrate-deepagents = "opentulpa.migrations.deepagents:main"

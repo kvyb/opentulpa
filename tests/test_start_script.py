@@ -44,7 +44,7 @@ def test_start_script_help_shows_install_and_runtime_flags() -> None:
 
     assert result.returncode == 0
     assert "serve|local|server|managed|install|run|doctor" in result.stdout
-    assert "Start web chat and, when configured, Telegram" in result.stdout
+    assert "Start the stable setup host, web chat, and configured interfaces" in result.stdout
     assert "--api-key" in result.stdout
     assert "--telegram-bot-token" in result.stdout
     assert "--telegram-user-id" in result.stdout
@@ -77,12 +77,30 @@ def test_serve_starts_web_and_local_telegram_from_one_command(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     assert "required .env value(s) missing" not in result.stdout
     assert "open http://127.0.0.1:8000/ after the server is healthy" in result.stdout
-    assert "uv run --no-sync python scripts/manager.py" in result.stdout
+    assert "uv run --no-sync python -m opentulpa.host" in result.stdout
+    assert "scripts/manager.py" not in result.stdout
     assert "model-secret" not in result.stdout
     assert "bot-secret" not in result.stdout
 
 
-def test_serve_uses_direct_webhook_when_public_url_is_present(tmp_path: Path) -> None:
+def test_default_start_needs_no_model_key_and_launches_setup_host(tmp_path: Path) -> None:
+    result = _run_start(
+        "--run-only",
+        "--dry-run",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+            "OPENTULPA_OPEN_BROWSER": "0",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "can start before model and interface credentials" in result.stdout
+    assert "uv run --no-sync python -m opentulpa.host" in result.stdout
+    assert "required .env value(s) missing" not in result.stdout
+
+
+def test_serve_uses_stable_host_when_public_url_is_present(tmp_path: Path) -> None:
     result = _run_start(
         "serve",
         "--run-only",
@@ -102,10 +120,10 @@ def test_serve_uses_direct_webhook_when_public_url_is_present(tmp_path: Path) ->
     )
 
     assert result.returncode == 0, result.stderr
-    assert "generated a Telegram webhook secret for this run" in result.stdout
     assert "required .env value(s) missing" not in result.stdout
-    assert "uv run --no-sync python -m opentulpa" in result.stdout
+    assert "uv run --no-sync python -m opentulpa.host" in result.stdout
     assert "scripts/manager.py" not in result.stdout
+    assert "Telegram webhook secret" not in result.stdout
 
 
 def test_serve_requires_bot_token_and_owner_id_together() -> None:
@@ -124,7 +142,7 @@ def test_serve_requires_bot_token_and_owner_id_together() -> None:
     assert "requires both --telegram-bot-token and --telegram-user-id" in result.stderr
 
 
-def test_serve_persists_initial_configuration_privately(tmp_path: Path) -> None:
+def test_serve_does_not_persist_command_line_secrets_in_dotenv(tmp_path: Path) -> None:
     script = tmp_path / "start.sh"
     script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
     script.chmod(0o755)
@@ -153,13 +171,10 @@ def test_serve_persists_initial_configuration_privately(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "OPENAI_COMPATIBLE_API_KEY=model-secret" in dotenv
-    assert "TELEGRAM_BOT_TOKEN=bot-secret" in dotenv
-    assert "TELEGRAM_ALLOWED_USER_IDS=123456789" in dotenv
-    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / ".env").exists()
     assert "model-secret" not in result.stdout
     assert "bot-secret" not in result.stdout
+    assert "shell history" in result.stderr
 
 
 def test_container_and_railway_use_serve_entrypoint() -> None:
@@ -171,6 +186,7 @@ def test_container_and_railway_use_serve_entrypoint() -> None:
     ).read_text(encoding="utf-8")
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert 'command: ["./start.sh", "serve", "--run-only"]' in compose
+    assert "HOST: 0.0.0.0" in compose
     assert "OPENTULPA_DATA_ROOT: /app/opentulpa_data" in compose
 
 
@@ -471,7 +487,7 @@ def test_start_script_defaults_to_lean_core_dependencies() -> None:
     ) in result.stdout
 
 
-def test_start_script_defaults_to_web_server() -> None:
+def test_start_script_defaults_to_stable_host() -> None:
     result = _run_start(
         "--dry-run",
         env={
@@ -484,6 +500,7 @@ def test_start_script_defaults_to_web_server() -> None:
 
     assert result.returncode == 0
     assert "[start] running server mode." in result.stdout
+    assert "python -m opentulpa.host" in result.stdout
     assert "scripts/manager.py" not in result.stdout
 
 

@@ -36,9 +36,9 @@ Usage:
   ./start.sh [serve|local|server|managed|install|run|doctor] [options] [-- extra-args]
 
 Commands:
-  serve                 Start web chat and, when configured, Telegram
+  serve                 Start the stable setup host, web chat, and configured interfaces
   local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
-  server                Install, then run the web/API app server (default)
+  server                Install, then run the mutable web/API app directly
   managed               Install trusted OCI images, then run the self-replacing bootstrap
   install               Install/setup only
   run [local|server|managed] Run only, without installing
@@ -70,7 +70,7 @@ Options:
   --host HOST           Bind host (local default: 127.0.0.1)
   --port PORT           Server port (default: PORT or 8000)
   --data-root PATH      Persistent data directory
-  --public-url URL      Public base URL; otherwise Telegram uses a local tunnel
+  --public-url URL      Public base URL advertised by this deployment
   -h, --help            Show this help
 
 .env knobs:
@@ -388,6 +388,7 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       local|server|managed)
+        SERVE_MODE=0
         RUNTIME_MODE="$1"
         MODE="up"
         shift
@@ -407,6 +408,7 @@ parse_args() {
         MODE="install"
         shift
         if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" || "$1" == "managed" ) ]]; then
+          SERVE_MODE=0
           RUNTIME_MODE="$1"
           shift
         fi
@@ -415,6 +417,7 @@ parse_args() {
         MODE="run"
         shift
         if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" || "$1" == "managed" ) ]]; then
+          SERVE_MODE=0
           RUNTIME_MODE="$1"
           shift
         fi
@@ -423,6 +426,7 @@ parse_args() {
         MODE="doctor"
         shift
         if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" || "$1" == "managed" ) ]]; then
+          SERVE_MODE=0
           RUNTIME_MODE="$1"
           shift
         fi
@@ -436,24 +440,29 @@ parse_args() {
         shift
         ;;
       --local)
+        SERVE_MODE=0
         RUNTIME_MODE="local"
         shift
         ;;
       --server)
+        SERVE_MODE=0
         RUNTIME_MODE="server"
         shift
         ;;
       --managed)
+        SERVE_MODE=0
         RUNTIME_MODE="managed"
         shift
         ;;
       --app)
         warn "--app is deprecated; use server or --server."
+        SERVE_MODE=0
         RUNTIME_MODE="server"
         shift
         ;;
       --manager)
         warn "--manager is deprecated; use local or --local."
+        SERVE_MODE=0
         RUNTIME_MODE="local"
         shift
         ;;
@@ -541,6 +550,19 @@ parse_args() {
         ;;
     esac
   done
+}
+
+default_to_serve() {
+  local argument
+  [[ -z "${START_MODE:-}" ]] || return 0
+  for argument in "$@"; do
+    case "${argument}" in
+      serve|local|server|managed|install|run|doctor|--local|--server|--managed|--app|--manager)
+        return 0
+        ;;
+    esac
+  done
+  SERVE_MODE=1
 }
 
 resolve_runtime_mode() {
@@ -650,18 +672,18 @@ apply_serve_value() {
 }
 
 configure_serve() {
-  local bot_configured=0 owner_configured=0 generated_secret
+  local bot_configured=0 owner_configured=0
   [[ "${SERVE_MODE}" == "1" ]] || return 0
 
-  apply_serve_value "OPENAI_COMPATIBLE_API_KEY" "${CLI_API_KEY}"
-  apply_serve_value "TELEGRAM_BOT_TOKEN" "${CLI_TELEGRAM_BOT_TOKEN}"
+  [[ -z "${CLI_API_KEY}" ]] || export OPENAI_COMPATIBLE_API_KEY="${CLI_API_KEY}"
+  [[ -z "${CLI_TELEGRAM_BOT_TOKEN}" ]] || export TELEGRAM_BOT_TOKEN="${CLI_TELEGRAM_BOT_TOKEN}"
   if [[ -n "${CLI_TELEGRAM_USER_ID}" && ! "${CLI_TELEGRAM_USER_ID}" =~ ^[1-9][0-9]*$ ]]; then
     die "--telegram-user-id must be a positive numeric Telegram user ID"
   fi
-  apply_serve_value "TELEGRAM_ALLOWED_USER_IDS" "${CLI_TELEGRAM_USER_ID}"
-  apply_serve_value "OPENTULPA_WEB_TOKEN" "${CLI_WEB_TOKEN}"
+  [[ -z "${CLI_TELEGRAM_USER_ID}" ]] || export TELEGRAM_ALLOWED_USER_IDS="${CLI_TELEGRAM_USER_ID}"
+  [[ -z "${CLI_WEB_TOKEN}" ]] || export OPENTULPA_WEB_TOKEN="${CLI_WEB_TOKEN}"
   if [[ -n "${CLI_API_KEY}${CLI_TELEGRAM_BOT_TOKEN}${CLI_TELEGRAM_USER_ID}${CLI_WEB_TOKEN}" ]]; then
-    warn "configuration passed as command arguments is saved in private .env; environment variables avoid shell history"
+    warn "secrets passed as arguments can remain in shell history; use the setup UI when possible"
   fi
 
   if [[ -n "${SERVER_HOST}" ]]; then
@@ -689,18 +711,7 @@ configure_serve() {
   [[ "${bot_configured}" == "${owner_configured}" ]] \
     || die "Telegram requires both --telegram-bot-token and --telegram-user-id"
 
-  if [[ "${bot_configured}" == "1" ]] && ! public_base_url_is_set; then
-    RUNTIME_MODE="local"
-  else
-    RUNTIME_MODE="server"
-  fi
-
-  if [[ "${bot_configured}" == "1" && "${RUNTIME_MODE}" == "server" ]] \
-    && ! env_is_set "TELEGRAM_WEBHOOK_SECRET"; then
-    generated_secret="$(generate_owner_token)"
-    apply_serve_value "TELEGRAM_WEBHOOK_SECRET" "${generated_secret}"
-    log "generated a Telegram webhook secret for this run"
-  fi
+  RUNTIME_MODE="server"
 }
 
 configure_local_server_defaults() {
@@ -724,6 +735,10 @@ configure_local_server_defaults() {
     log "using local data at ${OPENTULPA_DATA_ROOT}"
   fi
   env_is_set "OPENTULPA_WEB_TOKEN" && return 0
+  if [[ "${SERVE_MODE}" == "1" ]] && ! host_is_loopback "${HOST:-}"; then
+    log "remote host is unclaimed; use the one-time setup token printed at startup."
+    return 0
+  fi
 
   token_dir="${OPENTULPA_DATA_ROOT}/bootstrap"
   token_path="${token_dir}/owner-web.token"
@@ -758,6 +773,11 @@ ensure_required_env() {
   fi
   ensure_env_file || true
   load_dotenv
+
+  if [[ "${SERVE_MODE}" == "1" ]]; then
+    log "stable host can start before model and interface credentials are configured."
+    return 0
+  fi
 
   env_is_set "OPENAI_COMPATIBLE_API_KEY" || missing+=("OPENAI_COMPATIBLE_API_KEY")
 
@@ -964,6 +984,15 @@ run_app() {
   run_cmd uv run --no-sync python -m opentulpa
 }
 
+run_host() {
+  ensure_uv
+  if ((${#PASSTHRU[@]})); then
+    run_cmd uv run --no-sync python -m opentulpa.host "${PASSTHRU[@]}"
+    return 0
+  fi
+  run_cmd uv run --no-sync python -m opentulpa.host
+}
+
 listener_pids_for_port() {
   local port="$1"
   lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | sort -u
@@ -1083,7 +1112,7 @@ open_local_web_when_ready() {
     local attempt
     for attempt in $(seq 1 480); do
       if curl -fsS "http://127.0.0.1:${PORT:-8000}/healthz" >/dev/null 2>&1 \
-        && curl -fsS "http://127.0.0.1:${PORT:-8000}/agent/healthz" >/dev/null 2>&1; then
+        && { [[ "${SERVE_MODE}" == "1" ]] || curl -fsS "http://127.0.0.1:${PORT:-8000}/agent/healthz" >/dev/null 2>&1; }; then
         "${opener}" "${url}" >/dev/null 2>&1 || true
         exit 0
       fi
@@ -1318,6 +1347,7 @@ run_doctor() {
 }
 
 main() {
+  default_to_serve "$@"
   parse_args "$@"
   load_dotenv
   configure_serve
@@ -1365,7 +1395,11 @@ main() {
     log "running server mode."
     stop_existing_server
     open_local_web_when_ready
-    run_app
+    if [[ "${SERVE_MODE}" == "1" ]]; then
+      run_host
+    else
+      run_app
+    fi
     return 0
   fi
 

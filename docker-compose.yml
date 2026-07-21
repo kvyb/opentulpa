@@ -5,6 +5,7 @@ services:
     env_file:
       - .env
     environment:
+      HOST: 0.0.0.0
       OPENTULPA_DATA_ROOT: /app/opentulpa_data
       PORT: 8000
     ports:

@@ -1,6 +1,10 @@
 # Deployment
 
-OpenTulpa has two explicit host shapes:
+OpenTulpa has three explicit host shapes:
+
+- **Host** is the default. It starts before model configuration and owns setup, owner
+  authentication, encrypted credentials, child process health, redacted logs, and the
+  public proxy. The Deep Agents application runs as its replaceable child.
 
 - **Direct** starts the mutable FastAPI release itself. Use it for development or a
   platform that already owns image rollout and rollback. Reviewed capability workers
@@ -13,17 +17,19 @@ access to the stable bootstrap evolution API.
 
 ## Dependencies
 
-Required in both modes:
+Required in every mode:
 
 - Python 3.12;
 - [`uv`](https://docs.astral.sh/uv/);
-- `OPENAI_COMPATIBLE_API_KEY`;
 - writable persistent storage.
 
+The default host does not require `OPENAI_COMPATIBLE_API_KEY` to start. Configure it in
+`/_host` or provide it for non-interactive first boot.
+
 Local loopback startup generates and privately persists owner authentication and
-selects `${XDG_DATA_HOME:-$HOME/.local/share}/opentulpa` automatically. Public and
-managed deployments still require an explicit `OPENTULPA_WEB_TOKEN` and persistent
-storage paths.
+selects `${XDG_DATA_HOME:-$HOME/.local/share}/opentulpa` automatically. Public host
+deployments can be claimed with their one-time setup token; managed deployments still
+require an explicit `OPENTULPA_WEB_TOKEN` and persistent storage paths.
 
 The launcher installs only the lean core unless `OPENTULPA_EXTRAS` is set. Use
 `OPENTULPA_EXTRAS=bundled` or a comma-separated subset of `browser`, `integrations`,
@@ -42,7 +48,7 @@ uses that degraded path and additionally requires:
 - an administrator-created production egress network;
 - separate persistent bootstrap state and release workspace paths.
 
-## Direct Development
+## Stable Host
 
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
@@ -50,13 +56,16 @@ cd opentulpa
 ./start.sh
 ```
 
-The first run prompts only for `OPENAI_COMPATIBLE_API_KEY`, then opens the authenticated
-owner client at `http://127.0.0.1:8000/`. The generated owner bearer remains in a mode
-`0600` host file; the browser receives a separate ephemeral HttpOnly, `SameSite=Strict`
-loopback session. No token entry is required. Health checks are:
+The host opens its setup console at `http://127.0.0.1:8000/_host`. It remains healthy
+while unconfigured or while a candidate child fails. Local owner access needs no token.
+Remote first boot prints a one-time setup token, and the returned owner token can be
+used by the browser or `opentulpa connect`. Health checks are:
 
 - `http://127.0.0.1:8000/healthz`
 - `http://127.0.0.1:8000/agent/healthz`
+
+The first endpoint reports host health. The second returns `503` until the child is
+ready. Use `./start.sh server` to run the mutable application directly for development.
 
 `./start.sh local` remains a convenience mode for a host-configured Telegram bot. It
 starts the direct app, a temporary Cloudflare tunnel, and webhook synchronization. It
@@ -334,12 +343,11 @@ OpenTulpa controls it over CDP and cannot DNS-pin the vendor browser's connectio
 
 ## Docker Compose And Railway
 
-The included `docker-compose.yml` and `railway.toml` start **direct server mode**. They
-are suitable for running the V2 API behind a platform-owned deployment lifecycle, but
-they do not provide the host-level rootless OCI engine, canonical Git checkout, and
-stable gateway needed for managed self-replacement.
+The included `docker-compose.yml` and `railway.toml` start the stable host plus its
+Deep Agents child. They do not provide the rootless OCI engine, canonical Git checkout,
+and release network needed for managed source self-replacement.
 
-For direct Docker Compose:
+For Docker Compose:
 
 ```bash
 docker compose up --build
@@ -348,12 +356,13 @@ docker compose up --build
 Persist the volume mounted at `/app/opentulpa_data` and set
 `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
 
-For Railway, configure at least:
+For Railway, configure:
 
-- `OPENAI_COMPATIBLE_API_KEY`;
-- `OPENTULPA_WEB_TOKEN=<long-random-owner-token>` for remote web access;
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data` with a persistent volume;
-- optional Telegram webhook variables if using host-configured Telegram.
+- optionally `OPENAI_COMPATIBLE_API_KEY` and `OPENTULPA_WEB_TOKEN` for unattended boot.
+
+Without an owner token, read the one-time setup token from the first startup log and
+claim the deployment at `/_host`. Configure Telegram there; polling needs no webhook.
 
 The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize
 and start both interfaces directly:
@@ -366,10 +375,10 @@ and start both interfaces directly:
   --public-url https://tulpa.example.com
 ```
 
-One process is one OpenTulpa installation. Its Telegram owner ID determines the owner
-identity; there is no tenant argument. The launcher saves command configuration to a
-private `.env`, generates missing local credentials, and keeps product and Deep Agent
-state under `OPENTULPA_DATA_ROOT`.
+One host is one OpenTulpa installation. Its owner token and optional Telegram owner ID
+determine the owner identity; there is no tenant argument. Secrets are encrypted in the
+host database rather than saved to `.env`. Product, host, and Deep Agent state live
+under `OPENTULPA_DATA_ROOT`.
 
 Source evolution is unavailable in this direct shape. Do not mount a platform container
 socket into the app to imitate managed mode. Run the immutable bootstrap on a host that

@@ -34,15 +34,15 @@ legacy runtime facade.
 
 OpenTulpa keeps deployment machinery outside the application image it replaces.
 
-| Fixed host boundary | Mutable application release |
+| Fixed host boundary | Mutable application runtime |
 |---|---|
-| Bootstrap gateway, release fencing, staging, probation, recovery, rollback | Deep Agent service, prompts, tools, and approval policy |
+| Setup, owner authentication, encrypted configuration, process health, logs, proxy, recovery | Deep Agent service, prompts, tools, and approval policy |
 | Source-worktree sandbox limits and trusted evaluation commands | Agent API, product services, integrations, and interfaces |
-| Exact-commit release builder and immutable dependency base | Capability workers, manifests, bundled web UI, tests, and documentation |
+| Optional managed release builder, probation, and rollback | Capability workers, manifests, bundled web UI, tests, and documentation |
 | Host credentials, deployment controls, and OCI authority | Any other normal, secret-free repository source path |
 
-The owner can ask the main OpenTulpa agent to change any source. That same agent edits a
-detached Git worktree through a rootless sandbox, never the serving checkout. It can run
+In managed mode, the owner can ask the main OpenTulpa agent to change any source. That
+agent edits a detached Git worktree through a rootless sandbox, never the serving checkout. It can run
 tests and experiments over multiple chat turns, inspect its own traces, and ask the owner
 for feedback. `source_release` creates one persisted chat approval; after approval the
 fixed supervisor commits and evaluates the exact bytes, builds a full-source image, and
@@ -89,9 +89,10 @@ handover stops the old poller first and restores it if the new generation fails.
 mode keeps reviewed subprocess workers for development, but cannot safely replace or
 roll back itself.
 
-If `TELEGRAM_BOT_TOKEN` is configured on the host, the built-in webhook interface is
-used and the dynamic Telegram capability is blocked to prevent two consumers from
-using the same bot. Leave it unset for the web-to-dynamic-Telegram flow.
+The stable setup host imports `TELEGRAM_BOT_TOKEN` into the encrypted capability vault
+and starts only the long-poll worker. Explicit direct `server` mode retains the webhook
+adapter for development and blocks dynamic Telegram so two consumers cannot use one
+bot.
 
 Browser automation, Composio, document parsers, and Crawl4AI are optional adapters,
 not agent-runtime dependencies. The core installs and starts without them:
@@ -167,9 +168,10 @@ Use full AgentSpec and TriggerSpec revisions when a background process needs ano
 model, a narrower tool set, isolated memory, different instructions, or an external
 event source.
 
-## Self-Improvement
+## Managed Self-Improvement
 
-The owner agent directly controls one persistent, isolated source checkout:
+In managed mode, the owner agent directly controls one persistent, isolated source
+checkout:
 
 - `source_shell` creates or resumes it and can inspect, edit, test, and experiment with
   any OpenTulpa source using ordinary shell commands;
@@ -207,16 +209,18 @@ and idempotency; image rollback is not a transaction over the outside world.
 
 ## Start
 
-For local web chat, run one command:
+For a local installation, run one command:
 
 ```bash
 ./start.sh
 ```
 
-On the first run, enter only the OpenRouter-compatible model API key. The launcher
-stores it in a private mode `0600` `.env`, chooses a local data directory, generates an
-owner credential without displaying it, binds to `127.0.0.1`, and opens the web chat
-after both health endpoints are ready. Later runs reuse the same state and credential.
+The stable host starts immediately, even without a model key. Open `/_host`, enter the
+OpenAI-compatible endpoint, model key, and optional Telegram bot token plus numeric
+owner ID. Credentials are AES-GCM encrypted in the host database with a separate mode
+`0600` host key. The host validates the candidate, starts the Deep Agents child, and
+activates Telegram through its capability API. Failed candidates leave the host online
+and restore the previous active runtime.
 
 Python 3.12 and [`uv`](https://docs.astral.sh/uv/) are installed or resolved by the
 launcher. A rootless Docker/Podman engine, or a recognized macOS Docker Desktop or
@@ -228,7 +232,7 @@ but shell execution reports that it is unavailable; it never falls back to the h
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
 cd opentulpa
-./start.sh
+./start.sh server
 ```
 
 This starts the mutable application directly. It is useful for development and
@@ -238,9 +242,9 @@ still configure their persistent data root and owner authentication explicitly.
 
 ### Web and Telegram together
 
-`serve` is the normal entrypoint. Pass the initial configuration once and OpenTulpa
-saves it in its private `.env`, opens the web chat, and connects the Telegram bot to
-the same agent:
+`serve` is the normal entrypoint. The setup console is available at `/_host`; the
+mutable agent UI is available at `/` after activation. You may also provide an initial
+configuration non-interactively:
 
 ```bash
 ./start.sh serve \
@@ -249,12 +253,21 @@ the same agent:
   --telegram-user-id 123456789
 ```
 
-Without a public URL, the launcher starts a temporary Cloudflare tunnel for Telegram
-webhooks. With `--public-url https://tulpa.example.com`, it binds the normal server and
-registers that webhook directly. Omit both Telegram arguments for web-only chat. Local
-web authentication is automatic; public deployments can set `--web-token` or
-`OPENTULPA_WEB_TOKEN`. Environment variables are safer than command flags on shared
-machines because command arguments may remain in shell history.
+Telegram uses its long-poll capability worker, so it does not need a public URL or a
+Cloudflare tunnel. Omit both Telegram arguments for web-only chat. Local host access is
+automatic. A remote unclaimed host prints a one-time setup token; claiming it returns
+an owner token once. `--web-token` can pre-claim unattended deployments. Command-line
+secrets are imported into encrypted host storage and are not written to `.env`, but
+environment variables or the setup UI are safer because command arguments can remain
+in shell history.
+
+The small remote client uses the same stable host API:
+
+```bash
+opentulpa connect https://tulpa.example.com --token '<owner-token>'
+opentulpa status
+opentulpa logs --follow
+```
 
 ### Managed self-improving mode
 
@@ -292,7 +305,7 @@ the mutable release or its normal approval interface is unavailable. `/recovery`
 reserved and always returns `404`; recovery credentials are never accepted from a
 browser control page.
 
-Health checks are `/healthz` and `/agent/healthz` in both modes.
+Health checks are `/healthz` and `/agent/healthz` in host, direct, and managed modes.
 
 ## Persistence And Migration
 
