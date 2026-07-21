@@ -6,6 +6,7 @@ import asyncio
 import json
 import shlex
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
@@ -26,6 +28,49 @@ from opentulpa.client.config import (
     clear_connection,
     update_connection,
 )
+
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+@dataclass(slots=True)
+class _ToolView:
+    number: int
+    call_id: str
+    name: str
+    arguments: Any
+    ok: bool | None = None
+    result: Any = None
+    expanded: bool = False
+
+
+class _TranscriptLexer(Lexer):
+    def lex_document(self, document: Document) -> Any:
+        lines = document.lines
+
+        def get_line(lineno: int) -> list[tuple[str, str]]:
+            line = lines[lineno]
+            stripped = line.lstrip()
+            if line == "YOU":
+                style = "class:transcript.user-label"
+            elif line == "OPENTULPA":
+                style = "class:transcript.agent-label"
+            elif line.startswith("│"):
+                style = "class:transcript.user"
+            elif stripped.startswith("▣"):
+                style = "class:transcript.tool-running"
+            elif stripped.startswith("✓"):
+                style = "class:transcript.tool-ok"
+            elif stripped.startswith("×"):
+                style = "class:transcript.tool-error"
+            elif line.startswith("      "):
+                style = "class:transcript.tool-detail"
+            elif stripped.startswith("["):
+                style = "class:transcript.notice"
+            else:
+                style = "class:transcript.text"
+            return [(style, line)]
+
+        return get_line
 
 
 class OpenTulpaTUI:
@@ -38,6 +83,7 @@ class OpenTulpaTUI:
             focusable=False,
             scrollbar=True,
             wrap_lines=True,
+            lexer=_TranscriptLexer(),
         )
         self.input = TextArea(
             height=1,
@@ -46,6 +92,8 @@ class OpenTulpaTUI:
             wrap_lines=True,
         )
         self.state = "connecting"
+        self.model = ""
+        self.base_url = ""
         self.server_ready = False
         self.busy = False
         self.active_run_id: str | None = None
@@ -57,10 +105,16 @@ class OpenTulpaTUI:
         self.notification_cursor = 0
         self.seen_run_ids: set[str] = set()
         self.runs_with_text: set[str] = set()
+        self._transcript: list[str | _ToolView] = []
+        self._tools: list[_ToolView] = []
+        self._active_tools: dict[str, _ToolView] = {}
+        self._phase = "idle"
+        self._spinner_index = 0
         self._closed = False
         self._run_task: asyncio.Task[None] | None = None
         self._notification_task: asyncio.Task[None] | None = None
         self._restore_task: asyncio.Task[None] | None = None
+        self._spinner_task: asyncio.Task[None] | None = None
         self.app: Application[None] = Application(
             layout=Layout(self._layout(), focused_element=self.input),
             key_bindings=self._bindings(),
@@ -70,36 +124,47 @@ class OpenTulpaTUI:
         )
 
     async def run(self) -> None:
-        self._append(
-            "OpenTulpa terminal\n"
-            f"Connected to {self.connection.url}\n"
-            f"Thread {self.connection.thread_id}\n"
-            "Type /help for commands.\n\n"
-        )
         try:
             status = await self.client.host_status()
+            config = status.get("config") or {}
+            self.model = str(config.get("model") or "")
+            self.base_url = str(config.get("base_url") or "")
             runtime = status.get("runtime") or {}
             if not status.get("configured") or runtime.get("status") != "ready":
                 self.state = "setup"
-                self._append(f"Runtime is not ready. Configure it at {self.connection.url}/_host\n\n")
             else:
                 self.server_ready = True
                 self.state = "connected"
         except RemoteError:
             self.state = "reconnecting"
+        self._append("OPENTULPA\n")
+        self._append(
+            f"{self.model + '  ·  ' if self.model else ''}{self.connection.url}\n"
+            f"thread {self.connection.thread_id}\n"
+            "Type /help for commands.\n\n"
+        )
+        if self.state == "setup":
+            self._append(f"[runtime is not ready; configure it at {self.connection.url}/_host]\n\n")
         if self.connection.last_run_id:
             self.busy = True
             self.state = "reconnecting"
         self._notification_task = asyncio.create_task(self._poll_notifications())
         self._restore_task = asyncio.create_task(self._restore_last_run())
+        self._spinner_task = asyncio.create_task(self._animate_activity())
         try:
             await self.app.run_async()
         finally:
             self._closed = True
-            for task in (self._run_task, self._notification_task, self._restore_task):
+            tasks = (
+                self._run_task,
+                self._notification_task,
+                self._restore_task,
+                self._spinner_task,
+            )
+            for task in tasks:
                 if task is not None:
                     task.cancel()
-            for task in (self._run_task, self._notification_task, self._restore_task):
+            for task in tasks:
                 if task is not None:
                     with suppress(asyncio.CancelledError):
                         await task
@@ -117,6 +182,11 @@ class OpenTulpaTUI:
                 self.output,
                 Window(height=1, char="-", style="class:rule"),
                 Window(
+                    FormattedTextControl(self._activity),
+                    height=1,
+                    style="class:activity",
+                ),
+                Window(
                     FormattedTextControl(self._status),
                     height=1,
                     style="class:status",
@@ -129,8 +199,9 @@ class OpenTulpaTUI:
                                 ("class:hint", " enter send  "),
                                 ("class:key", "ctrl-c"),
                                 ("class:hint", " cancel  "),
+                                ("class:key", "ctrl-t"),
+                                ("class:hint", " tool details  "),
                                 ("class:key", "/help"),
-                                ("class:hint", " commands "),
                             ]
                         )
                     ),
@@ -160,14 +231,39 @@ class OpenTulpaTUI:
         def exit_app(_: Any) -> None:
             self.app.exit()
 
+        @bindings.add("c-t")
+        def toggle_tool(_: Any) -> None:
+            self._toggle_tool()
+
         return bindings
 
     def _header(self) -> FormattedText:
+        model = f"  {self.model}" if self.model else ""
         return FormattedText(
             [
-                ("class:brand", " OPENTULPA "),
-                ("class:header", f" {self.connection.url}"),
+                ("class:brand", " OPENTULPA"),
+                ("class:header", model),
                 ("class:thread", f"  {self.connection.thread_id}"),
+            ]
+        )
+
+    def _activity(self) -> FormattedText:
+        if not self.busy or self.state not in {"working", "reconnecting"}:
+            return FormattedText([("class:activity", "")])
+        spinner = _SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)]
+        if self._active_tools:
+            latest = next(reversed(self._active_tools.values()))
+            label = _tool_label(latest.name, latest.arguments)
+        elif self.state == "reconnecting":
+            label = "Reconnecting to the run"
+        elif self._phase == "responding":
+            label = "Writing response"
+        else:
+            label = "Planning next moves"
+        return FormattedText(
+            [
+                ("class:activity.spinner", f" {spinner} "),
+                ("class:activity", label),
             ]
         )
 
@@ -187,9 +283,10 @@ class OpenTulpaTUI:
         if self.busy:
             self._append("[busy] Wait for the current run, approve it, or use /cancel.\n")
             return
-        self._append(f"YOU\n{text}\n\nOPENTULPA\n")
+        self._append(f"YOU\n{_user_block(text)}\n\nOPENTULPA\n")
         self.busy = True
         self.state = "working"
+        self._phase = "thinking"
         self._invalidate()
         paths = list(self.attachments)
         self._run_task = asyncio.create_task(self._start_run(text, paths))
@@ -268,16 +365,16 @@ class OpenTulpaTUI:
         data = event.data
         if event.type == "run.started":
             self.state = "working"
+            self._phase = "thinking"
         elif event.type == "message.delta":
             self.runs_with_text.add(event.run_id)
+            self._phase = "responding"
             self._append(str(data.get("text") or ""))
         elif event.type == "tool.started":
-            self._append(f"\n[tool] {str(data.get('name') or 'tool').replace('_', ' ')}\n")
+            self._start_tool(data)
         elif event.type == "tool.completed":
-            suffix = "failed" if data.get("ok") is False else "done"
-            self._append(
-                f"[tool {suffix}] {str(data.get('name') or 'tool').replace('_', ' ')}\n"
-            )
+            self._complete_tool(data)
+            self._phase = "thinking"
         elif event.type == "artifact.ready":
             self._append(f"[artifact] {data.get('name') or data.get('path') or 'ready'}\n")
         elif event.type == "approval.required":
@@ -290,16 +387,80 @@ class OpenTulpaTUI:
             fallback = str(data.get("text") or "")
             if fallback and event.run_id not in self.runs_with_text:
                 self._append(fallback)
+            elif not fallback and event.run_id not in self.runs_with_text:
+                self._append("[the agent completed without a response; use /regenerate or /logs]\n")
             self._append("\n\n")
             self.busy = False
             self.state = "connected"
+            self._phase = "idle"
+            self._active_tools.clear()
             self.active_run_id = None
         elif event.type == "run.failed":
             self._append(f"\n[failed] {data.get('message') or 'Agent run failed.'}\n\n")
             self.busy = False
             self.state = "error"
+            self._phase = "idle"
+            self._active_tools.clear()
             self.active_run_id = None
         self._invalidate()
+
+    def _start_tool(self, data: dict[str, Any]) -> None:
+        call_id = str(data.get("call_id") or "").strip()
+        name = str(data.get("name") or "tool").strip() or "tool"
+        tool = _ToolView(
+            number=len(self._tools) + 1,
+            call_id=call_id or f"{name}:{len(self._tools) + 1}",
+            name=name,
+            arguments=data.get("arguments") or {},
+        )
+        self._tools.append(tool)
+        self._active_tools[tool.call_id] = tool
+        self._transcript.append(tool)
+        self._refresh_output()
+
+    def _complete_tool(self, data: dict[str, Any]) -> None:
+        call_id = str(data.get("call_id") or "").strip()
+        name = str(data.get("name") or "tool").strip() or "tool"
+        tool = self._active_tools.pop(call_id, None) if call_id else None
+        if tool is None:
+            tool = next(
+                (item for item in reversed(self._tools) if item.ok is None and item.name == name),
+                None,
+            )
+        if tool is None:
+            tool = _ToolView(
+                number=len(self._tools) + 1,
+                call_id=call_id or f"{name}:{len(self._tools) + 1}",
+                name=name,
+                arguments={},
+            )
+            self._tools.append(tool)
+            self._transcript.append(tool)
+        self._active_tools.pop(tool.call_id, None)
+        tool.ok = data.get("ok") is not False
+        tool.result = data.get("result") if tool.ok else data.get("error")
+        self._refresh_output()
+
+    def _toggle_tool(self, number: int | None = None) -> None:
+        if not self._tools:
+            self._append("[no tool calls in this session]\n")
+            return
+        tool = self._tools[-1] if number is None else next(
+            (item for item in self._tools if item.number == number),
+            None,
+        )
+        if tool is None:
+            self._append(f"[unknown tool call: {number}]\n")
+            return
+        tool.expanded = not tool.expanded
+        self._refresh_output()
+
+    async def _animate_activity(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(0.08)
+            if self.busy:
+                self._spinner_index = (self._spinner_index + 1) % len(_SPINNER_FRAMES)
+                self._invalidate()
 
     def _remember_approval(self, run_id: str, data: dict[str, Any]) -> None:
         approval_id = str(data.get("approval_id") or "").strip()
@@ -363,10 +524,17 @@ class OpenTulpaTUI:
             await self._cancel_active()
         elif command == "/logs":
             await self._show_logs()
+        elif command in {"/tool", "/tools"}:
+            if len(parts) > 2 or (len(parts) == 2 and not parts[1].isdigit()):
+                self._append("Usage: /tool [NUMBER]\n")
+            else:
+                self._toggle_tool(int(parts[1]) if len(parts) == 2 else None)
         elif command == "/settings":
             self._append(
                 f"SERVER  {self.connection.url}\n"
                 f"THREAD  {self.connection.thread_id}\n"
+                f"MODEL   {self.model or 'not configured'}\n"
+                f"API     {self.base_url or 'not configured'}\n"
                 f"TOKEN   {self.connection.credential_storage}\n"
             )
         elif command == "/disconnect":
@@ -578,7 +746,17 @@ class OpenTulpaTUI:
         self.notification_approvals.pop(notification_id, None)
 
     def _append(self, value: str) -> None:
-        updated = self.output.text + str(value)
+        rendered = str(value)
+        if self._transcript and isinstance(self._transcript[-1], str):
+            self._transcript[-1] += rendered
+        else:
+            self._transcript.append(rendered)
+        self._refresh_output()
+
+    def _refresh_output(self) -> None:
+        updated = "".join(
+            item if isinstance(item, str) else _render_tool(item) for item in self._transcript
+        )
         document = Document(updated, cursor_position=len(updated))
         self.output.buffer.set_document(document, bypass_readonly=True)
         self._invalidate()
@@ -587,6 +765,47 @@ class OpenTulpaTUI:
         app = getattr(self, "app", None)
         if app is not None:
             app.invalidate()
+
+
+def _user_block(text: str) -> str:
+    return "\n".join(f"│ {line}" for line in text.splitlines() or [""])
+
+
+def _tool_label(name: str, arguments: Any) -> str:
+    display_name = name.replace("_", " ").strip().title() or "Tool"
+    if not isinstance(arguments, dict):
+        return display_name
+    for key in ("command", "path", "query", "url", "instruction", "description", "action"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            summary = " ".join(value.strip().split())
+            if len(summary) > 72:
+                summary = f"{summary[:69]}..."
+            return f"{display_name}  {summary}"
+    return display_name
+
+
+def _render_tool(tool: _ToolView) -> str:
+    if tool.ok is None:
+        marker = "▣"
+    elif tool.ok:
+        marker = "✓"
+    else:
+        marker = "×"
+    value = f"\n  {marker} {tool.number:<2} {_tool_label(tool.name, tool.arguments)}"
+    if not tool.expanded:
+        return f"{value}\n"
+    value += "  [ctrl-t to collapse]\n"
+    value += _detail_block("arguments", tool.arguments)
+    if tool.ok is not None:
+        value += _detail_block("result" if tool.ok else "error", tool.result)
+    return value
+
+
+def _detail_block(label: str, value: Any) -> str:
+    rendered = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    lines = rendered.splitlines() or [""]
+    return f"      {label}\n" + "".join(f"        {line}\n" for line in lines)
 
 
 _HELP = """COMMANDS
@@ -598,6 +817,7 @@ _HELP = """COMMANDS
   /reject [ID]         reject an action
   /edit ID JSON        approve with edited arguments
   /cancel              cancel the active run
+  /tool [NUMBER]       expand or collapse sanitized tool details
   /logs                show recent server runtime logs
   /settings            show connection and thread settings
   /disconnect          forget this server and credential
@@ -607,22 +827,33 @@ _HELP = """COMMANDS
 
 _STYLE = Style.from_dict(
     {
-        "": "bg:#050608 #d7dce5",
-        "header": "bg:#0b0d12 #737b8c",
-        "brand": "bg:#1687ff #ffffff bold",
-        "thread": "bg:#0b0d12 #4d5668",
-        "rule": "#202633",
-        "prompt": "#1687ff bold",
-        "status": "bg:#0b0d12 #737b8c",
+        "": "bg:#000000 #e0e0e0",
+        "header": "bg:#000000 #666666",
+        "brand": "bg:#000000 #ffffff bold",
+        "thread": "bg:#000000 #444444",
+        "rule": "#222222",
+        "prompt": "#ffffff bold",
+        "activity": "bg:#000000 #777777",
+        "activity.spinner": "bg:#000000 #5c9cf5 bold",
+        "status": "bg:#000000 #666666",
         "state.connected": "bg:#10291f #62d99c bold",
-        "state.working": "bg:#10243b #63adff bold",
+        "state.working": "bg:#13243a #5c9cf5 bold",
         "state.approval": "bg:#3b2d10 #f6ca66 bold",
         "state.reconnecting": "bg:#2c243a #c89cff bold",
         "state.setup": "bg:#302610 #f6ca66 bold",
-        "state.connecting": "bg:#202633 #aab2c1 bold",
+        "state.connecting": "bg:#1a1a1a #999999 bold",
         "state.error": "bg:#3b1619 #ff737d bold",
-        "hint": "bg:#050608 #596273",
-        "key": "bg:#050608 #9ba5b7 bold",
+        "hint": "bg:#000000 #444444",
+        "key": "bg:#000000 #777777 bold",
+        "transcript.text": "bg:#000000 #e0e0e0",
+        "transcript.user-label": "bg:#000000 #777777 bold",
+        "transcript.agent-label": "bg:#000000 #ffffff bold",
+        "transcript.user": "bg:#111111 #e0e0e0",
+        "transcript.tool-running": "bg:#000000 #777777",
+        "transcript.tool-ok": "bg:#000000 #66d9c2",
+        "transcript.tool-error": "bg:#000000 #ff737d",
+        "transcript.tool-detail": "bg:#000000 #666666",
+        "transcript.notice": "bg:#000000 #e5c07b",
     }
 )
 
