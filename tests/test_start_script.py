@@ -11,7 +11,7 @@ EMPTY_REQUIRED_ENV = {
     "TELEGRAM_WEBHOOK_SECRET": "",
     "PUBLIC_BASE_URL": "",
     "OPENTULPA_DATA_ROOT": "",
-    "OPENTULPA_WEB_TOKEN": "",
+    "OPENTULPA_OWNER_TOKEN": "",
     "OPENTULPA_RECOVERY_TOKEN": "",
     "OPENTULPA_INGRESS_TOKEN": "",
     "OPENTULPA_RELEASE_EGRESS_NETWORK": "",
@@ -44,7 +44,7 @@ def test_start_script_help_shows_install_and_runtime_flags() -> None:
 
     assert result.returncode == 0
     assert "serve|local|server|managed|install|run|doctor" in result.stdout
-    assert "Start the stable setup host, web chat, and configured interfaces" in result.stdout
+    assert "Start the headless host, Agent API, and configured interfaces" in result.stdout
     assert "--api-key" in result.stdout
     assert "--telegram-bot-token" in result.stdout
     assert "--telegram-user-id" in result.stdout
@@ -312,16 +312,16 @@ def test_local_owner_token_is_private_and_reused(tmp_path: Path) -> None:
             "bash",
             "-c",
             "source ./start.sh; MODE=up; HOST=127.0.0.1; "
-            "unset OPENTULPA_WEB_TOKEN PUBLIC_BASE_URL RAILWAY_PUBLIC_DOMAIN; "
-            "configure_local_server_defaults server; first=$OPENTULPA_WEB_TOKEN; "
-            "unset OPENTULPA_WEB_TOKEN; configure_local_server_defaults server; "
-            "test \"$first\" = \"$OPENTULPA_WEB_TOKEN\"",
+            "unset OPENTULPA_OWNER_TOKEN PUBLIC_BASE_URL RAILWAY_PUBLIC_DOMAIN; "
+            "configure_local_server_defaults server; first=$OPENTULPA_OWNER_TOKEN; "
+            "unset OPENTULPA_OWNER_TOKEN; configure_local_server_defaults server; "
+            "test \"$first\" = \"$OPENTULPA_OWNER_TOKEN\"",
         ],
         cwd=tmp_path,
         env={
             **os.environ,
             "OPENTULPA_DATA_ROOT": str(data_root),
-            "OPENTULPA_WEB_TOKEN": "",
+            "OPENTULPA_OWNER_TOKEN": "",
             "PUBLIC_BASE_URL": "",
             "RAILWAY_PUBLIC_DOMAIN": "",
         },
@@ -331,7 +331,7 @@ def test_local_owner_token_is_private_and_reused(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    token_path = data_root / "bootstrap" / "owner-web.token"
+    token_path = data_root / "bootstrap" / "owner.token"
     assert len(token_path.read_text(encoding="utf-8").strip()) == 64
     assert token_path.stat().st_mode & 0o777 == 0o600
 
@@ -373,7 +373,7 @@ def test_start_script_dry_run_server_mode_allows_web_only_without_telegram() -> 
     assert "TELEGRAM_WEBHOOK_SECRET" not in result.stdout
     assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" not in result.stdout
     assert "TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS" not in result.stdout
-    assert "server Telegram disabled; web/API startup does not require Telegram env." in result.stdout
+    assert "server Telegram disabled; Agent API startup does not require Telegram env." in result.stdout
     assert "uv run --no-sync python -m opentulpa" in result.stdout
 
 
@@ -386,7 +386,7 @@ def test_start_script_public_server_does_not_generate_deployment_credentials() -
 
     assert result.returncode == 0
     assert "required .env value(s) missing for server:" in result.stdout
-    assert "OPENTULPA_WEB_TOKEN" in result.stdout
+    assert "OPENTULPA_OWNER_TOKEN" in result.stdout
     assert "OPENTULPA_DATA_ROOT" in result.stdout
     assert "private generated owner credential" not in result.stdout
 
@@ -399,7 +399,7 @@ def test_start_script_dry_run_server_mode_accepts_web_only_env() -> None:
             **EMPTY_REQUIRED_ENV,
             "OPENAI_COMPATIBLE_API_KEY": "test-key",
             "OPENTULPA_DATA_ROOT": "/tmp/opentulpa-test-data",
-            "OPENTULPA_WEB_TOKEN": "test-web-token",
+            "OPENTULPA_OWNER_TOKEN": "test-owner-token",
         },
     )
 
@@ -409,7 +409,7 @@ def test_start_script_dry_run_server_mode_accepts_web_only_env() -> None:
     assert "TELEGRAM_WEBHOOK_SECRET" not in result.stdout
     assert "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN" not in result.stdout
     assert "TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS" not in result.stdout
-    assert "server Telegram disabled; web/API startup does not require Telegram env." in result.stdout
+    assert "server Telegram disabled; Agent API startup does not require Telegram env." in result.stdout
     assert "uv run --no-sync python -m opentulpa" in result.stdout
 
 
@@ -419,7 +419,7 @@ def test_start_script_doctor_server_web_only_requires_web_token() -> None:
     assert result.returncode == 1
     assert "server Telegram disabled; skipping Telegram token and allowlist checks" in result.stdout
     assert "server Telegram disabled; skipping webhook URL/secret checks" in result.stdout
-    assert "fail: OPENTULPA_WEB_TOKEN is set" in result.stdout
+    assert "fail: OPENTULPA_OWNER_TOKEN is set" in result.stdout
     assert "TELEGRAM_BOT_TOKEN is set" not in result.stdout
     assert "TELEGRAM_WEBHOOK_SECRET is set" not in result.stdout
 
@@ -440,7 +440,7 @@ def test_start_script_server_with_telegram_still_requires_web_token() -> None:
     )
 
     assert result.returncode == 0
-    assert "required .env value(s) missing for server: OPENTULPA_WEB_TOKEN" in result.stdout
+    assert "required .env value(s) missing for server: OPENTULPA_OWNER_TOKEN" in result.stdout
 
 
 def test_start_script_dry_run_local_mode() -> None:
@@ -494,7 +494,7 @@ def test_start_script_defaults_to_stable_host() -> None:
             **EMPTY_REQUIRED_ENV,
             "OPENAI_COMPATIBLE_API_KEY": "test-key",
             "OPENTULPA_DATA_ROOT": "/tmp/opentulpa-test-data",
-            "OPENTULPA_WEB_TOKEN": "test-web-token",
+            "OPENTULPA_OWNER_TOKEN": "test-owner-token",
         },
     )
 
@@ -589,7 +589,7 @@ def test_start_script_run_managed_uses_immutable_bootstrap_without_rebuilding() 
             "OPENTULPA_INGRESS_TOKEN": "i" * 32,
             "OPENTULPA_RELEASE_EGRESS_NETWORK": "restricted-egress",
             "OPENTULPA_RELEASE_BASE_IMAGE": "opentulpa-runtime-base:0.1.0",
-            "OPENTULPA_WEB_TOKEN": "web-token",
+            "OPENTULPA_OWNER_TOKEN": "owner-token",
         },
     )
 
@@ -746,7 +746,7 @@ exit 22
         "TELEGRAM_WEBHOOK_SECRET": "test-secret",
         "PUBLIC_BASE_URL": "https://app.example",
         "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
-        "OPENTULPA_WEB_TOKEN": "test-web-token",
+        "OPENTULPA_OWNER_TOKEN": "test-owner-token",
         "TELEGRAM_ALLOWED_USERNAMES": "owner",
         "TELEGRAM_ALLOWED_USER_IDS": "",
         "COMPOSIO_API_KEY": "",
@@ -774,7 +774,7 @@ def test_start_script_run_server_accepts_platform_env_without_dotenv(tmp_path: P
         "TELEGRAM_WEBHOOK_SECRET": "test-secret",
         "RAILWAY_PUBLIC_DOMAIN": "opentulpa.example.railway.app",
         "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
-        "OPENTULPA_WEB_TOKEN": "test-web-token",
+        "OPENTULPA_OWNER_TOKEN": "test-owner-token",
         "TELEGRAM_ALLOWED_USERNAMES": "owner",
         "TELEGRAM_ALLOWED_USER_IDS": "",
         "COMPOSIO_API_KEY": "",

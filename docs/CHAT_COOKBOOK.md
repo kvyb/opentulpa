@@ -25,9 +25,9 @@ Refine or remove it through the same chat, for example:
 
 ## Connect A New Interface
 
-### Enable bundled Telegram from web
+### Enable bundled Telegram from the terminal
 
-Start without a host `TELEGRAM_BOT_TOKEN`, then write in the web interface:
+Start without a host `TELEGRAM_BOT_TOKEN`, then write in the local OpenTulpa TUI:
 
 > Enable Telegram as another private interface to this OpenTulpa. Here is the BotFather
 > token: `<token>`. Use the existing tenant and agent context. Test the bundled
@@ -64,7 +64,7 @@ planner, memory store, or untyped tool gateway.
 
 ### Request a focused improvement
 
-> Add a compact run-history view to the bundled web UI. Keep the Agent API unchanged,
+> Add a compact run-history view to the bundled terminal UI. Keep the Agent API unchanged,
 > add tests for refresh and pending approvals, use `trace_get` to inspect a failed test,
 > and show me the result before calling `source_release`.
 

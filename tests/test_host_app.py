@@ -72,7 +72,13 @@ def test_unconfigured_host_stays_healthy_and_redirects_chat_to_setup(tmp_path: P
         response = client.get("/", follow_redirects=False)
         assert response.status_code == 307
         assert response.headers["location"] == "/_host"
-        assert "Make the runtime yours" in client.get("/_host").text
+        console = client.get("/_host")
+        assert "Make the runtime yours" in console.text
+        assert "LOCAL TERMINAL" in console.text
+        assert "OPEN CHAT" not in console.text
+        script = client.get("/_host/assets/app.js")
+        assert "opentulpa connect" in script.text
+        assert "open-chat" not in script.text
 
 
 def test_remote_claim_requires_setup_token_and_sets_owner_session(tmp_path: Path) -> None:
@@ -122,3 +128,6 @@ def test_owner_can_activate_first_config_without_exposing_secrets(tmp_path: Path
         assert "provider-secret" not in response.text
         assert service.applied is not None
         assert service.applied.api_key == SecretStr("provider-secret")
+        root = client.get("/", follow_redirects=False)
+        assert root.status_code == 307
+        assert root.headers["location"] == "/_host"

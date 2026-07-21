@@ -94,7 +94,7 @@ input {
 }
 input::placeholder { color: #454545; }
 input:focus { border-color: var(--border-hot); background: var(--panel-2); box-shadow: 0 0 0 1px #222; }
-button, .button-link {
+button {
   min-height: 43px;
   border: 1px solid #d8d8d8;
   border-radius: 3px;
@@ -109,7 +109,7 @@ button, .button-link {
   font-weight: 700;
   letter-spacing: .07em;
 }
-button:hover, .button-link:hover { background: #fff; }
+button:hover { background: #fff; }
 button:disabled { opacity: .45; cursor: wait; }
 button.secondary { color: var(--text); background: transparent; border-color: var(--border-hot); }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
@@ -121,6 +121,15 @@ button.secondary { color: var(--text); background: transparent; border-color: va
 .issued { margin-top: 20px; padding: 14px; border: 1px solid var(--amber); background: rgba(229,192,123,.05); }
 .issued span { display: block; color: var(--amber); font-size: 9px; letter-spacing: .13em; margin-bottom: 8px; }
 .issued code { word-break: break-all; color: #fff; }
+#connect-command, #issued-connect-command {
+  display: block;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--blue);
+  overflow-wrap: anywhere;
+}
 
 .terminal { border: 1px solid var(--border); background: var(--panel); margin: 2px 0 70px; }
 .terminal header { height: 38px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 13px; color: #777; font-size: 9px; letter-spacing: .12em; }

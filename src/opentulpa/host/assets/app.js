@@ -3,6 +3,8 @@ let current = null;
 let logSource = null;
 let logCount = 0;
 
+$("connect-command").textContent = `opentulpa connect ${location.origin}`;
+
 async function request(path, options = {}) {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -29,7 +31,7 @@ function showAuth(status) {
   $("login-form").classList.toggle("hidden", needsClaim);
   $("auth-title").innerHTML = needsClaim ? '<span>$</span> claim deployment' : '<span>$</span> unlock host';
   $("auth-copy").textContent = needsClaim
-    ? "Local setup needs no token. Remote setup uses the one-time token printed by the server."
+    ? "Local setup needs no token. Remote setup uses the one-time pairing code printed by the server."
     : "Enter the owner token to manage configuration and logs.";
 }
 
@@ -56,7 +58,6 @@ function render(status) {
       : "123456:bot-token";
     $("telegram-user-id").value = config.telegram_user_id || "";
     $("restart-button").classList.remove("hidden");
-    if (status.runtime.status === "ready") $("open-chat").classList.remove("hidden");
   }
   startLogs();
 }
@@ -105,6 +106,8 @@ $("claim-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({ setup_token: $("setup-token").value || null }),
     });
     $("issued-token-value").textContent = result.owner_token;
+    $("issued-connect-command").textContent =
+      `opentulpa connect ${location.origin} --token '${result.owner_token}'`;
     $("issued-token").classList.remove("hidden");
     await refresh();
   } catch (error) {
@@ -152,7 +155,7 @@ $("config-form").addEventListener("submit", async (event) => {
     $("api-key").value = "";
     $("telegram-token").value = "";
     status.className = "form-status ok";
-    status.textContent = "Runtime active. You can open chat now.";
+    status.textContent = "Runtime active. Connect with the local OpenTulpa terminal.";
     await refresh();
   } catch (error) {
     status.className = "form-status error";

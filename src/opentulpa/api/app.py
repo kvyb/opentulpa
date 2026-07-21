@@ -35,7 +35,6 @@ from opentulpa.bootstrap.release_control import (
     register_release_control_plane,
 )
 from opentulpa.core.public_urls import build_public_composio_callback_path
-from opentulpa.interfaces.web import register_owner_web_interface
 
 if TYPE_CHECKING:
     from opentulpa.api.routes.v2_evolution import EvolutionService
@@ -141,6 +140,35 @@ def _register_composio_callback(app: FastAPI) -> None:
         )
 
 
+def _register_cli_landing(app: FastAPI) -> None:
+    @app.get("/", include_in_schema=False)
+    async def cli_landing(request: Request) -> HTMLResponse:
+        origin = html.escape(str(request.base_url).rstrip("/"), quote=True)
+        return HTMLResponse(
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<meta name='color-scheme' content='dark'><title>OpenTulpa API</title>"
+            "<style>body{margin:0;background:#050608;color:#d7dce5;font:15px/1.6 ui-monospace,"
+            "SFMono-Regular,Menlo,monospace}.shell{max-width:780px;margin:12vh auto;padding:24px}"
+            "h1{font-size:24px;color:#fff}p{color:#8b95a7}code{display:block;padding:16px 18px;"
+            "background:#0b0d12;border:1px solid #202633;color:#63adff;overflow:auto}"
+            "a{color:#63adff}</style></head><body><main class='shell'>"
+            "<p>HEADLESS DEEP AGENTS BACKEND</p><h1>Connect from your terminal.</h1>"
+            "<p>This server does not host an agent chat interface. Install OpenTulpa locally, "
+            "then connect with the owner token or one-time pairing code.</p>"
+            f"<code>opentulpa connect {origin}</code>"
+            "<p>Health: <a href='/agent/healthz'>/agent/healthz</a></p>"
+            "</main></body></html>",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+            },
+        )
+
+
 def create_app(
     *,
     agent_service: DeepAgentService,
@@ -168,7 +196,6 @@ def create_app(
     release_control_service: ReleaseControlService | None = None,
     notification_service: NotificationService | None = None,
     max_file_upload_bytes: int = 45_000_000,
-    local_owner_session_token: str | None = None,
 ) -> FastAPI:
     """Create the public V2 API without constructing product or runtime services."""
 
@@ -254,7 +281,7 @@ def create_app(
         register_release_control_plane(app, release_control_service)
 
     _register_health_routes(app, agent_service)
-    register_owner_web_interface(app, local_owner_token=local_owner_session_token)
+    _register_cli_landing(app)
     register_v2_agent_routes(
         app,
         get_agent_service=lambda: agent_service,

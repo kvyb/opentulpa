@@ -28,8 +28,8 @@ The default host does not require `OPENAI_COMPATIBLE_API_KEY` to start. Configur
 
 Local loopback startup generates and privately persists owner authentication and
 selects `${XDG_DATA_HOME:-$HOME/.local/share}/opentulpa` automatically. Public host
-deployments can be claimed with their one-time setup token; managed deployments still
-require an explicit `OPENTULPA_WEB_TOKEN` and persistent storage paths.
+deployments can be claimed with their one-time pairing code; managed deployments still
+require an explicit `OPENTULPA_OWNER_TOKEN` and persistent storage paths.
 
 The launcher installs only the lean core unless `OPENTULPA_EXTRAS` is set. Use
 `OPENTULPA_EXTRAS=bundled` or a comma-separated subset of `browser`, `integrations`,
@@ -58,8 +58,10 @@ cd opentulpa
 
 The host opens its setup console at `http://127.0.0.1:8000/_host`. It remains healthy
 while unconfigured or while a candidate child fails. Local owner access needs no token.
-Remote first boot prints a one-time setup token, and the returned owner token can be
-used by the browser or `opentulpa connect`. Health checks are:
+Remote first boot prints a one-time pairing code, and the returned owner token can be
+used by `opentulpa connect`. The server root redirects to `/_host`; agent conversation
+is intentionally provided only by the local terminal client and configured interfaces.
+Health checks are:
 
 - `http://127.0.0.1:8000/healthz`
 - `http://127.0.0.1:8000/agent/healthz`
@@ -84,7 +86,7 @@ Start from `.env.example` and set at least:
 
 ```env
 OPENAI_COMPATIBLE_API_KEY=...
-OPENTULPA_WEB_TOKEN=...
+OPENTULPA_OWNER_TOKEN=...
 EVOLUTION_ENABLED=true
 
 OPENTULPA_BOOTSTRAP_STATE_ROOT=/absolute/persistent/opentulpa-bootstrap
@@ -269,13 +271,13 @@ Restoring only the SQLite product databases is insufficient for source lineage a
 release rollback. Restoring only bootstrap state is insufficient for conversations,
 memory, capabilities, and tenant workspaces.
 
-## Dynamic Telegram From Web
+## Dynamic Telegram From The Terminal
 
 To let the running agent establish Telegram itself, do **not** set a host
 `TELEGRAM_BOT_TOKEN`.
 
-1. Start web-only direct or managed mode with `OPENTULPA_WEB_TOKEN`.
-2. Open `/` and authenticate.
+1. Start terminal-only direct or managed mode with `OPENTULPA_OWNER_TOKEN`.
+2. Connect with `opentulpa connect <server-url>` and authenticate.
 3. Ask OpenTulpa to enable Telegram and paste the BotFather token in that message.
 4. Credential ingress encrypts the value and replaces it with a `secret://` handle
    before checkpointing.
@@ -362,9 +364,9 @@ Persist the volume mounted at `/app/opentulpa_data` and set
 For Railway, configure:
 
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data` with a persistent volume;
-- optionally `OPENAI_COMPATIBLE_API_KEY` and `OPENTULPA_WEB_TOKEN` for unattended boot.
+- optionally `OPENAI_COMPATIBLE_API_KEY` and `OPENTULPA_OWNER_TOKEN` for unattended boot.
 
-Without an owner token, read the one-time setup token from the first startup log and
+Without an owner token, read the one-time pairing code from the first startup log and
 claim the deployment at `/_host`. Configure Telegram there; polling needs no webhook.
 
 The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize

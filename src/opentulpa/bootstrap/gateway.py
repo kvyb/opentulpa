@@ -731,7 +731,7 @@ def _production_environment(
             separators=(",", ":"),
         ),
         "BUSINESS_KNOWLEDGE_ORACLE_MODEL": settings.business_knowledge_oracle_model,
-        "OPENTULPA_WEB_TOKEN": settings.opentulpa_web_token,
+        "OPENTULPA_OWNER_TOKEN": settings.opentulpa_owner_token,
         "OPENTULPA_OWNER_CUSTOMER_ID": settings.opentulpa_owner_customer_id,
         "TELEGRAM_BOT_TOKEN": settings.telegram_bot_token,
         "TELEGRAM_WEBHOOK_SECRET": settings.telegram_webhook_secret,

@@ -152,9 +152,9 @@ class Settings(BaseSettings):
             "a numeric Telegram id binding on first message."
         ),
     )
-    opentulpa_web_token: str | None = Field(
+    opentulpa_owner_token: str | None = Field(
         default=None,
-        description="Bearer token required for dashboard web operations against this deployment.",
+        description="Bearer token required for owner Agent API operations.",
     )
 
     # LLM: one OpenRouter-compatible model used by Deep Agents.

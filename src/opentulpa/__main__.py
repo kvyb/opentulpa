@@ -22,7 +22,6 @@ from opentulpa.api.principal import (
     OwnerOrCapabilityPrincipalResolver,
     OwnerPrincipalResolver,
 )
-from opentulpa.api.web_auth import local_owner_cookie_enabled
 from opentulpa.application.product_ports import (
     ArtifactDeliveryProductPort,
     CustomerProfileProductPort,
@@ -1152,19 +1151,11 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                     deliver_approval=telegram_relay.deliver_approval,
                 )
             )
-        owner_web_token = str(settings.opentulpa_web_token or "").strip()
-        local_web_cookie = local_owner_cookie_enabled(
-            bind_host=settings.host,
-            public_base_url=_resolve_public_base_url(),
-        )
-        local_web_session_token = (
-            secrets.token_urlsafe(48) if local_web_cookie and owner_web_token else ""
-        )
+        owner_token = str(settings.opentulpa_owner_token or "").strip()
         principal = OwnerOrCapabilityPrincipalResolver(
             owner=OwnerPrincipalResolver(
-                token=owner_web_token,
+                token=owner_token,
                 tenant_id=owner_tenant_id,
-                local_cookie_token=local_web_session_token,
             ),
             capability=CapabilityPrincipalResolver(capability_credentials),
         )
@@ -1193,7 +1184,6 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             idempotency_store=idempotency,
             release_control_service=release_control,
             notification_service=notifications,
-            local_owner_session_token=local_web_session_token or None,
         )
         app.state.owner_tenant_id = owner_tenant_id
         app.state.product_application = product_application

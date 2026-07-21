@@ -283,7 +283,7 @@ class RuntimeSupervisor:
                 "OPENAI_COMPATIBLE_API_KEY": config.api_key.get_secret_value(),
                 "OPENAI_COMPATIBLE_BASE_URL": config.base_url,
                 "LLM_MODEL": config.model,
-                "OPENTULPA_WEB_TOKEN": config.internal_runtime_token.get_secret_value(),
+                "OPENTULPA_OWNER_TOKEN": config.internal_runtime_token.get_secret_value(),
                 "OPENTULPA_OWNER_CUSTOMER_ID": "owner",
                 "OPENTULPA_INTERNAL_AGENT_API_URL": f"http://127.0.0.1:{port}",
                 "OPENTULPA_DYNAMIC_HOST": "1",

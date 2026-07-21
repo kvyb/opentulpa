@@ -55,11 +55,11 @@ external effect, or non-resumable approval fails the rehearsal.
 
 ## Universal Interface Rehearsal
 
-Exercise web first, then prove another interface uses the same state:
+Exercise the local TUI first, then prove another interface uses the same state:
 
-1. Start a web-only deployment with no host `TELEGRAM_BOT_TOKEN`.
-2. Open `/`, authenticate, submit text and an attachment, and observe ordered SSE.
-3. Trigger a risky reversible test tool and verify the web approval can be approved,
+1. Start a terminal-only deployment with no host `TELEGRAM_BOT_TOKEN`.
+2. Connect with `opentulpa connect`, submit text and an attachment, and observe ordered SSE.
+3. Trigger a risky reversible test tool and verify the TUI approval can be approved,
    edited, and rejected.
 4. Paste a dedicated BotFather test token and ask OpenTulpa to enable Telegram.
 5. Verify the stored run text and traces contain only `secret://telegram_bot_token`, not

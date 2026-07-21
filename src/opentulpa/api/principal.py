@@ -11,7 +11,6 @@ from typing import Protocol
 
 from fastapi import HTTPException, Request
 
-from opentulpa.api.web_auth import bearer_token, owner_session_token
 from opentulpa.capabilities.credentials import (
     CAPABILITY_CREDENTIAL_PREFIX,
     CapabilityAPIScope,
@@ -86,23 +85,16 @@ class OwnerPrincipalResolver:
         token: str | None,
         tenant_id: str,
         actor_id: str = "web-owner",
-        local_cookie_token: str | None = None,
     ) -> None:
         self._token = str(token or "").strip()
         self._tenant_id = str(tenant_id or "").strip()
         self._actor_id = str(actor_id or "").strip()
-        self._local_cookie_token = str(local_cookie_token or "").strip()
 
     def __call__(self, request: Request) -> AuthenticatedPrincipal:
         if not self._token:
-            raise HTTPException(status_code=503, detail="OPENTULPA_WEB_TOKEN is not configured")
-        supplied = bearer_token(request)
+            raise HTTPException(status_code=503, detail="OPENTULPA_OWNER_TOKEN is not configured")
+        supplied = _bearer_token(request)
         authorized = bool(supplied and compare_digest(supplied, self._token))
-        if not supplied and self._local_cookie_token:
-            session = owner_session_token(request, enabled=True)
-            authorized = bool(
-                session and compare_digest(session, self._local_cookie_token)
-            )
         if not authorized:
             raise HTTPException(status_code=401, detail="unauthorized")
         if not self._tenant_id:
@@ -120,7 +112,7 @@ class CapabilityPrincipalResolver:
         self._credentials = credentials
 
     def __call__(self, request: Request) -> AuthenticatedPrincipal:
-        supplied = bearer_token(request)
+        supplied = _bearer_token(request)
         credential = self._credentials.authenticate(supplied)
         if credential is None:
             raise HTTPException(status_code=401, detail="unauthorized")
@@ -157,7 +149,7 @@ class OwnerOrCapabilityPrincipalResolver:
         self._capability = capability
 
     async def __call__(self, request: Request) -> AuthenticatedPrincipal:
-        supplied = bearer_token(request)
+        supplied = _bearer_token(request)
         if supplied.startswith(CAPABILITY_CREDENTIAL_PREFIX):
             return self._capability(request)
         resolved = self._owner(request)
@@ -184,6 +176,12 @@ def _origin_header(request: Request, name: str) -> str | None:
     if len(value) > 200 or any(ord(char) < 32 for char in value):
         raise HTTPException(status_code=400, detail="invalid interface origin metadata")
     return value
+
+
+def _bearer_token(request: Request) -> str:
+    header = str(request.headers.get("authorization") or "").strip()
+    scheme, _, token = header.partition(" ")
+    return token.strip() if scheme.casefold() == "bearer" else ""
 
 
 __all__ = [

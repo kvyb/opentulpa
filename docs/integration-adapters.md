@@ -34,7 +34,7 @@ stream. It must not own another model loop, planner, checkpoint store, or owner 
 token. Capability workers receive a revocable credential limited to their manifest
 scopes. An Agent API credential also pins the exact tenant AgentSpec revision, run
 kind, and trust class declared by the reviewed worker manifest. These values are never
-accepted in the run request body. Owner web requests resolve the owner binding inside
+accepted in the run request body. Owner API requests resolve the owner binding inside
 the trusted API, while the bundled Telegram manifest is the only seed interface that
 explicitly requests the same owner authority.
 

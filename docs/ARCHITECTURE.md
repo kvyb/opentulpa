@@ -8,12 +8,12 @@ services, integrations, interfaces, tests, and presentation.
 ## System Boundary
 
 ```text
-owner web UI       Telegram worker       time/event trigger       intake ingress
+local owner TUI    Telegram worker       time/event trigger       intake ingress
      |                   |                       |                       |
      +-------------------+-----------------------+-----------------------+
                                  |
                     stable host proxy and auth
-                setup + encrypted config + logs
+             setup + encrypted config + logs + /_host
                                  |
                     universal Agent API protocol
                 identity + AgentSpec + origin + files
@@ -136,7 +136,7 @@ origin, agent_spec, trust_class
 
 `RunSubmission` adds text, file IDs, a submission ID, timestamp, and idempotency key.
 Authentication constructs the context; an interface cannot override its tenant,
-channel, run kind, trust class, or AgentSpec. Owner web authentication resolves the
+channel, run kind, trust class, or AgentSpec. Owner API authentication resolves the
 active owner spec in trusted application code. Every capability credential instead
 persists one exact `AgentSpecRef` revision plus its reviewed run kind and trust class.
 That binding comes from the approved interface worker manifest, not request text or
@@ -176,11 +176,11 @@ and results are redacted. Runs and approval interrupts remain queryable after re
 Checkpoint thread IDs include the exact AgentSpec ID and revision. Different specs can
 therefore use the same logical thread name without sharing history or blocking each
 other's unresolved approvals. Only authenticated uses of the exact owner spec and
-revision share owner continuity across interfaces such as web and Telegram. Restricted
+revision share owner continuity across interfaces such as the local TUI and Telegram. Restricted
 origins are additionally scoped by their immutable credential authority.
 
 The notification store is a separate durable delivery stream. Each interface has its
-own acknowledgement cursor, so a web client and Telegram can independently receive a
+own acknowledgement cursor, so the local TUI and Telegram can independently receive a
 scheduled result or approval. Trigger, evolution, activation, and rollback outcomes
 are deduplicated before delivery.
 

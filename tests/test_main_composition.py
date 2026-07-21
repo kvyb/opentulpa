@@ -23,7 +23,7 @@ from opentulpa.tooling import TOOL_SPECS
 def _settings(root: Path, **overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "OPENAI_COMPATIBLE_API_KEY": "test-model-key",
-        "opentulpa_web_token": "test-web-token",
+        "opentulpa_owner_token": "test-owner-token",
         "telegram_bot_token": "",
         "composio_api_key": "",
         "deepagents_checkpoint_db_path": str(root / "runtime" / "checkpoints.db"),

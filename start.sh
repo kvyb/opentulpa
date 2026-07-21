@@ -28,7 +28,7 @@ SERVER_PUBLIC_URL=""
 CLI_API_KEY=""
 CLI_TELEGRAM_BOT_TOKEN=""
 CLI_TELEGRAM_USER_ID=""
-CLI_WEB_TOKEN=""
+CLI_OWNER_TOKEN=""
 
 usage() {
   cat <<'EOF_USAGE'
@@ -36,9 +36,9 @@ Usage:
   ./start.sh [serve|local|server|managed|install|run|doctor] [options] [-- extra-args]
 
 Commands:
-  serve                 Start the stable setup host, web chat, and configured interfaces
+  serve                 Start the headless host, Agent API, and configured interfaces
   local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
-  server                Install, then run the mutable web/API app directly
+  server                Install, then run the headless Agent API directly
   managed               Install trusted OCI images, then run the self-replacing bootstrap
   install               Install/setup only
   run [local|server|managed] Run only, without installing
@@ -66,7 +66,7 @@ Options:
   --telegram-bot-token TOKEN
                         Telegram bot token; requires --telegram-user-id
   --telegram-user-id ID Telegram numeric owner ID; requires --telegram-bot-token
-  --web-token TOKEN     Optional remote web/API owner token
+  --owner-token TOKEN   Optional remote Agent API owner token
   --host HOST           Bind host (local default: 127.0.0.1)
   --port PORT           Server port (default: PORT or 8000)
   --data-root PATH      Persistent data directory
@@ -510,9 +510,9 @@ parse_args() {
         CLI_TELEGRAM_USER_ID="$2"
         shift 2
         ;;
-      --web-token)
-        [[ $# -ge 2 ]] || die "--web-token requires a value"
-        CLI_WEB_TOKEN="$2"
+      --owner-token)
+        [[ $# -ge 2 ]] || die "--owner-token requires a value"
+        CLI_OWNER_TOKEN="$2"
         shift 2
         ;;
       --host)
@@ -681,8 +681,8 @@ configure_serve() {
     die "--telegram-user-id must be a positive numeric Telegram user ID"
   fi
   [[ -z "${CLI_TELEGRAM_USER_ID}" ]] || export TELEGRAM_ALLOWED_USER_IDS="${CLI_TELEGRAM_USER_ID}"
-  [[ -z "${CLI_WEB_TOKEN}" ]] || export OPENTULPA_WEB_TOKEN="${CLI_WEB_TOKEN}"
-  if [[ -n "${CLI_API_KEY}${CLI_TELEGRAM_BOT_TOKEN}${CLI_TELEGRAM_USER_ID}${CLI_WEB_TOKEN}" ]]; then
+  [[ -z "${CLI_OWNER_TOKEN}" ]] || export OPENTULPA_OWNER_TOKEN="${CLI_OWNER_TOKEN}"
+  if [[ -n "${CLI_API_KEY}${CLI_TELEGRAM_BOT_TOKEN}${CLI_TELEGRAM_USER_ID}${CLI_OWNER_TOKEN}" ]]; then
     warn "secrets passed as arguments can remain in shell history; use the setup UI when possible"
   fi
 
@@ -725,7 +725,7 @@ configure_local_server_defaults() {
       export HOST="0.0.0.0"
     else
       export HOST="127.0.0.1"
-      log "binding the local web server to 127.0.0.1"
+      log "binding the local Agent API to 127.0.0.1"
     fi
   fi
   if ! env_is_set "OPENTULPA_DATA_ROOT"; then
@@ -734,16 +734,16 @@ configure_local_server_defaults() {
     export OPENTULPA_DATA_ROOT="${data_root}"
     log "using local data at ${OPENTULPA_DATA_ROOT}"
   fi
-  env_is_set "OPENTULPA_WEB_TOKEN" && return 0
+  env_is_set "OPENTULPA_OWNER_TOKEN" && return 0
   if [[ "${SERVE_MODE}" == "1" ]] && ! host_is_loopback "${HOST:-}"; then
-    log "remote host is unclaimed; use the one-time setup token printed at startup."
+    log "remote host is unclaimed; use the one-time pairing code printed at startup."
     return 0
   fi
 
   token_dir="${OPENTULPA_DATA_ROOT}/bootstrap"
-  token_path="${token_dir}/owner-web.token"
+  token_path="${token_dir}/owner.token"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    export OPENTULPA_WEB_TOKEN="dry-run-local-owner-token"
+    export OPENTULPA_OWNER_TOKEN="dry-run-local-owner-token"
     log "use the private generated owner credential in ${token_path}"
     return 0
   fi
@@ -760,7 +760,7 @@ configure_local_server_defaults() {
   chmod 600 "${token_path}"
   token="$(tr -d '\r\n' < "${token_path}")"
   [[ "${token}" =~ ^[0-9a-f]{64}$ ]] || die "owner credential file is invalid: ${token_path}"
-  export OPENTULPA_WEB_TOKEN="${token}"
+  export OPENTULPA_OWNER_TOKEN="${token}"
   log "using the private generated owner credential"
 }
 
@@ -790,7 +790,7 @@ ensure_required_env() {
 
   if [[ "${runtime}" == "server" ]]; then
     env_is_set "OPENTULPA_DATA_ROOT" || missing+=("OPENTULPA_DATA_ROOT")
-    env_is_set "OPENTULPA_WEB_TOKEN" || missing+=("OPENTULPA_WEB_TOKEN")
+    env_is_set "OPENTULPA_OWNER_TOKEN" || missing+=("OPENTULPA_OWNER_TOKEN")
     if server_telegram_enabled; then
       env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
       env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
@@ -799,12 +799,12 @@ ensure_required_env() {
         missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
       fi
     else
-      log "server Telegram disabled; web/API startup does not require Telegram env."
+      log "server Telegram disabled; Agent API startup does not require Telegram env."
     fi
   fi
 
   if [[ "${runtime}" == "managed" ]]; then
-    env_is_set "OPENTULPA_WEB_TOKEN" || missing+=("OPENTULPA_WEB_TOKEN")
+    env_is_set "OPENTULPA_OWNER_TOKEN" || missing+=("OPENTULPA_OWNER_TOKEN")
     env_is_set "OPENTULPA_RECOVERY_TOKEN" || missing+=("OPENTULPA_RECOVERY_TOKEN")
     env_is_set "OPENTULPA_INGRESS_TOKEN" || missing+=("OPENTULPA_INGRESS_TOKEN")
     env_is_set "OPENTULPA_RELEASE_EGRESS_NETWORK" || missing+=("OPENTULPA_RELEASE_EGRESS_NETWORK")
@@ -846,7 +846,7 @@ ensure_required_env() {
     fi
   fi
   if [[ "${runtime}" == "server" ]]; then
-    env_is_set "OPENTULPA_WEB_TOKEN" || prompt_env_value "OPENTULPA_WEB_TOKEN" "OPENTULPA_WEB_TOKEN" 1
+    env_is_set "OPENTULPA_OWNER_TOKEN" || prompt_env_value "OPENTULPA_OWNER_TOKEN" "OPENTULPA_OWNER_TOKEN" 1
     if server_telegram_enabled; then
       env_is_set "TELEGRAM_BOT_TOKEN" || prompt_env_value "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN" 1
       if ! telegram_allowlist_is_set; then
@@ -858,7 +858,7 @@ ensure_required_env() {
     env_is_set "OPENTULPA_DATA_ROOT" || prompt_env_value "OPENTULPA_DATA_ROOT" "OPENTULPA_DATA_ROOT" 0 "/app/opentulpa_data"
   fi
   if [[ "${runtime}" == "managed" ]]; then
-    env_is_set "OPENTULPA_WEB_TOKEN" || prompt_env_value "OPENTULPA_WEB_TOKEN" "OPENTULPA_WEB_TOKEN" 1
+    env_is_set "OPENTULPA_OWNER_TOKEN" || prompt_env_value "OPENTULPA_OWNER_TOKEN" "OPENTULPA_OWNER_TOKEN" 1
     env_is_set "OPENTULPA_RECOVERY_TOKEN" || prompt_env_value "OPENTULPA_RECOVERY_TOKEN" "OPENTULPA_RECOVERY_TOKEN (32+ random characters)" 1
     env_is_set "OPENTULPA_INGRESS_TOKEN" || prompt_env_value "OPENTULPA_INGRESS_TOKEN" "OPENTULPA_INGRESS_TOKEN (32+ random characters)" 1
     env_is_set "OPENTULPA_RELEASE_EGRESS_NETWORK" || prompt_env_value "OPENTULPA_RELEASE_EGRESS_NETWORK" "OPENTULPA_RELEASE_EGRESS_NETWORK"
@@ -1097,7 +1097,7 @@ open_local_web_when_ready() {
     return 0
   fi
   command -v curl >/dev/null 2>&1 || {
-    log "Open ${url} to talk with OpenTulpa."
+    log "Open ${url} to administer OpenTulpa."
     return 0
   }
   case "$(uname -s)" in
@@ -1105,7 +1105,7 @@ open_local_web_when_ready() {
     Linux) command -v xdg-open >/dev/null 2>&1 && opener="xdg-open" ;;
   esac
   if [[ -z "${opener}" ]]; then
-    log "Open ${url} to talk with OpenTulpa."
+    log "Open ${url} to administer OpenTulpa."
     return 0
   fi
   (
@@ -1256,7 +1256,7 @@ run_doctor() {
   emit_model_config_notice
   check_model_catalog
   if [[ "${runtime}" == "server" ]]; then
-    doctor_check "OPENTULPA_WEB_TOKEN is set" "$(env_is_set "OPENTULPA_WEB_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_WEB_TOKEN for web/API access" || failures=$((failures + 1))
+    doctor_check "OPENTULPA_OWNER_TOKEN is set" "$(env_is_set "OPENTULPA_OWNER_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_OWNER_TOKEN for Agent API access" || failures=$((failures + 1))
     if server_telegram_enabled; then
       doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET in .env" || failures=$((failures + 1))
       doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL, or rely on Railway's RAILWAY_PUBLIC_DOMAIN" || failures=$((failures + 1))
@@ -1278,7 +1278,7 @@ run_doctor() {
     network="${OPENTULPA_RELEASE_EGRESS_NETWORK:-}"
     recovery_token="${OPENTULPA_RECOVERY_TOKEN:-}"
     ingress_token="${OPENTULPA_INGRESS_TOKEN:-}"
-    doctor_check "OPENTULPA_WEB_TOKEN is set" "$(env_is_set "OPENTULPA_WEB_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_WEB_TOKEN" || failures=$((failures + 1))
+    doctor_check "OPENTULPA_OWNER_TOKEN is set" "$(env_is_set "OPENTULPA_OWNER_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_OWNER_TOKEN" || failures=$((failures + 1))
     doctor_check "OPENTULPA_RECOVERY_TOKEN is at least 32 characters" "$([[ ${#recovery_token} -ge 32 ]] && echo 1 || echo 0)" "set a random OPENTULPA_RECOVERY_TOKEN" || failures=$((failures + 1))
     doctor_check "OPENTULPA_INGRESS_TOKEN is at least 32 characters" "$([[ ${#ingress_token} -ge 32 ]] && echo 1 || echo 0)" "set a random OPENTULPA_INGRESS_TOKEN" || failures=$((failures + 1))
     if server_telegram_enabled; then

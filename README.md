@@ -11,8 +11,8 @@
 
 ## What It Is
 
-OpenTulpa is one persistent agent with multiple replaceable ways to reach it. The web
-interface, Telegram worker, schedules, intake, browser automation, and future
+OpenTulpa is one persistent agent with multiple replaceable ways to reach it. The local
+terminal client, Telegram worker, schedules, intake, browser automation, and future
 integrations all submit work through the same tenant-scoped Agent API. They do not own
 their own model loops or conversation stores.
 
@@ -38,7 +38,7 @@ OpenTulpa keeps deployment machinery outside the application image it replaces.
 |---|---|
 | Setup, owner authentication, encrypted configuration, process health, logs, proxy, recovery | Deep Agent service, prompts, tools, and approval policy |
 | Source-worktree sandbox limits and trusted evaluation commands | Agent API, product services, integrations, and interfaces |
-| Optional managed release builder, probation, and rollback | Capability workers, manifests, bundled web UI, tests, and documentation |
+| Optional managed release builder, probation, and rollback | Capability workers, manifests, local TUI, tests, and documentation |
 | Host credentials, deployment controls, and OCI authority | Any other normal, secret-free repository source path |
 
 In managed mode, the owner can ask the main OpenTulpa agent to change any source. That
@@ -67,11 +67,12 @@ digest-checked patch for normal upstream review.
 
 ## Interfaces And Capabilities
 
-FastAPI is part of the fixed public API. A dependency-free owner web client is bundled
-at `/`. Telegram is a versioned interface capability that calls the same run, file,
-approval, replay, and notification endpoints with a scoped credential.
+FastAPI exposes the headless public API. The bundled `opentulpa` command is a local,
+keyboard-first terminal client that calls the run, file, approval, replay, notification,
+and log endpoints. Telegram is a versioned interface capability using the same protocol
+with a scoped credential.
 
-For example, on a web-only installation you can write:
+For example, from the terminal client you can write:
 
 > Enable Telegram for this OpenTulpa. Here is my BotFather token: `<token>`.
 
@@ -236,15 +237,14 @@ cd opentulpa
 ```
 
 This starts the mutable application directly. It is useful for development and
-platforms that already own deployments, but it cannot replace itself safely. Set
-`OPENTULPA_OPEN_BROWSER=0` for a headless start. Public/non-loopback deployments must
-still configure their persistent data root and owner authentication explicitly.
+platforms that already own deployments, but it cannot replace itself safely.
+Public/non-loopback deployments must still configure their persistent data root and
+owner authentication explicitly.
 
-### Web and Telegram together
+### Terminal and Telegram together
 
 `serve` is the normal entrypoint. The setup console is available at `/_host`; the
-mutable agent UI is available at `/` after activation. You may also provide an initial
-configuration non-interactively:
+server itself has no chat UI. You may provide an initial configuration non-interactively:
 
 ```bash
 ./start.sh serve \
@@ -254,20 +254,29 @@ configuration non-interactively:
 ```
 
 Telegram uses its long-poll capability worker, so it does not need a public URL or a
-Cloudflare tunnel. Omit both Telegram arguments for web-only chat. Local host access is
-automatic. A remote unclaimed host prints a one-time setup token; claiming it returns
-an owner token once. `--web-token` can pre-claim unattended deployments. Command-line
+Cloudflare tunnel. Omit both Telegram arguments for terminal-only use. Local host access
+is automatic. A remote unclaimed host prints a one-time pairing code; claiming it returns
+an owner token once. `--owner-token` can pre-claim unattended deployments. Command-line
 secrets are imported into encrypted host storage and are not written to `.env`, but
 environment variables or the setup UI are safer because command arguments can remain
 in shell history.
 
-The small remote client uses the same stable host API:
+Connect once from the machine where you want to use OpenTulpa:
 
 ```bash
-opentulpa connect https://tulpa.example.com --token '<owner-token>'
+opentulpa connect https://tulpa.example.com
+# paste the owner token or one-time pairing code when prompted
+
+# later launches reconnect and restore the same Deep Agents thread
+opentulpa
 opentulpa status
 opentulpa logs --follow
 ```
+
+The URL and last thread are stored in `~/.config/opentulpa/client.json`. The owner token
+uses the operating-system keychain when available, with a mode-`0600` config fallback.
+The TUI streams agent and tool activity, restores interrupted streams, uploads files,
+handles persisted approvals and notifications, and supports `/regenerate`.
 
 ### Managed self-improving mode
 
@@ -275,7 +284,7 @@ Set at least:
 
 ```env
 OPENAI_COMPATIBLE_API_KEY=...
-OPENTULPA_WEB_TOKEN=...
+OPENTULPA_OWNER_TOKEN=...
 EVOLUTION_ENABLED=true
 OPENTULPA_RECOVERY_TOKEN=<32-or-more-random-characters>
 OPENTULPA_INGRESS_TOKEN=<32-or-more-random-characters>
@@ -297,7 +306,7 @@ The immutable gateway remains on the public host/port and proxies to the active
 release. The release gets a persistent `/workspace`; it never receives the source
 checkout, bootstrap database, `.env`, container socket, or sandbox image authority.
 Tenant commands cross a private, lease-bound endpoint and the stable host derives the
-tenant root and launches the exact locally resolved no-network image. See
+tenant root and launches the exact locally resolved reviewed image. See
 [Deployment](docs/DEPLOYMENT.md) for the complete host contract.
 
 Use `opentulpa-recovery status`, `rollback`, `restart`, or `safe-mode` from the host if

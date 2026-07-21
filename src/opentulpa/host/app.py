@@ -125,6 +125,10 @@ def create_host_app(
             return JSONResponse(status_code=503, content={"ok": False, "runtime": runtime_status})
         return JSONResponse(content={"ok": True, "runtime": "ready"})
 
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/_host", status_code=307)
+
     @app.get("/_host")
     @app.get("/_host/")
     async def host_console() -> FileResponse:
@@ -179,7 +183,7 @@ def create_host_app(
         try:
             store.claim(setup_token=supplied_setup, owner_token=token)
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail="invalid setup token") from exc
+            raise HTTPException(status_code=403, detail="invalid pairing code") from exc
         except (ValueError, HostConfigConflictError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _set_owner_cookie(response, token, secure=request.url.scheme == "https")

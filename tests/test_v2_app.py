@@ -127,7 +127,6 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
     assert "/webhook/composio/callback" in paths
     assert all(
         path in {"/", "/healthz", "/agent/healthz"}
-        or path.startswith("/assets/")
         or path.startswith("/v2/")
         or path in {"/webhook/telegram", "/webhook/composio/callback"}
         for path in paths
@@ -138,14 +137,13 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
         agent_health = client.get("/agent/healthz")
         assert agent_health.status_code == 200
         assert agent_health.json()["backend"] == "deepagents"
-        owner_ui = client.get("/")
-        assert owner_ui.status_code == 200
-        assert "OpenTulpa" in owner_ui.text
-        assert "/assets/app.js" in owner_ui.text
-        owner_script = client.get("/assets/app.js")
-        assert "/v2/agent/runs" in owner_script.text
-        assert "/v2/notifications" in owner_script.text
-        assert owner_ui.headers["cache-control"] == "no-store"
+        landing = client.get("/")
+        assert landing.status_code == 200
+        assert "HEADLESS DEEP AGENTS BACKEND" in landing.text
+        assert "opentulpa connect http://testserver" in landing.text
+        assert "agent chat interface" in landing.text
+        assert client.get("/assets/app.js").status_code == 404
+        assert landing.headers["cache-control"] == "no-store"
 
 
 def test_v2_app_owns_service_lifespan_in_dependency_order() -> None:

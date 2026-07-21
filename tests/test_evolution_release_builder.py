@@ -48,14 +48,14 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     manifests = root / "src" / "opentulpa" / "capability_manifests"
     manifests.mkdir()
     (manifests / "telegram.json").write_text('{"version":1}\n')
-    web_assets = root / "src" / "opentulpa" / "web_assets"
-    web_assets.mkdir()
-    (web_assets / "index.html").write_text("<h1>version 1</h1>\n")
+    client = root / "src" / "opentulpa" / "client"
+    client.mkdir()
+    (client / "tui.py").write_text("VERSION = 1\n")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "seed")
     (workers / "telegram_worker.py").write_text("VERSION = 2\n")
     (manifests / "telegram.json").write_text('{"version":2}\n')
-    (web_assets / "index.html").write_text("<h1>version 2</h1>\n")
+    (client / "tui.py").write_text("VERSION = 2\n")
     _git(root, "add", ".")
     _git(root, "commit", "-m", "allowed runtime overlay")
     return root, _git(root, "rev-parse", "HEAD")
@@ -117,9 +117,7 @@ class FakeBuildRunner:
             assert (
                 context / "src/opentulpa/capability_manifests/telegram.json"
             ).read_text() == '{"version":2}\n'
-            assert (context / "src/opentulpa/web_assets/index.html").read_text() == (
-                "<h1>version 2</h1>\n"
-            )
+            assert (context / "src/opentulpa/client/tui.py").read_text() == "VERSION = 2\n"
             return OciCommandResult(returncode=0, output=b"built")
         if command[1:3] == ("image", "inspect"):
             if command[3] == self.base_image_id:
@@ -315,7 +313,7 @@ async def test_trusted_builder_rejects_credential_content_before_oci_access(
         "src/opentulpa/capability_workers/sitecustomize.py",
         "src/opentulpa/capability_workers/.venv/evil.py",
         "src/opentulpa/capability_manifests/nested/unsafe.json",
-        "src/opentulpa/web_assets/unsafe.py",
+        "src/opentulpa/client/unsafe.py",
         "opentulpa.config.yaml",
     ),
 )

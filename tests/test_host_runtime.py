@@ -46,7 +46,7 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     )
 
     assert environment["OPENAI_COMPATIBLE_API_KEY"] == "provider-secret-value"
-    assert environment["OPENTULPA_WEB_TOKEN"] == "internal-owner-secret-value"
+    assert environment["OPENTULPA_OWNER_TOKEN"] == "internal-owner-secret-value"
     assert "TELEGRAM_BOT_TOKEN" not in environment
     assert "TELEGRAM_WEBHOOK_SECRET" not in environment
     line = runtime.logs()[0].text

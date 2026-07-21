@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import getpass
 import json
 import os
 import secrets
@@ -14,6 +16,15 @@ import httpx
 import uvicorn
 from pydantic import SecretStr
 
+from opentulpa.client.config import (
+    ClientConfigError,
+    Connection,
+    clear_connection,
+    load_connection,
+    normalize_url,
+    save_connection,
+)
+from opentulpa.client.tui import run_tui
 from opentulpa.core.config import get_settings
 from opentulpa.host.app import create_host_app
 from opentulpa.host.models import HostConfigInput
@@ -59,9 +70,9 @@ def build_host_application() -> tuple[Any, str, str, Path]:
     )
     store.configure_setup_token(setup_token)
     host = str(os.environ.get("HOST") or "127.0.0.1").strip()
-    owner_token = str(os.environ.get("OPENTULPA_WEB_TOKEN") or "").strip()
+    owner_token = str(os.environ.get("OPENTULPA_OWNER_TOKEN") or "").strip()
     if not owner_token and host in {"127.0.0.1", "localhost", "::1"}:
-        owner_token = _private_token(data_root / "bootstrap" / "owner-web.token")
+        owner_token = _private_token(data_root / "bootstrap" / "owner.token")
     if owner_token and not store.claimed:
         store.claim(setup_token=setup_token, owner_token=owner_token)
 
@@ -99,7 +110,7 @@ def serve() -> None:
     print(f"OpenTulpa host: http://{host}:{port}/")
     print(f"Setup and recovery: http://{host}:{port}/_host")
     if host not in {"127.0.0.1", "localhost", "::1"} and not app.state.host_store.claimed:
-        print(f"One-time setup token: {setup_token}")
+        print(f"One-time pairing code: {setup_token}")
     print(f"Persistent data: {data_root}")
     uvicorn.run(
         app,
@@ -111,56 +122,48 @@ def serve() -> None:
     )
 
 
-def _client_config_path() -> Path:
-    return Path(
-        os.environ.get("OPENTULPA_CLIENT_CONFIG") or "~/.config/opentulpa/client.json"
-    ).expanduser()
-
-
-def _save_client(url: str, token: str) -> None:
-    path = _client_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_suffix(".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump({"url": url.rstrip("/"), "token": token}, stream)
-        stream.write("\n")
-    os.replace(temporary, path)
-
-
-def _load_client() -> dict[str, str]:
-    path = _client_config_path()
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise SystemExit("Run `opentulpa connect URL --token TOKEN` first.") from exc
-    return {"url": str(value["url"]), "token": str(value["token"])}
-
-
 def _remote(args: argparse.Namespace) -> int:
     if args.command == "connect":
-        config = {"url": args.url.rstrip("/"), "token": args.token}
-    else:
-        config = _load_client()
-    headers = {"Authorization": f"Bearer {config['token']}"}
-    with httpx.Client(timeout=30, trust_env=False) as client:
-        if args.command == "connect":
-            response = client.get(f"{config['url']}/_host/api/status", headers=headers)
-            if not response.is_success or not response.json().get("authenticated"):
-                print("OpenTulpa rejected the owner token.", file=sys.stderr)
-                return 1
-            _save_client(config["url"], config["token"])
-            print(f"Connected to {config['url']}")
+        try:
+            url = normalize_url(args.url)
+        except ClientConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        supplied = str(args.token or args.pairing_code or "").strip()
+        if not supplied and sys.stdin.isatty():
+            supplied = getpass.getpass("Owner token or pairing code (blank for local): ").strip()
+        token = _connect_credential(url, supplied)
+        if token is None:
+            return 1
+        try:
+            connection = save_connection(url, token)
+        except ClientConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(
+            f"Connected to {connection.url}; credential stored in "
+            f"{connection.credential_storage}."
+        )
+        if args.no_tui:
             return 0
+        asyncio.run(run_tui(connection))
+        return 0
+    try:
+        connection = load_connection()
+    except ClientConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    headers = _owner_headers(connection.token)
+    with httpx.Client(timeout=30, trust_env=False) as client:
         if args.command == "status":
-            response = client.get(f"{config['url']}/_host/api/status", headers=headers)
+            response = client.get(f"{connection.url}/_host/api/status", headers=headers)
             response.raise_for_status()
             print(json.dumps(response.json(), indent=2))
             return 0
         if args.command == "logs":
             if args.follow:
                 with client.stream(
-                    "GET", f"{config['url']}/_host/api/logs/stream", headers=headers
+                    "GET", f"{connection.url}/_host/api/logs/stream", headers=headers
                 ) as response:
                     response.raise_for_status()
                     for line in response.iter_lines():
@@ -168,27 +171,101 @@ def _remote(args: argparse.Namespace) -> int:
                             entry = json.loads(line[6:])
                             print(f"{entry['stream']:<6} {entry['text']}", flush=True)
                 return 0
-            response = client.get(f"{config['url']}/_host/api/logs", headers=headers)
+            response = client.get(f"{connection.url}/_host/api/logs", headers=headers)
             response.raise_for_status()
             for entry in response.json()["logs"]:
                 print(f"{entry['stream']:<6} {entry['text']}")
             return 0
+        if args.command == "disconnect":
+            try:
+                clear_connection()
+            except ClientConfigError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print("Forgot the remembered OpenTulpa server and owner credential.")
+            return 0
     return 1
+
+
+def _connect_credential(url: str, supplied: str) -> str | None:
+    headers = _owner_headers(supplied)
+    try:
+        with httpx.Client(timeout=20, trust_env=False) as client:
+            response = client.get(f"{url}/_host/api/status", headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            if bool(payload.get("authenticated")):
+                return supplied
+            if not bool(payload.get("claimed")) and supplied:
+                claim = client.post(
+                    f"{url}/_host/api/claim",
+                    json={"setup_token": supplied},
+                )
+                if claim.is_success:
+                    owner_token = str(claim.json().get("owner_token") or "").strip()
+                    if owner_token:
+                        return owner_token
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"Could not connect to OpenTulpa: {exc}", file=sys.stderr)
+        return None
+    print("OpenTulpa rejected the owner token or pairing code.", file=sys.stderr)
+    return None
+
+
+def _owner_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _interactive_connection() -> Connection:
+    try:
+        return load_connection()
+    except ClientConfigError:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise SystemExit("Run `opentulpa connect SERVER_URL` first.") from None
+    print("Connect this terminal to an OpenTulpa server.")
+    url = input("Server URL: ").strip()
+    credential = getpass.getpass("Owner token or pairing code (blank for local): ").strip()
+    try:
+        normalized = normalize_url(url)
+    except ClientConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+    token = _connect_credential(normalized, credential)
+    if token is None:
+        raise SystemExit(1)
+    try:
+        return save_connection(normalized, token)
+    except ClientConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _open_tui() -> None:
+    connection = _interactive_connection()
+    try:
+        asyncio.run(run_tui(connection))
+    except KeyboardInterrupt:
+        return
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="opentulpa")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("serve", help="start the stable host and mutable agent runtime")
-    connect = subparsers.add_parser("connect", help="save a remote owner connection")
+    connect = subparsers.add_parser("connect", help="connect and open the terminal client")
     connect.add_argument("url")
-    connect.add_argument("--token", required=True)
+    credential = connect.add_mutually_exclusive_group()
+    credential.add_argument("--token")
+    credential.add_argument("--pairing-code")
+    connect.add_argument("--no-tui", action="store_true", help="save without opening the TUI")
     subparsers.add_parser("status", help="show remote host status")
     logs = subparsers.add_parser("logs", help="show redacted runtime logs")
     logs.add_argument("--follow", action="store_true")
+    subparsers.add_parser("disconnect", help="forget the server and owner credential")
     args = parser.parse_args()
-    if args.command in {None, "serve"}:
+    if args.command == "serve":
         serve()
+        return
+    if args.command is None:
+        _open_tui()
         return
     raise SystemExit(_remote(args))
 
