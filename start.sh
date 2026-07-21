@@ -20,22 +20,26 @@ UV_BOOTSTRAPPED=0
 DIRECT_ENGINE_AVAILABLE=0
 PASSTHRU=()
 SELECTED_EXTRAS=()
-TENANT_ID=""
-TENANT_MODE=0
-TENANT_PORT=""
-TENANT_DATA_ROOT=""
-TENANT_PUBLIC_URL=""
+SERVE_MODE=0
+SERVER_PORT=""
+SERVER_HOST=""
+SERVER_DATA_ROOT=""
+SERVER_PUBLIC_URL=""
+CLI_API_KEY=""
+CLI_TELEGRAM_BOT_TOKEN=""
+CLI_TELEGRAM_USER_ID=""
+CLI_WEB_TOKEN=""
 
 usage() {
   cat <<'EOF_USAGE'
 Usage:
-  ./start.sh [local|server|managed|tenant|install|run|doctor] [options] [-- extra-args]
+  ./start.sh [serve|local|server|managed|install|run|doctor] [options] [-- extra-args]
 
 Commands:
+  serve                 Start web chat and, when configured, Telegram
   local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
   server                Install, then run the web/API app server (default)
   managed               Install trusted OCI images, then run the self-replacing bootstrap
-  tenant [TENANT_ID]    Install, then run one isolated owner server
   install               Install/setup only
   run [local|server|managed] Run only, without installing
   doctor [local|server|managed] Check startup readiness
@@ -58,9 +62,15 @@ Options:
   --yes, -y             Answer yes to installer prompts
   --no-install-uv       Never install uv automatically
   --dry-run             Print commands without running them
-  --port PORT           Tenant server port (default: PORT or 8000)
-  --data-root PATH      Tenant data directory (default: OPENTULPA_TENANTS_ROOT/TENANT_ID)
-  --public-url URL      Tenant public base URL
+  --api-key KEY         OpenAI-compatible model API key
+  --telegram-bot-token TOKEN
+                        Telegram bot token; requires --telegram-user-id
+  --telegram-user-id ID Telegram numeric owner ID; requires --telegram-bot-token
+  --web-token TOKEN     Optional remote web/API owner token
+  --host HOST           Bind host (local default: 127.0.0.1)
+  --port PORT           Server port (default: PORT or 8000)
+  --data-root PATH      Persistent data directory
+  --public-url URL      Public base URL; otherwise Telegram uses a local tunnel
   -h, --help            Show this help
 
 .env knobs:
@@ -72,10 +82,6 @@ Options:
   UV_PYTHON=3.12            (default: 3.12)
   OPENTULPA_OPEN_BROWSER=auto|1|0  (default: auto; open only for an interactive local start)
   OPENTULPA_RESTART_GRACE_SECONDS=15  (graceful replacement wait, capped at 300)
-  OPENTULPA_TENANTS_ROOT=...  (default: user data directory under opentulpa/tenants)
-  OPENTULPA_TENANT_ID=...  (alternative to the tenant command argument)
-  OPENTULPA_TENANT_HOST=0.0.0.0
-  OPENTULPA_TENANT_WEB_TOKEN=...  (optional; otherwise generated per tenant)
   SANDBOX_IMAGE=opentulpa-tenant-sandbox:0.1.0
 EOF_USAGE
 }
@@ -386,17 +392,11 @@ parse_args() {
         MODE="up"
         shift
         ;;
-      tenant)
-        TENANT_MODE=1
+      serve)
+        SERVE_MODE=1
         MODE="up"
         RUNTIME_MODE="server"
         shift
-        if [[ $# -gt 0 && "$1" != -* ]]; then
-          TENANT_ID="$1"
-          shift
-        else
-          TENANT_ID="${OPENTULPA_TENANT_ID:-}"
-        fi
         ;;
       up)
         MODE="up"
@@ -486,19 +486,44 @@ parse_args() {
         DRY_RUN="1"
         shift
         ;;
+      --api-key|--openai-compatible-api-key|--openapi-compatible-api-key)
+        [[ $# -ge 2 ]] || die "$1 requires a value"
+        CLI_API_KEY="$2"
+        shift 2
+        ;;
+      --telegram-bot-token)
+        [[ $# -ge 2 ]] || die "--telegram-bot-token requires a value"
+        CLI_TELEGRAM_BOT_TOKEN="$2"
+        shift 2
+        ;;
+      --telegram-user-id)
+        [[ $# -ge 2 ]] || die "--telegram-user-id requires a value"
+        CLI_TELEGRAM_USER_ID="$2"
+        shift 2
+        ;;
+      --web-token)
+        [[ $# -ge 2 ]] || die "--web-token requires a value"
+        CLI_WEB_TOKEN="$2"
+        shift 2
+        ;;
+      --host)
+        [[ $# -ge 2 ]] || die "--host requires a value"
+        SERVER_HOST="$2"
+        shift 2
+        ;;
       --port)
         [[ $# -ge 2 ]] || die "--port requires a value"
-        TENANT_PORT="$2"
+        SERVER_PORT="$2"
         shift 2
         ;;
       --data-root)
         [[ $# -ge 2 ]] || die "--data-root requires a value"
-        TENANT_DATA_ROOT="$2"
+        SERVER_DATA_ROOT="$2"
         shift 2
         ;;
       --public-url)
         [[ $# -ge 2 ]] || die "--public-url requires a value"
-        TENANT_PUBLIC_URL="$2"
+        SERVER_PUBLIC_URL="$2"
         shift 2
         ;;
       -h|--help)
@@ -616,101 +641,81 @@ generate_owner_token() {
   printf '%s\n' "${token}"
 }
 
-configure_tenant_server() {
-  local tenants_root data_root token_dir token_path marker_path token existing_tenant port
-  [[ -n "${TENANT_ID}" ]] || return 0
-  [[ "${TENANT_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] \
-    || die "TENANT_ID must use 1-63 lowercase letters, digits, dots, underscores, or hyphens"
+apply_serve_value() {
+  local key="$1" value="$2"
+  [[ -n "${value}" ]] || return 0
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || die "${key} cannot contain newlines"
+  export "${key}=${value}"
+  upsert_env_value "${key}" "${value}"
+}
 
-  port="${TENANT_PORT:-${PORT:-8000}}"
-  [[ "${port}" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) \
-    || die "tenant port must be an integer between 1 and 65535"
-  if [[ -n "${TENANT_PUBLIC_URL}" ]]; then
-    [[ "${TENANT_PUBLIC_URL}" =~ ^https?://[^[:space:]]+$ ]] \
+configure_serve() {
+  local bot_configured=0 owner_configured=0 generated_secret
+  [[ "${SERVE_MODE}" == "1" ]] || return 0
+
+  apply_serve_value "OPENAI_COMPATIBLE_API_KEY" "${CLI_API_KEY}"
+  apply_serve_value "TELEGRAM_BOT_TOKEN" "${CLI_TELEGRAM_BOT_TOKEN}"
+  if [[ -n "${CLI_TELEGRAM_USER_ID}" && ! "${CLI_TELEGRAM_USER_ID}" =~ ^[1-9][0-9]*$ ]]; then
+    die "--telegram-user-id must be a positive numeric Telegram user ID"
+  fi
+  apply_serve_value "TELEGRAM_ALLOWED_USER_IDS" "${CLI_TELEGRAM_USER_ID}"
+  apply_serve_value "OPENTULPA_WEB_TOKEN" "${CLI_WEB_TOKEN}"
+  if [[ -n "${CLI_API_KEY}${CLI_TELEGRAM_BOT_TOKEN}${CLI_TELEGRAM_USER_ID}${CLI_WEB_TOKEN}" ]]; then
+    warn "configuration passed as command arguments is saved in private .env; environment variables avoid shell history"
+  fi
+
+  if [[ -n "${SERVER_HOST}" ]]; then
+    [[ "${SERVER_HOST}" != *[[:space:]]* ]] || die "--host cannot contain whitespace"
+    apply_serve_value "HOST" "${SERVER_HOST}"
+  fi
+  if [[ -n "${SERVER_PORT}" ]]; then
+    [[ "${SERVER_PORT}" =~ ^[0-9]+$ ]] && ((SERVER_PORT >= 1 && SERVER_PORT <= 65535)) \
+      || die "--port must be an integer between 1 and 65535"
+    apply_serve_value "PORT" "${SERVER_PORT}"
+  fi
+  if [[ -n "${SERVER_DATA_ROOT}" ]]; then
+    [[ "${SERVER_DATA_ROOT}" == /* ]] || die "--data-root must be an absolute path"
+    apply_serve_value "OPENTULPA_DATA_ROOT" "${SERVER_DATA_ROOT}"
+  fi
+  if [[ -n "${SERVER_PUBLIC_URL}" ]]; then
+    [[ "${SERVER_PUBLIC_URL}" =~ ^https?://[^[:space:]]+$ ]] \
       || die "--public-url must be an absolute HTTP(S) URL"
-    export PUBLIC_BASE_URL="${TENANT_PUBLIC_URL%/}"
+    apply_serve_value "PUBLIC_BASE_URL" "${SERVER_PUBLIC_URL%/}"
+    export HOST="${HOST:-0.0.0.0}"
   fi
 
-  if [[ -n "${TENANT_DATA_ROOT}" ]]; then
-    data_root="${TENANT_DATA_ROOT}"
+  env_is_set "TELEGRAM_BOT_TOKEN" && bot_configured=1
+  telegram_allowlist_is_set && owner_configured=1
+  [[ "${bot_configured}" == "${owner_configured}" ]] \
+    || die "Telegram requires both --telegram-bot-token and --telegram-user-id"
+
+  if [[ "${bot_configured}" == "1" ]] && ! public_base_url_is_set; then
+    RUNTIME_MODE="local"
   else
-    [[ -n "${HOME:-}" ]] || die "HOME is required unless --data-root is provided"
-    tenants_root="${OPENTULPA_TENANTS_ROOT:-${XDG_DATA_HOME:-${HOME}/.local/share}/opentulpa/tenants}"
-    data_root="${tenants_root%/}/${TENANT_ID}"
-  fi
-  [[ "${data_root}" == /* ]] || die "tenant data root must be an absolute path"
-
-  export HOST="${OPENTULPA_TENANT_HOST:-0.0.0.0}"
-  export PORT="${port}"
-  export OPENTULPA_DATA_ROOT="${data_root}"
-  export OPENTULPA_OWNER_CUSTOMER_ID="${TENANT_ID}"
-  export OPENTULPA_OPEN_BROWSER="${OPENTULPA_OPEN_BROWSER:-0}"
-
-  token_dir="${data_root}/bootstrap"
-  token_path="${token_dir}/owner-web.token"
-  marker_path="${token_dir}/tenant-id"
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    export OPENTULPA_WEB_TOKEN="${OPENTULPA_TENANT_WEB_TOKEN:-dry-run-tenant-owner-token}"
-    log "tenant ${TENANT_ID}: data=${data_root} port=${port}"
-    if [[ -n "${OPENTULPA_TENANT_WEB_TOKEN:-}" ]]; then
-      log "tenant owner credential is provided by OPENTULPA_TENANT_WEB_TOKEN"
-    else
-      log "tenant owner credential is stored at ${token_path}"
-    fi
-    return 0
+    RUNTIME_MODE="server"
   fi
 
-  [[ ! -L "${data_root}" ]] || die "tenant data directory cannot be a symbolic link"
-  umask 077
-  mkdir -p "${token_dir}"
-  [[ ! -L "${data_root}" && ! -L "${token_dir}" ]] \
-    || die "tenant data and credential directories cannot be symbolic links"
-  chmod 700 "${data_root}" "${token_dir}"
-  if [[ -e "${marker_path}" ]]; then
-    [[ -f "${marker_path}" && ! -L "${marker_path}" ]] \
-      || die "tenant data marker must be a regular file"
-    existing_tenant="$(tr -d '\r\n' < "${marker_path}")"
-    [[ "${existing_tenant}" == "${TENANT_ID}" ]] \
-      || die "tenant data root belongs to ${existing_tenant}, not ${TENANT_ID}"
-  else
-    (umask 077; printf '%s\n' "${TENANT_ID}" > "${marker_path}")
-  fi
-  chmod 600 "${marker_path}"
-
-  if [[ -n "${OPENTULPA_TENANT_WEB_TOKEN:-}" ]]; then
-    token="${OPENTULPA_TENANT_WEB_TOKEN}"
-  else
-    if [[ ! -e "${token_path}" ]]; then
-      token="$(generate_owner_token)"
-      (umask 077; printf '%s\n' "${token}" > "${token_path}")
-    fi
-    [[ -f "${token_path}" && ! -L "${token_path}" ]] \
-      || die "tenant owner credential must be a regular file"
-    chmod 600 "${token_path}"
-    token="$(tr -d '\r\n' < "${token_path}")"
-    [[ "${token}" =~ ^[0-9a-f]{64}$ ]] \
-      || die "tenant owner credential file is invalid: ${token_path}"
-  fi
-  [[ -n "${token}" && "${token}" != *$'\n'* && "${token}" != *$'\r'* ]] \
-    || die "tenant owner credential is invalid"
-  ((${#token} >= 32)) || die "tenant owner credential must contain at least 32 characters"
-  export OPENTULPA_WEB_TOKEN="${token}"
-  log "tenant ${TENANT_ID}: data=${data_root} port=${port}"
-  if [[ -n "${OPENTULPA_TENANT_WEB_TOKEN:-}" ]]; then
-    log "tenant owner credential is provided by OPENTULPA_TENANT_WEB_TOKEN"
-  else
-    log "tenant owner credential is stored at ${token_path}"
+  if [[ "${bot_configured}" == "1" && "${RUNTIME_MODE}" == "server" ]] \
+    && ! env_is_set "TELEGRAM_WEBHOOK_SECRET"; then
+    generated_secret="$(generate_owner_token)"
+    apply_serve_value "TELEGRAM_WEBHOOK_SECRET" "${generated_secret}"
+    log "generated a Telegram webhook secret for this run"
   fi
 }
 
 configure_local_server_defaults() {
   local data_root token_dir token_path token
-  [[ "$1" == "server" && "${MODE}" != "install" && "${MODE}" != "doctor" ]] || return 0
-  local_server_bootstrap_enabled || return 0
+  [[ ( "$1" == "server" || "${SERVE_MODE}" == "1" ) \
+    && "${MODE}" != "install" && "${MODE}" != "doctor" ]] || return 0
+  [[ "${SERVE_MODE}" == "1" ]] || local_server_bootstrap_enabled || return 0
 
   if [[ -z "${HOST:-}" ]]; then
-    export HOST="127.0.0.1"
-    log "binding the local web server to 127.0.0.1"
+    if public_base_url_is_set; then
+      export HOST="0.0.0.0"
+    else
+      export HOST="127.0.0.1"
+      log "binding the local web server to 127.0.0.1"
+    fi
   fi
   if ! env_is_set "OPENTULPA_DATA_ROOT"; then
     [[ -n "${HOME:-}" ]] || die "HOME is required to select the local OpenTulpa data directory"
@@ -1314,14 +1319,9 @@ run_doctor() {
 
 main() {
   parse_args "$@"
-  RUNTIME_MODE="$(normalize_runtime_mode "${RUNTIME_MODE}")"
   load_dotenv
-  if [[ "${TENANT_MODE}" == "1" && -z "${TENANT_ID}" ]]; then
-    TENANT_ID="${OPENTULPA_TENANT_ID:-}"
-  fi
-  [[ "${TENANT_MODE}" == "0" || -n "${TENANT_ID}" ]] \
-    || die "tenant requires TENANT_ID or OPENTULPA_TENANT_ID"
-  configure_tenant_server
+  configure_serve
+  RUNTIME_MODE="$(normalize_runtime_mode "${RUNTIME_MODE}")"
   configure_python_extras
 
   local runtime
@@ -1370,6 +1370,9 @@ main() {
   fi
 
   log "running local Telegram mode."
+  if [[ "${SERVE_MODE}" == "1" ]]; then
+    open_local_web_when_ready
+  fi
   run_manager
 }
 

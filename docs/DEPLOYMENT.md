@@ -351,22 +351,25 @@ Persist the volume mounted at `/app/opentulpa_data` and set
 For Railway, configure at least:
 
 - `OPENAI_COMPATIBLE_API_KEY`;
-- `OPENTULPA_TENANT_ID=<stable-owner-slug>`;
-- `OPENTULPA_TENANT_WEB_TOKEN=<long-random-owner-token>`;
-- `OPENTULPA_TENANTS_ROOT=/app/opentulpa_data` with a persistent volume;
+- `OPENTULPA_WEB_TOKEN=<long-random-owner-token>` for remote web access;
+- `OPENTULPA_DATA_ROOT=/app/opentulpa_data` with a persistent volume;
 - optional Telegram webhook variables if using host-configured Telegram.
 
-The Docker and Railway entrypoint is `./start.sh tenant --run-only`. A VM can use the
-same command directly, or pass the ID and network settings on the command line:
+The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize
+and start both interfaces directly:
 
 ```bash
-./start.sh tenant acme --port 8101 --public-url https://acme.example.com
+./start.sh serve \
+  --api-key '<openai-compatible-key>' \
+  --telegram-bot-token '<telegram-bot-token>' \
+  --telegram-user-id 123456789 \
+  --public-url https://tulpa.example.com
 ```
 
-Each process owns one tenant and must have a unique port and data directory. The
-launcher persists a tenant marker and refuses to open a directory already bound to a
-different tenant. When `OPENTULPA_TENANT_WEB_TOKEN` is absent, it generates a private
-token at `<tenant-data>/bootstrap/owner-web.token` and reuses it on restart.
+One process is one OpenTulpa installation. Its Telegram owner ID determines the owner
+identity; there is no tenant argument. The launcher saves command configuration to a
+private `.env`, generates missing local credentials, and keeps product and Deep Agent
+state under `OPENTULPA_DATA_ROOT`.
 
 Source evolution is unavailable in this direct shape. Do not mount a platform container
 socket into the app to imitate managed mode. Run the immutable bootstrap on a host that

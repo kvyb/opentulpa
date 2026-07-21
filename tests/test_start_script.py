@@ -12,10 +12,6 @@ EMPTY_REQUIRED_ENV = {
     "PUBLIC_BASE_URL": "",
     "OPENTULPA_DATA_ROOT": "",
     "OPENTULPA_WEB_TOKEN": "",
-    "OPENTULPA_TENANT_ID": "",
-    "OPENTULPA_TENANTS_ROOT": "",
-    "OPENTULPA_TENANT_WEB_TOKEN": "",
-    "OPENTULPA_TENANT_HOST": "",
     "OPENTULPA_RECOVERY_TOKEN": "",
     "OPENTULPA_INGRESS_TOKEN": "",
     "OPENTULPA_RELEASE_EGRESS_NETWORK": "",
@@ -47,8 +43,11 @@ def test_start_script_help_shows_install_and_runtime_flags() -> None:
     result = _run_start("--help")
 
     assert result.returncode == 0
-    assert "local|server|managed|tenant|install|run|doctor" in result.stdout
-    assert "tenant [TENANT_ID]" in result.stdout
+    assert "serve|local|server|managed|install|run|doctor" in result.stdout
+    assert "Start web chat and, when configured, Telegram" in result.stdout
+    assert "--api-key" in result.stdout
+    assert "--telegram-bot-token" in result.stdout
+    assert "--telegram-user-id" in result.stdout
     assert "--yes" in result.stdout
     assert "--no-install-uv" in result.stdout
     assert "--browser-use" in result.stdout
@@ -57,120 +56,122 @@ def test_start_script_help_shows_install_and_runtime_flags() -> None:
     assert "OPENTULPA_RESTART_GRACE_SECONDS=15" in result.stdout
 
 
-def test_tenant_server_command_is_one_isolated_entrypoint(tmp_path: Path) -> None:
+def test_serve_starts_web_and_local_telegram_from_one_command(tmp_path: Path) -> None:
     result = _run_start(
-        "tenant",
-        "acme",
+        "serve",
         "--run-only",
-        "--port",
-        "8101",
-        "--public-url",
-        "https://acme.example.com",
         "--dry-run",
+        "--api-key",
+        "model-secret",
+        "--telegram-bot-token",
+        "bot-secret",
+        "--telegram-user-id",
+        "123456789",
         env={
             **EMPTY_REQUIRED_ENV,
-            "OPENAI_COMPATIBLE_API_KEY": "test-key",
-            "OPENTULPA_TENANTS_ROOT": str(tmp_path / "tenants"),
+            "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+            "OPENTULPA_OPEN_BROWSER": "1",
         },
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"tenant acme: data={tmp_path / 'tenants' / 'acme'} port=8101" in result.stdout
+    assert "required .env value(s) missing" not in result.stdout
+    assert "open http://127.0.0.1:8000/ after the server is healthy" in result.stdout
+    assert "uv run --no-sync python scripts/manager.py" in result.stdout
+    assert "model-secret" not in result.stdout
+    assert "bot-secret" not in result.stdout
+
+
+def test_serve_uses_direct_webhook_when_public_url_is_present(tmp_path: Path) -> None:
+    result = _run_start(
+        "serve",
+        "--run-only",
+        "--dry-run",
+        "--api-key",
+        "model-secret",
+        "--telegram-bot-token",
+        "bot-secret",
+        "--telegram-user-id",
+        "123456789",
+        "--public-url",
+        "https://tulpa.example.com",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "generated a Telegram webhook secret for this run" in result.stdout
     assert "required .env value(s) missing" not in result.stdout
     assert "uv run --no-sync python -m opentulpa" in result.stdout
+    assert "scripts/manager.py" not in result.stdout
 
 
-def test_tenant_server_accepts_identity_from_environment(tmp_path: Path) -> None:
+def test_serve_requires_bot_token_and_owner_id_together() -> None:
     result = _run_start(
-        "tenant",
+        "serve",
         "--run-only",
         "--dry-run",
-        env={
-            **EMPTY_REQUIRED_ENV,
-            "OPENAI_COMPATIBLE_API_KEY": "test-key",
-            "OPENTULPA_TENANT_ID": "owner-two",
-            "OPENTULPA_TENANTS_ROOT": str(tmp_path / "tenants"),
-        },
+        "--api-key",
+        "model-secret",
+        "--telegram-bot-token",
+        "bot-secret",
+        env=EMPTY_REQUIRED_ENV,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "tenant owner-two:" in result.stdout
+    assert result.returncode == 1
+    assert "requires both --telegram-bot-token and --telegram-user-id" in result.stderr
 
 
-def test_tenant_server_generates_private_reusable_identity_and_token(tmp_path: Path) -> None:
-    data_root = tmp_path / "tenant-data"
-    command = (
-        "source ./start.sh; "
-        "TENANT_ID=acme; TENANT_PORT=8101; TENANT_DATA_ROOT=\"$DATA_ROOT\"; DRY_RUN=0; "
-        "unset OPENTULPA_TENANT_WEB_TOKEN; configure_tenant_server; "
-        "test \"$OPENTULPA_OWNER_CUSTOMER_ID\" = acme; "
-        "test \"$OPENTULPA_DATA_ROOT\" = \"$DATA_ROOT\"; "
-        "test \"$PORT\" = 8101; test \"$HOST\" = 0.0.0.0"
-    )
-    first = subprocess.run(
-        ["bash", "-c", command],
-        cwd=REPO_ROOT,
-        env={**os.environ, "DATA_ROOT": str(data_root), "OPENTULPA_TENANT_HOST": ""},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert first.returncode == 0, first.stderr
-    first_token = (data_root / "bootstrap" / "owner-web.token").read_text(
-        encoding="utf-8"
-    )
-    second = subprocess.run(
-        ["bash", "-c", command],
-        cwd=REPO_ROOT,
-        env={**os.environ, "DATA_ROOT": str(data_root), "OPENTULPA_TENANT_HOST": ""},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert second.returncode == 0, second.stderr
-    assert (data_root / "bootstrap" / "tenant-id").read_text(encoding="utf-8") == "acme\n"
-    assert len(first_token.strip()) == 64
-    assert (data_root / "bootstrap" / "owner-web.token").read_text(
-        encoding="utf-8"
-    ) == first_token
-    assert first_token.strip() not in first.stdout
-    assert (data_root / "bootstrap" / "owner-web.token").stat().st_mode & 0o777 == 0o600
-
-
-def test_tenant_server_refuses_data_root_bound_to_another_tenant(tmp_path: Path) -> None:
-    marker = tmp_path / "tenant-data" / "bootstrap" / "tenant-id"
-    marker.parent.mkdir(parents=True)
-    marker.write_text("first-owner\n", encoding="utf-8")
-
+def test_serve_persists_initial_configuration_privately(tmp_path: Path) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(0o755)
+    (tmp_path / ".env.example").write_text("# configuration\n", encoding="utf-8")
     result = subprocess.run(
         [
             "bash",
             "-c",
-            "source ./start.sh; TENANT_ID=second-owner; "
-            "TENANT_DATA_ROOT=\"$DATA_ROOT\"; DRY_RUN=0; configure_tenant_server",
+            "source ./start.sh; SERVE_MODE=1; DRY_RUN=0; "
+            "CLI_API_KEY=model-secret; CLI_TELEGRAM_BOT_TOKEN=bot-secret; "
+            "CLI_TELEGRAM_USER_ID=123456789; configure_serve",
         ],
-        cwd=REPO_ROOT,
-        env={**os.environ, "DATA_ROOT": str(tmp_path / "tenant-data")},
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "OPENAI_COMPATIBLE_API_KEY": "",
+            "TELEGRAM_BOT_TOKEN": "",
+            "TELEGRAM_ALLOWED_USER_IDS": "",
+            "TELEGRAM_ALLOWED_USERNAMES": "",
+            "PUBLIC_BASE_URL": "",
+            "RAILWAY_PUBLIC_DOMAIN": "",
+        },
         capture_output=True,
         text=True,
         check=False,
     )
 
-    assert result.returncode == 1
-    assert "belongs to first-owner, not second-owner" in result.stderr
+    assert result.returncode == 0, result.stderr
+    dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_COMPATIBLE_API_KEY=model-secret" in dotenv
+    assert "TELEGRAM_BOT_TOKEN=bot-secret" in dotenv
+    assert "TELEGRAM_ALLOWED_USER_IDS=123456789" in dotenv
+    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+    assert "model-secret" not in result.stdout
+    assert "bot-secret" not in result.stdout
 
 
-def test_container_and_railway_use_tenant_entrypoint() -> None:
-    assert 'CMD ["./start.sh", "tenant", "--run-only"]' in (
+def test_container_and_railway_use_serve_entrypoint() -> None:
+    assert 'CMD ["./start.sh", "serve", "--run-only"]' in (
         REPO_ROOT / "Dockerfile"
     ).read_text(encoding="utf-8")
-    assert 'startCommand = "./start.sh tenant --run-only"' in (
+    assert 'startCommand = "./start.sh serve --run-only"' in (
         REPO_ROOT / "railway.toml"
     ).read_text(encoding="utf-8")
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    assert 'command: ["./start.sh", "tenant", "--run-only"]' in compose
-    assert "OPENTULPA_TENANTS_ROOT: /app/opentulpa_data" in compose
+    assert 'command: ["./start.sh", "serve", "--run-only"]' in compose
+    assert "OPENTULPA_DATA_ROOT: /app/opentulpa_data" in compose
 
 
 def test_start_script_stops_verified_existing_opentulpa_server(tmp_path: Path) -> None:

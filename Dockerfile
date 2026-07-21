@@ -32,7 +32,8 @@ COPY start.sh /app/start.sh
 
 ENV HOST=0.0.0.0
 ENV PORT=8000
+ENV OPENTULPA_DATA_ROOT=/app/opentulpa_data
 
 EXPOSE 8000
 
-CMD ["./start.sh", "tenant", "--run-only"]
+CMD ["./start.sh", "serve", "--run-only"]
