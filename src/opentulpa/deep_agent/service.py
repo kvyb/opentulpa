@@ -77,6 +77,9 @@ _PUBLIC_PROVIDER_REJECTION_MESSAGE = (
     "The model provider rejected this conversation. Start a new thread or use a different "
     "model/provider."
 )
+_PUBLIC_PROVIDER_FAILURE_MESSAGE = (
+    "No configured model provider could complete this request. Try again later."
+)
 _REGENERATE_COMMAND = "/regenerate"
 _REGENERATE_INSTRUCTION = """Regenerate your latest attempted response to the immediately preceding
 owner request. Produce a fresh answer rather than discussing this command or merely repeating the
@@ -247,6 +250,8 @@ def _failure_diagnostic(error: BaseException, *, phase: str) -> dict[str, str]:
 def _public_run_failure(error: BaseException) -> tuple[str, str, bool]:
     if _is_provider_rejection(error):
         return "model_provider_rejected", _PUBLIC_PROVIDER_REJECTION_MESSAGE, False
+    if _is_provider_fallback_error(error):
+        return "model_provider_failed", _PUBLIC_PROVIDER_FAILURE_MESSAGE, True
     return "agent_run_failed", _PUBLIC_RUN_FAILURE_MESSAGE, False
 
 
@@ -424,7 +429,6 @@ def build_openrouter_chat_model(
             {
                 "order": providers,
                 "allow_fallbacks": False,
-                "require_parameters": True,
             }
             if providers
             else None

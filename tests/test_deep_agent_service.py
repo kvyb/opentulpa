@@ -110,6 +110,14 @@ class _ProviderRejectedAfterOutputGraph:
         raise BadRequestResponseError("private provider response")
 
 
+class _ProviderUnavailableGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        if False:
+            yield {}
+        raise ValueError("OpenRouter API returned an error: no endpoints available")
+
+
 class _MiddlewareRequest:
     def __init__(self, model: Any) -> None:
         self.model = model
@@ -258,7 +266,6 @@ def test_openrouter_model_restricts_provider_order_before_model_fallback() -> No
         assert model.openrouter_provider == {
             "order": ["z-ai/fp8", "fireworks", "deepinfra/fp4"],
             "allow_fallbacks": False,
-            "require_parameters": True,
         }
     finally:
         model.client.sdk_configuration.client.close()
@@ -914,6 +921,27 @@ async def test_provider_bad_request_has_actionable_public_failure(tmp_path: Path
     assert snapshot is not None
     assert snapshot.error == events[-1].data["message"]
     assert "private provider response" not in snapshot.error
+
+
+@pytest.mark.asyncio
+async def test_exhausted_provider_routes_have_specific_public_failure(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _ProviderUnavailableGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(AgentRunRequest(context=_context(), text="Hi"))
+        ]
+    finally:
+        await service.shutdown()
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].data["code"] == "model_provider_failed"
+    assert events[-1].data["message"] == (
+        "No configured model provider could complete this request. Try again later."
+    )
+    assert events[-1].data["retryable"] is True
 
 
 @pytest.mark.asyncio
