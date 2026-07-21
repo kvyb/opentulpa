@@ -35,4 +35,4 @@ ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["./start.sh", "run", "server"]
+CMD ["./start.sh", "tenant", "--run-only"]

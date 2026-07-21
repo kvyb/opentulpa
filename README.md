@@ -236,6 +236,23 @@ platforms that already own deployments, but it cannot replace itself safely. Set
 `OPENTULPA_OPEN_BROWSER=0` for a headless start. Public/non-loopback deployments must
 still configure their persistent data root and owner authentication explicitly.
 
+### One server process per tenant
+
+Use the same launcher with a tenant ID to bind one owner identity, private credential,
+port, and persistent data directory to one process:
+
+```bash
+./start.sh tenant acme --port 8101 --public-url https://acme.example.com
+```
+
+The credential is generated once at
+`$OPENTULPA_TENANTS_ROOT/acme/bootstrap/owner-web.token` and reused. Set
+`OPENTULPA_TENANT_WEB_TOKEN` instead when the deployment platform owns secrets. For a
+generic container entrypoint, set `OPENTULPA_TENANT_ID` and run
+`./start.sh tenant --run-only`. Start additional tenants on different ports; their
+SQLite stores, checkpoints, memory, skills, capabilities, files, and workspaces never
+share a data root.
+
 ### Managed self-improving mode
 
 Set at least:

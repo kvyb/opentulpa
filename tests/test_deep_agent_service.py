@@ -164,6 +164,19 @@ class _SerializedGraph:
             self.active -= 1
 
 
+class _SummarizingGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        yield {
+            "type": "messages",
+            "data": (AIMessage(content="internal conversation summary"), {"lc_source": "summarization"}),
+        }
+        yield {
+            "type": "messages",
+            "data": (AIMessage(content="visible answer"), {}),
+        }
+
+
 class _SerializedIntakeGraph:
     def __init__(self) -> None:
         self.first_entered = asyncio.Event()
@@ -841,6 +854,30 @@ async def test_terminal_run_observer_sees_persisted_snapshot(tmp_path: Path) -> 
     assert observed[0].run_id == events[0].run_id
     assert observed[0].status == "completed"
     assert observed[0].final_text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_summarization_tokens_are_not_exposed_as_agent_output(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _SummarizingGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(AgentRunRequest(context=_context(), text="Hi"))
+        ]
+        snapshot = await service.get_run(events[0].run_id)
+    finally:
+        await service.shutdown()
+
+    assert [event.type for event in events] == [
+        "run.started",
+        "message.delta",
+        "run.completed",
+    ]
+    assert events[1].data["text"] == "visible answer"
+    assert snapshot is not None
+    assert snapshot.final_text == "visible answer"
 
 
 @pytest.mark.asyncio

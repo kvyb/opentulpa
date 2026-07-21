@@ -1823,6 +1823,15 @@ class DeepAgentService:
                         data = part.get("data") if isinstance(part, dict) else None
                         if part_type == "messages":
                             message = data[0] if isinstance(data, tuple | list) and data else data
+                            metadata = (
+                                data[1]
+                                if isinstance(data, tuple | list)
+                                and len(data) > 1
+                                and isinstance(data[1], dict)
+                                else {}
+                            )
+                            if metadata.get("lc_source") == "summarization":
+                                continue
                             for event_type, event_data, text in self._message_events(message):
                                 if text:
                                     final_parts.append(text)

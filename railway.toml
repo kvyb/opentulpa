@@ -2,7 +2,7 @@
 builder = "DOCKERFILE"
 
 [deploy]
-startCommand = "./start.sh run server"
+startCommand = "./start.sh tenant --run-only"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 600
 restartPolicyType = "ON_FAILURE"

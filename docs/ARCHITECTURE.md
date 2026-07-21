@@ -47,6 +47,26 @@ around `create_deep_agent`. It builds the Deep Agents profiles, backends, tools,
 callbacks, but it does not implement another loop, graph, planner, retry controller,
 or context compactor.
 
+## Context Compaction
+
+Deep Agents 0.6.12 installs its summarization and filesystem middleware on the main
+agent and its general-purpose subagent. OpenTulpa does not run a second compactor.
+
+The configured OpenRouter models do not expose a LangChain `max_input_tokens` profile,
+so Deep Agents uses its conservative fallback policy: summarize at approximately
+170,000 tokens and keep the six most recent messages. A standard
+`ContextOverflowError` triggers immediate summarization and one retry. Before full
+summarization, arguments on older tool calls are clipped after the history grows past
+20 messages. Tool results above 20,000 tokens and human messages above 50,000 tokens
+are offloaded to backend files and replaced by bounded previews and paths.
+
+Summarization generates a structured working summary and preserves the evicted history
+under `/conversation_history/<thread-id>.md` in the thread backend. Deep Agents keeps
+the raw message log in checkpoint state while using the summary plus recent messages
+for subsequent model calls. OpenTulpa filters stream chunks marked
+`lc_source=summarization`, so internal summary text is traced and checkpointed but is
+never rendered as the assistant's answer.
+
 ## Fixed Kernel
 
 The immutable bootstrap is a separate, long-lived host process. It owns:

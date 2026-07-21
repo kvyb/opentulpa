@@ -5,12 +5,14 @@ services:
     env_file:
       - .env
     environment:
-      OPENTULPA_DATA_ROOT: /app/opentulpa_data
+      OPENTULPA_TENANT_ID: ${OPENTULPA_TENANT_ID:?set OPENTULPA_TENANT_ID}
+      OPENTULPA_TENANTS_ROOT: /app/opentulpa_data
+      PORT: 8000
     ports:
       - "8000:8000"
     volumes:
       - opentulpa_data:/app/opentulpa_data
-    command: ["./start.sh", "run", "server"]
+    command: ["./start.sh", "tenant", "--run-only"]
 
 volumes:
   opentulpa_data:

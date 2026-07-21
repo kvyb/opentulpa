@@ -12,6 +12,10 @@ EMPTY_REQUIRED_ENV = {
     "PUBLIC_BASE_URL": "",
     "OPENTULPA_DATA_ROOT": "",
     "OPENTULPA_WEB_TOKEN": "",
+    "OPENTULPA_TENANT_ID": "",
+    "OPENTULPA_TENANTS_ROOT": "",
+    "OPENTULPA_TENANT_WEB_TOKEN": "",
+    "OPENTULPA_TENANT_HOST": "",
     "OPENTULPA_RECOVERY_TOKEN": "",
     "OPENTULPA_INGRESS_TOKEN": "",
     "OPENTULPA_RELEASE_EGRESS_NETWORK": "",
@@ -43,13 +47,130 @@ def test_start_script_help_shows_install_and_runtime_flags() -> None:
     result = _run_start("--help")
 
     assert result.returncode == 0
-    assert "local|server|managed|install|run|doctor" in result.stdout
+    assert "local|server|managed|tenant|install|run|doctor" in result.stdout
+    assert "tenant [TENANT_ID]" in result.stdout
     assert "--yes" in result.stdout
     assert "--no-install-uv" in result.stdout
     assert "--browser-use" in result.stdout
     assert "UV_PYTHON=3.12" in result.stdout
     assert "OPENTULPA_OPEN_BROWSER=auto|1|0" in result.stdout
     assert "OPENTULPA_RESTART_GRACE_SECONDS=15" in result.stdout
+
+
+def test_tenant_server_command_is_one_isolated_entrypoint(tmp_path: Path) -> None:
+    result = _run_start(
+        "tenant",
+        "acme",
+        "--run-only",
+        "--port",
+        "8101",
+        "--public-url",
+        "https://acme.example.com",
+        "--dry-run",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENAI_COMPATIBLE_API_KEY": "test-key",
+            "OPENTULPA_TENANTS_ROOT": str(tmp_path / "tenants"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"tenant acme: data={tmp_path / 'tenants' / 'acme'} port=8101" in result.stdout
+    assert "required .env value(s) missing" not in result.stdout
+    assert "uv run --no-sync python -m opentulpa" in result.stdout
+
+
+def test_tenant_server_accepts_identity_from_environment(tmp_path: Path) -> None:
+    result = _run_start(
+        "tenant",
+        "--run-only",
+        "--dry-run",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENAI_COMPATIBLE_API_KEY": "test-key",
+            "OPENTULPA_TENANT_ID": "owner-two",
+            "OPENTULPA_TENANTS_ROOT": str(tmp_path / "tenants"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "tenant owner-two:" in result.stdout
+
+
+def test_tenant_server_generates_private_reusable_identity_and_token(tmp_path: Path) -> None:
+    data_root = tmp_path / "tenant-data"
+    command = (
+        "source ./start.sh; "
+        "TENANT_ID=acme; TENANT_PORT=8101; TENANT_DATA_ROOT=\"$DATA_ROOT\"; DRY_RUN=0; "
+        "unset OPENTULPA_TENANT_WEB_TOKEN; configure_tenant_server; "
+        "test \"$OPENTULPA_OWNER_CUSTOMER_ID\" = acme; "
+        "test \"$OPENTULPA_DATA_ROOT\" = \"$DATA_ROOT\"; "
+        "test \"$PORT\" = 8101; test \"$HOST\" = 0.0.0.0"
+    )
+    first = subprocess.run(
+        ["bash", "-c", command],
+        cwd=REPO_ROOT,
+        env={**os.environ, "DATA_ROOT": str(data_root), "OPENTULPA_TENANT_HOST": ""},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    first_token = (data_root / "bootstrap" / "owner-web.token").read_text(
+        encoding="utf-8"
+    )
+    second = subprocess.run(
+        ["bash", "-c", command],
+        cwd=REPO_ROOT,
+        env={**os.environ, "DATA_ROOT": str(data_root), "OPENTULPA_TENANT_HOST": ""},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert (data_root / "bootstrap" / "tenant-id").read_text(encoding="utf-8") == "acme\n"
+    assert len(first_token.strip()) == 64
+    assert (data_root / "bootstrap" / "owner-web.token").read_text(
+        encoding="utf-8"
+    ) == first_token
+    assert first_token.strip() not in first.stdout
+    assert (data_root / "bootstrap" / "owner-web.token").stat().st_mode & 0o777 == 0o600
+
+
+def test_tenant_server_refuses_data_root_bound_to_another_tenant(tmp_path: Path) -> None:
+    marker = tmp_path / "tenant-data" / "bootstrap" / "tenant-id"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("first-owner\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source ./start.sh; TENANT_ID=second-owner; "
+            "TENANT_DATA_ROOT=\"$DATA_ROOT\"; DRY_RUN=0; configure_tenant_server",
+        ],
+        cwd=REPO_ROOT,
+        env={**os.environ, "DATA_ROOT": str(tmp_path / "tenant-data")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "belongs to first-owner, not second-owner" in result.stderr
+
+
+def test_container_and_railway_use_tenant_entrypoint() -> None:
+    assert 'CMD ["./start.sh", "tenant", "--run-only"]' in (
+        REPO_ROOT / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert 'startCommand = "./start.sh tenant --run-only"' in (
+        REPO_ROOT / "railway.toml"
+    ).read_text(encoding="utf-8")
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert 'command: ["./start.sh", "tenant", "--run-only"]' in compose
+    assert "OPENTULPA_TENANTS_ROOT: /app/opentulpa_data" in compose
 
 
 def test_start_script_stops_verified_existing_opentulpa_server(tmp_path: Path) -> None:
