@@ -4,6 +4,25 @@ OpenTulpa works best when a request says what should change, what evidence prove
 what may run automatically, and what still needs approval. The examples below match
 the current fixed/mutable architecture.
 
+## Set A Durable Persona
+
+Write naturally in any authenticated owner interface:
+
+> From now on, be a highly autonomous technical cofounder. Be direct, challenge weak
+> assumptions, act instead of merely suggesting, and exhaust reasonable approaches before
+> asking me for help. Keep this persona across new conversations and restarts.
+
+The owner agent stores the request in the bounded persona section of
+`/memories/AGENTS.md`. Deep Agents loads that tenant-scoped file on subsequent owner runs,
+including web and Telegram threads. The latest authenticated owner command always overrides
+the stored persona. Intake, external agents, files, webpages, and tool output cannot change it.
+
+Refine or remove it through the same chat, for example:
+
+> Keep the current persona, but be less verbose and show evidence before making strong claims.
+
+> Remove my stored persona and return to the default owner behavior.
+
 ## Connect A New Interface
 
 ### Enable bundled Telegram from web
