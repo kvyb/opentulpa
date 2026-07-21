@@ -72,6 +72,10 @@ from opentulpa.tooling import (
 logger = logging.getLogger(__name__)
 
 _PUBLIC_RUN_FAILURE_MESSAGE = "The agent run could not be completed."
+_PUBLIC_PROVIDER_REJECTION_MESSAGE = (
+    "The model provider rejected this conversation. Start a new thread or use a different "
+    "model/provider."
+)
 _PUBLIC_RUN_CANCELLED_MESSAGE = "The agent run was cancelled before completion."
 _PUBLIC_CAPABILITY_CHANGED_MESSAGE = (
     "The approved capability changed before the agent run could continue."
@@ -230,6 +234,12 @@ def _failure_diagnostic(error: BaseException, *, phase: str) -> dict[str, str]:
         "cause": _safe_failure_cause(error),
         "fingerprint": hashlib.sha256(material.encode("utf-8")).hexdigest()[:16],
     }
+
+
+def _public_run_failure(error: BaseException) -> tuple[str, str, bool]:
+    if type(error).__name__ == "BadRequestResponseError":
+        return "model_provider_rejected", _PUBLIC_PROVIDER_REJECTION_MESSAGE, False
+    return "agent_run_failed", _PUBLIC_RUN_FAILURE_MESSAGE, False
 
 
 def _browser_action_requires_approval(request: Any) -> bool:
@@ -1789,18 +1799,19 @@ class DeepAgentService:
                 yield event
         except Exception as exc:
             logger.exception("Deep Agent run failed: run_id=%s", run_id)
+            failure_code, failure_message, retryable = _public_run_failure(exc)
             event = await self._transition_with_event(
                 run_id,
                 allowed_statuses={"running", "resume_pending"},
                 status="failed",
                 event_type="run.failed",
                 event_data={
-                    "code": "agent_run_failed",
-                    "message": _PUBLIC_RUN_FAILURE_MESSAGE,
-                    "retryable": False,
+                    "code": failure_code,
+                    "message": failure_message,
+                    "retryable": retryable,
                     "diagnostic": _failure_diagnostic(exc, phase=failure_phase),
                 },
-                error=_PUBLIC_RUN_FAILURE_MESSAGE,
+                error=failure_message,
             )
             if event is None:
                 return

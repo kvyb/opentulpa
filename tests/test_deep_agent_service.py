@@ -87,6 +87,18 @@ class _FailingGraph:
         raise RuntimeError(self._error)
 
 
+class BadRequestResponseError(RuntimeError):
+    pass
+
+
+class _ProviderRejectedGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        if False:
+            yield {}
+        raise BadRequestResponseError("private provider response")
+
+
 class _BlockingGraph:
     def __init__(self) -> None:
         self.entered = asyncio.Event()
@@ -820,6 +832,32 @@ async def test_run_failure_is_sanitized_for_events_and_persisted_status(
     assert private_error not in snapshot.error
     assert private_error in caplog.text
     assert [str(error) for error in tracer.errors] == [private_error]
+
+
+@pytest.mark.asyncio
+async def test_provider_bad_request_has_actionable_public_failure(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _ProviderRejectedGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(AgentRunRequest(context=_context(), text="Hi"))
+        ]
+        snapshot = await service.get_run(events[0].run_id)
+    finally:
+        await service.shutdown()
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].data["code"] == "model_provider_rejected"
+    assert events[-1].data["message"] == (
+        "The model provider rejected this conversation. Start a new thread or use a different "
+        "model/provider."
+    )
+    assert events[-1].data["retryable"] is False
+    assert snapshot is not None
+    assert snapshot.error == events[-1].data["message"]
+    assert "private provider response" not in snapshot.error
 
 
 @pytest.mark.asyncio
