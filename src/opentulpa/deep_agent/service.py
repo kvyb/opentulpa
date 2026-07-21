@@ -76,6 +76,13 @@ _PUBLIC_PROVIDER_REJECTION_MESSAGE = (
     "The model provider rejected this conversation. Start a new thread or use a different "
     "model/provider."
 )
+_REGENERATE_COMMAND = "/regenerate"
+_REGENERATE_INSTRUCTION = """Regenerate your latest attempted response to the immediately preceding
+owner request. Produce a fresh answer rather than discussing this command or merely repeating the
+previous answer. If the previous attempt failed before producing an answer, answer that preceding
+request now. Reuse existing conversation and tool results; do not repeat tool calls, approvals, or
+external side effects that may already have executed. If there is no preceding owner request, say
+that briefly."""
 _PUBLIC_RUN_CANCELLED_MESSAGE = "The agent run was cancelled before completion."
 _PUBLIC_CAPABILITY_CHANGED_MESSAGE = (
     "The approved capability changed before the agent run could continue."
@@ -1835,6 +1842,27 @@ class DeepAgentService:
                 await self._observe_run(run_id)
                 yield event
         except Exception as exc:
+            final_text = "".join(final_parts).strip()
+            if _is_provider_rejection(exc) and final_text:
+                logger.warning(
+                    "Model provider rejected run after emitting output; preserving response: "
+                    "run_id=%s",
+                    run_id,
+                )
+                event = await self._transition_with_event(
+                    run_id,
+                    allowed_statuses={"running", "resume_pending"},
+                    status="completed",
+                    event_type="run.completed",
+                    event_data={"text": final_text},
+                    final_text=final_text,
+                    approvals=[],
+                )
+                if event is None:
+                    return
+                await self._observe_run(run_id)
+                yield event
+                return
             logger.exception("Deep Agent run failed: run_id=%s", run_id)
             failure_code, failure_message, retryable = _public_run_failure(exc)
             event = await self._transition_with_event(
@@ -2639,6 +2667,12 @@ class DeepAgentService:
     @staticmethod
     def _request_text(request: AgentRunRequest) -> str:
         text = str(request.text).strip()
+        if (
+            text == _REGENERATE_COMMAND
+            and request.context.run_kind == AgentRunKind.OWNER.value
+            and not request.file_ids
+        ):
+            return _REGENERATE_INSTRUCTION
         if request.file_ids:
             attached = ", ".join(request.file_ids)
             text = (

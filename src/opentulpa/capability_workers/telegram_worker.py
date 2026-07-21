@@ -331,7 +331,7 @@ class TelegramInterfaceWorker:
             )
             return
 
-        command, _ = _command(text)
+        command, argument = _command(text)
         if command == "/start":
             await self._telegram.send_message(
                 chat_id=chat_id,
@@ -350,6 +350,8 @@ class TelegramInterfaceWorker:
             )
             self._complete(update_id=update_id, source_event_id=source_event_id)
             return
+        if command == "/regenerate" and not argument:
+            text = "/regenerate"
 
         attachments = extract_attachments(message)
         if not text and not attachments:

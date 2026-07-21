@@ -27,6 +27,8 @@ def test_web_interface_serves_static_assets_with_fixed_security_headers() -> Non
     assert "What are we building?" in page.text
     assert "Deep Agents · owner" in page.text
     assert 'id="new-thread"' in page.text
+    assert 'id="regenerate"' in page.text
+    assert "input.value = '/regenerate'" in script.text
     assert "localStorage.otThread = `web-${crypto.randomUUID()}`" in script.text
     assert "const pendingRunText = 'Planning next moves'" in script.text
     assert "event.type === 'tool.started'" in script.text

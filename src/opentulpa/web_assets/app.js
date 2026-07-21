@@ -340,6 +340,12 @@ byId('new-thread').onclick = () => {
   localStorage.otThread = `web-${crypto.randomUUID()}`;
   location.reload();
 };
+byId('regenerate').onclick = () => {
+  if (send.disabled) return;
+  input.value = '/regenerate';
+  resizeInput();
+  byId('composer').requestSubmit();
+};
 byId('save-token').onclick = () => {
   token = byId('token').value.trim();
   byId('token').value = '';

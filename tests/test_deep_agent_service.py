@@ -100,6 +100,16 @@ class _ProviderRejectedGraph:
         raise BadRequestResponseError("private provider response")
 
 
+class _ProviderRejectedAfterOutputGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        yield {
+            "type": "messages",
+            "data": (AIMessage(content="usable streamed response"), {}),
+        }
+        raise BadRequestResponseError("private provider response")
+
+
 class _MiddlewareRequest:
     def __init__(self, model: Any) -> None:
         self.model = model
@@ -425,6 +435,24 @@ def test_request_content_inlines_pdf_as_native_file(tmp_path: Path) -> None:
             "file_data": "data:application/pdf;base64,JVBERi1zbW9rZQ==",
         },
     }
+
+
+def test_exact_owner_regenerate_command_becomes_side_effect_safe_instruction(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    request = AgentRunRequest(context=_context(), text="/regenerate")
+
+    text = service._request_text(request)  # noqa: SLF001
+
+    assert "immediately preceding\nowner request" in text
+    assert "do not repeat tool calls, approvals, or\nexternal side effects" in text
+    assert service._request_text(  # noqa: SLF001
+        AgentRunRequest(context=_context(), text="/regenerate now")
+    ) == "/regenerate now"
+    assert service._request_text(  # noqa: SLF001
+        AgentRunRequest(context=_context(), text="/regenerate", file_ids=("file-1",))
+    ).startswith("/regenerate\n\nAttached tenant file IDs")
 
 
 @pytest.mark.asyncio
@@ -867,6 +895,32 @@ async def test_provider_bad_request_has_actionable_public_failure(tmp_path: Path
     assert snapshot is not None
     assert snapshot.error == events[-1].data["message"]
     assert "private provider response" not in snapshot.error
+
+
+@pytest.mark.asyncio
+async def test_provider_rejection_after_output_preserves_completed_response(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _ProviderRejectedAfterOutputGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(AgentRunRequest(context=_context(), text="Hi"))
+        ]
+        snapshot = await service.get_run(events[0].run_id)
+    finally:
+        await service.shutdown()
+
+    assert [event.type for event in events] == [
+        "run.started",
+        "message.delta",
+        "run.completed",
+    ]
+    assert events[-1].data["text"] == "usable streamed response"
+    assert snapshot is not None
+    assert snapshot.status == "completed"
+    assert snapshot.final_text == "usable streamed response"
+    assert snapshot.error == ""
 
 
 @pytest.mark.asyncio

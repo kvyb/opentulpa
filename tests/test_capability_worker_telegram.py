@@ -225,6 +225,27 @@ async def test_one_time_pairing_then_routes_only_owner_messages(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_regenerate_command_routes_through_the_shared_agent_api(tmp_path: Path) -> None:
+    telegram = _Telegram([_message(4, text="/regenerate@open_tulpa_bot")])
+    agent = _Agent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    assert agent.starts[0]["text"] == "/regenerate"
+    assert agent.starts[0]["file_ids"] == []
+    assert agent.starts[0]["source_event_id"] == "telegram:99:4"
+
+
+@pytest.mark.asyncio
 async def test_attachment_is_downloaded_and_uploaded_before_agent_run(tmp_path: Path) -> None:
     update = _message(4, text="inspect")
     update["message"].pop("text")
