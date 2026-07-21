@@ -12,11 +12,34 @@ import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
+from uuid import UUID
+
+from langchain_core.callbacks import BaseCallbackHandler
 
 logger = logging.getLogger(__name__)
 
 _SECRET_KEY_RE = re.compile(
     r"(authorization|api[_-]?key|secret|token|password|passwd|cookie|set-cookie|bearer)",
+    re.IGNORECASE,
+)
+_INLINE_AUTHORIZATION_RE = re.compile(
+    r"(\bauthorization\b\s*:\s*)[^\r\n\"']+",
+    re.IGNORECASE,
+)
+_INLINE_COOKIE_RE = re.compile(
+    r"(\b(?:cookie|set-cookie)\b\s*:\s*)[^\r\n\"']+",
+    re.IGNORECASE,
+)
+_INLINE_BEARER_RE = re.compile(r"(\bbearer\s+)[^\s\"'`,;]+", re.IGNORECASE)
+_INLINE_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(\b[\w.-]*(?:api[_-]?key|secret|token|password|passwd)[\w.-]*"
+    r"\s*(?:=|:)\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&]+)",
+    re.IGNORECASE,
+)
+_INLINE_SECRET_VALUE_RE = re.compile(
+    r"(\b(?:api[_-]?key|secret|token|password|passwd)\b\s+"
+    r"(?:(?:is|was)\s+)?(?:[-=:.]\s*)?)"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&]+)",
     re.IGNORECASE,
 )
 _LANGFUSE_ENV_RE = re.compile(r"[^a-z0-9-_]+")
@@ -84,6 +107,11 @@ def _redact_string(value: str) -> str:
             return f"{prefix};base64,[redacted]"
         prefix, _, _ = text.partition(",")
         return f"{prefix},[redacted]"
+    text = _INLINE_AUTHORIZATION_RE.sub(r"\1[redacted]", text)
+    text = _INLINE_COOKIE_RE.sub(r"\1[redacted]", text)
+    text = _INLINE_BEARER_RE.sub(r"\1[redacted]", text)
+    text = _INLINE_SECRET_ASSIGNMENT_RE.sub(r"\1[redacted]", text)
+    text = _INLINE_SECRET_VALUE_RE.sub(r"\1[redacted]", text)
     if len(text) > _MAX_STRING_CHARS:
         return f"{text[:_MAX_STRING_CHARS]}...[truncated {len(text) - _MAX_STRING_CHARS} chars]"
     return text
@@ -318,6 +346,110 @@ class _TraceUsageAccumulator:
             self.cost[key] = float(self.cost.get(key, 0.0)) + float(cost_value)
 
 
+def _callback_component_name(serialized: Any, fallback: str) -> str:
+    value: Any = None
+    if isinstance(serialized, dict):
+        value = serialized.get("name")
+        if not value:
+            identifier = serialized.get("id")
+            if isinstance(identifier, list | tuple) and identifier:
+                value = identifier[-1]
+    return _redact_string(_clean_text(value) or fallback)[:200]
+
+
+class _SanitizedLangChainCallbackHandler(BaseCallbackHandler):
+    """Record callback timing without forwarding model or tool payloads."""
+
+    def __init__(self, *, tracer: LangfuseTracer, trace_id: str | None) -> None:
+        self._tracer = tracer
+        self._trace_id = _clean_text(trace_id) or None
+        self._started: dict[str, tuple[str, str, float]] = {}
+
+    def _begin(self, *, kind: str, run_id: UUID, component: str) -> None:
+        self._started[str(run_id)] = (kind, component, time.monotonic())
+
+    def _finish(self, *, run_id: UUID, status: str) -> None:
+        key = str(run_id)
+        started = self._started.pop(key, None)
+        if started is None:
+            return
+        kind, component, started_at = started
+        self._tracer.record_span(
+            name=f"{kind}.invoke",
+            metadata={
+                "component": component,
+                "callback_run_id": key,
+                "duration_ms": max(0, int((time.monotonic() - started_at) * 1_000)),
+                "content_capture": "disabled",
+            },
+            trace_id=self._trace_id,
+            status=status,
+        )
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[Any]],
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del messages, kwargs
+        self._begin(
+            kind="llm",
+            run_id=run_id,
+            component=_callback_component_name(serialized, "chat_model"),
+        )
+
+    def on_llm_start(
+        self,
+        serialized: dict[str, Any],
+        prompts: list[str],
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del prompts, kwargs
+        self._begin(
+            kind="llm",
+            run_id=run_id,
+            component=_callback_component_name(serialized, "language_model"),
+        )
+
+    def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        del response, kwargs
+        self._finish(run_id=run_id, status="ok")
+
+    def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        del error, kwargs
+        self._finish(run_id=run_id, status="error")
+
+    def on_tool_start(
+        self,
+        serialized: dict[str, Any],
+        input_str: str,
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del input_str
+        name = kwargs.get("name")
+        component = _redact_string(_clean_text(name))[:200] if name else ""
+        self._begin(
+            kind="tool",
+            run_id=run_id,
+            component=component or _callback_component_name(serialized, "tool"),
+        )
+
+    def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        del output, kwargs
+        self._finish(run_id=run_id, status="ok")
+
+    def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        del error, kwargs
+        self._finish(run_id=run_id, status="error")
+
+
 @dataclass
 class _LangfuseToolSpan:
     tracer: LangfuseTracer
@@ -434,7 +566,6 @@ class LangfuseTracer:
         environment: str | None = None,
         content_level: str = "full_debug",
         client: Any | None = None,
-        callback_handler_cls: type[Any] | None = None,
     ) -> None:
         self.public_key = _clean_text(public_key)
         self.secret_key = _clean_text(secret_key)
@@ -448,7 +579,6 @@ class LangfuseTracer:
         )
         self.content_level = _clean_text(content_level) or "full_debug"
         self._client = client
-        self._callback_handler_cls = callback_handler_cls
         self._client_failed = False
 
     @property
@@ -613,11 +743,20 @@ class LangfuseTracer:
         with suppress(Exception):
             attributes_context.__enter__()
         usage_accumulator = _TraceUsageAccumulator()
-        usage_token = _ACTIVE_TRACE_USAGE.set(
-            (*_ACTIVE_TRACE_USAGE.get(), usage_accumulator)
-        )
+        usage_token = _ACTIVE_TRACE_USAGE.set((*_ACTIVE_TRACE_USAGE.get(), usage_accumulator))
+        error_info: tuple[Any, Any, Any] = (None, None, None)
         try:
             yield observation
+        except BaseException as error:
+            error_info = (type(error), error, error.__traceback__)
+            update = getattr(observation, "update", None)
+            if callable(update):
+                with suppress(Exception):
+                    update(
+                        level="ERROR",
+                        status_message=type(error).__name__,
+                    )
+            raise
         finally:
             if usage_accumulator.usage or usage_accumulator.cost:
                 update = getattr(observation, "update", None)
@@ -630,9 +769,9 @@ class LangfuseTracer:
             with suppress(Exception):
                 _ACTIVE_TRACE_USAGE.reset(usage_token)
             with suppress(Exception):
-                attributes_context.__exit__(None, None, None)
+                attributes_context.__exit__(*error_info)
             with suppress(Exception):
-                observation_context.__exit__(None, None, None)
+                observation_context.__exit__(*error_info)
 
     def build_callbacks(
         self,
@@ -647,22 +786,12 @@ class LangfuseTracer:
         if not self.enabled:
             return []
         self._install_env()
-        callback_cls = self._callback_handler_cls
-        if callback_cls is None:
-            try:
-                from langfuse.langchain import CallbackHandler
-
-                callback_cls = CallbackHandler
-                self._callback_handler_cls = callback_cls
-            except Exception:
-                logger.exception("Failed to import Langfuse LangChain callback handler.")
-                return []
         try:
             active_observation_id = _clean_text(_ACTIVE_OBSERVATION_ID.get())
             if not active_observation_id:
                 logger.debug("Skipping Langfuse callback handler without active root observation.")
                 return []
-            return [callback_cls()]
+            return [_SanitizedLangChainCallbackHandler(tracer=self, trace_id=trace_id)]
         except Exception:
             logger.exception("Failed to build Langfuse callback handler.")
             return []

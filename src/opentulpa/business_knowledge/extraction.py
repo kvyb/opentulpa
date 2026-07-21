@@ -427,7 +427,7 @@ def _extract_pdf_sections(
     raw_bytes: bytes,
 ) -> tuple[list[KnowledgeSourceSection], list[str], str]:
     try:
-        from pypdf import PdfReader
+        from pypdf import PdfReader  # type: ignore[import-not-found]
     except Exception as exc:
         return [], [f"pdf parser unavailable for {filename}: {exc}"], "unsupported_for_business_knowledge"
     try:

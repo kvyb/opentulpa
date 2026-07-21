@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 
 
 class TelegramStateStore:
     def __init__(self, state_path: Path) -> None:
         self.state_path = state_path.resolve()
+        self.backup_path = self.state_path.with_suffix(f"{self.state_path.suffix}.bak")
         self._lock = RLock()
 
     @staticmethod
@@ -24,22 +28,77 @@ class TelegramStateStore:
             "support_bindings": {},
             "support_audit": [],
             "support_command_chats": {},
+            "owner_update_inbox": {},
+            "owner_update_completed": [],
         }
 
     def _load_unlocked(self) -> dict[str, Any]:
-        if not self.state_path.exists():
+        if not self.state_path.exists() and not self.backup_path.exists():
             return self._default_state()
-        try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else self._default_state()
-        except Exception:
-            return self._default_state()
+
+        for path in (self.state_path, self.backup_path):
+            try:
+                raw = path.read_bytes()
+                data = json.loads(raw)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if path == self.backup_path:
+                self._atomic_write(self.state_path, raw)
+            return data
+        raise RuntimeError("Telegram state is corrupt and no valid backup is available")
 
     def _save_unlocked(self, state: dict[str, Any]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        with suppress(Exception):
-            self.state_path.chmod(0o600)
+        payload = json.dumps(state, indent=2, sort_keys=True).encode("utf-8")
+        current = self._valid_payload(self.state_path)
+        if current is not None:
+            self._atomic_write(self.backup_path, current)
+        self._atomic_write(self.state_path, payload)
+
+    @staticmethod
+    def _valid_payload(path: Path) -> bytes | None:
+        try:
+            payload = path.read_bytes()
+            parsed = json.loads(payload)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _atomic_write(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, raw_temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary = Path(raw_temporary)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            with suppress(OSError):
+                os.chmod(path, 0o600)
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+            except OSError:
+                directory_fd = -1
+            if directory_fd >= 0:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            with suppress(FileNotFoundError):
+                temporary.unlink()
 
     def load(self) -> dict[str, Any]:
         with self._lock:
@@ -59,6 +118,108 @@ class TelegramStateStore:
             result = mutator(state)
             self._save_unlocked(state)
             return result
+
+    def enqueue_owner_update(self, body: dict[str, Any]) -> tuple[str, bool]:
+        """Persist an owner webhook update before acknowledgement and deduplicate retries."""
+
+        detached = json.loads(json.dumps(body, ensure_ascii=False, allow_nan=False))
+        encoded = json.dumps(
+            detached,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raw_update_id = body.get("update_id")
+        if raw_update_id is None:
+            update_id = 0
+        elif isinstance(raw_update_id, int) and not isinstance(raw_update_id, bool):
+            update_id = raw_update_id
+        elif isinstance(raw_update_id, str) and raw_update_id.isdecimal():
+            update_id = int(raw_update_id)
+        else:
+            raise ValueError("Telegram update_id is invalid")
+        if update_id < 0:
+            raise ValueError("Telegram update_id is invalid")
+        key = (
+            f"telegram:update:{update_id}"
+            if body.get("update_id") is not None
+            else f"telegram:update:sha256:{hashlib.sha256(encoded.encode()).hexdigest()}"
+        )
+
+        def enqueue(state: dict[str, Any]) -> tuple[str, bool]:
+            completed = state.get("owner_update_completed")
+            completed_values = completed if isinstance(completed, list) else []
+            if key in completed_values:
+                return key, False
+            inbox = state.get("owner_update_inbox")
+            if not isinstance(inbox, dict):
+                inbox = {}
+            existing = inbox.get(key)
+            if isinstance(existing, dict):
+                existing_body = existing.get("body")
+                existing_encoded = json.dumps(
+                    existing_body,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if existing_encoded != encoded:
+                    raise ValueError("Telegram update_id payload conflict")
+                return key, True
+            inbox[key] = {
+                "update_id": update_id,
+                "body": detached,
+                "accepted_at": datetime.now(UTC).isoformat(),
+            }
+            state["owner_update_inbox"] = inbox
+            return key, True
+
+        return cast("tuple[str, bool]", self.update(enqueue))
+
+    def owner_update(self, ingress_key: str) -> dict[str, Any] | None:
+        state = self.load()
+        inbox = state.get("owner_update_inbox")
+        item = inbox.get(ingress_key) if isinstance(inbox, dict) else None
+        body = item.get("body") if isinstance(item, dict) else None
+        return dict(body) if isinstance(body, dict) else None
+
+    def pending_owner_updates(self, *, limit: int = 100) -> list[tuple[str, dict[str, Any]]]:
+        state = self.load()
+        inbox = state.get("owner_update_inbox")
+        if not isinstance(inbox, dict):
+            return []
+        pending: list[tuple[int, str, dict[str, Any]]] = []
+        for key, item in inbox.items():
+            body = item.get("body") if isinstance(item, dict) else None
+            if not isinstance(body, dict):
+                continue
+            try:
+                update_id = int(item.get("update_id"))
+            except (TypeError, ValueError):
+                continue
+            pending.append((update_id, str(key), dict(body)))
+        pending.sort(key=lambda item: (item[0], item[1]))
+        return [(key, body) for _, key, body in pending[: max(1, min(limit, 1_000))]]
+
+    def complete_owner_update(self, ingress_key: str) -> bool:
+        def complete(state: dict[str, Any]) -> bool:
+            inbox = state.get("owner_update_inbox")
+            if not isinstance(inbox, dict) or ingress_key not in inbox:
+                return False
+            inbox.pop(ingress_key, None)
+            completed = state.get("owner_update_completed")
+            completed_values = completed if isinstance(completed, list) else []
+            completed_values = [
+                str(value) for value in completed_values if str(value) != ingress_key
+            ]
+            completed_values.append(ingress_key)
+            state["owner_update_inbox"] = inbox
+            state["owner_update_completed"] = completed_values[-2_048:]
+            return True
+
+        return bool(self.update(complete))
 
     def find_session_slots(self, customer_id: str) -> list[dict[str, Any]]:
         state = self.load()

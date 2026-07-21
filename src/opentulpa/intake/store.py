@@ -47,7 +47,7 @@ class IntakeWorkflowStore:
         self._db_path = db_path.resolve()
 
     def conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self._db_path, wal=True)
+        return connect_sqlite(self._db_path)
 
     def init_db(
         self,
@@ -56,11 +56,16 @@ class IntakeWorkflowStore:
     ) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.conn() as conn:
+            # Draft activation spans this database and the draft database. SQLite
+            # only provides an atomic multi-database commit through its rollback
+            # journal (the super-journal protocol), not WAL.
+            conn.execute("PRAGMA journal_mode=DELETE")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS intake_workflows (
                     workflow_id TEXT PRIMARY KEY,
                     customer_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     name TEXT NOT NULL,
                     channel TEXT NOT NULL,
                     provider TEXT NOT NULL,
@@ -93,6 +98,8 @@ class IntakeWorkflowStore:
                     extracted_fields_json TEXT NOT NULL,
                     sink_write_status TEXT NOT NULL,
                     sink_record_ref_json TEXT NOT NULL,
+                    sink_effect_revision INTEGER NOT NULL DEFAULT 0,
+                    sink_effect_phase TEXT NOT NULL DEFAULT '',
                     conversation_summary TEXT NOT NULL,
                     last_customer_message_at TEXT,
                     opened_at TEXT NOT NULL,
@@ -133,10 +140,25 @@ class IntakeWorkflowStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_intake_pending_runs_due
                     ON intake_pending_runs(status, due_at);
+
+                CREATE TABLE IF NOT EXISTS intake_reply_deliveries (
+                    workflow_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    reply_hash TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, conversation_id, source_message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_intake_reply_deliveries_customer
+                    ON intake_reply_deliveries(customer_id, updated_at DESC);
                 """
             )
             self._ensure_cursor_columns(conn)
             self._ensure_workflow_columns(conn)
+            self._ensure_booking_columns(conn)
             self._migrate_legacy_sink_configs(conn, normalize_sink_config=normalize_sink_config)
 
     @staticmethod
@@ -144,6 +166,7 @@ class IntakeWorkflowStore:
         rows = conn.execute("PRAGMA table_info(intake_conversation_cursors)").fetchall()
         existing = {str(row["name"] or "") for row in rows}
         required_columns = {
+            "revision": "INTEGER NOT NULL DEFAULT 1",
             "last_seen_conversation_updated_time": "TEXT",
             "last_seen_latest_outbound_message_id": "TEXT",
             "last_agent_action_at": "TEXT",
@@ -169,6 +192,19 @@ class IntakeWorkflowStore:
         conn.commit()
 
     @staticmethod
+    def _ensure_booking_columns(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(intake_bookings)").fetchall()
+        existing = {str(row["name"] or "") for row in rows}
+        required_columns = {
+            "sink_effect_revision": "INTEGER NOT NULL DEFAULT 0",
+            "sink_effect_phase": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, column_type in required_columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE intake_bookings ADD COLUMN {column} {column_type}")
+        conn.commit()
+
+    @staticmethod
     def _migrate_legacy_sink_configs(
         conn: sqlite3.Connection,
         *,
@@ -180,13 +216,18 @@ class IntakeWorkflowStore:
         for row in rows:
             sink_type = str(row["sink_type"] or "").strip().lower()
             original = json.loads(row["sink_config_json"] or "{}")
-            normalized = normalize_sink_config(
-                sink_type=sink_type,
-                sink_config=original,
-                workflow_id=str(row["workflow_id"] or "").strip(),
-                customer_id=str(row["customer_id"] or "").strip(),
-                validate_target=False,
-            )
+            try:
+                normalized = normalize_sink_config(
+                    sink_type=sink_type,
+                    sink_config=original,
+                    workflow_id=str(row["workflow_id"] or "").strip(),
+                    customer_id=str(row["customer_id"] or "").strip(),
+                    validate_target=False,
+                )
+            except (TypeError, ValueError):
+                # Preserve invalid legacy configuration for migration reporting;
+                # runtime sink execution still validates it and fails closed.
+                continue
             if normalized != original:
                 conn.execute(
                     "UPDATE intake_workflows SET sink_config_json = ? WHERE workflow_id = ?",
@@ -200,63 +241,113 @@ class IntakeWorkflowStore:
         workflow: dict[str, Any],
         created_at: str,
         updated_at: str,
-    ) -> None:
+    ) -> int:
         with self.conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO intake_workflows (
-                    workflow_id, customer_id, name, channel, provider, source_config_json,
-                    intent_description, required_fields_json, field_guidance_json,
-                    assistant_instructions, business_facts_json, knowledge_file_ids_json, sink_type,
-                    sink_config_json, schedule, notify_user, enabled, routine_id,
-                    reply_mode, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workflow_id) DO UPDATE SET
-                    customer_id=excluded.customer_id,
-                    name=excluded.name,
-                    channel=excluded.channel,
-                    provider=excluded.provider,
-                    source_config_json=excluded.source_config_json,
-                    intent_description=excluded.intent_description,
-                    required_fields_json=excluded.required_fields_json,
-                    field_guidance_json=excluded.field_guidance_json,
-                    assistant_instructions=excluded.assistant_instructions,
-                    business_facts_json=excluded.business_facts_json,
-                    knowledge_file_ids_json=excluded.knowledge_file_ids_json,
-                    sink_type=excluded.sink_type,
-                    sink_config_json=excluded.sink_config_json,
-                    schedule=excluded.schedule,
-                    notify_user=excluded.notify_user,
-                    enabled=excluded.enabled,
-                    routine_id=excluded.routine_id,
-                    reply_mode=excluded.reply_mode,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    workflow["workflow_id"],
-                    workflow["customer_id"],
-                    workflow["name"],
-                    workflow["channel"],
-                    workflow["provider"],
-                    _json_dumps(workflow["source_config"]),
-                    workflow["intent_description"],
-                    _json_dumps(workflow["required_fields"]),
-                    _json_dumps(workflow["field_guidance"]),
-                    workflow["assistant_instructions"],
-                    _json_dumps(workflow["business_facts"]),
-                    _json_dumps(workflow["knowledge_file_ids"]),
-                    workflow["sink_type"],
-                    _json_dumps(workflow["sink_config"]),
-                    workflow["schedule"],
-                    1 if workflow["notify_user"] else 0,
-                    1 if workflow["enabled"] else 0,
-                    workflow["routine_id"],
-                    workflow["reply_mode"],
-                    created_at,
-                    updated_at,
-                ),
+            conn.execute("BEGIN IMMEDIATE")
+            revision = self.upsert_workflow_record_in_transaction(
+                conn,
+                workflow=workflow,
+                created_at=created_at,
+                updated_at=updated_at,
             )
             conn.commit()
+        return revision
+
+    @staticmethod
+    def upsert_workflow_record_in_transaction(
+        conn: sqlite3.Connection,
+        *,
+        workflow: dict[str, Any],
+        created_at: str,
+        updated_at: str,
+        expected_revision: int | None = None,
+    ) -> int:
+        """Write through an existing transaction without committing it."""
+
+        current = conn.execute(
+            "SELECT customer_id, revision FROM intake_workflows WHERE workflow_id = ?",
+            (workflow["workflow_id"],),
+        ).fetchone()
+        if current is not None and str(current["customer_id"]) != str(workflow["customer_id"]):
+            raise PermissionError("intake workflow is owned by another tenant")
+        current_revision = int(current["revision"] or 0) if current is not None else 0
+        if expected_revision is not None and current_revision != expected_revision:
+            raise RuntimeError(
+                f"active workflow changed during activation: expected revision "
+                f"{expected_revision}, found {current_revision}"
+            )
+        if str(workflow["channel"]) == "telegram_business_dm":
+            duplicate = conn.execute(
+                """
+                SELECT workflow_id FROM intake_workflows
+                WHERE customer_id = ? AND channel = 'telegram_business_dm'
+                  AND workflow_id != ?
+                LIMIT 1
+                """,
+                (workflow["customer_id"], workflow["workflow_id"]),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(
+                    "telegram_business_dm supports only one active workflow per customer"
+                )
+        revision = current_revision + 1
+        conn.execute(
+            """
+            INSERT INTO intake_workflows (
+                workflow_id, customer_id, revision, name, channel, provider, source_config_json,
+                intent_description, required_fields_json, field_guidance_json,
+                assistant_instructions, business_facts_json, knowledge_file_ids_json, sink_type,
+                sink_config_json, schedule, notify_user, enabled, routine_id,
+                reply_mode, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workflow_id) DO UPDATE SET
+                customer_id=excluded.customer_id,
+                revision=excluded.revision,
+                name=excluded.name,
+                channel=excluded.channel,
+                provider=excluded.provider,
+                source_config_json=excluded.source_config_json,
+                intent_description=excluded.intent_description,
+                required_fields_json=excluded.required_fields_json,
+                field_guidance_json=excluded.field_guidance_json,
+                assistant_instructions=excluded.assistant_instructions,
+                business_facts_json=excluded.business_facts_json,
+                knowledge_file_ids_json=excluded.knowledge_file_ids_json,
+                sink_type=excluded.sink_type,
+                sink_config_json=excluded.sink_config_json,
+                schedule=excluded.schedule,
+                notify_user=excluded.notify_user,
+                enabled=excluded.enabled,
+                routine_id=excluded.routine_id,
+                reply_mode=excluded.reply_mode,
+                updated_at=excluded.updated_at
+            """,
+            (
+                workflow["workflow_id"],
+                workflow["customer_id"],
+                revision,
+                workflow["name"],
+                workflow["channel"],
+                workflow["provider"],
+                _json_dumps(workflow["source_config"]),
+                workflow["intent_description"],
+                _json_dumps(workflow["required_fields"]),
+                _json_dumps(workflow["field_guidance"]),
+                workflow["assistant_instructions"],
+                _json_dumps(workflow["business_facts"]),
+                _json_dumps(workflow["knowledge_file_ids"]),
+                workflow["sink_type"],
+                _json_dumps(workflow["sink_config"]),
+                workflow["schedule"],
+                1 if workflow["notify_user"] else 0,
+                1 if workflow["enabled"] else 0,
+                workflow["routine_id"],
+                workflow["reply_mode"],
+                created_at,
+                updated_at,
+            ),
+        )
+        return revision
 
     def list_workflows(self, *, customer_id: str, include_disabled: bool = False) -> list[dict[str, Any]]:
         safe_customer = str(customer_id or "").strip()
@@ -302,16 +393,39 @@ class IntakeWorkflowStore:
             ).fetchone()
         return self._hydrate_workflow_row(row) if row is not None else None
 
-    def delete_workflow_records(self, *, workflow_id: str) -> None:
+    def delete_workflow_records(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        expected_revision: int | None = None,
+    ) -> bool:
+        safe_customer = str(customer_id or "").strip()
         safe_workflow = str(workflow_id or "").strip()
-        if not safe_workflow:
-            return
+        if not safe_customer or not safe_workflow:
+            return False
         with self.conn() as conn:
-            conn.execute("DELETE FROM intake_workflows WHERE workflow_id = ?", (safe_workflow,))
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT revision FROM intake_workflows WHERE workflow_id = ? AND customer_id = ?",
+                (safe_workflow, safe_customer),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            revision = int(row["revision"] or 1)
+            if expected_revision is not None and revision != expected_revision:
+                conn.rollback()
+                raise ValueError(f"expected revision {expected_revision}, found {revision}")
+            conn.execute(
+                "DELETE FROM intake_workflows WHERE workflow_id = ? AND customer_id = ?",
+                (safe_workflow, safe_customer),
+            )
             conn.execute("DELETE FROM intake_bookings WHERE workflow_id = ?", (safe_workflow,))
             conn.execute("DELETE FROM intake_conversation_cursors WHERE workflow_id = ?", (safe_workflow,))
             conn.execute("DELETE FROM intake_pending_runs WHERE workflow_id = ?", (safe_workflow,))
             conn.commit()
+        return True
 
     def list_bookings(
         self,
@@ -400,6 +514,92 @@ class IntakeWorkflowStore:
             )
             conn.commit()
 
+    def claim_reply_delivery(
+        self,
+        *,
+        workflow_id: str,
+        customer_id: str,
+        conversation_id: str,
+        source_message_id: str,
+        reply_hash: str,
+    ) -> str:
+        """Claim one outbound reply before calling a non-idempotent provider."""
+        now = _utc_now_iso()
+        with self.conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT customer_id, reply_hash, status
+                FROM intake_reply_deliveries
+                WHERE workflow_id = ? AND conversation_id = ? AND source_message_id = ?
+                """,
+                (workflow_id, conversation_id, source_message_id),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO intake_reply_deliveries (
+                        workflow_id, conversation_id, source_message_id, customer_id,
+                        reply_hash, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (
+                        workflow_id,
+                        conversation_id,
+                        source_message_id,
+                        customer_id,
+                        reply_hash,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                return "claimed"
+            if str(row["customer_id"]) != customer_id:
+                conn.rollback()
+                raise PermissionError("reply delivery is owned by another tenant")
+            if str(row["reply_hash"]) != reply_hash:
+                conn.commit()
+                return "conflict"
+            status = str(row["status"])
+            conn.commit()
+            return status
+
+    def complete_reply_delivery(
+        self,
+        *,
+        workflow_id: str,
+        customer_id: str,
+        conversation_id: str,
+        source_message_id: str,
+        reply_hash: str,
+    ) -> None:
+        with self.conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE intake_reply_deliveries
+                SET status = 'completed', updated_at = ?
+                WHERE workflow_id = ?
+                  AND conversation_id = ?
+                  AND source_message_id = ?
+                  AND customer_id = ?
+                  AND reply_hash = ?
+                  AND status = 'pending'
+                """,
+                (
+                    _utc_now_iso(),
+                    workflow_id,
+                    conversation_id,
+                    source_message_id,
+                    customer_id,
+                    reply_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise RuntimeError("reply delivery claim was not found")
+            conn.commit()
+
     def upsert_booking(self, booking: dict[str, Any]) -> None:
         now = _utc_now_iso()
         with self.conn() as conn:
@@ -408,14 +608,17 @@ class IntakeWorkflowStore:
                 INSERT INTO intake_bookings (
                     booking_id, workflow_id, customer_id, conversation_id, status,
                     extracted_fields_json, sink_write_status, sink_record_ref_json,
+                    sink_effect_revision, sink_effect_phase,
                     conversation_summary, last_customer_message_at, opened_at,
                     completed_at, edit_window_until, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(booking_id) DO UPDATE SET
                     status=excluded.status,
                     extracted_fields_json=excluded.extracted_fields_json,
                     sink_write_status=excluded.sink_write_status,
                     sink_record_ref_json=excluded.sink_record_ref_json,
+                    sink_effect_revision=excluded.sink_effect_revision,
+                    sink_effect_phase=excluded.sink_effect_phase,
                     conversation_summary=excluded.conversation_summary,
                     last_customer_message_at=excluded.last_customer_message_at,
                     opened_at=excluded.opened_at,
@@ -432,6 +635,8 @@ class IntakeWorkflowStore:
                     _json_dumps(_safe_dict(booking.get("extracted_fields"))),
                     str(booking.get("sink_write_status", "pending") or "pending"),
                     _json_dumps(_safe_dict(booking.get("sink_record_ref"))),
+                    max(0, int(booking.get("sink_effect_revision") or 0)),
+                    str(booking.get("sink_effect_phase", "") or ""),
                     str(booking.get("conversation_summary", "") or ""),
                     str(booking.get("last_customer_message_at", "") or ""),
                     str(booking.get("opened_at", "") or now),
@@ -634,6 +839,7 @@ class IntakeWorkflowStore:
         return {
             "workflow_id": str(row["workflow_id"]),
             "customer_id": str(row["customer_id"]),
+            "revision": int(row["revision"] or 1),
             "name": str(row["name"]),
             "channel": str(row["channel"]),
             "provider": str(row["provider"]),
@@ -649,7 +855,6 @@ class IntakeWorkflowStore:
             "schedule": str(row["schedule"]),
             "notify_user": bool(row["notify_user"]),
             "enabled": bool(row["enabled"]),
-            "routine_id": str(row["routine_id"]),
             "reply_mode": "auto",
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
@@ -666,6 +871,8 @@ class IntakeWorkflowStore:
             "extracted_fields": json.loads(row["extracted_fields_json"] or "{}"),
             "sink_write_status": str(row["sink_write_status"]),
             "sink_record_ref": json.loads(row["sink_record_ref_json"] or "{}"),
+            "sink_effect_revision": int(row["sink_effect_revision"] or 0),
+            "sink_effect_phase": str(row["sink_effect_phase"] or ""),
             "conversation_summary": str(row["conversation_summary"] or ""),
             "last_customer_message_at": str(row["last_customer_message_at"] or ""),
             "opened_at": str(row["opened_at"] or ""),

@@ -1,0 +1,2585 @@
+"""Application lifecycle, persistence, and streaming around the Deep Agents graph."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import nullcontext, suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, Protocol, cast
+from weakref import WeakValueDictionary
+
+import aiosqlite
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+from deepagents.middleware.filesystem import FilesystemPermission
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    InterruptOnConfig,
+    ModelCallLimitMiddleware,
+)
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.tools import BaseTool
+from langchain_openrouter import ChatOpenRouter
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.store.sqlite.aio import AsyncSqliteStore
+from langgraph.types import Command
+from pydantic import SecretStr
+
+from opentulpa.core.ids import new_short_id
+from opentulpa.deep_agent.contracts import (
+    AgentApproval,
+    AgentApprovalStatus,
+    AgentRunCapabilityConflictError,
+    AgentRunCheckpointConflictError,
+    AgentRunContext,
+    AgentRunEvent,
+    AgentRunEventType,
+    AgentRunIdempotencyConflictError,
+    AgentRunRequest,
+    AgentRunSnapshot,
+    AgentRunStatus,
+    ApprovalDecision,
+    utc_now_iso,
+)
+from opentulpa.deep_agent.dynamic_tools import DynamicToolProvider, DynamicToolSnapshot
+from opentulpa.deep_agent.prompts import INTAKE_PROMPT, OWNER_PROMPT, ROUTINE_PROMPT
+from opentulpa.deep_agent.sandbox import (
+    TenantContainerPolicy,
+    TenantExecutionProvider,
+    TenantSandboxBackend,
+)
+from opentulpa.intake.decision import IntakeDecision
+from opentulpa.logging.langfuse import redact_for_langfuse
+from opentulpa.persistence.tenant_namespace import (
+    tenant_namespace_label,
+    tenant_store_namespace,
+)
+from opentulpa.specs import AgentSpec, AgentSpecRef, AgentSpecStore, OriginRef
+from opentulpa.tooling import (
+    TOOL_SPEC_BY_NAME,
+    AgentRunKind,
+    ApprovalMode,
+)
+
+logger = logging.getLogger(__name__)
+
+_PUBLIC_RUN_FAILURE_MESSAGE = "The agent run could not be completed."
+_PUBLIC_RUN_CANCELLED_MESSAGE = "The agent run was cancelled before completion."
+_PUBLIC_CAPABILITY_CHANGED_MESSAGE = (
+    "The approved capability changed before the agent run could continue."
+)
+_ACTIVE_RUN_STATUSES = frozenset({"running", "interrupted", "resume_pending"})
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_RUN_STATUSES = _ACTIVE_RUN_STATUSES | _TERMINAL_RUN_STATUSES
+_TRACE_EVENT_LIMIT = 500
+_TRACE_LIST_LIMIT = 100
+_TRACE_TEXT_PREVIEW_CHARS = 500
+_TRACE_TOOL_VALUE_CHARS = 4_000
+_TRACE_FAILURE_CAUSE_CHARS = 500
+_TRACE_HIDDEN_KEYS = frozenset(
+    {"actor_id", "checkpoint_thread_id", "customer_id", "tenant_id", "thread_id"}
+)
+_TRACE_PATH_KEYS = frozenset({"path", "uri"})
+_TRACE_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w:/])(?:[A-Za-z]:\\[^\s\"']+|/(?:[^\s/\"']+/)*[^\s/\"']+)"
+)
+
+_OWNER_PRODUCT_TOOL_NAMES = frozenset(TOOL_SPEC_BY_NAME)
+_ROUTINE_PRODUCT_TOOL_NAMES = frozenset(
+    {
+        "artifact_deliver",
+        "browser_act",
+        "browser_get",
+        "browser_start",
+        "connection_list",
+        "content_fetch",
+        "file_analyze",
+        "file_get",
+        "file_inspect",
+        "file_search",
+        "integration_action_search",
+        "integration_invoke",
+        "integration_list",
+        "job_artifacts",
+        "job_events",
+        "job_get",
+        "knowledge_find",
+        "knowledge_list",
+        "knowledge_query",
+        "profile_get",
+        "schedule_list",
+        "web_search",
+    }
+)
+_INTAKE_PRODUCT_TOOL_NAMES = frozenset(
+    {
+        "knowledge_find",
+        "knowledge_list",
+        "knowledge_query",
+    }
+)
+
+_FILESYSTEM_TOOL_NAMES = frozenset(
+    {"edit_file", "execute", "glob", "grep", "ls", "read_file", "write_file"}
+)
+_OWNER_DECISIONS: tuple[
+    Literal["approve"],
+    Literal["edit"],
+    Literal["reject"],
+] = ("approve", "edit", "reject")
+
+
+def _bounded_trace_value(value: Any) -> Any:
+    safe_value = _sanitize_trace_value(redact_for_langfuse(value))
+    encoded = json.dumps(safe_value, ensure_ascii=False, sort_keys=True, default=str)
+    if len(encoded) <= _TRACE_TOOL_VALUE_CHARS:
+        return safe_value
+    return {
+        "preview": encoded[:_TRACE_TOOL_VALUE_CHARS],
+        "truncated": True,
+    }
+
+
+def _sanitize_trace_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            normalized = key.strip().casefold()
+            if normalized in _TRACE_HIDDEN_KEYS:
+                sanitized[key] = "[redacted]"
+            elif (
+                normalized in _TRACE_PATH_KEYS
+                and isinstance(raw_value, str)
+                and (raw_value.startswith("/") or raw_value.startswith("file:"))
+            ):
+                sanitized[key] = "[redacted-path]"
+            else:
+                sanitized[key] = _sanitize_trace_value(raw_value)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_trace_value(item) for item in value]
+    return value
+
+
+def _trace_text_preview(value: Any) -> str:
+    safe_value = str(redact_for_langfuse(str(value or "")))
+    if len(safe_value) <= _TRACE_TEXT_PREVIEW_CHARS:
+        return safe_value
+    return f"{safe_value[:_TRACE_TEXT_PREVIEW_CHARS]}...[truncated]"
+
+
+def _trace_input_summary(graph_input: Any) -> str:
+    if not isinstance(graph_input, dict):
+        return ""
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list | tuple):
+        return ""
+    parts: list[str] = []
+    for message in messages:
+        if isinstance(message, dict):
+            content = message.get("content")
+        else:
+            content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip())
+    return _trace_text_preview("\n".join(parts))
+
+
+def _safe_failure_cause(error: BaseException) -> str:
+    cause = str(redact_for_langfuse(str(error or type(error).__name__)))
+    cause = _TRACE_ABSOLUTE_PATH_RE.sub("[redacted-path]", cause)
+    if len(cause) > _TRACE_FAILURE_CAUSE_CHARS:
+        return f"{cause[:_TRACE_FAILURE_CAUSE_CHARS]}...[truncated]"
+    return cause
+
+
+def _failure_diagnostic(error: BaseException, *, phase: str) -> dict[str, str]:
+    traceback = error.__traceback__
+    location = "unknown"
+    while traceback is not None:
+        frame = traceback.tb_frame
+        location = (
+            f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}:{traceback.tb_lineno}"
+        )
+        traceback = traceback.tb_next
+    error_type = type(error).__name__[:100] or "Exception"
+    material = f"{type(error).__module__}.{type(error).__qualname__}:{location}"
+    return {
+        "error_type": error_type,
+        "phase": str(phase or "unknown")[:100],
+        "location": location[:300],
+        "cause": _safe_failure_cause(error),
+        "fingerprint": hashlib.sha256(material.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _browser_action_requires_approval(request: Any) -> bool:
+    """Auto-run only browser operations that cannot submit or modify page state."""
+
+    raw_arguments = request.tool_call.get("args", {})
+    if not isinstance(raw_arguments, dict):
+        return True
+    action = raw_arguments.get("action")
+    if not isinstance(action, dict):
+        return True
+    kind = str(action.get("kind") or action.get("type") or "").strip().casefold()
+    return kind not in {"navigate", "wait"}
+
+
+class AgentRunObserver(Protocol):
+    """Receive redacted persisted terminal snapshots outside the agent loop."""
+
+    async def __call__(self, snapshot: AgentRunSnapshot) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRun:
+    run_id: str
+    checkpoint_thread_id: str
+    created: bool
+
+
+class _DenyToolsMiddleware(AgentMiddleware):
+    """Hide and reject built-ins a restricted AgentSpec is not allowed to use."""
+
+    def __init__(self, denied: frozenset[str]) -> None:
+        self._denied = denied
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        tools = [tool for tool in request.tools if tool.name not in self._denied]
+        return await handler(request.override(tools=tools))
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        name = str(request.tool_call.get("name", ""))
+        if name in self._denied:
+            return ToolMessage(
+                content="This AgentSpec is not permitted to use that tool.",
+                tool_call_id=str(request.tool_call.get("id", "denied-tool-call")),
+                name=name,
+                status="error",
+            )
+        return await handler(request)
+
+
+_RUN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    checkpoint_thread_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    origin_json TEXT NOT NULL DEFAULT '{}',
+    agent_spec_id TEXT NOT NULL DEFAULT 'owner',
+    agent_spec_revision INTEGER NOT NULL DEFAULT 1,
+    trust_class TEXT NOT NULL DEFAULT 'owner',
+    correlation_id TEXT NOT NULL,
+    idempotency_key TEXT,
+    status TEXT NOT NULL,
+    final_text TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    approvals_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_sequence INTEGER NOT NULL DEFAULT 0,
+    request_digest TEXT NOT NULL DEFAULT '',
+    dynamic_generation INTEGER NOT NULL DEFAULT 0,
+    dynamic_digest TEXT NOT NULL DEFAULT ''
+)
+"""
+
+_RUN_EVENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_run_events (
+    run_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    event_type TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+)
+"""
+
+
+def build_openrouter_chat_model(
+    *,
+    api_key: str,
+    base_url: str,
+    model_name: str,
+    reasoning_effort: str | None = "medium",
+    max_completion_tokens: int | None = None,
+) -> ChatOpenRouter:
+    """Build the model adapter shared by OpenTulpa agent profiles."""
+
+    safe_key = str(api_key or "").strip()
+    safe_model = str(model_name or "").strip()
+    if not safe_key:
+        raise RuntimeError("OPENAI_COMPATIBLE_API_KEY is required")
+    if not safe_model:
+        raise RuntimeError("LLM_MODEL is required")
+    effort = str(reasoning_effort or "").strip() or None
+    reasoning = {"effort": effort, "exclude": False} if effort else None
+    return ChatOpenRouter(
+        model=safe_model,
+        api_key=SecretStr(safe_key),
+        base_url=str(base_url or "").strip() or None,
+        app_url="https://github.com/kvyb/opentulpa",
+        app_title="OpenTulpa",
+        reasoning=reasoning,
+        max_completion_tokens=max_completion_tokens,
+        streaming=True,
+        max_retries=0,
+        # langchain-openrouter forwards this value to the SDK as milliseconds.
+        timeout=60_000,
+    )
+
+
+class DeepAgentService:
+    """Configure and invoke Deep Agents without adding another agent runtime."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model_name: str,
+        checkpoint_db_path: str | Path,
+        store_db_path: str | Path,
+        runs_db_path: str | Path,
+        workspaces_root: str | Path,
+        tools: Sequence[BaseTool] = (),
+        dynamic_tools: DynamicToolProvider | None = None,
+        reasoning_effort: str | None = "medium",
+        max_completion_tokens: int | None = None,
+        langfuse_tracer: Any | None = None,
+        model: Any | None = None,
+        agent_specs: AgentSpecStore | None = None,
+        model_resolver: Callable[[str], Any] | None = None,
+        container_policy: TenantContainerPolicy | None = None,
+        container_cli: str = "docker",
+        execution_provider: TenantExecutionProvider | None = None,
+        run_observer: AgentRunObserver | None = None,
+    ) -> None:
+        self._api_key = str(api_key or "").strip()
+        self._base_url = str(base_url or "").strip()
+        self._model_name = str(model_name or "").strip()
+        self._checkpoint_db_path = Path(checkpoint_db_path).expanduser().resolve()
+        self._store_db_path = Path(store_db_path).expanduser().resolve()
+        self._runs_db_path = Path(runs_db_path).expanduser().resolve()
+        self._workspaces_root = Path(workspaces_root).expanduser().resolve()
+        self._tools = self._validate_product_tools(tools)
+        if dynamic_tools is not None and agent_specs is None:
+            raise ValueError("dynamic tools require revisioned AgentSpecs")
+        self._dynamic_tools = dynamic_tools
+        self._reasoning_effort = str(reasoning_effort or "").strip() or None
+        self._max_completion_tokens = max_completion_tokens
+        self._langfuse_tracer = langfuse_tracer
+        self._provided_model = model
+        self._agent_specs = agent_specs
+        self._model_resolver = model_resolver
+        self._container_policy = container_policy or TenantContainerPolicy()
+        self._container_cli = str(container_cli or "docker").strip() or "docker"
+        self._execution_provider = execution_provider
+        self._run_observer = run_observer
+        self._checkpoint_conn: aiosqlite.Connection | None = None
+        self._store_cm: Any | None = None
+        self._checkpointer: AsyncSqliteSaver | None = None
+        self._store: AsyncSqliteStore | None = None
+        self._runs_db: aiosqlite.Connection | None = None
+        self._run_event_lock = asyncio.Lock()
+        self._graphs: dict[str, Any] = {}
+        self._spec_graphs: dict[tuple[str, str, int, str, int, str], Any] = {}
+        self._checkpoint_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._pending_resume_tasks: set[asyncio.Task[None]] = set()
+        self._pending_resume_ids: set[str] = set()
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def langfuse_tracer(self) -> Any | None:
+        return self._langfuse_tracer
+
+    @property
+    def started(self) -> bool:
+        return bool(self._graphs and self._runs_db is not None)
+
+    def healthy(self) -> bool:
+        return self.started
+
+    async def start(self, *, recover_pending_resumes: bool = True) -> None:
+        if self.started:
+            return
+        for path in (self._checkpoint_db_path, self._store_db_path, self._runs_db_path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        self._workspaces_root.mkdir(parents=True, exist_ok=True)
+
+        self._checkpoint_conn = await aiosqlite.connect(str(self._checkpoint_db_path))
+        self._checkpointer = AsyncSqliteSaver(
+            self._checkpoint_conn,
+            serde=JsonPlusSerializer(pickle_fallback=False),
+        )
+        await self._checkpointer.setup()
+        self._store_cm = AsyncSqliteStore.from_conn_string(str(self._store_db_path))
+        self._store = await self._store_cm.__aenter__()
+        await self._store.setup()
+        self._runs_db = await aiosqlite.connect(str(self._runs_db_path))
+        self._runs_db.row_factory = aiosqlite.Row
+        await self._runs_db.execute("PRAGMA foreign_keys=ON")
+        await self._runs_db.execute("PRAGMA journal_mode=WAL")
+        await self._runs_db.execute(_RUN_SCHEMA)
+        await self._runs_db.execute(_RUN_EVENT_SCHEMA)
+        schema_cursor = await self._runs_db.execute("PRAGMA table_info(agent_runs)")
+        columns = {str(row[1]) for row in await schema_cursor.fetchall()}
+        await schema_cursor.close()
+        if "last_sequence" not in columns:
+            await self._runs_db.execute(
+                "ALTER TABLE agent_runs ADD COLUMN last_sequence INTEGER NOT NULL DEFAULT 0"
+            )
+        for column, definition in (
+            ("origin_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("agent_spec_id", "TEXT NOT NULL DEFAULT 'owner'"),
+            ("agent_spec_revision", "INTEGER NOT NULL DEFAULT 1"),
+            ("trust_class", "TEXT NOT NULL DEFAULT 'owner'"),
+            ("idempotency_key", "TEXT"),
+            ("request_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("dynamic_generation", "INTEGER NOT NULL DEFAULT 0"),
+            ("dynamic_digest", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in columns:
+                await self._runs_db.execute(
+                    f"ALTER TABLE agent_runs ADD COLUMN {column} {definition}"
+                )
+        await self._runs_db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_tenant_idempotency
+            ON agent_runs (tenant_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+            """
+        )
+        await self._runs_db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_type
+            ON agent_run_events (run_id, event_type)
+            """
+        )
+        await self._runs_db.commit()
+        self._graphs = (
+            {"__agent_specs__": True} if self._agent_specs is not None else self._build_graphs()
+        )
+        await self._reconcile_stale_running_runs()
+        if recover_pending_resumes:
+            await self.recover_pending_resumes()
+
+    async def recover_pending_resumes(self) -> None:
+        """Continue durable approval decisions after capability restoration."""
+
+        self._require_started()
+        await self._recover_pending_resumes()
+
+    async def shutdown(self) -> None:
+        recovery_tasks = tuple(self._pending_resume_tasks)
+        for task in recovery_tasks:
+            task.cancel()
+        if recovery_tasks:
+            await asyncio.gather(*recovery_tasks, return_exceptions=True)
+        self._pending_resume_tasks.clear()
+        self._pending_resume_ids.clear()
+        self._graphs.clear()
+        self._spec_graphs.clear()
+        if self._runs_db is not None:
+            await self._runs_db.close()
+            self._runs_db = None
+        if self._store_cm is not None:
+            await self._store_cm.__aexit__(None, None, None)
+            self._store_cm = None
+            self._store = None
+        if self._checkpoint_conn is not None:
+            await self._checkpoint_conn.close()
+            self._checkpoint_conn = None
+            self._checkpointer = None
+
+    async def run(self, request: AgentRunRequest) -> AgentRunSnapshot:
+        run_id = ""
+        async for event in self.stream(request):
+            run_id = event.run_id
+        if not run_id:
+            raise RuntimeError("agent run did not start")
+        snapshot = await self.get_run(run_id)
+        if snapshot is None:
+            raise RuntimeError(f"agent run {run_id} was not persisted")
+        return snapshot
+
+    async def open_stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
+        """Persist and validate a run before an HTTP server commits SSE headers."""
+
+        self._require_started()
+        prepared = await self._prepare_run(request)
+        return self._stream_prepared(request, prepared)
+
+    async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
+        events = await self.open_stream(request)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            close = getattr(events, "aclose", None)
+            if callable(close):
+                await close()
+
+    async def _prepare_run(self, request: AgentRunRequest) -> _PreparedRun:
+        run_id = new_short_id("run", suffix_chars=10)
+        checkpoint_thread_id = self._checkpoint_thread_id(request.context)
+        dynamic = self._dynamic_snapshot(request.context.tenant_id)
+        persisted_run_id = await self._insert_run(
+            run_id,
+            checkpoint_thread_id,
+            request.context,
+            idempotency_key=request.idempotency_key,
+            request_digest=self._request_digest(request),
+            dynamic_generation=dynamic.generation,
+            dynamic_digest=self._dynamic_digest(dynamic),
+        )
+        return _PreparedRun(
+            run_id=persisted_run_id,
+            checkpoint_thread_id=checkpoint_thread_id,
+            created=persisted_run_id == run_id,
+        )
+
+    async def _stream_prepared(
+        self,
+        request: AgentRunRequest,
+        prepared: _PreparedRun,
+    ) -> AsyncIterator[AgentRunEvent]:
+        if not prepared.created:
+            async for event in self.events(prepared.run_id):
+                yield event
+            return
+        graph_input = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": self._request_text(request),
+                }
+            ]
+        }
+        try:
+            async with self._checkpoint_lock(prepared.checkpoint_thread_id):
+                async for event in self._stream_graph(
+                    run_id=prepared.run_id,
+                    context=request.context,
+                    checkpoint_thread_id=prepared.checkpoint_thread_id,
+                    graph_input=graph_input,
+                    resumed=False,
+                ):
+                    yield event
+        finally:
+            await self._finalize_abandoned_run(prepared.run_id)
+
+    async def open_resume(
+        self,
+        run_id: str,
+        decision: ApprovalDecision,
+    ) -> AsyncIterator[AgentRunEvent]:
+        """Claim an approval before an HTTP server commits SSE headers."""
+
+        self._require_started()
+        snapshot = await self.get_run(run_id)
+        if snapshot is None:
+            raise KeyError(f"agent run not found: {run_id}")
+        if snapshot.status not in {"interrupted", "resume_pending"}:
+            raise ValueError(f"agent run is not awaiting approval: {snapshot.status}")
+        dynamic = await self._verified_dynamic_snapshot(run_id, snapshot.context)
+        claimed_snapshot, approvals = await self._claim_approval_decision(run_id, decision)
+        pending = [approval for approval in approvals if approval.status == "pending"]
+        if pending:
+            return self._pending_approval_events(run_id, pending)
+        cursor = await self._last_sequence(run_id)
+        events = self._resume_with_recovery(
+            run_id=run_id,
+            snapshot=claimed_snapshot,
+            approvals=approvals,
+            dynamic=dynamic,
+            cursor=cursor,
+        )
+        # The decision is durable before SSE headers are committed. Start recovery now so
+        # a disconnect before the response iterator begins cannot strand resume_pending.
+        self._schedule_pending_resume(run_id)
+        return events
+
+    async def resume(
+        self,
+        run_id: str,
+        decision: ApprovalDecision,
+    ) -> AsyncIterator[AgentRunEvent]:
+        events = await self.open_resume(run_id, decision)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            close = getattr(events, "aclose", None)
+            if callable(close):
+                await close()
+
+    async def _pending_approval_events(
+        self,
+        run_id: str,
+        approvals: Sequence[AgentApproval],
+    ) -> AsyncIterator[AgentRunEvent]:
+        for approval in approvals:
+            event = await self._append_event(
+                run_id=run_id,
+                type="approval.required",
+                data=self._public_approval(approval),
+            )
+            if event is None:
+                return
+            yield event
+
+    async def _resume_with_recovery(
+        self,
+        *,
+        run_id: str,
+        snapshot: AgentRunSnapshot,
+        approvals: Sequence[AgentApproval],
+        dynamic: DynamicToolSnapshot,
+        cursor: int,
+    ) -> AsyncIterator[AgentRunEvent]:
+        try:
+            async for event in self._resume_claimed_run(
+                run_id=run_id,
+                snapshot=snapshot,
+                approvals=approvals,
+                dynamic=dynamic,
+                cursor=cursor,
+            ):
+                yield event
+        finally:
+            self._schedule_pending_resume(run_id)
+
+    async def _resume_claimed_run(
+        self,
+        *,
+        run_id: str,
+        snapshot: AgentRunSnapshot,
+        approvals: Sequence[AgentApproval],
+        dynamic: DynamicToolSnapshot,
+        cursor: int | None = None,
+    ) -> AsyncIterator[AgentRunEvent]:
+        checkpoint_thread_id = self._checkpoint_thread_id(snapshot.context)
+        if cursor is None:
+            cursor = await self._last_sequence(run_id)
+        async with self._checkpoint_lock(checkpoint_thread_id):
+            current = await self.get_run(run_id)
+            if current is None:
+                raise KeyError(f"agent run not found: {run_id}")
+            if current.status in {"completed", "failed", "cancelled", "interrupted"}:
+                async for event in self.events(run_id, after_sequence=cursor):
+                    yield event
+                return
+            if current.status != "resume_pending":
+                raise ValueError(f"agent run cannot resume from status: {current.status}")
+            current_dynamic = await self._verified_dynamic_snapshot(run_id, current.context)
+            if self._dynamic_binding(current_dynamic) != self._dynamic_binding(dynamic):
+                raise AgentRunCapabilityConflictError(_PUBLIC_CAPABILITY_CHANGED_MESSAGE)
+            graph = self._graph_for_context(current.context, dynamic=current_dynamic)
+            config = self._run_config(current.context, checkpoint_thread_id)
+            graph_input, handled = await self._resume_input_from_checkpoint(
+                run_id=run_id,
+                snapshot=current,
+                graph=graph,
+                config=config,
+                approvals=approvals,
+            )
+            if handled:
+                async for event in self.events(run_id, after_sequence=cursor):
+                    yield event
+                return
+            async for event in self._stream_graph(
+                run_id=run_id,
+                context=current.context,
+                checkpoint_thread_id=checkpoint_thread_id,
+                graph_input=graph_input,
+                resumed=True,
+            ):
+                yield event
+
+    async def _resume_input_from_checkpoint(
+        self,
+        *,
+        run_id: str,
+        snapshot: AgentRunSnapshot,
+        graph: Any,
+        config: dict[str, Any],
+        approvals: Sequence[AgentApproval],
+    ) -> tuple[Any, bool]:
+        state = await graph.aget_state(config)
+        state_interrupts = [
+            interrupt
+            for task in getattr(state, "tasks", ()) or ()
+            for interrupt in getattr(task, "interrupts", ()) or ()
+        ]
+        checkpoint_approvals = self._approvals_from_stream(
+            {"__interrupt__": state_interrupts},
+            run_id,
+        )
+        decided_ids = {approval.id for approval in approvals}
+        checkpoint_ids = {approval.id for approval in checkpoint_approvals}
+        if checkpoint_approvals and checkpoint_ids != decided_ids:
+            updated = await self._update_run(
+                run_id,
+                status="interrupted",
+                approvals=checkpoint_approvals,
+                final_text=snapshot.final_text,
+                allowed_statuses={"resume_pending"},
+            )
+            if not updated:
+                return None, True
+            for approval in checkpoint_approvals:
+                event = await self._append_event(
+                    run_id=run_id,
+                    type="approval.required",
+                    data=self._public_approval(approval),
+                )
+                if event is None:
+                    return None, True
+            return None, True
+        if not tuple(getattr(state, "next", ()) or ()):
+            final_text = self._last_ai_text(state.values.get("messages", []))
+            event = await self._transition_with_event(
+                run_id,
+                allowed_statuses={"resume_pending"},
+                status="completed",
+                event_type="run.completed",
+                event_data={"text": final_text or snapshot.final_text},
+                final_text=final_text or snapshot.final_text,
+                approvals=[],
+            )
+            if event is not None:
+                await self._observe_run(run_id)
+            return None, True
+        if checkpoint_approvals:
+            return Command(
+                resume={"decisions": [self._resume_decision(item) for item in approvals]}
+            ), False
+        return None, False
+
+    async def _claim_approval_decision(
+        self,
+        run_id: str,
+        decision: ApprovalDecision,
+    ) -> tuple[AgentRunSnapshot, list[AgentApproval]]:
+        snapshot = await self.get_run(run_id)
+        if snapshot is None:
+            raise KeyError(f"agent run not found: {run_id}")
+        if snapshot.status not in {"interrupted", "resume_pending"}:
+            raise ValueError(f"agent run is not awaiting approval: {snapshot.status}")
+
+        approvals = list(snapshot.approvals)
+        for index, approval in enumerate(approvals):
+            if approval.id != decision.approval_id:
+                continue
+            if approval.status != "pending":
+                if not self._approval_matches_decision(approval, decision):
+                    raise ValueError(f"approval already decided differently: {approval.id}")
+                return snapshot, approvals
+            if decision.decision not in approval.allowed_decisions:
+                raise ValueError(
+                    f"decision {decision.decision!r} is not allowed for {approval.tool_name}"
+                )
+            approvals[index] = AgentApproval(
+                id=approval.id,
+                tool_name=approval.tool_name,
+                description=approval.description,
+                arguments=approval.arguments,
+                allowed_decisions=approval.allowed_decisions,
+                status=decision.decision,
+                edited_arguments=decision.edited_arguments,
+                message=decision.message,
+            )
+            break
+        else:
+            raise KeyError(f"approval not found: {decision.approval_id}")
+
+        next_status = (
+            "interrupted"
+            if any(approval.status == "pending" for approval in approvals)
+            else "resume_pending"
+        )
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            cursor = await db.execute(
+                """
+                UPDATE agent_runs
+                SET approvals_json = ?, status = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'interrupted' AND approvals_json = ?
+                """,
+                (
+                    self._serialize_approvals(approvals),
+                    next_status,
+                    utc_now_iso(),
+                    run_id,
+                    self._serialize_approvals(snapshot.approvals),
+                ),
+            )
+            claimed = cursor.rowcount == 1
+            await cursor.close()
+            await db.commit()
+        if not claimed:
+            raise ValueError("approval state changed; reload the run before retrying")
+        return snapshot, approvals
+
+    @staticmethod
+    def _approval_matches_decision(
+        approval: AgentApproval,
+        decision: ApprovalDecision,
+    ) -> bool:
+        return (
+            approval.status == decision.decision
+            and approval.edited_arguments == decision.edited_arguments
+            and approval.message == decision.message
+        )
+
+    async def get_run(self, run_id: str) -> AgentRunSnapshot | None:
+        db = self._require_runs_db()
+        cursor = await db.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,))
+        row = await cursor.fetchone()
+        await cursor.close()
+        return self._snapshot_from_row(row) if row is not None else None
+
+    async def trace_list(
+        self,
+        *,
+        tenant_id: str,
+        status: str | None = None,
+        limit: int = 20,
+        before_run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List bounded run summaries visible to one tenant."""
+
+        safe_tenant_id = str(tenant_id or "").strip()
+        if not safe_tenant_id:
+            raise ValueError("tenant_id is required")
+        safe_status = str(status or "").strip() or None
+        if safe_status is not None and safe_status not in _RUN_STATUSES:
+            raise ValueError(f"unknown agent run status: {safe_status}")
+        safe_limit = min(_TRACE_LIST_LIMIT, max(1, int(limit)))
+        safe_before_run_id = str(before_run_id or "").strip() or None
+        db = self._require_runs_db()
+        before_created_at: str | None = None
+        if safe_before_run_id is not None:
+            before_cursor = await db.execute(
+                """
+                SELECT created_at
+                FROM agent_runs
+                WHERE tenant_id = ? AND run_id = ?
+                """,
+                (safe_tenant_id, safe_before_run_id),
+            )
+            before_row = await before_cursor.fetchone()
+            await before_cursor.close()
+            if before_row is None:
+                return []
+            before_created_at = str(before_row["created_at"])
+        conditions = ["tenant_id = ?"]
+        parameters: list[Any] = [safe_tenant_id]
+        if safe_status is not None:
+            conditions.append("status = ?")
+            parameters.append(safe_status)
+        if safe_before_run_id is not None and before_created_at is not None:
+            conditions.append("(created_at < ? OR (created_at = ? AND run_id < ?))")
+            parameters.extend((before_created_at, before_created_at, safe_before_run_id))
+        parameters.append(safe_limit)
+        cursor = await db.execute(
+            f"""
+            SELECT run_id, status, channel, run_kind, final_text, created_at, updated_at
+            FROM agent_runs
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        counts = {str(row["run_id"]): [0, 0] for row in rows}
+        if counts:
+            placeholders = ", ".join("?" for _ in counts)
+            event_cursor = await db.execute(
+                f"""
+                SELECT
+                    event.run_id,
+                    SUM(CASE WHEN event.event_type = 'tool.started' THEN 1 ELSE 0 END)
+                        AS tool_count,
+                    SUM(
+                        CASE
+                            WHEN event.event_type = 'tool.completed'
+                             AND json_extract(event.data_json, '$.ok') = 0
+                            THEN 1 ELSE 0
+                        END
+                    ) AS failed_tool_count
+                FROM agent_run_events AS event
+                WHERE event.run_id IN ({placeholders})
+                  AND event.event_type IN ('tool.started', 'tool.completed')
+                GROUP BY event.run_id
+                """,
+                tuple(counts),
+            )
+            event_rows = await event_cursor.fetchall()
+            await event_cursor.close()
+            for event_row in event_rows:
+                counts[str(event_row["run_id"])] = [
+                    int(event_row["tool_count"] or 0),
+                    int(event_row["failed_tool_count"] or 0),
+                ]
+        return [
+            self._trace_run_summary(
+                row,
+                tool_count=counts[str(row["run_id"])][0],
+                failed_tool_count=counts[str(row["run_id"])][1],
+            )
+            for row in rows
+        ]
+
+    async def trace_get(
+        self,
+        *,
+        tenant_id: str,
+        run_id: str,
+        after_sequence: int = 0,
+        limit: int = 200,
+        include_messages: bool = False,
+    ) -> dict[str, Any] | None:
+        """Read one tenant-scoped durable trace without exposing runtime ownership data."""
+
+        safe_tenant_id = str(tenant_id or "").strip()
+        safe_run_id = str(run_id or "").strip()
+        if not safe_tenant_id or not safe_run_id:
+            raise ValueError("tenant_id and run_id are required")
+        safe_after = max(0, int(after_sequence))
+        safe_limit = min(_TRACE_EVENT_LIMIT, max(1, int(limit)))
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT run_id, status, channel, run_kind, final_text, created_at, updated_at
+            FROM agent_runs
+            WHERE tenant_id = ? AND run_id = ?
+            """,
+            (safe_tenant_id, safe_run_id),
+        )
+        run_row = await cursor.fetchone()
+        await cursor.close()
+        if run_row is None:
+            return None
+        if include_messages:
+            event_cursor = await db.execute(
+                """
+                SELECT event.sequence, event.event_type, event.timestamp, event.data_json
+                FROM agent_run_events AS event
+                JOIN agent_runs AS run ON run.run_id = event.run_id
+                WHERE run.tenant_id = ? AND event.run_id = ? AND event.sequence > ?
+                ORDER BY event.sequence ASC
+                LIMIT ?
+                """,
+                (safe_tenant_id, safe_run_id, safe_after, safe_limit + 1),
+            )
+        else:
+            event_cursor = await db.execute(
+                """
+                SELECT event.sequence, event.event_type, event.timestamp, event.data_json
+                FROM agent_run_events AS event
+                JOIN agent_runs AS run ON run.run_id = event.run_id
+                WHERE run.tenant_id = ? AND event.run_id = ? AND event.sequence > ?
+                  AND event.event_type != 'message.delta'
+                ORDER BY event.sequence ASC
+                LIMIT ?
+                """,
+                (safe_tenant_id, safe_run_id, safe_after, safe_limit + 1),
+            )
+        event_rows = list(await event_cursor.fetchall())
+        await event_cursor.close()
+        count_cursor = await db.execute(
+            """
+            SELECT
+                SUM(CASE WHEN event.event_type = 'tool.started' THEN 1 ELSE 0 END)
+                    AS tool_count,
+                SUM(
+                    CASE
+                        WHEN event.event_type = 'tool.completed'
+                         AND json_extract(event.data_json, '$.ok') = 0
+                        THEN 1 ELSE 0
+                    END
+                ) AS failed_tool_count
+            FROM agent_run_events AS event
+            WHERE event.run_id = ?
+              AND event.event_type IN ('tool.started', 'tool.completed')
+            """,
+            (safe_run_id,),
+        )
+        count_row = await count_cursor.fetchone()
+        await count_cursor.close()
+        tool_count = int(count_row["tool_count"] or 0) if count_row is not None else 0
+        failed_tool_count = (
+            int(count_row["failed_tool_count"] or 0) if count_row is not None else 0
+        )
+        has_more = len(event_rows) > safe_limit
+        event_rows = event_rows[:safe_limit]
+        events: list[dict[str, Any]] = []
+        for event_row in event_rows:
+            try:
+                raw_data = json.loads(str(event_row["data_json"]))
+            except (TypeError, ValueError):
+                raw_data = {"code": "invalid_trace_event"}
+            data = raw_data if isinstance(raw_data, dict) else {"value": raw_data}
+            if not include_messages and str(event_row["event_type"]) == "run.completed":
+                data.pop("text", None)
+            events.append(
+                {
+                    "sequence": int(event_row["sequence"]),
+                    "type": str(event_row["event_type"]),
+                    "timestamp": str(event_row["timestamp"]),
+                    "data": _bounded_trace_value(data),
+                }
+            )
+        trace = self._trace_run_summary(
+            run_row,
+            tool_count=tool_count,
+            failed_tool_count=failed_tool_count,
+        )
+        trace["events"] = events
+        trace["has_more"] = has_more
+        trace["next_after_sequence"] = int(event_rows[-1]["sequence"]) if event_rows else safe_after
+        return trace
+
+    @staticmethod
+    def _trace_run_summary(
+        row: aiosqlite.Row,
+        *,
+        tool_count: int = 0,
+        failed_tool_count: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "run_id": str(row["run_id"]),
+            "status": str(row["status"]),
+            "channel": str(row["channel"]),
+            "run_kind": str(row["run_kind"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "final_text_preview": _trace_text_preview(row["final_text"]),
+            "tool_count": max(0, int(tool_count)),
+            "failed_tool_count": max(0, int(failed_tool_count)),
+        }
+
+    async def events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[AgentRunEvent]:
+        """Replay the durable, redacted event stream after a client cursor."""
+
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT sequence, event_type, timestamp, data_json
+            FROM agent_run_events
+            WHERE run_id = ? AND sequence > ?
+            ORDER BY sequence ASC
+            """,
+            (run_id, max(0, int(after_sequence))),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            yield AgentRunEvent(
+                type=cast(AgentRunEventType, str(row["event_type"])),
+                run_id=run_id,
+                sequence=int(row["sequence"]),
+                timestamp=str(row["timestamp"]),
+                data=dict(json.loads(str(row["data_json"]))),
+            )
+
+    def _checkpoint_lock(self, checkpoint_thread_id: str) -> asyncio.Lock:
+        lock = self._checkpoint_locks.get(checkpoint_thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._checkpoint_locks[checkpoint_thread_id] = lock
+        return lock
+
+    async def cancel(self, run_id: str) -> AgentRunSnapshot:
+        snapshot = await self.get_run(run_id)
+        if snapshot is None:
+            raise KeyError(f"agent run not found: {run_id}")
+        if snapshot.status in {"completed", "failed", "cancelled"}:
+            return snapshot
+        await self._cancel_with_event(
+            run_id,
+            allowed_statuses={"running", "interrupted", "resume_pending"},
+        )
+        updated = await self.get_run(run_id)
+        assert updated is not None
+        return updated
+
+    def _build_graphs(self) -> dict[str, Any]:
+        assert self._checkpointer is not None
+        assert self._store is not None
+        model = self._provided_model or self._build_model()
+        interrupt_on = self._interrupt_on()
+        owner_tools = [tool for tool in self._tools if tool.name in _OWNER_PRODUCT_TOOL_NAMES]
+        routine_tools = [tool for tool in owner_tools if tool.name in _ROUTINE_PRODUCT_TOOL_NAMES]
+        intake_tools = [tool for tool in owner_tools if tool.name in _INTAKE_PRODUCT_TOOL_NAMES]
+
+        return {
+            "owner": create_deep_agent(
+                model=model,
+                name="opentulpa_owner",
+                tools=owner_tools,
+                system_prompt=OWNER_PROMPT,
+                skills=["/skills/"],
+                memory=["/memories/AGENTS.md"],
+                backend=self._owner_backend(),
+                interrupt_on=interrupt_on,
+                context_schema=AgentRunContext,
+                checkpointer=self._checkpointer,
+                store=self._store,
+            ),
+            "routine": create_deep_agent(
+                model=model,
+                name="opentulpa_routine",
+                tools=routine_tools,
+                system_prompt=ROUTINE_PROMPT,
+                backend=StateBackend(),
+                interrupt_on={
+                    name: config
+                    for name, config in interrupt_on.items()
+                    if name in _ROUTINE_PRODUCT_TOOL_NAMES
+                },
+                context_schema=AgentRunContext,
+                checkpointer=self._checkpointer,
+            ),
+            "intake": create_deep_agent(
+                model=model,
+                name="opentulpa_intake",
+                tools=intake_tools,
+                system_prompt=INTAKE_PROMPT,
+                backend=StateBackend(),
+                response_format=IntakeDecision,
+                context_schema=AgentRunContext,
+                checkpointer=self._checkpointer,
+            ),
+        }
+
+    def _graph_for_context(
+        self,
+        context: AgentRunContext,
+        *,
+        dynamic: DynamicToolSnapshot | None = None,
+    ) -> Any:
+        if self._agent_specs is None:
+            graph = self._graphs.get(str(context.run_kind))
+            if graph is None:
+                raise RuntimeError("the requested agent profile is unavailable")
+            return graph
+
+        spec = self._agent_specs.get_revision(context.agent_spec)
+        if spec is None:
+            raise RuntimeError("the requested AgentSpec revision does not exist")
+        self._validate_context_spec(context, spec)
+        active_dynamic = dynamic or self._dynamic_snapshot(spec.tenant_id)
+        key = (
+            spec.tenant_id,
+            spec.id,
+            spec.revision,
+            spec.content_digest,
+            active_dynamic.generation,
+            self._dynamic_digest(active_dynamic),
+        )
+        graph = self._spec_graphs.get(key)
+        if graph is None:
+            graph = self._compile_spec_graph(spec, dynamic=active_dynamic)
+            self._spec_graphs[key] = graph
+        return graph
+
+    def _compile_spec_graph(
+        self,
+        spec: AgentSpec,
+        *,
+        dynamic: DynamicToolSnapshot | None = None,
+    ) -> Any:
+        assert self._checkpointer is not None
+        assert self._store is not None
+        active_dynamic = dynamic or self._dynamic_snapshot(spec.tenant_id)
+        tools = self._tools_for_spec(spec, dynamic=active_dynamic)
+        tool_names = {tool.name for tool in tools}
+        dynamic_tool_names = {tool.name for tool in active_dynamic.tools}
+        interrupt_on = self._interrupt_for_tools(
+            tool_names,
+            dynamic=active_dynamic,
+        )
+        if spec.isolation == "private" and spec.id != "owner":
+            interrupt_on.update(dict.fromkeys(tool_names.intersection(dynamic_tool_names), True))
+        backend, uses_store = self._backend_for_spec(spec)
+        denied: set[str] = set()
+        permissions: list[FilesystemPermission] = []
+        if not spec.allow_delegation:
+            denied.add("task")
+        if spec.isolation == "external":
+            denied.update(_FILESYSTEM_TOOL_NAMES)
+            denied.add("write_todos")
+            permissions.append(
+                FilesystemPermission(
+                    operations=["read", "write"],
+                    paths=["/**"],
+                    mode="deny",
+                )
+            )
+        elif spec.workspace_scope == "none":
+            denied.add("execute")
+            permissions.append(
+                FilesystemPermission(
+                    operations=["read", "write"],
+                    paths=["/workspace/**"],
+                    mode="deny",
+                )
+            )
+        elif spec.workspace_scope == "read_only":
+            denied.update({"edit_file", "execute", "write_file"})
+            permissions.append(
+                FilesystemPermission(
+                    operations=["write"],
+                    paths=["/workspace/**"],
+                    mode="deny",
+                )
+            )
+
+        middleware: list[Any] = [
+            ModelCallLimitMiddleware(
+                run_limit=spec.max_model_calls,
+                exit_behavior="error",
+            )
+        ]
+        if denied:
+            middleware.append(_DenyToolsMiddleware(frozenset(denied)))
+        kwargs: dict[str, Any] = {
+            "model": self._resolve_spec_model(spec.model_alias),
+            "name": f"opentulpa_{spec.id}_r{spec.revision}",
+            "tools": tools,
+            "system_prompt": self._prompt_for_spec(spec),
+            "backend": backend,
+            "interrupt_on": interrupt_on or None,
+            "context_schema": AgentRunContext,
+            "checkpointer": self._checkpointer,
+            "middleware": middleware,
+            "permissions": permissions or None,
+        }
+        if uses_store:
+            kwargs["store"] = self._store
+        if uses_store:
+            kwargs["memory"] = ["/memories/AGENTS.md"]
+            kwargs["skills"] = ["/skills/"]
+        if spec.runtime_profile == AgentRunKind.INTAKE.value:
+            kwargs["response_format"] = IntakeDecision
+        elif spec.output_schema is not None:
+            kwargs["response_format"] = spec.output_schema
+        return create_deep_agent(**kwargs)
+
+    def preflight_agent_spec(self, spec: AgentSpec) -> None:
+        """Compile an exact revision before its active pointer can change."""
+
+        self._require_started()
+        required_profiles = {
+            AgentRunKind.OWNER.value: (AgentRunKind.OWNER.value, "private"),
+            AgentRunKind.ROUTINE.value: (AgentRunKind.ROUTINE.value, "private"),
+            AgentRunKind.INTAKE.value: (AgentRunKind.INTAKE.value, "external"),
+        }
+        expected = required_profiles.get(spec.id)
+        if expected is not None and (spec.runtime_profile, spec.isolation) != expected:
+            raise ValueError(
+                f"the {spec.id} AgentSpec must retain its runtime profile and isolation boundary"
+            )
+        dynamic = self._dynamic_snapshot(spec.tenant_id)
+        key = (
+            spec.tenant_id,
+            spec.id,
+            spec.revision,
+            spec.content_digest,
+            dynamic.generation,
+            self._dynamic_digest(dynamic),
+        )
+        if key in self._spec_graphs:
+            return
+        try:
+            graph = self._compile_spec_graph(spec, dynamic=dynamic)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise ValueError("the AgentSpec cannot compile in the active runtime") from exc
+        self._spec_graphs[key] = graph
+
+    def _resolve_spec_model(self, alias: str) -> Any:
+        if self._model_resolver is not None:
+            return self._model_resolver(alias)
+        if alias not in {"default", self._model_name}:
+            raise RuntimeError("the AgentSpec model alias is not configured")
+        return self._provided_model or self._build_model()
+
+    def _tools_for_spec(
+        self,
+        spec: AgentSpec,
+        *,
+        dynamic: DynamicToolSnapshot | None = None,
+    ) -> list[BaseTool]:
+        active_dynamic = dynamic or self._dynamic_snapshot(spec.tenant_id)
+        dynamic_tools = () if spec.isolation == "external" else active_dynamic.tools
+        dynamic_names = frozenset(tool.name for tool in dynamic_tools)
+        all_tools = (*self._tools, *dynamic_tools)
+        available = {tool.name: tool for tool in all_tools}
+        if len(available) != len(all_tools):
+            raise RuntimeError("active capability tools collide with kernel tools")
+        if spec.tool_policy == "profile_default":
+            names = {
+                AgentRunKind.OWNER.value: frozenset(available),
+                AgentRunKind.ROUTINE.value: _ROUTINE_PRODUCT_TOOL_NAMES,
+                AgentRunKind.INTAKE.value: _INTAKE_PRODUCT_TOOL_NAMES,
+            }.get(spec.runtime_profile)
+            if names is None:
+                raise RuntimeError("custom AgentSpecs must declare an explicit tool allowlist")
+        else:
+            names = frozenset(spec.tools)
+        boundary = (
+            _INTAKE_PRODUCT_TOOL_NAMES
+            if spec.isolation == "external"
+            else None
+            if spec.id == "owner"
+            else _ROUTINE_PRODUCT_TOOL_NAMES | dynamic_names
+        )
+        unsafe = sorted(set(names) - boundary) if boundary is not None else []
+        if unsafe:
+            raise RuntimeError(
+                f"AgentSpec {spec.id!r} exceeds its execution boundary: " + ", ".join(unsafe)
+            )
+        missing = sorted(set(names) - set(available))
+        if missing:
+            raise RuntimeError("AgentSpec tools are unavailable: " + ", ".join(missing))
+        return [tool for tool in all_tools if tool.name in names]
+
+    def _interrupt_for_tools(
+        self,
+        tool_names: set[str],
+        *,
+        dynamic: DynamicToolSnapshot | None = None,
+    ) -> dict[str, bool | InterruptOnConfig]:
+        policy = self._interrupt_on()
+        if dynamic is not None:
+            policy.update(
+                {name: True for name, required in dynamic.interrupt_on.items() if required}
+            )
+        return {name: config for name, config in policy.items() if name in tool_names}
+
+    def _dynamic_snapshot(self, tenant_id: str) -> DynamicToolSnapshot:
+        if self._dynamic_tools is None:
+            return DynamicToolSnapshot(generation=0, tools=(), interrupt_on={})
+        return self._dynamic_tools.snapshot(tenant_id)
+
+    @staticmethod
+    def _dynamic_digest(dynamic: DynamicToolSnapshot) -> str:
+        tools: list[dict[str, Any]] = []
+        for tool in sorted(dynamic.tools, key=lambda item: item.name):
+            try:
+                schema_source = tool.tool_call_schema
+                if isinstance(schema_source, dict):
+                    schema = schema_source
+                else:
+                    render_schema = getattr(schema_source, "model_json_schema", None)
+                    if not callable(render_schema):
+                        render_schema = schema_source.schema
+                    schema = render_schema()
+            except Exception:
+                schema = {"unavailable": True}
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": str(tool.description or ""),
+                    "schema": schema,
+                    "metadata": redact_for_langfuse(dict(tool.metadata or {})),
+                    "implementation": {
+                        "class": f"{type(tool).__module__}.{type(tool).__qualname__}",
+                        "callable": DeepAgentService._tool_callable_identity(tool),
+                    },
+                }
+            )
+        canonical = json.dumps(
+            {
+                "tools": tools,
+                "interrupt_on": sorted(
+                    (str(name), bool(required)) for name, required in dynamic.interrupt_on.items()
+                ),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _tool_callable_identity(tool: BaseTool) -> dict[str, str]:
+        target = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
+        if target is None:
+            return {}
+        code = getattr(target, "__code__", None)
+        code_digest = ""
+        if code is not None:
+            payload = b"\0".join(
+                (
+                    bytes(code.co_code),
+                    repr(code.co_consts).encode("utf-8", errors="replace"),
+                    repr(code.co_names).encode("utf-8", errors="replace"),
+                )
+            )
+            code_digest = hashlib.sha256(payload).hexdigest()
+        return {
+            "module": str(getattr(target, "__module__", "") or ""),
+            "qualname": str(getattr(target, "__qualname__", "") or ""),
+            "code_digest": code_digest,
+        }
+
+    @classmethod
+    def _dynamic_binding(cls, dynamic: DynamicToolSnapshot) -> tuple[int, str]:
+        return dynamic.generation, cls._dynamic_digest(dynamic)
+
+    async def _verified_dynamic_snapshot(
+        self,
+        run_id: str,
+        context: AgentRunContext,
+    ) -> DynamicToolSnapshot:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            "SELECT dynamic_generation, dynamic_digest FROM agent_runs WHERE run_id = ?",
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            raise KeyError(f"agent run not found: {run_id}")
+        current = self._dynamic_snapshot(context.tenant_id)
+        expected = (int(row["dynamic_generation"] or 0), str(row["dynamic_digest"] or ""))
+        if expected != self._dynamic_binding(current):
+            raise AgentRunCapabilityConflictError(_PUBLIC_CAPABILITY_CHANGED_MESSAGE)
+        return current
+
+    def _backend_for_spec(self, spec: AgentSpec) -> tuple[Any, bool]:
+        if spec.isolation == "external":
+            return StateBackend(), False
+
+        default: Any = StateBackend()
+        routes: dict[str, Any] = {}
+        uses_store = spec.memory_scope != "none"
+        if spec.workspace_scope == "read_write":
+            default = TenantSandboxBackend(
+                workspaces_root=self._workspaces_root,
+                policy=self._container_policy,
+                container_cli=self._container_cli,
+                persistent_execution_workspace=True,
+                execution_provider=self._execution_provider,
+            )
+            routes["/workspace/"] = TenantSandboxBackend(
+                workspaces_root=self._workspaces_root,
+                policy=self._container_policy,
+                container_cli=self._container_cli,
+                persistent_files=True,
+                execution_provider=self._execution_provider,
+            )
+        elif spec.workspace_scope == "read_only":
+            routes["/workspace/"] = TenantSandboxBackend(
+                workspaces_root=self._workspaces_root,
+                policy=self._container_policy,
+                container_cli=self._container_cli,
+                persistent_files=True,
+                execution_provider=self._execution_provider,
+            )
+        if uses_store:
+            routes["/memories/"] = StoreBackend(
+                store=self._store,
+                namespace=self._store_namespace_for_spec(spec, "memory"),
+            )
+            routes["/skills/"] = StoreBackend(
+                store=self._store,
+                namespace=self._store_namespace_for_spec(spec, "skills"),
+            )
+        if routes:
+            return CompositeBackend(default=default, routes=routes), uses_store
+        return default, False
+
+    @staticmethod
+    def _store_namespace_for_spec(
+        spec: AgentSpec,
+        kind: Literal["memory", "skills"],
+    ) -> Callable[[Any], tuple[str, ...]]:
+        def namespace(runtime: Any) -> tuple[str, ...]:
+            tenant_id = runtime.context.tenant_id
+            if spec.memory_scope == "owner":
+                return tenant_store_namespace(tenant_id, kind)
+            return (
+                "tenant",
+                tenant_namespace_label(tenant_id),
+                "agent-spec",
+                spec.id,
+                kind,
+            )
+
+        return namespace
+
+    @staticmethod
+    def _prompt_for_spec(spec: AgentSpec) -> str:
+        base = {
+            AgentRunKind.OWNER.value: OWNER_PROMPT,
+            AgentRunKind.ROUTINE.value: ROUTINE_PROMPT,
+            AgentRunKind.INTAKE.value: INTAKE_PROMPT,
+        }.get(spec.runtime_profile, "You are an OpenTulpa agent configured by the owner.")
+        return f"{base}\n\nActive AgentSpec instructions:\n{spec.instructions}"
+
+    @staticmethod
+    def _validate_context_spec(context: AgentRunContext, spec: AgentSpec) -> None:
+        if context.run_kind != spec.runtime_profile:
+            raise RuntimeError(
+                "AgentSpec runtime profile does not match the authenticated run kind"
+            )
+        authenticated_external = context.trust_class == "external"
+        if authenticated_external != (spec.isolation == "external"):
+            raise RuntimeError("AgentSpec isolation does not match the authenticated origin")
+        if context.trust_class == "background" and spec.id == "owner":
+            raise RuntimeError("background runs cannot use the owner AgentSpec")
+
+    async def decide_intake(
+        self,
+        *,
+        context: AgentRunContext,
+        decision_input: dict[str, Any],
+    ) -> IntakeDecision:
+        """Ask the isolated intake profile for typed advice without applying side effects."""
+
+        self._require_started()
+        if context.run_kind != AgentRunKind.INTAKE.value:
+            raise ValueError("intake decisions require run_kind=intake")
+        graph = self._graph_for_context(context)
+        checkpoint_thread_id = self._checkpoint_thread_id(context)
+        graph_input = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        decision_input,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                }
+            ]
+        }
+        async with self._checkpoint_lock(checkpoint_thread_id):
+            with self._trace_context(context, graph_input):
+                async with asyncio.timeout(self._runtime_limit_for_context(context)):
+                    state = await graph.ainvoke(
+                        graph_input,
+                        config=self._run_config(context, checkpoint_thread_id),
+                        context=context,
+                    )
+        response = state.get("structured_response") if isinstance(state, dict) else None
+        if isinstance(response, IntakeDecision):
+            return response
+        if isinstance(response, dict):
+            return IntakeDecision.model_validate(response)
+        raise RuntimeError("intake agent did not return IntakeDecision")
+
+    def _build_model(self) -> ChatOpenRouter:
+        return build_openrouter_chat_model(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            model_name=self._model_name,
+            reasoning_effort=self._reasoning_effort,
+            max_completion_tokens=self._max_completion_tokens,
+        )
+
+    def _owner_backend(self) -> CompositeBackend:
+        return CompositeBackend(
+            default=TenantSandboxBackend(
+                workspaces_root=self._workspaces_root,
+                policy=self._container_policy,
+                container_cli=self._container_cli,
+                persistent_execution_workspace=True,
+                execution_provider=self._execution_provider,
+            ),
+            routes={
+                "/memories/": StoreBackend(
+                    store=self._store,
+                    namespace=lambda rt: tenant_store_namespace(rt.context.tenant_id, "memory"),
+                ),
+                "/skills/": StoreBackend(
+                    store=self._store,
+                    namespace=lambda rt: tenant_store_namespace(rt.context.tenant_id, "skills"),
+                ),
+                "/workspace/": TenantSandboxBackend(
+                    workspaces_root=self._workspaces_root,
+                    policy=self._container_policy,
+                    container_cli=self._container_cli,
+                    persistent_files=True,
+                    execution_provider=self._execution_provider,
+                ),
+            },
+        )
+
+    def _interrupt_on(self) -> dict[str, bool | InterruptOnConfig]:
+        names = {tool.name for tool in self._tools}
+        policy: dict[str, bool | InterruptOnConfig] = {}
+        for name, spec in TOOL_SPEC_BY_NAME.items():
+            if name not in names or spec.approval is ApprovalMode.AUTO:
+                continue
+            config = InterruptOnConfig(allowed_decisions=list(_OWNER_DECISIONS))
+            if name == "browser_act":
+                config["when"] = _browser_action_requires_approval
+            # Integration action metadata is provider-defined. Until an adapter
+            # supplies a trusted read-only classifier, policy mode fails closed.
+            policy[name] = config
+        return policy
+
+    @staticmethod
+    def _validate_product_tools(tools: Sequence[BaseTool]) -> tuple[BaseTool, ...]:
+        validated = tuple(tools)
+        names = [tool.name for tool in validated]
+        unknown = sorted(set(names) - _OWNER_PRODUCT_TOOL_NAMES)
+        if unknown:
+            raise ValueError(f"unknown product tools: {', '.join(unknown)}")
+        duplicates = sorted(name for name in set(names) if names.count(name) > 1)
+        if duplicates:
+            raise ValueError(f"duplicate product tools: {', '.join(duplicates)}")
+        return validated
+
+    async def _stream_graph(
+        self,
+        *,
+        run_id: str,
+        context: AgentRunContext,
+        checkpoint_thread_id: str,
+        graph_input: Any,
+        resumed: bool,
+    ) -> AsyncIterator[AgentRunEvent]:
+        final_parts: list[str] = []
+        interrupted = False
+        started_data: dict[str, Any] = {
+            "thread_id": context.thread_id,
+            "resumed": resumed,
+        }
+        if not resumed:
+            started_data["input_summary"] = _trace_input_summary(graph_input)
+        started_event = await self._append_event(
+            run_id=run_id,
+            type="run.started",
+            data=started_data,
+        )
+        if started_event is None:
+            return
+        yield started_event
+        trace_context = self._trace_context(context, graph_input)
+        failure_phase = "trace_setup"
+        try:
+            with trace_context:
+                config = self._run_config(context, checkpoint_thread_id)
+                failure_phase = "capability_resolution"
+                dynamic = await self._verified_dynamic_snapshot(run_id, context)
+                graph = self._graph_for_context(context, dynamic=dynamic)
+                runtime_limit = self._runtime_limit_for_context(context)
+                failure_phase = "agent_loop"
+                async with asyncio.timeout(runtime_limit):
+                    async for part in graph.astream(
+                        graph_input,
+                        config=config,
+                        context=context,
+                        stream_mode=["messages", "updates", "custom"],
+                        version="v2",
+                    ):
+                        if await self._run_status(run_id) in _TERMINAL_RUN_STATUSES:
+                            return
+                        part_type = str(part.get("type", "")) if isinstance(part, dict) else ""
+                        data = part.get("data") if isinstance(part, dict) else None
+                        if part_type == "messages":
+                            message = data[0] if isinstance(data, tuple | list) and data else data
+                            for event_type, event_data, text in self._message_events(message):
+                                if text:
+                                    final_parts.append(text)
+                                event = await self._append_event(
+                                    run_id=run_id,
+                                    type=event_type,
+                                    data=event_data,
+                                )
+                                if event is None:
+                                    return
+                                yield event
+                        approvals = self._approvals_from_stream(data, run_id)
+                        if approvals:
+                            interrupted = True
+                            updated = await self._update_run(
+                                run_id,
+                                status="interrupted",
+                                approvals=approvals,
+                                final_text="".join(final_parts).strip(),
+                                allowed_statuses={"running", "resume_pending"},
+                            )
+                            if not updated:
+                                return
+                            for approval in approvals:
+                                event = await self._append_event(
+                                    run_id=run_id,
+                                    type="approval.required",
+                                    data=self._public_approval(approval),
+                                )
+                                if event is None:
+                                    return
+                                yield event
+                if interrupted:
+                    return
+                if await self._run_status(run_id) in _TERMINAL_RUN_STATUSES:
+                    return
+                failure_phase = "finalization"
+                final_text = "".join(final_parts).strip()
+                if not final_text:
+                    state = await graph.aget_state(config)
+                    final_text = self._last_ai_text(state.values.get("messages", []))
+                event = await self._transition_with_event(
+                    run_id,
+                    allowed_statuses={"running", "resume_pending"},
+                    status="completed",
+                    event_type="run.completed",
+                    event_data={"text": final_text},
+                    final_text=final_text,
+                    approvals=[],
+                )
+                if event is None:
+                    return
+                await self._observe_run(run_id)
+                yield event
+        except Exception as exc:
+            logger.exception("Deep Agent run failed: run_id=%s", run_id)
+            event = await self._transition_with_event(
+                run_id,
+                allowed_statuses={"running", "resume_pending"},
+                status="failed",
+                event_type="run.failed",
+                event_data={
+                    "code": "agent_run_failed",
+                    "message": _PUBLIC_RUN_FAILURE_MESSAGE,
+                    "retryable": False,
+                    "diagnostic": _failure_diagnostic(exc, phase=failure_phase),
+                },
+                error=_PUBLIC_RUN_FAILURE_MESSAGE,
+            )
+            if event is None:
+                return
+            await self._observe_run(run_id)
+            yield event
+
+    def _run_config(self, context: AgentRunContext, checkpoint_thread_id: str) -> dict[str, Any]:
+        callbacks: list[Any] = []
+        tracer = self._langfuse_tracer
+        if tracer is not None and hasattr(tracer, "build_callbacks"):
+            callbacks = tracer.build_callbacks(
+                user_id=context.tenant_id,
+                trace_id=context.correlation_id,
+                session_id=context.thread_id,
+                metadata={"run_kind": str(context.run_kind), "channel": str(context.channel)},
+                tags=["deepagents", str(context.run_kind)],
+            )
+        return {
+            "configurable": {"thread_id": checkpoint_thread_id},
+            "callbacks": callbacks,
+            "metadata": {
+                "tenant_id": context.tenant_id,
+                "actor_id": context.actor_id,
+                "correlation_id": context.correlation_id,
+                "run_kind": str(context.run_kind),
+                "channel": str(context.channel),
+            },
+        }
+
+    def _runtime_limit_for_context(self, context: AgentRunContext) -> float | None:
+        if self._agent_specs is None:
+            return None
+        spec = self._agent_specs.get_revision(context.agent_spec)
+        return float(spec.max_runtime_seconds) if spec is not None else None
+
+    def _trace_context(self, context: AgentRunContext, graph_input: Any) -> Any:
+        tracer = self._langfuse_tracer
+        if tracer is None or not hasattr(tracer, "trace_context"):
+            return nullcontext()
+        return tracer.trace_context(
+            name=f"deepagent.{context.run_kind}",
+            trace_id=context.correlation_id,
+            user_id=context.tenant_id,
+            session_id=context.thread_id,
+            input=graph_input,
+            metadata={"channel": str(context.channel), "actor_id": context.actor_id},
+            tags=["deepagents", str(context.run_kind)],
+        )
+
+    @staticmethod
+    def _message_events(message: Any) -> list[tuple[AgentRunEventType, dict[str, Any], str]]:
+        events: list[tuple[AgentRunEventType, dict[str, Any], str]] = []
+        if isinstance(message, AIMessage | AIMessageChunk):
+            text = DeepAgentService._message_text(message)
+            if text:
+                events.append(("message.delta", {"text": text}, text))
+            for call in getattr(message, "tool_calls", []) or []:
+                events.append(
+                    (
+                        "tool.started",
+                        {
+                            "name": str(call.get("name", ""))[:200],
+                            "call_id": str(call.get("id", ""))[:200],
+                            "arguments": _bounded_trace_value(call.get("args", {})),
+                        },
+                        "",
+                    )
+                )
+        elif isinstance(message, ToolMessage):
+            ok = str(getattr(message, "status", "success")) != "error"
+            result = message.content
+            if isinstance(result, str):
+                with suppress(TypeError, ValueError):
+                    result = json.loads(result)
+            result_key = "result" if ok else "error"
+            events.append(
+                (
+                    "tool.completed",
+                    {
+                        "name": str(getattr(message, "name", "") or "")[:200],
+                        "call_id": str(getattr(message, "tool_call_id", "") or "")[:200],
+                        "ok": ok,
+                        result_key: _bounded_trace_value(result),
+                    },
+                    "",
+                )
+            )
+            events.extend(DeepAgentService._artifact_events(message))
+        return events
+
+    @staticmethod
+    def _artifact_events(
+        message: ToolMessage,
+    ) -> list[tuple[AgentRunEventType, dict[str, Any], str]]:
+        """Surface artifacts when the native graph observes job event/artifact tool output."""
+
+        tool_name = str(getattr(message, "name", "") or "")
+        if tool_name not in {"job_events", "job_artifacts"}:
+            return []
+        content = message.content
+        if not isinstance(content, str):
+            return []
+        try:
+            envelope = json.loads(content)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(envelope, dict) or envelope.get("status") != "ok":
+            return []
+        raw_items = envelope.get("data")
+        if not isinstance(raw_items, list):
+            return []
+        artifacts: list[dict[str, Any]] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            if tool_name == "job_events":
+                if raw.get("event_type") != "artifact.ready":
+                    continue
+                payload = raw.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                raw = (
+                    payload.get("artifact")
+                    if isinstance(payload.get("artifact"), dict)
+                    else payload
+                )
+            artifact_id = str(raw.get("id") or raw.get("artifact_id") or "").strip()
+            job_id = str(raw.get("job_id") or "").strip()
+            name = str(raw.get("name") or "").strip()
+            if not artifact_id or not job_id or not name:
+                continue
+            artifacts.append(
+                {
+                    "artifact_id": artifact_id,
+                    "job_id": job_id,
+                    "name": name[:300],
+                    "media_type": str(raw.get("media_type") or "")[:200],
+                    "size_bytes": (
+                        raw.get("size_bytes") if isinstance(raw.get("size_bytes"), int) else None
+                    ),
+                }
+            )
+        return [("artifact.ready", artifact, "") for artifact in artifacts]
+
+    @staticmethod
+    def _message_text(message: BaseMessage) -> str:
+        content = message.content
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+                parts.append(str(block.get("text") or ""))
+        return "".join(parts)
+
+    @classmethod
+    def _last_ai_text(cls, messages: Sequence[Any]) -> str:
+        for message in reversed(messages):
+            if isinstance(message, AIMessage):
+                text = cls._message_text(message).strip()
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
+    def _approvals_from_stream(data: Any, run_id: str) -> list[AgentApproval]:
+        interrupts: list[Any] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "__interrupt__":
+                        if isinstance(item, list | tuple):
+                            interrupts.extend(item)
+                        else:
+                            interrupts.append(item)
+                    else:
+                        collect(item)
+            elif isinstance(value, list | tuple):
+                for item in value:
+                    collect(item)
+
+        collect(data)
+        approvals: list[AgentApproval] = []
+        seen_ids: set[str] = set()
+        for interrupt in interrupts:
+            value = getattr(interrupt, "value", interrupt)
+            if not isinstance(value, dict):
+                continue
+            interrupt_id = str(getattr(interrupt, "id", "") or "").strip()
+            actions = value.get("action_requests") or []
+            configs = value.get("review_configs") or []
+            for index, action in enumerate(actions):
+                if not isinstance(action, dict):
+                    continue
+                config = (
+                    configs[index]
+                    if index < len(configs) and isinstance(configs[index], dict)
+                    else {}
+                )
+                tool_name = str(action.get("name") or config.get("action_name") or "").strip()
+                binding = json.dumps(
+                    {
+                        "interrupt_id": interrupt_id,
+                        "index": index,
+                        "tool_name": tool_name,
+                        "arguments": action.get("args") or {},
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                    default=str,
+                )
+                call_key = hashlib.sha256(binding.encode("utf-8")).hexdigest()[:32]
+                approval_id = f"approval_{run_id}_{call_key}"
+                if approval_id in seen_ids:
+                    continue
+                seen_ids.add(approval_id)
+                approvals.append(
+                    AgentApproval(
+                        id=approval_id,
+                        tool_name=tool_name,
+                        description=str(action.get("description") or "Approval required"),
+                        arguments=dict(action.get("args") or {}),
+                        allowed_decisions=tuple(
+                            config.get("allowed_decisions") or ("approve", "edit", "reject")
+                        ),
+                    )
+                )
+        return approvals
+
+    @staticmethod
+    def _public_approval(approval: AgentApproval) -> dict[str, Any]:
+        return {
+            "approval_id": approval.id,
+            "tool_name": approval.tool_name,
+            "description": approval.description,
+            "arguments": redact_for_langfuse(approval.arguments),
+            "allowed_decisions": list(approval.allowed_decisions),
+        }
+
+    @staticmethod
+    def _resume_decision(approval: AgentApproval) -> dict[str, Any]:
+        if approval.status == "approve":
+            return {"type": "approve"}
+        if approval.status == "edit":
+            return {
+                "type": "edit",
+                "edited_action": {
+                    "name": approval.tool_name,
+                    "args": approval.edited_arguments or {},
+                },
+            }
+        if approval.status == "reject":
+            payload: dict[str, Any] = {"type": "reject"}
+            if approval.message:
+                payload["message"] = approval.message
+            return payload
+        raise ValueError(f"approval decision is incomplete: {approval.id}")
+
+    async def _insert_run(
+        self,
+        run_id: str,
+        checkpoint_thread_id: str,
+        context: AgentRunContext,
+        *,
+        idempotency_key: str | None = None,
+        request_digest: str = "",
+        dynamic_generation: int = 0,
+        dynamic_digest: str = "",
+    ) -> str:
+        db = self._require_runs_db()
+        now = utc_now_iso()
+        async with self._run_event_lock:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if idempotency_key is not None:
+                    existing_cursor = await db.execute(
+                        """
+                        SELECT run_id, request_digest FROM agent_runs
+                        WHERE tenant_id = ? AND idempotency_key = ?
+                        """,
+                        (context.tenant_id, idempotency_key),
+                    )
+                    existing = await existing_cursor.fetchone()
+                    await existing_cursor.close()
+                    if existing is not None:
+                        await db.rollback()
+                        if str(existing["request_digest"] or "") != request_digest:
+                            raise AgentRunIdempotencyConflictError(
+                                "the idempotency key belongs to a different agent run request"
+                            )
+                        return str(existing["run_id"])
+                active_cursor = await db.execute(
+                    """
+                    SELECT run_id FROM agent_runs
+                    WHERE checkpoint_thread_id = ?
+                      AND status IN ('running', 'interrupted', 'resume_pending')
+                    LIMIT 1
+                    """,
+                    (checkpoint_thread_id,),
+                )
+                active = await active_cursor.fetchone()
+                await active_cursor.close()
+                if active is not None:
+                    await db.rollback()
+                    raise AgentRunCheckpointConflictError(
+                        "the checkpoint thread already has an unresolved agent run"
+                    )
+                await db.execute(
+                    """
+                    INSERT INTO agent_runs (
+                        run_id, tenant_id, actor_id, thread_id, checkpoint_thread_id,
+                        channel, run_kind, origin_json, agent_spec_id, agent_spec_revision,
+                        trust_class, correlation_id, idempotency_key, status, created_at,
+                        updated_at, request_digest, dynamic_generation, dynamic_digest
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        run_id,
+                        context.tenant_id,
+                        context.actor_id,
+                        context.thread_id,
+                        checkpoint_thread_id,
+                        str(context.channel),
+                        str(context.run_kind),
+                        context.origin.model_dump_json(),
+                        context.agent_spec.spec_id,
+                        context.agent_spec.revision,
+                        context.trust_class,
+                        context.correlation_id,
+                        idempotency_key,
+                        now,
+                        now,
+                        request_digest,
+                        dynamic_generation,
+                        dynamic_digest,
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                with suppress(Exception):
+                    await db.rollback()
+                raise
+        return run_id
+
+    async def _reconcile_stale_running_runs(self) -> None:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            "SELECT run_id FROM agent_runs WHERE status = 'running' ORDER BY created_at"
+        )
+        run_ids = [str(row["run_id"]) for row in await cursor.fetchall()]
+        await cursor.close()
+        for run_id in run_ids:
+            await self._cancel_with_event(run_id, allowed_statuses={"running"})
+        if run_ids:
+            logger.warning("Cancelled %s stale Deep Agent run(s) during startup", len(run_ids))
+
+    async def _recover_pending_resumes(self) -> None:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            "SELECT run_id FROM agent_runs WHERE status = 'resume_pending' ORDER BY created_at"
+        )
+        run_ids = [str(row["run_id"]) for row in await cursor.fetchall()]
+        await cursor.close()
+        for run_id in run_ids:
+            self._schedule_pending_resume(run_id)
+
+    def _schedule_pending_resume(self, run_id: str) -> None:
+        if run_id in self._pending_resume_ids or self._runs_db is None:
+            return
+        task = asyncio.create_task(
+            self._recover_pending_resume(run_id),
+            name=f"opentulpa-resume-recovery:{run_id}",
+        )
+        self._pending_resume_ids.add(run_id)
+        self._pending_resume_tasks.add(task)
+        task.add_done_callback(lambda completed: self._pending_resume_done(run_id, completed))
+
+    async def _recover_pending_resume(self, run_id: str) -> None:
+        snapshot = await self.get_run(run_id)
+        if snapshot is None or snapshot.status != "resume_pending":
+            return
+        if any(approval.status == "pending" for approval in snapshot.approvals):
+            await self._update_run(
+                run_id,
+                status="interrupted",
+                allowed_statuses={"resume_pending"},
+            )
+            return
+        try:
+            dynamic = await self._verified_dynamic_snapshot(run_id, snapshot.context)
+            async for _ in self._resume_claimed_run(
+                run_id=run_id,
+                snapshot=snapshot,
+                approvals=snapshot.approvals,
+                dynamic=dynamic,
+            ):
+                pass
+        except asyncio.CancelledError:
+            raise
+        except AgentRunCapabilityConflictError:
+            event = await self._transition_with_event(
+                run_id,
+                allowed_statuses={"resume_pending"},
+                status="failed",
+                event_type="run.failed",
+                event_data={
+                    "code": "agent_capability_changed",
+                    "message": _PUBLIC_CAPABILITY_CHANGED_MESSAGE,
+                    "retryable": False,
+                },
+                error=_PUBLIC_CAPABILITY_CHANGED_MESSAGE,
+            )
+            if event is not None:
+                await self._observe_run(run_id)
+        except Exception:
+            logger.exception("Pending Deep Agent resume recovery failed: run_id=%s", run_id)
+
+    def _pending_resume_done(self, run_id: str, task: asyncio.Task[None]) -> None:
+        self._pending_resume_ids.discard(run_id)
+        self._pending_resume_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Pending Deep Agent resume recovery stopped: error_type=%s",
+                type(error).__name__,
+            )
+
+    async def _finalize_abandoned_run(self, run_id: str) -> None:
+        cleanup = asyncio.create_task(self._cancel_running_run(run_id))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(cleanup)
+            except Exception:
+                logger.exception("Failed to persist cancelled Deep Agent run: run_id=%s", run_id)
+            raise
+        except Exception:
+            logger.exception("Failed to persist cancelled Deep Agent run: run_id=%s", run_id)
+
+    async def _cancel_running_run(self, run_id: str) -> None:
+        await self._cancel_with_event(run_id, allowed_statuses={"running"})
+
+    async def _update_run(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        final_text: str | None = None,
+        error: str | None = None,
+        approvals: Sequence[AgentApproval] | None = None,
+        allowed_statuses: set[str],
+    ) -> bool:
+        fields = ["updated_at = ?"]
+        values: list[Any] = [utc_now_iso()]
+        for column, value in (
+            ("status", status),
+            ("final_text", final_text),
+            ("error", error),
+        ):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(value)
+        if approvals is not None:
+            fields.append("approvals_json = ?")
+            values.append(self._serialize_approvals(approvals))
+        statuses = sorted(allowed_statuses)
+        placeholders = ", ".join("?" for _ in statuses)
+        values.append(run_id)
+        values.extend(statuses)
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            cursor = await db.execute(
+                f"UPDATE agent_runs SET {', '.join(fields)} "
+                f"WHERE run_id = ? AND status IN ({placeholders})",
+                values,
+            )
+            updated = cursor.rowcount == 1
+            await cursor.close()
+            await db.commit()
+        return updated
+
+    async def _cancel_with_event(self, run_id: str, *, allowed_statuses: set[str]) -> None:
+        event = await self._transition_with_event(
+            run_id,
+            allowed_statuses=allowed_statuses,
+            status="cancelled",
+            event_type="run.failed",
+            event_data={
+                "code": "agent_run_cancelled",
+                "message": _PUBLIC_RUN_CANCELLED_MESSAGE,
+                "retryable": False,
+            },
+            error=_PUBLIC_RUN_CANCELLED_MESSAGE,
+        )
+        if event is not None:
+            await self._observe_run(run_id)
+
+    async def _transition_with_event(
+        self,
+        run_id: str,
+        *,
+        allowed_statuses: set[str],
+        status: AgentRunStatus,
+        event_type: AgentRunEventType,
+        event_data: dict[str, Any],
+        final_text: str | None = None,
+        error: str | None = None,
+        approvals: Sequence[AgentApproval] | None = None,
+    ) -> AgentRunEvent | None:
+        """Atomically persist one conditional state transition and its terminal event."""
+
+        timestamp = utc_now_iso()
+        safe_data = cast("dict[str, Any]", redact_for_langfuse(event_data))
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT status, last_sequence FROM agent_runs WHERE run_id = ?",
+                    (run_id,),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                if row is None:
+                    raise KeyError(f"agent run not found: {run_id}")
+                if str(row["status"]) not in allowed_statuses:
+                    await db.rollback()
+                    return None
+                sequence = int(row["last_sequence"] or 0) + 1
+                fields = ["status = ?", "last_sequence = ?", "updated_at = ?"]
+                values: list[Any] = [status, sequence, timestamp]
+                if final_text is not None:
+                    fields.append("final_text = ?")
+                    values.append(final_text)
+                if error is not None:
+                    fields.append("error = ?")
+                    values.append(error)
+                if approvals is not None:
+                    fields.append("approvals_json = ?")
+                    values.append(self._serialize_approvals(approvals))
+                values.append(run_id)
+                await db.execute(
+                    f"UPDATE agent_runs SET {', '.join(fields)} WHERE run_id = ?",
+                    values,
+                )
+                await db.execute(
+                    """
+                    INSERT INTO agent_run_events (
+                        run_id, sequence, event_type, timestamp, data_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        sequence,
+                        event_type,
+                        timestamp,
+                        json.dumps(safe_data, ensure_ascii=False, sort_keys=True, default=str),
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                with suppress(Exception):
+                    await db.rollback()
+                raise
+        return AgentRunEvent(
+            type=event_type,
+            run_id=run_id,
+            sequence=sequence,
+            timestamp=timestamp,
+            data=safe_data,
+        )
+
+    async def _observe_run(self, run_id: str) -> None:
+        observer = self._run_observer
+        if observer is None:
+            return
+        snapshot = await self.get_run(run_id)
+        if snapshot is None or snapshot.status not in {"completed", "failed", "cancelled"}:
+            return
+        try:
+            await observer(snapshot)
+        except Exception:
+            logger.exception("Deep Agent run observer failed: run_id=%s", run_id)
+
+    async def _last_sequence(self, run_id: str) -> int:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            "SELECT last_sequence FROM agent_runs WHERE run_id = ?",
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            raise KeyError(f"agent run not found: {run_id}")
+        return int(row["last_sequence"] or 0)
+
+    async def _append_event(
+        self,
+        *,
+        run_id: str,
+        type: AgentRunEventType,
+        data: dict[str, Any],
+    ) -> AgentRunEvent | None:
+        """Allocate a monotonic cursor and persist an event before publishing it."""
+
+        timestamp = utc_now_iso()
+        safe_data = cast("dict[str, Any]", redact_for_langfuse(data))
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT status, last_sequence FROM agent_runs WHERE run_id = ?",
+                    (run_id,),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                if row is None:
+                    raise KeyError(f"agent run not found: {run_id}")
+                if str(row["status"]) in _TERMINAL_RUN_STATUSES:
+                    await db.rollback()
+                    return None
+                sequence = int(row["last_sequence"] or 0) + 1
+                await db.execute(
+                    """
+                    INSERT INTO agent_run_events (
+                        run_id, sequence, event_type, timestamp, data_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        sequence,
+                        type,
+                        timestamp,
+                        json.dumps(safe_data, ensure_ascii=False, sort_keys=True, default=str),
+                    ),
+                )
+                await db.execute(
+                    "UPDATE agent_runs SET last_sequence = ?, updated_at = ? WHERE run_id = ?",
+                    (sequence, timestamp, run_id),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return AgentRunEvent(
+            type=type,
+            run_id=run_id,
+            sequence=sequence,
+            timestamp=timestamp,
+            data=safe_data,
+        )
+
+    async def _run_status(self, run_id: str) -> str:
+        db = self._require_runs_db()
+        cursor = await db.execute("SELECT status FROM agent_runs WHERE run_id = ?", (run_id,))
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            raise KeyError(f"agent run not found: {run_id}")
+        return str(row["status"])
+
+    @staticmethod
+    def _approval_json(approval: AgentApproval) -> dict[str, Any]:
+        return {
+            "id": approval.id,
+            "tool_name": approval.tool_name,
+            "description": approval.description,
+            "arguments": approval.arguments,
+            "allowed_decisions": list(approval.allowed_decisions),
+            "status": approval.status,
+            "edited_arguments": approval.edited_arguments,
+            "message": approval.message,
+        }
+
+    @classmethod
+    def _serialize_approvals(cls, approvals: Sequence[AgentApproval]) -> str:
+        return json.dumps([cls._approval_json(item) for item in approvals], sort_keys=True)
+
+    @staticmethod
+    def _snapshot_from_row(row: aiosqlite.Row) -> AgentRunSnapshot:
+        raw_approvals = json.loads(str(row["approvals_json"] or "[]"))
+        approvals = tuple(
+            AgentApproval(
+                id=str(item["id"]),
+                tool_name=str(item["tool_name"]),
+                description=str(item["description"]),
+                arguments=dict(item.get("arguments") or {}),
+                allowed_decisions=tuple(item.get("allowed_decisions") or ()),
+                status=cast(AgentApprovalStatus, str(item.get("status") or "pending")),
+                edited_arguments=item.get("edited_arguments"),
+                message=item.get("message"),
+            )
+            for item in raw_approvals
+        )
+        context = AgentRunContext(
+            tenant_id=str(row["tenant_id"]),
+            actor_id=str(row["actor_id"]),
+            thread_id=str(row["thread_id"]),
+            channel=str(row["channel"]),
+            run_kind=str(row["run_kind"]),
+            correlation_id=str(row["correlation_id"]),
+            origin=(
+                OriginRef.model_validate_json(str(row["origin_json"]))
+                if str(row["origin_json"] or "").strip() not in {"", "{}"}
+                else OriginRef(interface=str(row["channel"]), source_id="legacy-run")
+            ),
+            agent_spec=AgentSpecRef(
+                tenant_id=str(row["tenant_id"]),
+                spec_id=str(row["agent_spec_id"] or row["run_kind"]),
+                revision=max(1, int(row["agent_spec_revision"] or 1)),
+            ),
+            trust_class=cast(
+                "Literal['owner', 'background', 'external']",
+                str(row["trust_class"] or "owner"),
+            ),
+        )
+        return AgentRunSnapshot(
+            run_id=str(row["run_id"]),
+            context=context,
+            status=cast(AgentRunStatus, str(row["status"])),
+            final_text=str(row["final_text"] or ""),
+            error=str(row["error"] or ""),
+            approvals=approvals,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _checkpoint_thread_id(context: AgentRunContext) -> str:
+        thread_digest = hashlib.sha256(context.thread_id.encode("utf-8")).hexdigest()[:32]
+        spec = context.agent_spec
+        owner_shared = (
+            context.trust_class == "owner"
+            and context.run_kind == AgentRunKind.OWNER.value
+            and spec.spec_id == "owner"
+        )
+        if owner_shared:
+            authority_scope = "owner-shared"
+        else:
+            authority = "\0".join(
+                (
+                    context.actor_id,
+                    context.origin.interface,
+                    context.origin.source_id,
+                    context.trust_class,
+                )
+            )
+            authority_digest = hashlib.sha256(authority.encode("utf-8")).hexdigest()[:16]
+            authority_scope = f"{context.trust_class}-{authority_digest}"
+        return (
+            f"{tenant_namespace_label(context.tenant_id)}:spec-{spec.spec_id}"
+            f"-r{spec.revision}:{authority_scope}:{context.run_kind}:{thread_digest}"
+        )
+
+    @staticmethod
+    def _request_digest(request: AgentRunRequest) -> str:
+        context = request.context
+        canonical = json.dumps(
+            {
+                "actor_id": context.actor_id,
+                "thread_id": context.thread_id,
+                "channel": str(context.channel),
+                "run_kind": str(context.run_kind),
+                "origin": context.origin.model_dump(mode="json"),
+                "agent_spec": context.agent_spec.model_dump(mode="json"),
+                "trust_class": context.trust_class,
+                "text": request.text,
+                "file_ids": list(request.file_ids),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _request_text(request: AgentRunRequest) -> str:
+        text = str(request.text).strip()
+        if request.file_ids:
+            attached = ", ".join(request.file_ids)
+            text = f"{text}\n\nAttached file IDs: {attached}"
+        return text
+
+    def _require_started(self) -> None:
+        if not self.started:
+            raise RuntimeError("DeepAgentService is not started")
+
+    def _require_runs_db(self) -> aiosqlite.Connection:
+        if self._runs_db is None:
+            raise RuntimeError("DeepAgentService is not started")
+        return self._runs_db

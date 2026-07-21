@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Callable
@@ -100,6 +101,18 @@ class TelegramBusinessService:
                 );
                 CREATE INDEX IF NOT EXISTS idx_tg_business_messages_customer
                     ON telegram_business_messages(customer_id, business_connection_id, chat_id, date_iso DESC);
+
+                CREATE TABLE IF NOT EXISTS telegram_business_ingress (
+                    ingress_key TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'dispatched', 'ignored')),
+                    raw_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_tg_business_ingress_pending
+                    ON telegram_business_ingress(status, updated_at);
                 """
             )
 
@@ -544,9 +557,124 @@ class TelegramBusinessService:
             },
         }
 
+    @staticmethod
+    def _ingress_key(body: dict[str, Any]) -> str:
+        update_id = str(body.get("update_id", "") or "").strip()
+        if update_id:
+            return f"telegram-update:{update_id}"
+        encoded = _json_dumps(body).encode("utf-8")
+        return f"telegram-payload:{hashlib.sha256(encoded).hexdigest()}"
+
+    def _existing_ingress(self, ingress_key: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT status, result_json
+                FROM telegram_business_ingress
+                WHERE ingress_key = ?
+                """,
+                (ingress_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = _safe_dict(json.loads(str(row["result_json"] or "{}")))
+        result.update(
+            {
+                "ingress_key": ingress_key,
+                "duplicate": True,
+                "dispatch_pending": str(row["status"]) == "pending",
+            }
+        )
+        return result
+
+    def _record_ingress(
+        self,
+        *,
+        ingress_key: str,
+        body: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _utc_now_iso()
+        status = "pending" if bool(result.get("trigger_workflows")) else "ignored"
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO telegram_business_ingress (
+                    ingress_key, kind, status, raw_json, result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ingress_key,
+                    str(result.get("kind") or "unknown"),
+                    status,
+                    _json_dumps(body),
+                    _json_dumps(result),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        existing = self._existing_ingress(ingress_key)
+        if existing is None:  # pragma: no cover - committed row must exist
+            raise RuntimeError("Telegram Business ingress receipt disappeared")
+        existing["duplicate"] = cursor.rowcount != 1
+        return existing
+
+    def complete_ingress(self, ingress_key: str) -> None:
+        safe_key = str(ingress_key or "").strip()
+        if not safe_key:
+            raise ValueError("Telegram Business ingress key is required")
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE telegram_business_ingress
+                SET status = 'dispatched', updated_at = ?
+                WHERE ingress_key = ? AND status = 'pending'
+                """,
+                (_utc_now_iso(), safe_key),
+            )
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    "SELECT status FROM telegram_business_ingress WHERE ingress_key = ?",
+                    (safe_key,),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    raise KeyError("Telegram Business ingress receipt was not found")
+                if str(row["status"]) != "dispatched":
+                    conn.rollback()
+                    raise RuntimeError("Telegram Business ingress receipt cannot be dispatched")
+            conn.commit()
+
     def ingest_update(self, body: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(body, dict):
             return {"handled": False}
+        if not any(
+            key in body
+            for key in (
+                "business_connection",
+                "business_message",
+                "edited_business_message",
+                "deleted_business_messages",
+            )
+        ):
+            return {"handled": False}
+        ingress_key = self._ingress_key(body)
+        existing = self._existing_ingress(ingress_key)
+        if existing is not None:
+            return existing
+        result = self._ingest_new_update(body)
+        if not bool(result.get("handled")):
+            return result
+        return self._record_ingress(
+            ingress_key=ingress_key,
+            body=body,
+            result=result,
+        )
+
+    def _ingest_new_update(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a new payload before its durable ingress receipt is written."""
 
         connection = body.get("business_connection")
         if isinstance(connection, dict):

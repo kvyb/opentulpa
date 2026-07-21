@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 import csv
-from pathlib import Path
+import io
+import logging
+import os
+import secrets
+import stat
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from opentulpa.intake.sink_utils import (
@@ -39,6 +47,18 @@ from opentulpa.intake.workflow_runtime import (
 from opentulpa.intake.workflow_runtime import (
     utc_now_iso as _utc_now_iso,
 )
+from opentulpa.persistence.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyPendingError,
+    IdempotencyStore,
+)
+from opentulpa.persistence.tenant_namespace import tenant_namespace_label
+
+logger = logging.getLogger(__name__)
+_PUBLIC_SINK_ERROR = "intake sink execution failed"
+_PUBLIC_INDETERMINATE_SINK_ERROR = "intake sink outcome is indeterminate"
+_MAX_LOCAL_CSV_BYTES = 10 * 1024 * 1024
+_FORMULA_PREFIXES = frozenset({"=", "+", "-", "@", "\t", "\r"})
 
 _LOCAL_CSV_SYSTEM_COLUMNS = frozenset(
     {
@@ -53,12 +73,58 @@ _LOCAL_CSV_SYSTEM_COLUMNS = frozenset(
 )
 
 
+def normalize_local_csv_path(value: Any, *, workflow_id: str) -> str:
+    """Return a confined tenant-relative CSV path."""
+
+    requested = str(value or "").strip()
+    raw = requested or f"intake_{workflow_id or 'workflow'}.csv"
+    if len(raw) > 240 or "\\" in raw or any(ord(char) < 32 for char in raw):
+        raise ValueError("local_csv file_path is invalid")
+    raw_parts = raw.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValueError("local_csv file_path must be a relative path without traversal")
+    path = PurePosixPath(raw)
+    if path.is_absolute() or path.suffix.casefold() != ".csv":
+        raise ValueError("local_csv file_path must be a relative .csv path")
+    return path.as_posix()
+
+
 class SinkWriter:
     """Writes completed or partial bookings to configured sinks."""
 
-    def __init__(self, *, project_root: Path, composio: Any | None) -> None:
-        self._project_root = project_root
+    def __init__(
+        self,
+        *,
+        sink_root: Path,
+        composio: Any | None,
+        idempotency: IdempotencyStore,
+    ) -> None:
+        requested_root = sink_root.expanduser().resolve(strict=False)
+        requested_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if requested_root.is_symlink():
+            raise ValueError("intake sink root cannot be a symbolic link")
+        self._sink_root = requested_root.resolve()
+        os.chmod(self._sink_root, 0o700)
+        self._sink_root_fd = os.open(
+            self._sink_root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
         self._composio = composio
+        self._idempotency = idempotency
+        self._csv_locks_guard = threading.Lock()
+        self._csv_locks: dict[str, threading.Lock] = {}
+
+    def close(self) -> None:
+        descriptor = self._sink_root_fd
+        if descriptor < 0:
+            return
+        self._sink_root_fd = -1
+        with suppress(OSError):
+            os.close(descriptor)
+
+    def __del__(self) -> None:
+        if hasattr(self, "_sink_root_fd"):
+            self.close()
 
     def write_to_sink(
         self,
@@ -67,7 +133,6 @@ class SinkWriter:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
-        sink_arguments: dict[str, Any] | None = None,
         record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
@@ -84,7 +149,6 @@ class SinkWriter:
                 booking=booking,
                 conversation_summary=conversation_summary,
                 payload=payload,
-                sink_arguments=sink_arguments,
                 record_status=record_status,
             )
         return {}, f"unsupported sink_type={sink_type}"
@@ -101,16 +165,50 @@ class SinkWriter:
         relative_path = str(sink_config.get("file_path", "") or "").strip()
         if not relative_path:
             return {}, "local_csv sink is missing file_path"
-        absolute_path = (self._project_root / relative_path).resolve()
+        try:
+            relative_path = normalize_local_csv_path(
+                relative_path,
+                workflow_id=str(workflow.get("workflow_id") or "workflow"),
+            )
+        except (OSError, ValueError):
+            return {}, "local_csv sink path is invalid"
         base_row = self._local_csv_row(
             workflow=workflow,
             booking=booking,
             payload=payload,
             record_status=record_status,
         )
-        rows, fieldnames = self._read_existing_csv(absolute_path, base_row)
-        self._upsert_csv_row(rows=rows, row=base_row, booking_id=str(booking["booking_id"]))
-        self._write_csv_rows(absolute_path=absolute_path, fieldnames=fieldnames, rows=rows)
+        customer_id = str(workflow.get("customer_id") or "")
+        lock = self._csv_lock(f"{tenant_namespace_label(customer_id)}/{relative_path}")
+        try:
+            with lock:
+                path = PurePosixPath(relative_path)
+                with self._open_csv_directory(
+                    customer_id=customer_id,
+                    directory_parts=path.parent.parts if path.parent != PurePosixPath(".") else (),
+                ) as directory_fd:
+                    rows, fieldnames = self._read_existing_csv(
+                        directory_fd,
+                        path.name,
+                        base_row,
+                    )
+                    self._upsert_csv_row(
+                        rows=rows,
+                        row=base_row,
+                        booking_id=str(booking["booking_id"]),
+                    )
+                    self._write_csv_rows(
+                        directory_fd=directory_fd,
+                        filename=path.name,
+                        fieldnames=fieldnames,
+                        rows=rows,
+                    )
+        except (OSError, ValueError):
+            logger.exception(
+                "intake local CSV sink failed",
+                extra={"workflow_id": str(workflow.get("workflow_id") or "")},
+            )
+            return {}, _PUBLIC_SINK_ERROR
         return {
             "sink_type": "local_csv",
             "file_path": relative_path,
@@ -124,7 +222,6 @@ class SinkWriter:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
-        sink_arguments: dict[str, Any] | None = None,
         record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
@@ -132,121 +229,123 @@ class SinkWriter:
         sink_config = _safe_dict(workflow.get("sink_config"))
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
         toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
-        tool_slug = self.resolve_composio_sink_tool_slug(
-            sink_type=sink_type,
-            sink_config=sink_config,
-        )
-        if not tool_slug:
-            return {}, f"could not resolve a Composio tool for toolkit={toolkit or 'unknown'}"
+        tool_slug = str(sink_config.get("tool_slug") or "").strip()
+        connected_account_id = str(sink_config.get("connected_account_id", "") or "").strip()
+        if not toolkit or not tool_slug or not connected_account_id:
+            return {}, "intake sink requires a pinned tenant connection and tool"
         arguments_result = self._build_composio_arguments(
             workflow=workflow,
             booking=booking,
             conversation_summary=conversation_summary,
             payload=payload,
-            sink_arguments=sink_arguments,
             record_status=record_status,
         )
         if isinstance(arguments_result, str):
             return {}, arguments_result
-        connected_account_id = str(sink_config.get("connected_account_id", "") or "").strip() or None
         try:
-            result = self._composio.execute_tool(
-                customer_id=str(workflow["customer_id"]),
-                tool_slug=tool_slug,
-                arguments=arguments_result,
+            self._composio.resolve_sink_binding(
+                tenant_id=str(workflow["customer_id"]),
+                toolkit=toolkit,
                 connected_account_id=connected_account_id,
+                tool_slug=tool_slug,
+                operation_hint="",
+                required_arguments=set(arguments_result),
+                allow_discovery=False,
             )
         except Exception as exc:
-            return {}, f"sink execution failed: {exc}"
+            logger.error(
+                "intake sink binding validation failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={"workflow_id": str(workflow.get("workflow_id") or "")},
+            )
+            return {}, _PUBLIC_SINK_ERROR
+        operation = f"intake_sink.{sink_type}.{tool_slug}"
+        effect_arguments = {
+            "booking_id": str(booking["booking_id"]),
+            "connected_account_id": connected_account_id,
+            "arguments": arguments_result,
+        }
+        phase = str(record_status or "partial").strip().casefold() or "partial"
+        revision = int(booking.get("sink_effect_revision") or 0)
+        if revision <= 0:
+            return {}, "intake sink effect revision is missing"
+        idempotency_key = self.effect_idempotency_key(
+            booking_id=str(booking["booking_id"]),
+            phase=phase,
+            revision=revision,
+        )
+        try:
+            claim = self._idempotency.claim(
+                tenant_id=str(workflow["customer_id"]),
+                idempotency_key=idempotency_key,
+                operation=operation,
+                arguments=effect_arguments,
+            )
+        except IdempotencyPendingError:
+            return {}, _PUBLIC_INDETERMINATE_SINK_ERROR
+        except IdempotencyConflictError:
+            return {}, _PUBLIC_INDETERMINATE_SINK_ERROR
+        if not claim.created:
+            return dict(claim.result or {}), None
+        try:
+            result = self._composio.execute_sink(
+                tenant_id=str(workflow["customer_id"]),
+                toolkit=toolkit,
+                connected_account_id=connected_account_id,
+                tool_slug=tool_slug,
+                arguments=arguments_result,
+            )
+        except Exception as exc:
+            logger.error(
+                "intake Composio sink execution raised",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "workflow_id": str(workflow.get("workflow_id") or ""),
+                    "booking_id": str(booking.get("booking_id") or ""),
+                },
+            )
+            return {}, _PUBLIC_INDETERMINATE_SINK_ERROR
         if not bool(result.get("successful", False)):
-            return {}, str(result.get("error") or "sink execution failed")
-        return {
+            logger.error(
+                "intake Composio sink provider rejected the request: %r",
+                result.get("error"),
+                extra={
+                    "workflow_id": str(workflow.get("workflow_id") or ""),
+                    "booking_id": str(booking.get("booking_id") or ""),
+                },
+            )
+            return {}, _PUBLIC_INDETERMINATE_SINK_ERROR
+        sink_result = {
             "sink_type": str(workflow["sink_type"]),
             "toolkit": toolkit,
+            "tool_slug": tool_slug,
             "booking_id": str(booking["booking_id"]),
             "data": result.get("data"),
-        }, None
-
-    def resolve_composio_sink_tool_slug(
-        self,
-        *,
-        sink_type: str,
-        sink_config: dict[str, Any],
-    ) -> str:
-        if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
-            raise ValueError("Composio is not available for sink tool resolution")
-        toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
-        if not toolkit:
-            raise ValueError("sink_config.toolkit is required")
-        operation_hint = str(sink_config.get("operation_hint", "") or "").strip().lower()
-        candidates: list[dict[str, Any]] = []
-        for query in self._tool_search_queries(sink_type, operation_hint):
-            result = self._composio.search_tools(query=query, toolkits=[toolkit], limit=20)
-            if not bool(result.get("ok", False)):
-                continue
-            candidates.extend(item for item in _safe_list(result.get("items")) if isinstance(item, dict))
-            selected = self.select_composio_sink_candidate(
-                sink_type=sink_type,
-                toolkit=toolkit,
-                operation_hint=operation_hint or query,
-                candidates=candidates,
+        }
+        try:
+            self._idempotency.complete(
+                tenant_id=str(workflow["customer_id"]),
+                idempotency_key=idempotency_key,
+                result=sink_result,
             )
-            if selected:
-                return selected
-        selected = self.select_composio_sink_candidate(
-            sink_type=sink_type,
-            toolkit=toolkit,
-            operation_hint=operation_hint,
-            candidates=candidates,
-        )
-        if selected:
-            return selected
-        raise ValueError(f"no matching tool found in toolkit={toolkit}")
+        except Exception as exc:
+            logger.error(
+                "intake sink result could not be committed: error_type=%s",
+                type(exc).__name__,
+                extra={
+                    "workflow_id": str(workflow.get("workflow_id") or ""),
+                    "booking_id": str(booking.get("booking_id") or ""),
+                },
+            )
+            return {}, _PUBLIC_INDETERMINATE_SINK_ERROR
+        return sink_result, None
 
     @staticmethod
-    def select_composio_sink_candidate(
-        *,
-        sink_type: str,
-        toolkit: str,
-        operation_hint: str,
-        candidates: list[dict[str, Any]],
-    ) -> str:
-        best_slug = ""
-        best_score = -1
-        hint_tokens = [token for token in operation_hint.replace("_", " ").split() if len(token) > 2]
-        for item in candidates:
-            slug = str(item.get("slug", "") or "").strip()
-            if not slug:
-                continue
-            upper_slug = slug.upper()
-            haystack = " ".join(
-                str(item.get(key, "") or "").lower()
-                for key in ("slug", "name", "description")
-            )
-            score = 0
-            if _normalize_toolkit_slug(toolkit).upper() in upper_slug:
-                score += 20
-            if sink_type == "google_sheets_composio":
-                if "SHEET" in upper_slug:
-                    score += 20
-                if "ROW" in upper_slug:
-                    score += 15
-            for token in hint_tokens:
-                if token in haystack:
-                    score += 8
-            input_schema = item.get("input_schema")
-            if isinstance(input_schema, dict):
-                schema_text = str(input_schema).lower()
-                if "rows" in schema_text:
-                    score += 10
-                if "headers" in schema_text:
-                    score += 6
-                if "keycolumn" in schema_text:
-                    score += 6
-            if score > best_score:
-                best_score = score
-                best_slug = slug
-        return best_slug
+    def effect_idempotency_key(*, booking_id: str, phase: str, revision: int) -> str:
+        safe_phase = str(phase or "").strip().casefold()
+        if not booking_id or not safe_phase or revision <= 0:
+            raise ValueError("sink effect identity is incomplete")
+        return f"intake-sink:{booking_id}:{safe_phase}:r{revision}"
 
     def _build_composio_arguments(
         self,
@@ -255,14 +354,12 @@ class SinkWriter:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
-        sink_arguments: dict[str, Any] | None,
         record_status: str | None,
     ) -> dict[str, Any] | str:
         sink_config = _safe_dict(workflow.get("sink_config"))
         sink_type = str(workflow.get("sink_type", "")).strip().lower()
         field_mapping = _clean_mapping(sink_config.get("field_mapping"))
         static_arguments = _safe_dict(sink_config.get("static_arguments"))
-        override_arguments = _safe_dict(sink_arguments)
         if sink_type == "google_sheets_composio":
             static_result = self._google_sheets_static_arguments(
                 customer_id=str(workflow["customer_id"]),
@@ -272,7 +369,6 @@ class SinkWriter:
             if isinstance(static_result, str):
                 return static_result
             static_arguments = static_result
-            override_arguments = _normalize_google_sheets_arguments(override_arguments)
         enriched_payload = self._enriched_payload(
             workflow=workflow,
             booking=booking,
@@ -286,12 +382,10 @@ class SinkWriter:
                 field_mapping,
                 enriched_payload,
             )
-            arguments.update(override_arguments)
             return arguments
         arguments = dict(static_arguments)
         for target_key, source_key in field_mapping.items():
             arguments[target_key] = enriched_payload.get(source_key)
-        arguments.update(override_arguments)
         return arguments
 
     def _google_sheets_static_arguments(
@@ -312,7 +406,12 @@ class SinkWriter:
                 validate_target=True,
             )
         except ValueError as exc:
-            return str(exc)
+            logger.error(
+                "intake Google Sheets sink validation failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={"customer_id": customer_id},
+            )
+            return _PUBLIC_SINK_ERROR
 
     def resolve_google_sheets_sheet_name_for_sink(
         self,
@@ -442,25 +541,48 @@ class SinkWriter:
         for key, value in payload.items():
             if str(key) in _LOCAL_CSV_SYSTEM_COLUMNS:
                 continue
-            base_row[str(key)] = str(value or "")
-        return base_row
+            base_row[_neutralize_csv_cell(str(key))] = str(value or "")
+        return {key: _neutralize_csv_cell(value) for key, value in base_row.items()}
 
     @staticmethod
     def _read_existing_csv(
-        absolute_path: Path,
+        directory_fd: int,
+        filename: str,
         base_row: dict[str, str],
     ) -> tuple[list[dict[str, str]], list[str]]:
         rows: list[dict[str, str]] = []
         fieldnames = list(base_row.keys())
-        if not absolute_path.exists():
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(filename, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
             return rows, fieldnames
-        with absolute_path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_size > _MAX_LOCAL_CSV_BYTES
+            ):
+                raise ValueError("local CSV sink target is invalid")
+            with os.fdopen(descriptor, "rb", closefd=False) as raw:
+                content = raw.read(_MAX_LOCAL_CSV_BYTES + 1)
+            if len(content) > _MAX_LOCAL_CSV_BYTES:
+                raise ValueError("local CSV sink exceeds its size limit")
+            reader = csv.DictReader(io.StringIO(content.decode("utf-8"), newline=""))
             for item in reader:
-                rows.append({str(k): str(v or "") for k, v in item.items()})
+                rows.append(
+                    {
+                        _neutralize_csv_cell(str(key)): _neutralize_csv_cell(str(value or ""))
+                        for key, value in item.items()
+                    }
+                )
             for field in list(reader.fieldnames or []):
-                if field not in fieldnames:
-                    fieldnames.append(field)
+                safe_field = _neutralize_csv_cell(field)
+                if safe_field not in fieldnames:
+                    fieldnames.append(safe_field)
+        finally:
+            os.close(descriptor)
         for field in base_row:
             if field not in fieldnames:
                 fieldnames.append(field)
@@ -483,31 +605,97 @@ class SinkWriter:
     @staticmethod
     def _write_csv_rows(
         *,
-        absolute_path: Path,
+        directory_fd: int,
+        filename: str,
         fieldnames: list[str],
         rows: list[dict[str, str]],
     ) -> None:
-        absolute_path.parent.mkdir(parents=True, exist_ok=True)
-        with absolute_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({field: row.get(field, "") for field in fieldnames})
+        safe_fieldnames = [_neutralize_csv_cell(field) for field in fieldnames]
+        temporary_name = f".{filename}.{secrets.token_hex(12)}.tmp"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=safe_fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(
+                        {
+                            safe_field: _neutralize_csv_cell(row.get(field, ""))
+                            for field, safe_field in zip(
+                                fieldnames,
+                                safe_fieldnames,
+                                strict=True,
+                            )
+                        }
+                    )
+                handle.flush()
+                os.fsync(handle.fileno())
+            metadata = os.stat(temporary_name, dir_fd=directory_fd, follow_symlinks=False)
+            if metadata.st_size > _MAX_LOCAL_CSV_BYTES:
+                raise ValueError("local CSV sink exceeds its size limit")
+            try:
+                existing = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1
+            ):
+                raise ValueError("local CSV sink target is invalid")
+            os.replace(
+                temporary_name,
+                filename,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=directory_fd)
 
-    @staticmethod
-    def _tool_search_queries(sink_type: str, operation_hint: str) -> list[str]:
-        queries: list[str] = []
-        if operation_hint:
-            queries.append(operation_hint)
-        if sink_type == "google_sheets_composio":
-            queries.extend(["upsert rows", "append rows", "add row", "rows"])
-        elif operation_hint:
-            queries.append("write")
-        seen: set[str] = set()
-        out: list[str] = []
-        for query in queries:
-            safe_query = str(query or "").strip().lower()
-            if safe_query and safe_query not in seen:
-                seen.add(safe_query)
-                out.append(safe_query)
-        return out
+    @contextmanager
+    def _open_csv_directory(
+        self,
+        *,
+        customer_id: str,
+        directory_parts: tuple[str, ...],
+    ) -> Iterator[int]:
+        descriptor = os.dup(self._sink_root_fd)
+        try:
+            for part in (tenant_namespace_label(customer_id), *directory_parts):
+                if not part or part in {".", ".."} or "/" in part:
+                    raise ValueError("local CSV directory is invalid")
+                with suppress(FileExistsError):
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                next_descriptor = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+                os.fchmod(next_descriptor, 0o700)
+                os.close(descriptor)
+                descriptor = next_descriptor
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def _csv_lock(self, path: str) -> threading.Lock:
+        with self._csv_locks_guard:
+            return self._csv_locks.setdefault(path, threading.Lock())
+
+
+def _neutralize_csv_cell(value: Any) -> str:
+    text = str(value or "")
+    stripped = text.lstrip()
+    if (text and text[0] in {"\t", "\r"}) or (
+        stripped and stripped[0] in _FORMULA_PREFIXES
+    ):
+        return f"'{text}"
+    return text

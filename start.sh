@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}" && pwd)"
 cd "${REPO_ROOT}"
 
 MODE="up"
-RUNTIME_MODE="${START_MODE:-local}"
-INSTALL_BROWSER_USE="${INSTALL_BROWSER_USE:-1}"
+RUNTIME_MODE="${START_MODE:-server}"
+INSTALL_BROWSER_USE="${INSTALL_BROWSER_USE:-0}"
 INSTALL_CLOUDFLARED="${INSTALL_CLOUDFLARED:-auto}"
 INSTALL_UV="${INSTALL_UV:-1}"
 UV_PYTHON="${UV_PYTHON:-3.12}"
@@ -17,22 +17,25 @@ ASSUME_YES=0
 NO_INSTALL_UV=0
 DRY_RUN=0
 UV_BOOTSTRAPPED=0
+DIRECT_ENGINE_AVAILABLE=0
 PASSTHRU=()
+SELECTED_EXTRAS=()
 
 usage() {
   cat <<'EOF_USAGE'
 Usage:
-  ./start.sh [local|server|install|run|doctor] [options] [-- extra-args]
+  ./start.sh [local|server|managed|install|run|doctor] [options] [-- extra-args]
 
 Commands:
-  local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync (default)
-  server                Install, then run the plain app server
+  local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
+  server                Install, then run the web/API app server (default)
+  managed               Install trusted OCI images, then run the self-replacing bootstrap
   install               Install/setup only
-  run [local|server]    Run only, without installing
-  doctor [local|server] Check startup readiness
+  run [local|server|managed] Run only, without installing
+  doctor [local|server|managed] Check startup readiness
 
 Compatibility aliases:
-  up                    Same as local
+  up                    Same as server
   --manager             Deprecated alias for local mode
   --app                 Deprecated alias for server mode
   --install-only        Same as install
@@ -41,8 +44,9 @@ Compatibility aliases:
 Options:
   --local               Force local Telegram mode
   --server              Force plain app server mode
-  --browser-use         Install Browser Use Chromium
-  --no-browser-use      Skip Browser Use Chromium install
+  --managed             Force immutable-bootstrap managed mode
+  --browser-use         Install Browser Use Cloud adapter dependencies
+  --no-browser-use      Skip Browser Use Cloud adapter dependencies
   --cloudflared         Install cloudflared when local mode needs it
   --no-cloudflared      Never install cloudflared automatically
   --yes, -y             Answer yes to installer prompts
@@ -51,12 +55,37 @@ Options:
   -h, --help            Show this help
 
 .env knobs:
-  START_MODE=local|server|auto  (app and manager are deprecated aliases)
-  INSTALL_BROWSER_USE=1|0
+  START_MODE=server|managed|local|auto  (default: server; app and manager are deprecated aliases)
+  INSTALL_BROWSER_USE=1|0        (default: 0; browser is an optional capability)
+  OPENTULPA_EXTRAS=integrations,documents  (optional comma/space-separated extras)
   INSTALL_CLOUDFLARED=auto|1|0
   INSTALL_UV=1|auto|0       (default: 1, bootstrap uv when missing)
   UV_PYTHON=3.12            (default: 3.12)
+  OPENTULPA_OPEN_BROWSER=auto|1|0  (default: auto; open only for an interactive local start)
+  OPENTULPA_RESTART_GRACE_SECONDS=15  (graceful replacement wait, capped at 300)
+  SANDBOX_IMAGE=opentulpa-tenant-sandbox:0.1.0
 EOF_USAGE
+}
+
+configure_python_extras() {
+  local raw item seen=""
+  raw="${OPENTULPA_EXTRAS:-}"
+  raw="${raw//,/ }"
+  if is_truthy "${INSTALL_BROWSER_USE}"; then
+    raw="${raw} browser"
+  fi
+  SELECTED_EXTRAS=()
+  for item in ${raw}; do
+    case "${item}" in
+      browser|integrations|documents|research|bundled) ;;
+      *) die "unsupported OPENTULPA_EXTRAS value: ${item}" ;;
+    esac
+    case " ${seen} " in
+      *" ${item} "*) continue ;;
+    esac
+    SELECTED_EXTRAS+=("${item}")
+    seen="${seen} ${item}"
+  done
 }
 
 is_truthy() {
@@ -98,10 +127,39 @@ run_cmd() {
   "$@"
 }
 
-append_env_value() {
+upsert_env_value() {
   local key="$1"
   local value="$2"
-  printf '\n%s=%s\n' "${key}" "${value}" >> "${REPO_ROOT}/.env"
+  local env_file="${REPO_ROOT}/.env" temporary found=0 raw line_key
+
+  [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid .env key: ${key}"
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || die "${key} cannot contain newlines"
+  ensure_env_file || die ".env.example was not found"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    log "save ${key} in .env"
+    return 0
+  fi
+
+  umask 077
+  temporary="$(mktemp "${REPO_ROOT}/.env.tmp.XXXXXX")"
+  while IFS= read -r raw || [[ -n "${raw}" ]]; do
+    line_key="${raw%%=*}"
+    line_key="${line_key#"${line_key%%[![:space:]]*}"}"
+    line_key="${line_key%"${line_key##*[![:space:]]}"}"
+    if [[ "${raw}" == *=* && "${line_key}" == "${key}" ]]; then
+      if [[ "${found}" == "0" ]]; then
+        printf '%s=%s\n' "${key}" "${value}" >> "${temporary}"
+        found=1
+      fi
+      continue
+    fi
+    printf '%s\n' "${raw}" >> "${temporary}"
+  done < "${env_file}"
+  if [[ "${found}" == "0" ]]; then
+    printf '\n%s=%s\n' "${key}" "${value}" >> "${temporary}"
+  fi
+  chmod 600 "${temporary}"
+  mv -f "${temporary}" "${env_file}"
 }
 
 env_is_set() {
@@ -120,18 +178,6 @@ public_base_url_is_set() {
 
 server_telegram_enabled() {
   env_is_set "TELEGRAM_BOT_TOKEN" || telegram_allowlist_is_set
-}
-
-yaml_value_is_set() {
-  local key="$1"
-  local line value
-  line="$(grep -E "^[[:space:]]*${key}:[[:space:]]*" "${REPO_ROOT}/opentulpa.config.yaml" 2>/dev/null | head -n 1 || true)"
-  [[ -n "${line}" ]] || return 1
-  value="${line#*:}"
-  value="${value%%#*}"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  [[ -n "${value}" && "${value}" != "null" && "${value}" != "\"\"" && "${value}" != "''" ]]
 }
 
 yaml_value() {
@@ -162,10 +208,6 @@ config_value() {
   yaml_value "${yaml_key}"
 }
 
-multimodal_model_is_set() {
-  env_is_set "MULTIMODAL_LLM" || yaml_value_is_set "multimodal_llm"
-}
-
 openrouter_base_url_is_set() {
   local base="${OPENAI_COMPATIBLE_BASE_URL:-${OPENROUTER_BASE_URL:-}}"
   base="$(printf '%s' "${base}" | tr '[:upper:]' '[:lower:]')"
@@ -173,11 +215,8 @@ openrouter_base_url_is_set() {
 }
 
 emit_model_config_notice() {
-  if ! multimodal_model_is_set; then
-    log "warning: MULTIMODAL_LLM is not set and opentulpa.config.yaml has no multimodal_llm; image/file/browser functionality may not work."
-  fi
   if ! openrouter_base_url_is_set; then
-    log "warning: OPENAI_COMPATIBLE_BASE_URL is not OpenRouter. Check opentulpa.config.yaml model settings for this provider: llm_model, wake_execution_model, workflow_setup_input_classifier_model, memory_llm_model, multimodal_llm, business_knowledge_oracle_model, openai_compatible_embedding_model, and optional browser_use_model."
+    log "warning: OPENAI_COMPATIBLE_BASE_URL is not OpenRouter. Check opentulpa.config.yaml model settings for this provider: llm_model and business_knowledge_oracle_model."
   fi
 }
 
@@ -202,13 +241,7 @@ check_model_catalog() {
 
   local -a role_specs=(
     "llm_model|LLM_MODEL|llm_model"
-    "wake_execution_model|WAKE_EXECUTION_MODEL|wake_execution_model"
-    "workflow_setup_input_classifier_model|WORKFLOW_SETUP_INPUT_CLASSIFIER_MODEL|workflow_setup_input_classifier_model"
-    "memory_llm_model|MEMORY_LLM_MODEL|memory_llm_model"
-    "multimodal_llm|MULTIMODAL_LLM|multimodal_llm"
     "business_knowledge_oracle_model|BUSINESS_KNOWLEDGE_ORACLE_MODEL|business_knowledge_oracle_model"
-    "openai_compatible_embedding_model|OPENAI_COMPATIBLE_EMBEDDING_MODEL|openai_compatible_embedding_model"
-    "browser_use_model|BROWSER_USE_MODEL|browser_use_model"
   )
   local expected_lines="" spec role env_key yaml_key model
   for spec in "${role_specs[@]}"; do
@@ -286,7 +319,7 @@ prompt_env_value() {
 
   value="${value//[$'\r\n']/}"
   [[ -n "${value}" ]] || die "${key} cannot be blank"
-  append_env_value "${key}" "${value}"
+  upsert_env_value "${key}" "${value}"
   export "${key}=${value}"
   log "saved ${key} to .env"
 }
@@ -314,8 +347,8 @@ load_dotenv() {
 
 normalize_runtime_mode() {
   case "${1:-}" in
-    local|server|auto|"")
-      printf '%s\n' "${1:-local}"
+    local|server|managed|auto|"")
+      printf '%s\n' "${1:-server}"
       ;;
     app)
       warn "START_MODE=app is deprecated; use START_MODE=server."
@@ -334,24 +367,28 @@ normalize_runtime_mode() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      local|server)
+      local|server|managed)
         RUNTIME_MODE="$1"
         MODE="up"
         shift
         ;;
       up)
         MODE="up"
-        RUNTIME_MODE="${RUNTIME_MODE:-local}"
+        RUNTIME_MODE="${RUNTIME_MODE:-server}"
         shift
         ;;
       install)
         MODE="install"
         shift
+        if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" || "$1" == "managed" ) ]]; then
+          RUNTIME_MODE="$1"
+          shift
+        fi
         ;;
       run)
         MODE="run"
         shift
-        if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" ) ]]; then
+        if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" || "$1" == "managed" ) ]]; then
           RUNTIME_MODE="$1"
           shift
         fi
@@ -359,7 +396,7 @@ parse_args() {
       doctor)
         MODE="doctor"
         shift
-        if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" ) ]]; then
+        if [[ $# -gt 0 && ( "$1" == "local" || "$1" == "server" || "$1" == "managed" ) ]]; then
           RUNTIME_MODE="$1"
           shift
         fi
@@ -378,6 +415,10 @@ parse_args() {
         ;;
       --server)
         RUNTIME_MODE="server"
+        shift
+        ;;
+      --managed)
+        RUNTIME_MODE="managed"
         shift
         ;;
       --app)
@@ -440,15 +481,11 @@ resolve_runtime_mode() {
   local normalized
   normalized="$(normalize_runtime_mode "${RUNTIME_MODE}")"
   case "${normalized}" in
-    local|server)
+    local|server|managed)
       printf '%s\n' "${normalized}"
       ;;
     auto)
-      if [[ -n "${PUBLIC_BASE_URL:-}" || -n "${RAILWAY_PUBLIC_DOMAIN:-}" ]]; then
-        printf '%s\n' "server"
-      else
-        printf '%s\n' "local"
-      fi
+      printf '%s\n' "server"
       ;;
     *)
       die "invalid runtime mode: ${normalized}"
@@ -498,10 +535,85 @@ ensure_uv() {
 
 ensure_env_file() {
   if [[ -f "${REPO_ROOT}/.env" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      log "chmod 600 ${REPO_ROOT}/.env"
+    else
+      chmod 600 "${REPO_ROOT}/.env"
+    fi
     return 0
   fi
   [[ -f "${REPO_ROOT}/.env.example" ]] || return 1
-  run_cmd cp "${REPO_ROOT}/.env.example" "${REPO_ROOT}/.env"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    log "cp ${REPO_ROOT}/.env.example ${REPO_ROOT}/.env"
+    log "chmod 600 ${REPO_ROOT}/.env"
+    return 0
+  fi
+  umask 077
+  cp "${REPO_ROOT}/.env.example" "${REPO_ROOT}/.env"
+  chmod 600 "${REPO_ROOT}/.env"
+}
+
+host_is_loopback() {
+  case "${1:-}" in
+    127.0.0.1|localhost|::1|\[::1\]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+local_server_bootstrap_enabled() {
+  ! public_base_url_is_set && { [[ -z "${HOST:-}" ]] || host_is_loopback "${HOST}"; }
+}
+
+generate_owner_token() {
+  local token=""
+  if command -v openssl >/dev/null 2>&1; then
+    token="$(openssl rand -hex 32)"
+  elif [[ -r /dev/urandom ]] && command -v od >/dev/null 2>&1; then
+    token="$(od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')"
+  fi
+  [[ "${token}" =~ ^[0-9a-f]{64}$ ]] || die "could not generate a secure owner credential"
+  printf '%s\n' "${token}"
+}
+
+configure_local_server_defaults() {
+  local data_root token_dir token_path token
+  [[ "$1" == "server" && "${MODE}" != "install" && "${MODE}" != "doctor" ]] || return 0
+  local_server_bootstrap_enabled || return 0
+
+  if [[ -z "${HOST:-}" ]]; then
+    export HOST="127.0.0.1"
+    log "binding the local web server to 127.0.0.1"
+  fi
+  if ! env_is_set "OPENTULPA_DATA_ROOT"; then
+    [[ -n "${HOME:-}" ]] || die "HOME is required to select the local OpenTulpa data directory"
+    data_root="${XDG_DATA_HOME:-${HOME}/.local/share}/opentulpa"
+    export OPENTULPA_DATA_ROOT="${data_root}"
+    log "using local data at ${OPENTULPA_DATA_ROOT}"
+  fi
+  env_is_set "OPENTULPA_WEB_TOKEN" && return 0
+
+  token_dir="${OPENTULPA_DATA_ROOT}/bootstrap"
+  token_path="${token_dir}/owner-web.token"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    export OPENTULPA_WEB_TOKEN="dry-run-local-owner-token"
+    log "use the private generated owner credential in ${token_path}"
+    return 0
+  fi
+
+  umask 077
+  mkdir -p "${token_dir}"
+  [[ ! -L "${token_dir}" ]] || die "owner credential directory cannot be a symbolic link"
+  chmod 700 "${token_dir}"
+  if [[ ! -e "${token_path}" ]]; then
+    token="$(generate_owner_token)"
+    (umask 077; printf '%s\n' "${token}" > "${token_path}")
+  fi
+  [[ -f "${token_path}" && ! -L "${token_path}" ]] || die "owner credential must be a regular file"
+  chmod 600 "${token_path}"
+  token="$(tr -d '\r\n' < "${token_path}")"
+  [[ "${token}" =~ ^[0-9a-f]{64}$ ]] || die "owner credential file is invalid: ${token_path}"
+  export OPENTULPA_WEB_TOKEN="${token}"
+  log "using the private generated owner credential"
 }
 
 ensure_required_env() {
@@ -525,6 +637,7 @@ ensure_required_env() {
 
   if [[ "${runtime}" == "server" ]]; then
     env_is_set "OPENTULPA_DATA_ROOT" || missing+=("OPENTULPA_DATA_ROOT")
+    env_is_set "OPENTULPA_WEB_TOKEN" || missing+=("OPENTULPA_WEB_TOKEN")
     if server_telegram_enabled; then
       env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
       env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
@@ -533,8 +646,23 @@ ensure_required_env() {
         missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
       fi
     else
-      env_is_set "OPENTULPA_WEB_TOKEN" || missing+=("OPENTULPA_WEB_TOKEN")
       log "server Telegram disabled; web/API startup does not require Telegram env."
+    fi
+  fi
+
+  if [[ "${runtime}" == "managed" ]]; then
+    env_is_set "OPENTULPA_WEB_TOKEN" || missing+=("OPENTULPA_WEB_TOKEN")
+    env_is_set "OPENTULPA_RECOVERY_TOKEN" || missing+=("OPENTULPA_RECOVERY_TOKEN")
+    env_is_set "OPENTULPA_INGRESS_TOKEN" || missing+=("OPENTULPA_INGRESS_TOKEN")
+    env_is_set "OPENTULPA_RELEASE_EGRESS_NETWORK" || missing+=("OPENTULPA_RELEASE_EGRESS_NETWORK")
+    env_is_set "OPENTULPA_RELEASE_BASE_IMAGE" || missing+=("OPENTULPA_RELEASE_BASE_IMAGE")
+    if server_telegram_enabled; then
+      env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
+      env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
+      public_base_url_is_set || missing+=("PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN")
+      if ! telegram_allowlist_is_set; then
+        missing+=("TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS")
+      fi
     fi
   fi
 
@@ -565,6 +693,7 @@ ensure_required_env() {
     fi
   fi
   if [[ "${runtime}" == "server" ]]; then
+    env_is_set "OPENTULPA_WEB_TOKEN" || prompt_env_value "OPENTULPA_WEB_TOKEN" "OPENTULPA_WEB_TOKEN" 1
     if server_telegram_enabled; then
       env_is_set "TELEGRAM_BOT_TOKEN" || prompt_env_value "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN" 1
       if ! telegram_allowlist_is_set; then
@@ -572,24 +701,79 @@ ensure_required_env() {
       fi
       env_is_set "TELEGRAM_WEBHOOK_SECRET" || prompt_env_value "TELEGRAM_WEBHOOK_SECRET" "TELEGRAM_WEBHOOK_SECRET" 1
       public_base_url_is_set || prompt_env_value "PUBLIC_BASE_URL" "PUBLIC_BASE_URL"
-    else
-      env_is_set "OPENTULPA_WEB_TOKEN" || prompt_env_value "OPENTULPA_WEB_TOKEN" "OPENTULPA_WEB_TOKEN" 1
     fi
     env_is_set "OPENTULPA_DATA_ROOT" || prompt_env_value "OPENTULPA_DATA_ROOT" "OPENTULPA_DATA_ROOT" 0 "/app/opentulpa_data"
+  fi
+  if [[ "${runtime}" == "managed" ]]; then
+    env_is_set "OPENTULPA_WEB_TOKEN" || prompt_env_value "OPENTULPA_WEB_TOKEN" "OPENTULPA_WEB_TOKEN" 1
+    env_is_set "OPENTULPA_RECOVERY_TOKEN" || prompt_env_value "OPENTULPA_RECOVERY_TOKEN" "OPENTULPA_RECOVERY_TOKEN (32+ random characters)" 1
+    env_is_set "OPENTULPA_INGRESS_TOKEN" || prompt_env_value "OPENTULPA_INGRESS_TOKEN" "OPENTULPA_INGRESS_TOKEN (32+ random characters)" 1
+    env_is_set "OPENTULPA_RELEASE_EGRESS_NETWORK" || prompt_env_value "OPENTULPA_RELEASE_EGRESS_NETWORK" "OPENTULPA_RELEASE_EGRESS_NETWORK"
+    env_is_set "OPENTULPA_RELEASE_BASE_IMAGE" || prompt_env_value "OPENTULPA_RELEASE_BASE_IMAGE" "OPENTULPA_RELEASE_BASE_IMAGE" 0 "opentulpa-runtime-base:0.1.0"
+    if server_telegram_enabled; then
+      env_is_set "TELEGRAM_BOT_TOKEN" || prompt_env_value "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN" 1
+      env_is_set "TELEGRAM_WEBHOOK_SECRET" || prompt_env_value "TELEGRAM_WEBHOOK_SECRET" "TELEGRAM_WEBHOOK_SECRET" 1
+      public_base_url_is_set || prompt_env_value "PUBLIC_BASE_URL" "PUBLIC_BASE_URL"
+      if ! telegram_allowlist_is_set; then
+        prompt_env_value "TELEGRAM_ALLOWED_USERNAMES" "TELEGRAM_ALLOWED_USERNAMES (comma-separated, no @)"
+      fi
+    fi
   fi
 }
 
 install_python_deps() {
   ensure_uv
-  run_cmd uv sync
+  local -a arguments=(sync --no-dev)
+  local extra
+  for extra in "${SELECTED_EXTRAS[@]-}"; do
+    [[ -n "${extra}" ]] || continue
+    arguments+=(--extra "${extra}")
+  done
+  run_cmd uv "${arguments[@]}"
 }
 
-install_browser_use_deps() {
-  if is_falsey "${INSTALL_BROWSER_USE}"; then
-    log "skipping Browser Use Chromium install."
+install_tenant_sandbox_image() {
+  local engine tenant_image
+  if [[ "${DIRECT_ENGINE_AVAILABLE}" != "1" ]]; then
+    log "tenant sandbox image build skipped; chat will start with shell execution unavailable."
     return 0
   fi
-  run_cmd uv run playwright install chromium
+  engine="${OPENTULPA_CONTAINER_CLI:-docker}"
+  tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
+  tenant_image="${tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    command -v "${engine}" >/dev/null 2>&1 || die "${engine} is required for tenant sandbox execution"
+  fi
+  run_cmd "${engine}" build \
+    --tag "${tenant_image}" \
+    --file docker/tenant-sandbox.Dockerfile .
+}
+
+install_managed_images() {
+  local engine runtime_image sandbox_image evaluator_image tenant_image extras_csv
+  engine="${OPENTULPA_CONTAINER_CLI:-docker}"
+  runtime_image="${OPENTULPA_RELEASE_BASE_IMAGE:-opentulpa-runtime-base:0.1.0}"
+  sandbox_image="${EVOLUTION_SANDBOX_IMAGE:-opentulpa-evolution:0.1.0}"
+  evaluator_image="${EVOLUTION_EVALUATOR_IMAGE:-${sandbox_image}}"
+  tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
+  tenant_image="${tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    command -v "${engine}" >/dev/null 2>&1 || die "${engine} is required for managed mode"
+  fi
+  if ((${#SELECTED_EXTRAS[@]})); then
+    extras_csv="$(IFS=,; printf '%s' "${SELECTED_EXTRAS[*]}")"
+    run_cmd "${engine}" build --build-arg "OPENTULPA_EXTRAS=${extras_csv}" \
+      --tag "${runtime_image}" --file Dockerfile .
+  else
+    run_cmd "${engine}" build --tag "${runtime_image}" --file Dockerfile .
+  fi
+  run_cmd "${engine}" build \
+    --tag "${sandbox_image}" \
+    --tag "${evaluator_image}" \
+    --file docker/evolution.Dockerfile .
+  run_cmd "${engine}" build \
+    --tag "${tenant_image}" \
+    --file docker/tenant-sandbox.Dockerfile .
 }
 
 install_cloudflared_linux() {
@@ -641,19 +825,138 @@ ensure_cloudflared() {
 run_app() {
   ensure_uv
   if ((${#PASSTHRU[@]})); then
-    run_cmd uv run python -m opentulpa "${PASSTHRU[@]}"
+    run_cmd uv run --no-sync python -m opentulpa "${PASSTHRU[@]}"
     return 0
   fi
-  run_cmd uv run python -m opentulpa
+  run_cmd uv run --no-sync python -m opentulpa
+}
+
+listener_pids_for_port() {
+  local port="$1"
+  lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | sort -u
+}
+
+stop_existing_server() {
+  local port grace_seconds attempts listeners remaining pid command_line
+  local -a opentulpa_pids=()
+
+  [[ "${DRY_RUN}" == "0" ]] || return 0
+  port="$(config_value "PORT" "port")"
+  port="${port:-8000}"
+  command -v lsof >/dev/null 2>&1 || return 0
+  listeners="$(listener_pids_for_port "${port}" || true)"
+  [[ -n "${listeners}" ]] || return 0
+
+  for pid in ${listeners}; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || die "invalid listener PID reported for port ${port}"
+    command_line="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+    [[ -n "${command_line}" ]] || continue
+    if [[ "${command_line}" != *" -m opentulpa"* ]]; then
+      die "port ${port} is used by PID ${pid}, which is not OpenTulpa; refusing to stop it"
+    fi
+    opentulpa_pids+=("${pid}")
+  done
+
+  if ((${#opentulpa_pids[@]} == 0)); then
+    remaining="$(listener_pids_for_port "${port}" || true)"
+    [[ -z "${remaining}" ]] || die "port ${port} is in use and its owner could not be verified"
+    return 0
+  fi
+
+  log "stopping existing OpenTulpa server on port ${port} (PID(s): ${opentulpa_pids[*]})"
+  kill -TERM "${opentulpa_pids[@]}" 2>/dev/null || true
+
+  grace_seconds="${OPENTULPA_RESTART_GRACE_SECONDS:-15}"
+  if [[ ! "${grace_seconds}" =~ ^[0-9]+$ ]]; then
+    die "OPENTULPA_RESTART_GRACE_SECONDS must be a non-negative integer"
+  fi
+  ((grace_seconds > 300)) && grace_seconds=300
+  attempts=$((grace_seconds * 10))
+  while ((attempts > 0)); do
+    remaining="$(listener_pids_for_port "${port}" || true)"
+    [[ -n "${remaining}" ]] || break
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+
+  remaining="$(listener_pids_for_port "${port}" || true)"
+  if [[ -n "${remaining}" ]]; then
+    warn "existing OpenTulpa did not stop within ${grace_seconds}s; forcing its verified process to stop"
+    for pid in "${opentulpa_pids[@]}"; do
+      command_line="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+      if [[ "${command_line}" == *" -m opentulpa"* ]]; then
+        kill -KILL "${pid}" 2>/dev/null || true
+      fi
+    done
+    attempts=50
+    while ((attempts > 0)); do
+      remaining="$(listener_pids_for_port "${port}" || true)"
+      [[ -n "${remaining}" ]] || break
+      sleep 0.1
+      attempts=$((attempts - 1))
+    done
+  fi
+
+  remaining="$(listener_pids_for_port "${port}" || true)"
+  [[ -z "${remaining}" ]] || die "port ${port} is still in use after stopping OpenTulpa"
+  log "existing OpenTulpa server stopped"
+}
+
+run_bootstrap() {
+  ensure_uv
+  if ((${#PASSTHRU[@]})); then
+    run_cmd uv run --no-sync opentulpa-bootstrap "${PASSTHRU[@]}"
+    return 0
+  fi
+  run_cmd uv run --no-sync opentulpa-bootstrap
 }
 
 run_manager() {
   ensure_uv
   if ((${#PASSTHRU[@]})); then
-    run_cmd uv run python scripts/manager.py "${PASSTHRU[@]}"
+    run_cmd uv run --no-sync python scripts/manager.py "${PASSTHRU[@]}"
     return 0
   fi
-  run_cmd uv run python scripts/manager.py
+  run_cmd uv run --no-sync python scripts/manager.py
+}
+
+open_local_web_when_ready() {
+  local preference="${OPENTULPA_OPEN_BROWSER:-auto}"
+  local url="http://127.0.0.1:${PORT:-8000}/" opener=""
+  local_server_bootstrap_enabled || return 0
+  if is_falsey "${preference}"; then
+    return 0
+  fi
+  if [[ "${preference}" == "auto" ]] && ! is_interactive; then
+    return 0
+  fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    log "open ${url} after the server is healthy"
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    log "Open ${url} to talk with OpenTulpa."
+    return 0
+  }
+  case "$(uname -s)" in
+    Darwin) command -v open >/dev/null 2>&1 && opener="open" ;;
+    Linux) command -v xdg-open >/dev/null 2>&1 && opener="xdg-open" ;;
+  esac
+  if [[ -z "${opener}" ]]; then
+    log "Open ${url} to talk with OpenTulpa."
+    return 0
+  fi
+  (
+    local attempt
+    for attempt in $(seq 1 480); do
+      if curl -fsS "http://127.0.0.1:${PORT:-8000}/healthz" >/dev/null 2>&1 \
+        && curl -fsS "http://127.0.0.1:${PORT:-8000}/agent/healthz" >/dev/null 2>&1; then
+        "${opener}" "${url}" >/dev/null 2>&1 || true
+        exit 0
+      fi
+      sleep 0.25
+    done
+  ) &
 }
 
 doctor_check() {
@@ -671,6 +974,100 @@ doctor_check() {
   fi
 }
 
+container_engine_is_rootless() {
+  local engine="$1" name output
+  name="$(basename "${engine}")"
+  case "${name}" in
+    docker)
+      output="$("${engine}" info --format '{{json .SecurityOptions}}' 2>/dev/null || true)"
+      output="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
+      [[ "${output}" == *rootless* ]]
+      ;;
+    podman)
+      output="$("${engine}" info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
+      output="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
+      [[ "${output}" == "true" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+docker_uses_desktop_vm() {
+  local engine="$1" context identity
+  [[ "$(uname -s)" == "Darwin" && "$(basename "${engine}")" == "docker" ]] || return 1
+  context="$("${engine}" context show 2>/dev/null || true)"
+  identity="$("${engine}" info --format '{{.OperatingSystem}}|{{.Name}}' 2>/dev/null || true)"
+  case "${context}|${identity}" in
+    orbstack\|OrbStack\|orbstack|desktop-linux\|Docker\ Desktop\|docker-desktop) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+container_engine_is_safe_for_direct() {
+  local engine="$1"
+  if container_engine_is_rootless "${engine}"; then
+    return 0
+  fi
+  docker_uses_desktop_vm "${engine}"
+}
+
+configure_container_engine() {
+  local runtime="$1" requested candidate
+  requested="${OPENTULPA_CONTAINER_CLI:-}"
+  DIRECT_ENGINE_AVAILABLE=0
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    export OPENTULPA_CONTAINER_CLI="${requested:-docker}"
+    DIRECT_ENGINE_AVAILABLE=1
+    return 0
+  fi
+
+  if [[ -n "${requested}" ]]; then
+    if command -v "${requested}" >/dev/null 2>&1; then
+      if container_engine_is_rootless "${requested}"; then
+        DIRECT_ENGINE_AVAILABLE=1
+        return 0
+      fi
+      if [[ "${runtime}" != "managed" ]] && docker_uses_desktop_vm "${requested}"; then
+        export OPENTULPA_ALLOW_DESKTOP_VM=1
+        DIRECT_ENGINE_AVAILABLE=1
+        log "using Docker inside its recognized macOS desktop VM for tenant commands."
+        return 0
+      fi
+    fi
+    if [[ "${runtime}" == "managed" && "${MODE}" != "doctor" ]]; then
+      die "managed mode requires a running rootless Docker or Podman engine"
+    fi
+    warn "${requested} is unavailable or lacks required isolation; chat will start but sandbox shell commands will be unavailable."
+    return 0
+  fi
+
+  for candidate in podman docker; do
+    command -v "${candidate}" >/dev/null 2>&1 || continue
+    if container_engine_is_rootless "${candidate}"; then
+      export OPENTULPA_CONTAINER_CLI="${candidate}"
+      DIRECT_ENGINE_AVAILABLE=1
+      log "using rootless ${candidate} for tenant commands."
+      return 0
+    fi
+    if [[ "${runtime}" != "managed" ]] && docker_uses_desktop_vm "${candidate}"; then
+      export OPENTULPA_CONTAINER_CLI="${candidate}"
+      export OPENTULPA_ALLOW_DESKTOP_VM=1
+      DIRECT_ENGINE_AVAILABLE=1
+      log "using Docker inside its recognized macOS desktop VM for tenant commands."
+      return 0
+    fi
+  done
+
+  export OPENTULPA_CONTAINER_CLI="docker"
+  if [[ "${runtime}" == "managed" && "${MODE}" != "doctor" ]]; then
+    die "managed mode requires a running rootless Docker or Podman engine"
+  fi
+  warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable."
+}
+
 run_doctor() {
   local runtime="$1"
   local failures=0
@@ -683,11 +1080,11 @@ run_doctor() {
   fi
   load_dotenv
   doctor_check "OPENAI_COMPATIBLE_API_KEY is set" "$(env_is_set "OPENAI_COMPATIBLE_API_KEY" && echo 1 || echo 0)" "set OPENAI_COMPATIBLE_API_KEY in .env" || failures=$((failures + 1))
-  if [[ "${runtime}" != "server" ]] || server_telegram_enabled; then
+  if [[ "${runtime}" == "local" ]] || server_telegram_enabled; then
     doctor_check "TELEGRAM_BOT_TOKEN is set" "$(env_is_set "TELEGRAM_BOT_TOKEN" && echo 1 || echo 0)" "set TELEGRAM_BOT_TOKEN in .env" || failures=$((failures + 1))
     doctor_check "Telegram allowlist is set" "$(telegram_allowlist_is_set && echo 1 || echo 0)" "set TELEGRAM_ALLOWED_USERNAMES or TELEGRAM_ALLOWED_USER_IDS in .env" || failures=$((failures + 1))
   else
-    echo "[doctor] info: server Telegram disabled; skipping Telegram token and allowlist checks"
+    echo "[doctor] info: ${runtime} Telegram disabled; skipping Telegram token and allowlist checks"
   fi
   if env_is_set "COMPOSIO_API_KEY"; then
     echo "[doctor] ok: COMPOSIO_API_KEY is set"
@@ -697,16 +1094,54 @@ run_doctor() {
   emit_model_config_notice
   check_model_catalog
   if [[ "${runtime}" == "server" ]]; then
+    doctor_check "OPENTULPA_WEB_TOKEN is set" "$(env_is_set "OPENTULPA_WEB_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_WEB_TOKEN for web/API access" || failures=$((failures + 1))
     if server_telegram_enabled; then
       doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET in .env" || failures=$((failures + 1))
       doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set PUBLIC_BASE_URL to the public HTTPS URL, or rely on Railway's RAILWAY_PUBLIC_DOMAIN" || failures=$((failures + 1))
     else
       echo "[doctor] info: server Telegram disabled; skipping webhook URL/secret checks"
-      doctor_check "OPENTULPA_WEB_TOKEN is set" "$(env_is_set "OPENTULPA_WEB_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_WEB_TOKEN for web/API access" || failures=$((failures + 1))
     fi
     doctor_check "OPENTULPA_DATA_ROOT is set" "$(env_is_set "OPENTULPA_DATA_ROOT" && echo 1 || echo 0)" "set OPENTULPA_DATA_ROOT=/app/opentulpa_data and mount persistent storage there" || failures=$((failures + 1))
     if env_is_set "OPENTULPA_DATA_ROOT"; then
       doctor_check "OPENTULPA_DATA_ROOT is writable" "$(mkdir -p "${OPENTULPA_DATA_ROOT}" 2>/dev/null && [[ -w "${OPENTULPA_DATA_ROOT}" ]] && echo 1 || echo 0)" "mount a writable persistent volume at OPENTULPA_DATA_ROOT" || failures=$((failures + 1))
+    fi
+  fi
+  if [[ "${runtime}" == "managed" ]]; then
+    local engine runtime_image sandbox_image tenant_image network recovery_token ingress_token
+    engine="${OPENTULPA_CONTAINER_CLI:-docker}"
+    runtime_image="${OPENTULPA_RELEASE_BASE_IMAGE:-opentulpa-runtime-base:0.1.0}"
+    sandbox_image="${EVOLUTION_SANDBOX_IMAGE:-opentulpa-evolution:0.1.0}"
+    tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
+    tenant_image="${tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
+    network="${OPENTULPA_RELEASE_EGRESS_NETWORK:-}"
+    recovery_token="${OPENTULPA_RECOVERY_TOKEN:-}"
+    ingress_token="${OPENTULPA_INGRESS_TOKEN:-}"
+    doctor_check "OPENTULPA_WEB_TOKEN is set" "$(env_is_set "OPENTULPA_WEB_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_WEB_TOKEN" || failures=$((failures + 1))
+    doctor_check "OPENTULPA_RECOVERY_TOKEN is at least 32 characters" "$([[ ${#recovery_token} -ge 32 ]] && echo 1 || echo 0)" "set a random OPENTULPA_RECOVERY_TOKEN" || failures=$((failures + 1))
+    doctor_check "OPENTULPA_INGRESS_TOKEN is at least 32 characters" "$([[ ${#ingress_token} -ge 32 ]] && echo 1 || echo 0)" "set a random OPENTULPA_INGRESS_TOKEN" || failures=$((failures + 1))
+    if server_telegram_enabled; then
+      doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET" || failures=$((failures + 1))
+      doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set the public HTTPS gateway URL" || failures=$((failures + 1))
+    fi
+    doctor_check "canonical Git checkout is available" "$([[ -d "${REPO_ROOT}/.git" ]] && echo 1 || echo 0)" "run managed mode from a canonical Git checkout" || failures=$((failures + 1))
+    doctor_check "${engine} is available" "$(command -v "${engine}" >/dev/null 2>&1 && echo 1 || echo 0)" "install a rootless Docker or Podman engine" || failures=$((failures + 1))
+    if command -v "${engine}" >/dev/null 2>&1; then
+      doctor_check "${engine} is rootless" "$(container_engine_is_rootless "${engine}" && echo 1 || echo 0)" "configure a rootless Docker or Podman engine" || failures=$((failures + 1))
+      doctor_check "trusted runtime base image exists" "$("${engine}" image inspect "${runtime_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install managed" || failures=$((failures + 1))
+      doctor_check "evolution sandbox image exists" "$("${engine}" image inspect "${sandbox_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install managed" || failures=$((failures + 1))
+      doctor_check "tenant sandbox image exists" "$("${engine}" image inspect "${tenant_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install managed" || failures=$((failures + 1))
+      doctor_check "restricted release network exists" "$([[ -n "${network}" ]] && "${engine}" network inspect "${network}" >/dev/null 2>&1 && echo 1 || echo 0)" "create and restrict OPENTULPA_RELEASE_EGRESS_NETWORK" || failures=$((failures + 1))
+    fi
+  fi
+  if [[ "${runtime}" != "managed" ]]; then
+    local direct_engine direct_tenant_image
+    direct_engine="${OPENTULPA_CONTAINER_CLI:-docker}"
+    direct_tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
+    direct_tenant_image="${direct_tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
+    doctor_check "${direct_engine} is available for tenant commands" "$(command -v "${direct_engine}" >/dev/null 2>&1 && echo 1 || echo 0)" "install a rootless Docker or Podman engine" || failures=$((failures + 1))
+    if command -v "${direct_engine}" >/dev/null 2>&1; then
+      doctor_check "${direct_engine} has direct-mode isolation" "$(container_engine_is_safe_for_direct "${direct_engine}" && echo 1 || echo 0)" "configure rootless Docker/Podman or use Docker Desktop/OrbStack on macOS" || failures=$((failures + 1))
+      doctor_check "tenant sandbox image exists" "$("${direct_engine}" image inspect "${direct_tenant_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install ${runtime}" || failures=$((failures + 1))
     fi
   fi
   doctor_check ".opentulpa is writable" "$(mkdir -p "${REPO_ROOT}/.opentulpa" 2>/dev/null && [[ -w "${REPO_ROOT}/.opentulpa" ]] && echo 1 || echo 0)" "make .opentulpa writable" || failures=$((failures + 1))
@@ -753,18 +1188,30 @@ main() {
   parse_args "$@"
   RUNTIME_MODE="$(normalize_runtime_mode "${RUNTIME_MODE}")"
   load_dotenv
+  configure_python_extras
 
   local runtime
   runtime="$(resolve_runtime_mode)"
 
   if [[ "${MODE}" == "doctor" ]]; then
+    configure_container_engine "${runtime}"
     run_doctor "${runtime}"
     return 0
   fi
 
+  if [[ "${MODE}" != "install" ]]; then
+    configure_local_server_defaults "${runtime}"
+    ensure_required_env "${runtime}"
+  fi
+  configure_container_engine "${runtime}"
+
   if [[ "${MODE}" != "run" ]]; then
     install_python_deps
-    install_browser_use_deps
+    if [[ "${runtime}" == "managed" ]]; then
+      install_managed_images
+    else
+      install_tenant_sandbox_image
+    fi
     if [[ "${runtime}" == "local" ]]; then
       ensure_cloudflared
     fi
@@ -774,10 +1221,16 @@ main() {
     return 0
   fi
 
-  ensure_required_env "${runtime}"
+  if [[ "${runtime}" == "managed" ]]; then
+    log "running immutable bootstrap with managed OCI releases."
+    run_bootstrap
+    return 0
+  fi
 
   if [[ "${runtime}" == "server" ]]; then
     log "running server mode."
+    stop_existing_server
+    open_local_web_when_ready
     run_app
     return 0
   fi
@@ -786,4 +1239,6 @@ main() {
   run_manager
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

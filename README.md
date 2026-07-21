@@ -5,55 +5,225 @@
 <h1 align="center">OpenTulpa</h1>
 
 <p align="center">
-  <strong>A self-hosted digital AI agent and employee you brief, equip, and delegate to, in chat.</strong><br/>
-  Persistent memory, durable workflow state, and native Telegram &amp; Instagram inbox handling. Runs on your infrastructure.
+  <strong>A small, self-hosted Deep Agents operator that can inspect, edit, test, and safely replace its own code.</strong><br/>
+  One Agent API, explicit tools, durable triggers, and a fixed rollback boundary.
 </p>
 
-<p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> ·
-  <a href="#what-you-can-delegate">Delegate</a> ·
-  <a href="#how-it-works">How It Works</a> ·
-  <a href="docs/DEPLOYMENT.md">Deploy</a> ·
-  <a href="docs/CHAT_COOKBOOK.md">Cookbook</a>
-</p>
+## What It Is
 
-<p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"/>
-  <img src="https://img.shields.io/badge/self--hosted-yes-success.svg" alt="Self-hosted"/>
-  <img src="https://img.shields.io/badge/status-actively%20developed-brightgreen.svg" alt="Status"/>
-</p>
+OpenTulpa is one persistent agent with multiple replaceable ways to reach it. The web
+interface, Telegram worker, schedules, intake, browser automation, and future
+integrations all submit work through the same tenant-scoped Agent API. They do not own
+their own model loops or conversation stores.
 
-<p align="center">
-  <sub>Targets OpenAI-compatible providers · App integrations via Composio · No external database required</sub>
-</p>
+[`deepagents==0.6.12`](https://github.com/langchain-ai/deepagents) owns the agent loop,
+planning, delegation, checkpointing, summarization, memory, skills, and filesystem
+middleware. OpenTulpa supplies the smaller product and safety boundary around it:
 
----
+- authenticated tenant and actor identity;
+- a generated, typed tool contract with persisted approvals;
+- deterministic intake, scheduling, delivery, and external side effects;
+- tenant memory, skills, and persistent workspaces;
+- capability workers that use the universal Agent API;
+- an immutable bootstrap that evaluates, activates, and rolls back source releases.
 
-## Why OpenTulpa
+There is no custom LangGraph harness, model loop, tool gateway, prompt compactor, or
+legacy runtime facade.
 
-OpenTulpa is a **self-hosted agent runtime** built for work that repeats. You brief it in chat (goals, tools, source material, escalation rules) and it keeps working across sessions: saving skills, running scheduled routines, handling inbound customer DMs on Telegram and Instagram, and writing outcomes back into your systems.
+## Fixed And Mutable
 
-It works as a personal operator on day one, and becomes a durable workflow employee the moment the work starts repeating. Most "AI agents" forget the job between sessions. OpenTulpa is built the other way around: **brief it once, and it keeps working**, on a runtime you own and can inspect.
+OpenTulpa keeps deployment machinery outside the application image it replaces.
 
-|  | Typical agent app | **OpenTulpa** |
-|---|---|---|
-| Context | Session-bound | Persistent memory, files, checkpoints, workflow state |
-| Setup | Prompt every time | Brief once, saved skills, routines, intake workflows |
-| Knowledge | Pasted into prompts | Prepared knowledge packs bound to each worker |
-| Execution | One-off | Real tools, browser, scripts, APIs, sink writes |
-| Customer DMs | Separate bot code | Telegram Business + Instagram configured in chat |
-| Integrations | Hand-rolled per tool | App connectors via Composio (Google, Slack, Notion, HubSpot...) |
-| Ownership | Vendor black box | Local SQLite + embedded Qdrant, yours to inspect |
+| Fixed host boundary | Mutable application release |
+|---|---|
+| Bootstrap gateway, release fencing, staging, probation, recovery, rollback | Deep Agent service, prompts, tools, and approval policy |
+| Source-worktree sandbox limits and trusted evaluation commands | Agent API, product services, integrations, and interfaces |
+| Exact-commit release builder and immutable dependency base | Capability workers, manifests, bundled web UI, tests, and documentation |
+| Host credentials, deployment controls, and OCI authority | Any other normal, secret-free repository source path |
 
----
+The owner can ask the main OpenTulpa agent to change any source. That same agent edits a
+detached Git worktree through a rootless sandbox, never the serving checkout. It can run
+tests and experiments over multiple chat turns, inspect its own traces, and ask the owner
+for feedback. `source_release` creates one persisted chat approval; after approval the
+fixed supervisor commits and evaluates the exact bytes, builds a full-source image, and
+queues staged activation. No second model or host-shell approval participates.
 
-## Quick Start
+The dependency lock and trusted image recipe remain fixed during this path. A dependency
+change requires an administrator to rebuild the immutable runtime base. Host recovery
+commands remain available if both the mutable release and its normal approval interface
+are unavailable.
 
-Minimum to get a reply from your own agent in Telegram:
+The chat approval is a policy enforced by the currently trusted application release. It
+is not cryptographic protection against an already malicious release: that release holds
+a scoped evolution credential so it can drive the source workflow. The stable bootstrap
+proves source lineage, fixed checks, image identity, staged health, and rollback; it does
+not independently prove human intent. Requiring protection from a hostile active release
+would need a second authority outside the application, which this deliberately simple
+one-approval design does not include.
 
-1. A Telegram bot token from [@BotFather](https://t.me/BotFather)
-2. An OpenAI-compatible API key
-3. macOS or Linux with `bash` and `curl`
+This gives instances room to specialize without silently fragmenting the project. An
+instance keeps a Git lineage, and an evaluated candidate can be exported as a sanitized,
+digest-checked patch for normal upstream review.
+
+## Interfaces And Capabilities
+
+FastAPI is part of the fixed public API. A dependency-free owner web client is bundled
+at `/`. Telegram is a versioned interface capability that calls the same run, file,
+approval, replay, and notification endpoints with a scoped credential.
+
+For example, on a web-only installation you can write:
+
+> Enable Telegram for this OpenTulpa. Here is my BotFather token: `<token>`.
+
+Recognized credentials are encrypted before the message reaches a checkpoint; the
+model sees an opaque `secret://` handle. OpenTulpa can test the bundled Telegram
+capability, ask for activation approval, and start its worker. Pair the first Telegram
+account with `/start <code>`; by default the one-time code is the last eight characters
+of the bot token. A later request to change Telegram behavior becomes a source
+candidate and managed release rather than an in-place edit.
+
+In managed mode the stable bootstrap derives the active release image and runs that
+worker rootless with only private capability `/state`; product `/workspace`, source,
+databases, host credentials, and the container socket are never mounted. Generation
+handover stops the old poller first and restores it if the new generation fails. Direct
+mode keeps reviewed subprocess workers for development, but cannot safely replace or
+roll back itself.
+
+If `TELEGRAM_BOT_TOKEN` is configured on the host, the built-in webhook interface is
+used and the dynamic Telegram capability is blocked to prevent two consumers from
+using the same bot. Leave it unset for the web-to-dynamic-Telegram flow.
+
+Browser automation, Composio, document parsers, and Crawl4AI are optional adapters,
+not agent-runtime dependencies. The core installs and starts without them:
+
+```bash
+uv sync --no-dev                         # lean core and API
+uv sync --no-dev --extra browser         # Browser Use Cloud SDK and Playwright CDP client
+uv sync --no-dev --extra integrations    # Composio
+uv sync --no-dev --extra documents       # PDF, workbook, and encoding helpers
+uv sync --no-dev --extra research        # Crawl4AI extraction
+uv sync --no-dev --extra bundled         # all optional bundled adapters
+```
+
+`start.sh` keeps the lean core by default. Set `OPENTULPA_EXTRAS=bundled` (or a
+comma-separated subset such as `integrations,documents`) to retain those adapters
+across installs and bake the same extras into a managed runtime image.
+
+With `BROWSER_USE_API_KEY`, explicit browser tools use a tenant-scoped Browser Use
+Cloud session. The Playwright package is only the CDP control client; Chromium and its
+target network run in Browser Use Cloud isolation. OpenTulpa has no host-browser
+fallback. It requires explicit destination domains and rejects direct private or
+link-local targets, but it cannot DNS-pin Chromium inside the vendor environment.
+`content_fetch` has a bounded built-in HTML
+extractor and uses Crawl4AI only when the research extra is present.
+
+## Runs, Notifications, And Approvals
+
+All owner interfaces use the same V2 surfaces:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v2/agent/runs` | Start an owner run and stream normalized SSE events |
+| `GET /v2/agent/runs/{run_id}` | Read tenant-scoped status and pending approvals |
+| `POST /v2/agent/runs/{run_id}/resume` | Approve, edit, or reject an interrupted run |
+| `GET /v2/notifications` | Long-poll durable background and approval notifications |
+| `POST /v2/notifications/{id}/ack` | Acknowledge one notification for this interface |
+| `/v2/agent-specs` | Revisioned model, tools, memory, workspace, and instruction policy |
+| `/v2/trigger-specs` | Revisioned time, interval, or authenticated-event triggers |
+| `/v2/schedules` | Simple reminder and agent-job projection over trigger specs |
+| `/v2/capabilities` | Test and activate release-bundled capability revisions |
+| `/v2/evolution` | Inspect release lineage and export evaluated contribution patches |
+
+Run streaming is normalized to `run.started`, `message.delta`, `tool.started`,
+`tool.completed`, `approval.required`, `artifact.ready`, `run.completed`, and
+`run.failed`. Each event has a run ID, monotonic sequence, and timestamp. The durable
+notification stream carries schedule results, pending approvals, candidate results,
+activation failures, and rollback outcomes back to web and Telegram after restarts.
+
+Tool arguments never contain tenant IDs, credentials, filesystem roots, or ownership
+identifiers. The registry in `opentulpa.tooling` generates LangChain tools, approval
+policy, audit metadata, JSON Schema, and the committed
+[tool contract](docs/tool-contract.md).
+
+## AgentSpecs And Triggers
+
+An `AgentSpec` is an immutable behavioral revision: model alias, instructions, tool
+allowlist, memory scope, workspace scope, delegation, and runtime budgets. Secrets
+remain behind explicit tools and capability manifests rather than entering an agent
+configuration. Owner, routine, and intake are seed specs, not separate runtimes.
+
+A `TriggerSpec` selects an exact `AgentSpec` revision and adds a source, instruction,
+and delivery rule. Sources can be one-off time, cron with an IANA timezone, interval,
+or an authenticated event. APScheduler and the durable dispatcher only submit runs;
+they never auto-approve an interrupted action.
+
+The simpler `/v2/schedules` and schedule tools project:
+
+```text
+At | Cron -> Reminder | AgentJob -> routine AgentSpec -> owner notification
+```
+
+Use full AgentSpec and TriggerSpec revisions when a background process needs another
+model, a narrower tool set, isolated memory, different instructions, or an external
+event source.
+
+## Self-Improvement
+
+The owner agent directly controls one persistent, isolated source checkout:
+
+- `source_shell` creates or resumes it and can inspect, edit, test, and experiment with
+  any OpenTulpa source using ordinary shell commands;
+- `source_status` shows the current checkout and bounded diff without changing it;
+- `trace_list` and `trace_get` expose the agent's own redacted durable execution traces;
+- `source_release` requests one native chat approval, runs fixed checks, builds the exact
+  source commit, and queues safe activation;
+- `source_rollback` restores the previous healthy image with owner approval.
+
+The source shell cannot see production data, credentials, the serving checkout,
+bootstrap state, deployment controls, or a container socket. It is rootless,
+resource-bounded, and has no network by default. The agent may change core runtime,
+API, integrations, interfaces, tools, prompts, schedules, or add new code. The stable
+bootstrap and its release recipe remain outside the mutable release.
+
+Evaluation and release building are bound to the source commit, dependency lock hash,
+evaluator fingerprint, and OCI artifact digest. The candidate's Dockerfile is not used.
+Dependency-lock changes still require an administrator-built runtime base.
+
+Failures remain in the lineage with a sanitized cause. The originating owner thread
+and notification stream receive completion or failure. After a successful cutover,
+the new release uses the same persistent checkpoints, memory, skills, notification
+store, and workspace, so it can explain what happened. If the new release fails during
+activation or probation, the immutable bootstrap automatically restores the previous
+release and reports the rollback. Only release-coupled capability worker state is
+restored; messages, checkpoints, files, memories, bookings, schedules, and other
+product data written during probation are preserved. Self-updates therefore must not
+perform irreversible product-data migrations.
+
+Rollback restores code, the serving process, and release-coupled capability state. It
+cannot retract an external message, purchase, authorization change, or other provider
+effect already emitted while a candidate was serving probation traffic. Changes near
+external effects must be rehearsed with fake sinks and continue to rely on tool approval
+and idempotency; image rollback is not a transaction over the outside world.
+
+## Start
+
+For local web chat, run one command:
+
+```bash
+./start.sh
+```
+
+On the first run, enter only the OpenRouter-compatible model API key. The launcher
+stores it in a private mode `0600` `.env`, chooses a local data directory, generates an
+owner credential without displaying it, binds to `127.0.0.1`, and opens the web chat
+after both health endpoints are ready. Later runs reuse the same state and credential.
+
+Python 3.12 and [`uv`](https://docs.astral.sh/uv/) are installed or resolved by the
+launcher. A rootless Docker/Podman engine, or a recognized macOS Docker Desktop or
+OrbStack VM, enables the sandbox shell. Without an isolated engine, chat still starts
+but shell execution reports that it is unavailable; it never falls back to the host.
+
+### Direct development mode
 
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
@@ -61,124 +231,94 @@ cd opentulpa
 ./start.sh
 ```
 
-The script uses `uv` with Python 3.12, prompts for missing required values, starts the app, opens a Cloudflare tunnel, and syncs the Telegram webhook. Then message your bot on Telegram.
+This starts the mutable application directly. It is useful for development and
+platforms that already own deployments, but it cannot replace itself safely. Set
+`OPENTULPA_OPEN_BROWSER=0` for a headless start. Public/non-loopback deployments must
+still configure their persistent data root and owner authentication explicitly.
 
-Composio is optional for first run. Add it later when you want Google Sheets, Gmail, Slack, Instagram, or other app connectors.
+### Managed self-improving mode
 
-### What `start.sh` Does
-
-1. **Bootstraps `uv`** if missing (via Astral's installer) → `~/.local/bin/uv`
-2. **Syncs Python deps** with `uv sync` (Python 3.12) → project `.venv/`
-3. **Installs Chromium** via Playwright → `~/.cache/ms-playwright/` *(skip with `--no-browser-use`)*
-4. **Installs `cloudflared`** if missing, for the Telegram tunnel → Homebrew (macOS) or `.deb` via `sudo dpkg` (Linux) *(skip with `--no-cloudflared`)*
-5. **Creates `.env`** from `.env.example` and prompts for missing values
-6. **Starts the app** on `127.0.0.1:8000`, opens a Cloudflare tunnel, and points Telegram at the webhook
-
-`sudo` is only ever used for the `cloudflared` `.deb` on Linux — never for Python deps. To uninstall: delete the repo, clear Playwright's browser cache, and remove `cloudflared` via your package manager.
-
-Prefer Docker or Railway? See [Deployment](docs/DEPLOYMENT.md).
-
----
-
-## What You Can Delegate
-
-### Owner-facing: your personal operator
-
-- **Research** topics, files, and links; produce reports and summaries with citations
-- **Write, execute, and debug** Python/shell scripts in a sandboxed workspace, with automatic retry on failure
-- **Monitor** dashboards, competitors, inboxes, or error signals and ping you only on exceptions
-- **Scheduled routines** that run while you sleep. For example, a 7am brief that scrapes your dashboards, summarizes overnight errors, and DMs you the top three
-- **Remember** preferences, decisions, and project context across sessions, not just within one chat
-
-### Customer-facing: runs inbound DMs end to end
-
-- **Qualify** inbound leads on Telegram Business or Instagram
-- **Answer** pricing and service questions from trusted source material only
-- **Collect** appointment or intake fields across multiple messages, tolerating typos and reorderings
-- **Book, update, or cancel** records inside allowed edit windows, writing to Google Sheets, Calendar, or any Composio-connected system
-- **Escalate** anything outside the workflow to you instead of guessing
-
-> **The best workflows are narrow and operational.**
-
-The clearer you define the job, tools, source material, required fields, and escalation boundary, the more employee-like the result.
-
-> **Example brief, pasted into chat:**
-> *"Handle incoming Telegram Business messages for my car wash. Answer pricing from the attached sheet, collect name / phone / vehicle / date / time, write completed bookings to this Google Sheet. Redirect anything outside this workflow to me. Confirm the workflow before activating."*
-
-<p align="center">
-  <img src="docs/assets/opentulpa-conversation-insta.jpg" alt="Instagram conversation handled by OpenTulpa" width="360"/>
-</p>
-
----
-
-## Configuration
-
-Set these when prompted, or add them to `.env`:
+Set at least:
 
 ```env
 OPENAI_COMPATIBLE_API_KEY=...
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USERNAMES=your_handle
-OPENTULPA_OWNER_CUSTOMER_ID=usr_default
-COMPOSIO_API_KEY=...
-BROWSER_USE_API_KEY=...
+OPENTULPA_WEB_TOKEN=...
+EVOLUTION_ENABLED=true
+OPENTULPA_RECOVERY_TOKEN=<32-or-more-random-characters>
+OPENTULPA_INGRESS_TOKEN=<32-or-more-random-characters>
+OPENTULPA_RELEASE_BASE_IMAGE=opentulpa-runtime-base:0.1.0
+OPENTULPA_RELEASE_EGRESS_NETWORK=opentulpa-release-egress
+OPENTULPA_RELEASE_WORKSPACE=/absolute/persistent/opentulpa-release-data
 ```
 
-Telegram is optional for deployed web/API use. A Railway/dashboard deployment can start with `OPENTULPA_WEB_TOKEN`, `OPENAI_COMPATIBLE_API_KEY`, and `OPENTULPA_DATA_ROOT` only. Add Telegram env vars later when Telegram chat is enabled.
+The egress network must be created and restricted by the administrator. Then:
 
-For generic-first dashboard deployments, `OPENTULPA_OWNER_CUSTOMER_ID` lets the first message from the single allowed Telegram username bind that user's numeric Telegram id to the generic owner scope.
-
-**Composio is strongly recommended.** It unlocks app connectors for Google Workspace, Slack, Notion, Linear, HubSpot, Gmail, Instagram, and more without writing custom integration code.
-
-**Browser Use Cloud is recommended for browser-heavy work.** With `BROWSER_USE_API_KEY`, OpenTulpa still owns the browser worker loop, but runs it against Browser Use Cloud hosted sessions for live owner handoff URLs, persisted browser profiles, proxying, and managed browser infrastructure.
-
-Then message your bot on Telegram. Health check: `http://127.0.0.1:8000/healthz`.
-
-OpenTulpa targets OpenAI-compatible providers such as OpenAI-compatible proxies, OpenRouter, Groq, local vLLM, and similar runtimes. Specific model, multimodal, and tool-calling behavior depends on the provider and model you choose. Defaults live in `opentulpa.config.yaml`.
-
----
-
-## How It Works
-
-```text
-incoming message or event
-        |
-  load durable context: workflow state, files, memory, checkpoints
-        |
-  plan and call tools via LangGraph
-        |
-  validate tool calls and execution constraints
-        |
-  reply, write outputs, or schedule follow-up
-        |
-  persist state, logs, artifacts, and traces
+```bash
+./start.sh install managed   # builds runtime, evaluator, and tenant sandbox images
+./start.sh doctor managed    # checks Git, OCI, images, network, and writable state
+./start.sh run managed       # starts only, without reinstalling
+# or: ./start.sh managed     # install, then start
 ```
 
-Core pieces: **FastAPI** for webhooks, **LangGraph** for orchestration, **SQLite** for checkpoints and workflow state, **Mem0 + embedded Qdrant** for memory, **Composio** for third-party connectors, and **Playwright** for browser automation. No external database required.
+The immutable gateway remains on the public host/port and proxies to the active
+release. The release gets a persistent `/workspace`; it never receives the source
+checkout, bootstrap database, `.env`, container socket, or sandbox image authority.
+Tenant commands cross a private, lease-bound endpoint and the stable host derives the
+tenant root and launches the exact locally resolved no-network image. See
+[Deployment](docs/DEPLOYMENT.md) for the complete host contract.
 
-The runtime is modular around models and tools. Bring an OpenAI-compatible model provider, use Composio-backed connectors, or add your own LangGraph tool definitions where the workflow needs custom actions.
+Use `opentulpa-recovery status`, `rollback`, `restart`, or `safe-mode` from the host if
+the mutable release or its normal approval interface is unavailable. `/recovery` is
+reserved and always returns `404`; recovery credentials are never accepted from a
+browser control page.
 
-**Inspectable by design.** Everything the employee does lands on disk under `.opentulpa/` (checkpoints, context, logs, databases, knowledge packs) and `tulpa_stuff/` (generated artifacts). Back it up, mount it as a volume, or read it directly. You always know what's happening.
+Health checks are `/healthz` and `/agent/healthz` in both modes.
 
----
+## Persistence And Migration
 
-## Docs
+The default is one active process with SQLite:
 
-| Doc | Why you'd read it |
+- fresh Deep Agents checkpoints and persisted approval interrupts;
+- a tenant-namespaced store for `/memories/` and `/skills/`;
+- persistent tenant `/workspace` directories;
+- separate product stores for runs, notifications, jobs, triggers, intake, files,
+  knowledge, profiles, connections, secrets, capabilities, and evolution lineage.
+
+Multiple active replicas require shared saver/store and product persistence. Historical
+legacy chat checkpoints are intentionally not imported.
+
+Dry-run legacy data migration first:
+
+```bash
+uv run --extra migration opentulpa-migrate-deepagents \
+  --data-root /path/to/copied-data --dry-run
+```
+
+The migration preserves product records, translates valid routines to AgentSpec and
+TriggerSpec-backed schedules, translates setup sessions to drafts, exports tenant
+memories, and converts user-authored skills. Invalid legacy rows are reported and
+disabled rather than guessed. Cutover verification fails if a preserved product
+database is absent, which prevents a wrong `--data-root` from looking successful.
+`--allow-missing` is reserved for a verified new installation with no legacy data.
+It also transactionally rebases persisted uploaded-file paths to the selected data
+root. Destination content conflicts block cutover without disabling their legacy
+source rows, so they can be resolved and the migration safely rerun.
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check .
+uv run mypy src
+```
+
+| Document | Contents |
 |---|---|
-| [Architecture](docs/ARCHITECTURE.md) | Runtime layout, request flows, safety controls, extension points |
-| [Deployment](docs/DEPLOYMENT.md) | Local, Docker, and Railway setup |
-| [E2E Testing](docs/E2E_TESTING.md) | Realistic workflow and intake validation |
-| [Chat Cookbook](docs/CHAT_COOKBOOK.md) | Concrete prompt patterns and use cases |
-| [External Tool Safety Checklist](docs/EXTERNAL_TOOL_SAFETY_CHECKLIST.md) | Rules for connecting high-impact tools safely |
+| [Architecture](docs/ARCHITECTURE.md) | Fixed/mutable boundary, universal protocol, and flows |
+| [Tool Contract](docs/tool-contract.md) | Complete model-visible tool surface |
+| [Deployment](docs/DEPLOYMENT.md) | Direct and managed host setup |
+| [E2E Testing](docs/E2E_TESTING.md) | Migration, interface, improvement, and rollback rehearsal |
+| [Prompt Cookbook](docs/CHAT_COOKBOOK.md) | Accurate requests for capabilities, triggers, and evolution |
 
----
-
-<p align="center">
-  <strong>Stop re-explaining. Start delegating.</strong><br/>
-  <em>Run your first self-hosted digital employee.</em>
-</p>
-
-<p align="center">
-  <sub>MIT licensed</sub>
-</p>
+MIT licensed.

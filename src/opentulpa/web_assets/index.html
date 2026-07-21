@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OpenTulpa</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <main class="terminal-shell">
+    <header class="session-header">
+      <div class="session-identity">
+        <span class="mode-label">Owner</span>
+        <span class="brand">OpenTulpa</span>
+      </div>
+      <div class="session-actions">
+        <span id="connection-status" class="connection-status" data-state="checking">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="connection-label">checking</span>
+        </span>
+        <button id="new-thread" class="text-button" type="button">new thread</button>
+        <button id="settings" class="text-button" type="button">connection</button>
+      </div>
+    </header>
+    <section id="messages" aria-live="polite">
+      <div id="empty-state" class="empty-state">
+        <div class="constellation" aria-hidden="true">
+          <span class="star star-a">*</span>
+          <span class="star star-b">·</span>
+          <span class="star star-c">✦</span>
+          <span class="star star-d">·</span>
+          <span class="star star-e">*</span>
+          <span class="star star-f">·</span>
+          <strong>OpenTulpa</strong>
+        </div>
+        <p>What are we building?</p>
+      </div>
+    </section>
+    <footer class="prompt-dock">
+      <div id="file-queue" class="file-queue" hidden></div>
+      <form id="composer">
+        <div class="prompt-line">
+          <label class="attach" title="Attach files" aria-label="Attach files">
+            <span aria-hidden="true">+</span>
+            <input id="files" type="file" multiple>
+          </label>
+          <span class="prompt-mode">Owner</span>
+          <textarea id="input" rows="1" placeholder="Message OpenTulpa..."></textarea>
+          <button id="send" type="submit"><span>Run</span><span aria-hidden="true">↵</span></button>
+        </div>
+        <div class="prompt-meta">
+          <span class="runtime-label"><span id="run-indicator" class="run-indicator" aria-hidden="true"></span>Deep Agents · owner</span>
+          <span class="key-hints"><kbd>shift+enter</kbd> new line <span>·</span> <kbd>enter</kbd> run</span>
+        </div>
+      </form>
+    </footer>
+  </main>
+  <dialog id="connection">
+    <form method="dialog">
+      <div class="dialog-title"><h2>Owner connection</h2><button class="text-button" value="cancel" aria-label="Close connection dialog">esc</button></div>
+      <p>Use the deployment owner token when this interface is not running locally.</p>
+      <input class="sr-only" type="text" value="owner" autocomplete="username" tabindex="-1" aria-hidden="true">
+      <label>API token<input id="token" type="password" autocomplete="current-password" placeholder="owner token"></label>
+      <div class="dialog-actions">
+        <button class="secondary" value="cancel">Cancel</button>
+        <button id="save-token" value="ok">Connect</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

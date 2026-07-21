@@ -1,33 +1,26 @@
-"""Integrations: Browser Use, CapSolver, Composio, web-search, and external service connectors."""
+"""Injected external service adapters."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__all__ = ["BrowserUseLocalManager", "CapSolverClient", "ComposioService", "HeadroomService"]
+__all__ = [
+    "ComposioService",
+    "TenantComposioService",
+]
 
 if TYPE_CHECKING:
-    from opentulpa.integrations.browser_use_local import BrowserUseLocalManager
-    from opentulpa.integrations.capsolver import CapSolverClient
     from opentulpa.integrations.composio import ComposioService
-    from opentulpa.integrations.headroom import HeadroomService
+    from opentulpa.integrations.tenant_composio import TenantComposioService
 
 
 def __getattr__(name: str) -> Any:
-    if name == "BrowserUseLocalManager":
-        from opentulpa.integrations.browser_use_local import BrowserUseLocalManager
-
-        return BrowserUseLocalManager
-    if name == "CapSolverClient":
-        from opentulpa.integrations.capsolver import CapSolverClient
-
-        return CapSolverClient
     if name == "ComposioService":
         from opentulpa.integrations.composio import ComposioService
 
         return ComposioService
-    if name == "HeadroomService":
-        from opentulpa.integrations.headroom import HeadroomService
+    if name == "TenantComposioService":
+        from opentulpa.integrations.tenant_composio import TenantComposioService
 
-        return HeadroomService
+        return TenantComposioService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

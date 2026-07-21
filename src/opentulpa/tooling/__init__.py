@@ -1,0 +1,43 @@
+"""Typed product-tool contract for OpenTulpa agents."""
+
+from opentulpa.tooling.contract import (
+    CONTRACT_VERSION,
+    TOOL_SPEC_BY_NAME,
+    TOOL_SPECS,
+    AgentChannel,
+    AgentRunContext,
+    AgentRunKind,
+    ApprovalMode,
+    ExecutionMode,
+    IdempotencyMode,
+    ToolEffect,
+    ToolError,
+    ToolResult,
+    ToolSpec,
+    ToolStatus,
+    get_tool_spec,
+    render_tool_contract_markdown,
+    tool_contract_document,
+    tool_contract_json_schema,
+)
+
+__all__ = [
+    "CONTRACT_VERSION",
+    "TOOL_SPECS",
+    "TOOL_SPEC_BY_NAME",
+    "AgentChannel",
+    "AgentRunContext",
+    "AgentRunKind",
+    "ApprovalMode",
+    "ExecutionMode",
+    "IdempotencyMode",
+    "ToolEffect",
+    "ToolError",
+    "ToolResult",
+    "ToolSpec",
+    "ToolStatus",
+    "get_tool_spec",
+    "render_tool_contract_markdown",
+    "tool_contract_document",
+    "tool_contract_json_schema",
+]

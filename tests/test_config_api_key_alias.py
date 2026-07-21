@@ -40,38 +40,14 @@ def test_settings_accepts_legacy_openrouter_base_url_alias() -> None:
     assert settings.openrouter_base_url == "https://legacy.example/v1"
 
 
-def test_settings_accepts_primary_openai_compatible_embedding_model_name() -> None:
-    settings = Settings(OPENAI_COMPATIBLE_EMBEDDING_MODEL="text-embedding-x")
-    assert settings.openrouter_embedding_model == "text-embedding-x"
-    assert settings.openai_compatible_embedding_model == "text-embedding-x"
-
-
-def test_settings_accepts_legacy_openrouter_embedding_model_alias() -> None:
-    settings = Settings(OPENROUTER_EMBEDDING_MODEL="legacy-embedding-model")
-    assert settings.openrouter_embedding_model == "legacy-embedding-model"
-
-
-def test_settings_accepts_primary_multimodal_llm_name() -> None:
-    settings = Settings(MULTIMODAL_LLM="google/gemini-3-flash-preview")
-    assert settings.multimodal_llm == "google/gemini-3-flash-preview"
-
-
-def test_settings_accepts_legacy_telegram_media_model_alias() -> None:
-    settings = Settings(TELEGRAM_MEDIA_MODEL="google/gemini-3-flash-preview")
-    assert settings.multimodal_llm == "google/gemini-3-flash-preview"
-
-
-def test_settings_default_agent_models_use_glm52(monkeypatch, tmp_path: Path) -> None:
+def test_settings_default_deep_agent_model_uses_kimi_k3(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LLM_MODEL", raising=False)
-    monkeypatch.delenv("WAKE_EXECUTION_MODEL", raising=False)
     monkeypatch.delenv("BUSINESS_KNOWLEDGE_ORACLE_MODEL", raising=False)
 
     settings = Settings()
 
-    assert settings.llm_model == "z-ai/glm-5.2"
-    assert settings.wake_execution_model == "z-ai/glm-5.2"
-    assert settings.workflow_setup_input_classifier_model == "z-ai/glm-5.2"
+    assert settings.llm_model == "moonshotai/kimi-k3"
     assert settings.business_knowledge_oracle_model == "google/gemini-3.1-flash-lite-preview"
 
 
@@ -81,14 +57,6 @@ def test_settings_accepts_business_knowledge_oracle_model_env(monkeypatch) -> No
     settings = Settings()
 
     assert settings.business_knowledge_oracle_model == "provider/oracle-model"
-
-
-def test_settings_accepts_capsolver_api_key_env(monkeypatch) -> None:
-    monkeypatch.setenv("CAPSOLVER_API_KEY", "cap-key")
-
-    settings = Settings()
-
-    assert settings.capsolver_api_key == "cap-key"
 
 
 def test_settings_accepts_browser_use_user_data_dir_env(monkeypatch) -> None:
@@ -134,10 +102,25 @@ def test_settings_defaults_langfuse_base_url_to_us_cloud(monkeypatch) -> None:
     assert settings.langfuse_base_url == "https://us.cloud.langfuse.com"
 
 
+def test_settings_ignores_blank_dotenv_values(monkeypatch, tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LANGFUSE_BASE_URL=\nLANGFUSE_TRACING_ENVIRONMENT=\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LANGFUSE_HOST", "https://example.langfuse.test")
+    monkeypatch.setenv("LANGFUSE_ENVIRONMENT", "staging")
+
+    settings = Settings(_env_file=str(env_file))
+
+    assert settings.langfuse_base_url == "https://example.langfuse.test"
+    assert settings.langfuse_environment == "staging"
+
+
 def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "opentulpa.config.yaml"
     config_file.write_text(
-        "llm_model: from-yaml\nagent_recursion_limit: 42\n"
+        "llm_model: from-yaml\nintake_drafts_db_path: state/intake-drafts.db\n"
         "openai_compatible_base_url: https://yaml.example/v1\n"
         "business_knowledge_oracle_model: oracle-from-yaml\n",
         encoding="utf-8",
@@ -147,15 +130,21 @@ def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) 
     settings = Settings()
 
     assert settings.llm_model == "from-yaml"
-    assert settings.agent_recursion_limit == 42
+    assert settings.intake_drafts_db_path == "state/intake-drafts.db"
     assert settings.openai_compatible_base_url == "https://yaml.example/v1"
     assert settings.business_knowledge_oracle_model == "oracle-from-yaml"
 
 
-def test_settings_accepts_agent_recursion_limit_250() -> None:
-    settings = Settings(agent_recursion_limit=250)
+def test_settings_accepts_deep_agent_completion_limit() -> None:
+    settings = Settings(agent_max_completion_tokens=32_768)
 
-    assert settings.agent_recursion_limit == 250
+    assert settings.agent_max_completion_tokens == 32_768
+
+
+def test_settings_accepts_trusted_model_alias_map() -> None:
+    settings = Settings(model_aliases={"fast": "provider/fast-model"})
+
+    assert settings.model_aliases == {"fast": "provider/fast-model"}
 
 
 def test_dotenv_overrides_yaml_runtime_defaults(monkeypatch, tmp_path: Path) -> None:

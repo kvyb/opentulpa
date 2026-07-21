@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -27,7 +28,10 @@ from opentulpa.intake.workflow_runtime import (
 from opentulpa.intake.workflow_runtime import (
     workflow_requires_intent_match as _workflow_requires_intent_match,
 )
-from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
+from opentulpa.interfaces.telegram.constants import NO_NOTIFY_TOKEN
+
+logger = logging.getLogger(__name__)
+_PUBLIC_SOURCE_ERROR = "intake source is temporarily unavailable"
 
 
 @dataclass
@@ -468,9 +472,17 @@ class WorkflowRunner:
                 conversation_id=conversation_id,
             )
         except Exception as exc:
+            logger.error(
+                "intake conversation load raised",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "workflow_id": str(workflow.get("workflow_id") or ""),
+                    "conversation_id": conversation_id,
+                },
+            )
             detailed_summary = {}
             conversation = {}
-            detail_error = str(exc)
+            detail_error = _PUBLIC_SOURCE_ERROR
         if detail_error:
             error_text = str(detail_error)
             run_state.errors.append(f"{conversation_id}: {error_text}")
@@ -556,15 +568,16 @@ class WorkflowRunner:
                 if stale_result is not None:
                     run_state.result_items.append(stale_result)
                 return None
-            context = await self._refresh_stale_context(
+            refreshed = await self._refresh_stale_context(
                 workflow=workflow,
                 context=context,
                 latest_summary=latest_summary,
                 attempt=attempt,
                 run_state=run_state,
             )
-            if context is None:
+            if refreshed is None:
                 return None
+            context = refreshed
         return context
 
     async def _refresh_stale_context(
@@ -777,15 +790,16 @@ class WorkflowRunner:
             if attempt >= _MAX_DECISION_RECOVERY_ATTEMPTS or feedback is None:
                 break
             recovery_feedback.append(feedback)
-            current, decision_error = await self._decide_recovery_context(
+            recovered, decision_error = await self._decide_recovery_context(
                 workflow=workflow,
                 conversation_id=current.conversation_id,
                 conversation_summary=current.conversation_summary,
                 conversation=current.conversation,
                 execution_feedback=recovery_feedback,
             )
-            if current is None:
+            if recovered is None:
                 return applied, decision_error or apply_error
+            current = recovered
             if _workflow_requires_intent_match(workflow) and not bool(current.decision.get("matches_workflow")):
                 return applied, "recovery decision no longer matches workflow"
         return applied, apply_error

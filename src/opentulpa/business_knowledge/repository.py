@@ -87,6 +87,17 @@ class BusinessKnowledgeRepository:
         with self.conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA_SQL)
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(knowledge_sources)").fetchall()
+            }
+            for name, declaration in (
+                ("title", "TEXT"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("archived", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE knowledge_sources ADD COLUMN {name} {declaration}")
 
     def get_source_row(
         self,
@@ -239,6 +250,96 @@ class BusinessKnowledgeRepository:
                     (customer_id, scope_type, scope_id),
                 ).fetchall()
             )
+
+    def product_source_rows(
+        self,
+        *,
+        customer_id: str,
+        include_archived: bool = False,
+        query: str = "",
+        limit: int = 200,
+    ) -> list[sqlite3.Row]:
+        conditions = [
+            "s.customer_id = ?",
+            "s.scope_type = 'customer_business'",
+            "s.scope_id = 'library'",
+        ]
+        values: list[Any] = [customer_id]
+        if not include_archived:
+            conditions.append("s.archived = 0")
+        safe_query = str(query or "").strip().casefold()
+        if safe_query:
+            like = f"%{safe_query}%"
+            conditions.append(
+                """
+                (lower(s.filename) LIKE ? OR lower(COALESCE(s.title, '')) LIKE ?
+                 OR lower(COALESCE(s.tags_json, '')) LIKE ? OR EXISTS (
+                    SELECT 1 FROM knowledge_sections x
+                    WHERE x.customer_id = s.customer_id
+                      AND x.scope_type = s.scope_type
+                      AND x.scope_id = s.scope_id
+                      AND x.file_id = s.file_id
+                      AND lower(x.content) LIKE ?
+                 ))
+                """
+            )
+            values.extend((like, like, like, like))
+        values.append(max(1, min(int(limit), 200)))
+        with self.conn() as conn:
+            return list(
+                conn.execute(
+                    f"""
+                    SELECT s.* FROM knowledge_sources s
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY s.indexed_at DESC, s.file_id ASC
+                    LIMIT ?
+                    """,
+                    values,
+                ).fetchall()
+            )
+
+    def set_product_metadata(
+        self,
+        *,
+        customer_id: str,
+        file_id: str,
+        title: str | None,
+        tags: list[str],
+        archived: bool = False,
+    ) -> None:
+        with self.conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE knowledge_sources
+                SET title = ?, tags_json = ?, archived = ?
+                WHERE customer_id = ? AND scope_type = 'customer_business'
+                  AND scope_id = 'library' AND file_id = ?
+                """,
+                (
+                    str(title or "").strip() or None,
+                    _json_dumps(_unique_strings(tags)),
+                    int(archived),
+                    customer_id,
+                    file_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(file_id)
+            conn.commit()
+
+    def archive_product_source(self, *, customer_id: str, file_id: str) -> None:
+        with self.conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE knowledge_sources SET archived = 1
+                WHERE customer_id = ? AND scope_type = 'customer_business'
+                  AND scope_id = 'library' AND file_id = ?
+                """,
+                (customer_id, file_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(file_id)
+            conn.commit()
 
     def get_preflight_cache(self, *, customer_id: str, cache_key: str) -> dict[str, Any]:
         with self.conn() as conn:

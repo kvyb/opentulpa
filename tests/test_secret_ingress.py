@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from opentulpa.secrets import (
+    AesGcmHostKeyCipher,
+    SecretIngressHook,
+    SecretIngressService,
+    SecretVault,
+    SecretVaultService,
+)
+
+
+def _ingress(tmp_path: Path) -> tuple[SecretIngressService, SecretVault]:
+    vault = SecretVault(
+        tmp_path / "secrets.db",
+        cipher=AesGcmHostKeyCipher(b"k" * 32),
+    )
+    return SecretIngressService(SecretVaultService(vault)), vault
+
+
+def _assert_hook(hook: SecretIngressHook) -> SecretIngressHook:
+    return hook
+
+
+def _assert_absent_from_database(vault: SecretVault, *values: str) -> None:
+    for path in (vault.db_path, vault.db_path.with_name(f"{vault.db_path.name}-wal")):
+        if not path.exists():
+            continue
+        stored = path.read_bytes()
+        for value in values:
+            assert value.encode() not in stored
+
+
+def test_ingress_encrypts_pasted_credentials_and_returns_only_handles(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    hook = _assert_hook(ingress)
+    telegram = "1234567890:AAEabcdefghijklmnopqrstuvwxyz012345678"
+    api_token = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+
+    sanitized = hook(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"Use Telegram {telegram} and this API token {api_token}.",
+    )
+
+    assert sanitized == (
+        "Use Telegram secret://telegram_bot_token and this API token "
+        "secret://api_token."
+    )
+    assert telegram not in sanitized
+    assert api_token not in sanitized
+    telegram_handle = vault.get_handle(
+        tenant_id="tenant-a",
+        secret_id="telegram_bot_token",
+    )
+    api_handle = vault.get_handle(tenant_id="tenant-a", secret_id="api_token")
+    assert telegram_handle is not None and telegram_handle.revision == 2
+    assert api_handle is not None and api_handle.revision == 2
+    _assert_absent_from_database(vault, telegram, api_token)
+
+
+def test_ingress_rotates_existing_handles_and_leaves_normal_text_unchanged(
+    tmp_path: Path,
+) -> None:
+    ingress, vault = _ingress(tmp_path)
+    first_telegram = "1234567890:AAEabcdefghijklmnopqrstuvwxyz012345678"
+    first_api = "sk-first_abcdefghijklmnopqrstuvwxyz0123456789"
+    ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"{first_telegram} {first_api}",
+    )
+    second_telegram = "9876543210:AAFabcdefghijklmnopqrstuvwxyz987654321"
+    second_api = "sk-second_abcdefghijklmnopqrstuvwxyz9876543210"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"Replace them: {second_telegram} and {second_api}",
+    )
+
+    assert result.text == (
+        "Replace them: secret://telegram_bot_token and secret://api_token"
+    )
+    assert {handle.id: handle.revision for handle in result.handles} == {
+        "telegram_bot_token": 3,
+        "api_token": 3,
+    }
+    assert ingress(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text="No credentials here.",
+    ) == "No credentials here."
+    _assert_absent_from_database(
+        vault,
+        first_telegram,
+        first_api,
+        second_telegram,
+        second_api,
+    )
+
+
+def test_ingress_uses_separate_handles_for_multiple_tokens_of_one_kind(
+    tmp_path: Path,
+) -> None:
+    ingress, vault = _ingress(tmp_path)
+    first = "sk-first_abcdefghijklmnopqrstuvwxyz0123456789"
+    second = "sk-second_abcdefghijklmnopqrstuvwxyz9876543210"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"primary={first} fallback={second}",
+    )
+
+    assert result.text == "primary=secret://api_token fallback=secret://api_token_2"
+    assert [handle.id for handle in result.handles] == ["api_token", "api_token_2"]
+    assert vault.get_handle(tenant_id="tenant-a", secret_id="api_token") is not None
+    assert vault.get_handle(tenant_id="tenant-a", secret_id="api_token_2") is not None
+    _assert_absent_from_database(vault, first, second)
+
+
+def test_ingress_does_not_restore_a_revoked_handle(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    first = "sk-first_abcdefghijklmnopqrstuvwxyz0123456789"
+    ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=first,
+    )
+    revoked = vault.revoke(
+        tenant_id="tenant-a",
+        secret_id="api_token",
+        expected_revision=2,
+        updated_by="owner-a",
+    )
+    replacement = "sk-second_abcdefghijklmnopqrstuvwxyz9876543210"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=replacement,
+    )
+
+    assert revoked.state == "revoked"
+    assert result.text == "secret://api_token_replacement_2"
+    assert result.handles[0].id == "api_token_replacement_2"
+    assert vault.get_handle(tenant_id="tenant-a", secret_id="api_token") == revoked
+    _assert_absent_from_database(vault, first, replacement)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -405,6 +406,46 @@ class CustomerProfileService:
             locale=self._optional_text(row["locale"]),
             source=str(row["source"]),
             updated_at=str(row["updated_at"]),
+        )
+
+    def update_profile(
+        self,
+        customer_id: str,
+        *,
+        updates: Mapping[str, object],
+        source: str = "agent",
+    ) -> CustomerProfileRecord:
+        """Atomically update the model-visible profile fields for one customer."""
+
+        allowed = {"directive_text", "locale", "utc_offset"}
+        unexpected = sorted(set(updates) - allowed)
+        if unexpected:
+            raise ValueError(f"unsupported profile fields: {', '.join(unexpected)}")
+        if not updates:
+            raise ValueError("profile updates are required")
+
+        values: dict[str, str | None] = {}
+        for field in allowed:
+            if field not in updates:
+                values[field] = None
+                continue
+            raw = updates[field]
+            value = str(raw or "").strip()
+            if field == "utc_offset" and value:
+                value = _normalize_utc_offset(value)
+            if field == "locale" and len(value) > 100:
+                raise ValueError("locale must be at most 100 characters")
+            if field == "directive_text" and len(value) > 20_000:
+                raise ValueError("directive_text must be at most 20000 characters")
+            # Empty strings intentionally clear fields; None means preserve in _upsert.
+            values[field] = value
+
+        return self._upsert(
+            customer_id,
+            directive_text=values["directive_text"],
+            utc_offset=values["utc_offset"],
+            locale=values["locale"],
+            source=source,
         )
 
     def list_customer_summaries(self) -> list[dict[str, str]]:

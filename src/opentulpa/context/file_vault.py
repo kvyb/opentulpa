@@ -47,7 +47,7 @@ def _extract_docx_text(raw_bytes: bytes) -> str:
 
 def _extract_pdf_text(raw_bytes: bytes) -> str:
     try:
-        from pypdf import PdfReader
+        from pypdf import PdfReader  # type: ignore[import-not-found]
     except Exception:
         return ""
     try:
@@ -271,6 +271,33 @@ class FileVaultService:
             return stored_path.read_bytes()
         except Exception:
             return None
+
+    def delete_file(self, customer_id: str, file_id: str) -> bool:
+        """Delete one tenant-owned file and its metadata without trusting the stored path."""
+        cid = str(customer_id or "").strip()
+        fid = str(file_id or "").strip()
+        record = self.get_file(cid, fid)
+        if not record:
+            return False
+        try:
+            stored_path = Path(str(record.get("stored_path", ""))).resolve()
+            stored_path.relative_to(self.root_dir)
+        except (OSError, ValueError):
+            return False
+        try:
+            if stored_path.exists():
+                if not stored_path.is_file():
+                    return False
+                stored_path.unlink()
+        except OSError:
+            return False
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM uploaded_files WHERE customer_id=? AND id=?",
+                (cid, fid),
+            )
+            conn.commit()
+        return bool(cursor.rowcount)
 
     def set_ai_summary(self, customer_id: str, file_id: str, ai_summary: str) -> dict[str, Any] | None:
         cid = str(customer_id or "").strip()

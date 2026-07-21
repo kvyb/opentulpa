@@ -12,8 +12,8 @@ from opentulpa.integrations.composio_instagram import InstagramComposioAdapter
 
 def _load_composio_sdk() -> tuple[type[Any], type[Any]]:
     try:
-        from composio import Composio as ComposioClient
-        from composio_langchain import LangchainProvider
+        from composio import Composio as ComposioClient  # type: ignore[import-not-found]
+        from composio_langchain import LangchainProvider  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:
         if str(getattr(exc, "name", "") or "") in {"composio", "composio_langchain"}:
             raise RuntimeError(
