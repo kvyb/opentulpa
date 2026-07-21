@@ -61,6 +61,21 @@ class _ToolCapableMessageModel(FakeMessagesListChatModel):
         return self
 
 
+class _AttachmentResolver:
+    def __init__(self, records: dict[tuple[str, str], tuple[dict[str, Any], bytes]]) -> None:
+        self.records = records
+        self.reads: list[tuple[str, str]] = []
+
+    def get_file(self, tenant_id: str, file_id: str) -> dict[str, Any] | None:
+        resolved = self.records.get((tenant_id, file_id))
+        return dict(resolved[0]) if resolved is not None else None
+
+    def read_file_bytes(self, tenant_id: str, file_id: str) -> bytes | None:
+        self.reads.append((tenant_id, file_id))
+        resolved = self.records.get((tenant_id, file_id))
+        return resolved[1] if resolved is not None else None
+
+
 class _FailingGraph:
     def __init__(self, error: str) -> None:
         self._error = error
@@ -288,6 +303,7 @@ def _service(
     run_observer: Any | None = None,
     agent_specs: AgentSpecStore | None = None,
     dynamic_tools: TenantDynamicToolRegistry | None = None,
+    attachment_resolver: Any | None = None,
 ) -> DeepAgentService:
     return DeepAgentService(
         api_key="",
@@ -303,7 +319,91 @@ def _service(
         run_observer=run_observer,
         agent_specs=agent_specs,
         dynamic_tools=dynamic_tools,
+        attachment_resolver=attachment_resolver,
     )
+
+
+def test_request_content_inlines_tenant_owned_images_and_text(tmp_path: Path) -> None:
+    resolver = _AttachmentResolver(
+        {
+            ("tenant-1", "image-1"): (
+                {
+                    "original_filename": "screen.png",
+                    "mime_type": "image/png",
+                    "text_excerpt": "",
+                },
+                b"png-bytes",
+            ),
+            ("tenant-1", "text-1"): (
+                {
+                    "original_filename": "notes.txt",
+                    "mime_type": "text/plain",
+                    "text_excerpt": "exact file text",
+                },
+                b"exact file text",
+            ),
+        }
+    )
+    service = _service(
+        tmp_path,
+        _ToolCapableTextModel(responses=["unused"]),
+        attachment_resolver=resolver,
+    )
+
+    content = service._request_content(  # noqa: SLF001
+        AgentRunRequest(
+            context=_context(),
+            text="Inspect these",
+            file_ids=("image-1", "text-1", "other-tenant-file"),
+        )
+    )
+
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert "not filesystem paths" in content[0]["text"]
+    image_blocks = [block for block in content if block["type"] == "image_url"]
+    assert image_blocks == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,cG5nLWJ5dGVz"},
+        }
+    ]
+    assert any("exact file text" in block.get("text", "") for block in content)
+    assert any("unavailable to this tenant" in block.get("text", "") for block in content)
+    assert resolver.reads == [("tenant-1", "image-1")]
+
+
+def test_request_content_inlines_pdf_as_native_file(tmp_path: Path) -> None:
+    resolver = _AttachmentResolver(
+        {
+            ("tenant-1", "pdf-1"): (
+                {
+                    "original_filename": "scan.pdf",
+                    "mime_type": "application/pdf",
+                    "text_excerpt": "",
+                },
+                b"%PDF-smoke",
+            )
+        }
+    )
+    service = _service(
+        tmp_path,
+        _ToolCapableTextModel(responses=["unused"]),
+        attachment_resolver=resolver,
+    )
+
+    content = service._request_content(  # noqa: SLF001
+        AgentRunRequest(context=_context(), text="Read it", file_ids=("pdf-1",))
+    )
+
+    assert isinstance(content, list)
+    assert content[-1] == {
+        "type": "file",
+        "file": {
+            "filename": "scan.pdf",
+            "file_data": "data:application/pdf;base64,JVBERi1zbW9rZQ==",
+        },
+    }
 
 
 @pytest.mark.asyncio

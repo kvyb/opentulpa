@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -90,6 +91,9 @@ _TRACE_PATH_KEYS = frozenset({"path", "uri"})
 _TRACE_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![\w:/])(?:[A-Za-z]:\\[^\s\"']+|/(?:[^\s/\"']+/)*[^\s/\"']+)"
 )
+_INLINE_IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
+_MAX_INLINE_ATTACHMENT_BYTES = 10 * 1024 * 1024
+_MAX_INLINE_ATTACHMENTS_BYTES = 20 * 1024 * 1024
 
 _OWNER_PRODUCT_TOOL_NAMES = frozenset(TOOL_SPEC_BY_NAME)
 _ROUTINE_PRODUCT_TOOL_NAMES = frozenset(
@@ -190,6 +194,13 @@ def _trace_input_summary(graph_input: Any) -> str:
             content = getattr(message, "content", None)
         if isinstance(content, str) and content.strip():
             parts.append(content.strip())
+        elif isinstance(content, list | tuple):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
     return _trace_text_preview("\n".join(parts))
 
 
@@ -238,6 +249,14 @@ class AgentRunObserver(Protocol):
     """Receive redacted persisted terminal snapshots outside the agent loop."""
 
     async def __call__(self, snapshot: AgentRunSnapshot) -> None: ...
+
+
+class AgentAttachmentResolver(Protocol):
+    """Resolve only tenant-owned uploads for native model attachment blocks."""
+
+    def get_file(self, tenant_id: str, file_id: str) -> dict[str, Any] | None: ...
+
+    def read_file_bytes(self, tenant_id: str, file_id: str) -> bytes | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +387,7 @@ class DeepAgentService:
         container_cli: str = "docker",
         execution_provider: TenantExecutionProvider | None = None,
         run_observer: AgentRunObserver | None = None,
+        attachment_resolver: AgentAttachmentResolver | None = None,
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
@@ -390,6 +410,7 @@ class DeepAgentService:
         self._container_cli = str(container_cli or "docker").strip() or "docker"
         self._execution_provider = execution_provider
         self._run_observer = run_observer
+        self._attachment_resolver = attachment_resolver
         self._checkpoint_conn: aiosqlite.Connection | None = None
         self._store_cm: Any | None = None
         self._checkpointer: AsyncSqliteSaver | None = None
@@ -569,7 +590,7 @@ class DeepAgentService:
             "messages": [
                 {
                     "role": "user",
-                    "content": self._request_text(request),
+                    "content": self._request_content(request),
                 }
             ]
         }
@@ -2572,8 +2593,87 @@ class DeepAgentService:
         text = str(request.text).strip()
         if request.file_ids:
             attached = ", ".join(request.file_ids)
-            text = f"{text}\n\nAttached file IDs: {attached}"
+            text = (
+                f"{text}\n\nAttached tenant file IDs: {attached}\n"
+                "These IDs are not filesystem paths. Their supported contents are attached "
+                "to this message; use file_get or file_inspect for additional metadata and "
+                "extracted text. Do not pass a file ID to read_file."
+            )
         return text
+
+    def _request_content(self, request: AgentRunRequest) -> str | list[dict[str, Any]]:
+        text = self._request_text(request)
+        resolver = self._attachment_resolver
+        if resolver is None or not request.file_ids:
+            return text
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        total_inline_bytes = 0
+        for file_id in request.file_ids:
+            record = resolver.get_file(request.context.tenant_id, file_id)
+            if record is None:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"Attachment {file_id} is unavailable to this tenant.",
+                    }
+                )
+                continue
+
+            filename = str(record.get("original_filename") or file_id)
+            mime_type = str(record.get("mime_type") or "application/octet-stream").lower()
+            text_excerpt = str(record.get("text_excerpt") or "").strip()
+            raw_bytes: bytes | None = None
+            if mime_type in _INLINE_IMAGE_MIME_TYPES or mime_type == "application/pdf":
+                raw_bytes = resolver.read_file_bytes(request.context.tenant_id, file_id)
+
+            can_inline = (
+                raw_bytes is not None
+                and len(raw_bytes) <= _MAX_INLINE_ATTACHMENT_BYTES
+                and total_inline_bytes + len(raw_bytes) <= _MAX_INLINE_ATTACHMENTS_BYTES
+            )
+            label = f"Attachment {file_id}: {filename} ({mime_type})"
+            if can_inline and raw_bytes is not None:
+                encoded = base64.b64encode(raw_bytes).decode("ascii")
+                total_inline_bytes += len(raw_bytes)
+                content.append({"type": "text", "text": label})
+                if mime_type in _INLINE_IMAGE_MIME_TYPES:
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+                        }
+                    )
+                else:
+                    content.append(
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": filename,
+                                "file_data": f"data:{mime_type};base64,{encoded}",
+                            },
+                        }
+                    )
+                continue
+
+            if text_excerpt:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"{label}\n<file-content>\n{text_excerpt}\n</file-content>",
+                    }
+                )
+            else:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{label}\nNative content was not inlined. Use the file tools "
+                            "for available metadata or extracted content."
+                        ),
+                    }
+                )
+        return content
 
     def _require_started(self) -> None:
         if not self.started:

@@ -1131,6 +1131,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             ),
             container_cli=settings.sandbox_container_cli,
             execution_provider=sandbox_execution,
+            attachment_resolver=file_vault,
         )
         deferred_agent.bind(agent_service)
 
