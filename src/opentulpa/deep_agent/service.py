@@ -1784,6 +1784,7 @@ class DeepAgentService:
         resumed: bool,
     ) -> AsyncIterator[AgentRunEvent]:
         final_parts: list[str] = []
+        pending_ai_chunk: AIMessageChunk | None = None
         interrupted = False
         started_data: dict[str, Any] = {
             "thread_id": context.thread_id,
@@ -1832,7 +1833,25 @@ class DeepAgentService:
                             )
                             if metadata.get("lc_source") == "summarization":
                                 continue
-                            for event_type, event_data, text in self._message_events(message):
+                            message_events = self._message_events(message)
+                            if isinstance(message, AIMessageChunk):
+                                pending_ai_chunk = (
+                                    message
+                                    if pending_ai_chunk is None
+                                    else pending_ai_chunk + message
+                                )
+                                if message.chunk_position == "last":
+                                    message_events.extend(
+                                        self._tool_start_events(pending_ai_chunk)
+                                    )
+                                    pending_ai_chunk = None
+                            elif isinstance(message, ToolMessage) and pending_ai_chunk is not None:
+                                message_events = [
+                                    *self._tool_start_events(pending_ai_chunk),
+                                    *message_events,
+                                ]
+                                pending_ai_chunk = None
+                            for event_type, event_data, text in message_events:
                                 if text:
                                     final_parts.append(text)
                                 event = await self._append_event(
@@ -1978,18 +1997,8 @@ class DeepAgentService:
             text = DeepAgentService._message_text(message)
             if text:
                 events.append(("message.delta", {"text": text}, text))
-            for call in getattr(message, "tool_calls", []) or []:
-                events.append(
-                    (
-                        "tool.started",
-                        {
-                            "name": str(call.get("name", ""))[:200],
-                            "call_id": str(call.get("id", ""))[:200],
-                            "arguments": _bounded_trace_value(call.get("args", {})),
-                        },
-                        "",
-                    )
-                )
+            if isinstance(message, AIMessage) and not isinstance(message, AIMessageChunk):
+                events.extend(DeepAgentService._tool_start_events(message))
         elif isinstance(message, ToolMessage):
             ok = str(getattr(message, "status", "success")) != "error"
             result = message.content
@@ -2010,6 +2019,29 @@ class DeepAgentService:
                 )
             )
             events.extend(DeepAgentService._artifact_events(message))
+        return events
+
+    @staticmethod
+    def _tool_start_events(
+        message: AIMessage | AIMessageChunk,
+    ) -> list[tuple[AgentRunEventType, dict[str, Any], str]]:
+        events: list[tuple[AgentRunEventType, dict[str, Any], str]] = []
+        for call in message.tool_calls:
+            name = str(call.get("name") or "").strip()
+            call_id = str(call.get("id") or "").strip()
+            if not name or not call_id or call_id.casefold() == "none":
+                continue
+            events.append(
+                (
+                    "tool.started",
+                    {
+                        "name": name[:200],
+                        "call_id": call_id[:200],
+                        "arguments": _bounded_trace_value(call.get("args", {})),
+                    },
+                    "",
+                )
+            )
         return events
 
     @staticmethod

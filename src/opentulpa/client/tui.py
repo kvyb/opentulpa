@@ -19,6 +19,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
@@ -49,7 +50,6 @@ class _ToolView:
     arguments: Any
     ok: bool | None = None
     result: Any = None
-    expanded: bool = False
 
 
 class _TranscriptLexer(Lexer):
@@ -65,14 +65,6 @@ class _TranscriptLexer(Lexer):
                 style = "class:transcript.agent-label"
             elif line.startswith("│"):
                 style = "class:transcript.user"
-            elif stripped.startswith("▣"):
-                style = "class:transcript.tool-running"
-            elif stripped.startswith("✓"):
-                style = "class:transcript.tool-ok"
-            elif stripped.startswith("×"):
-                style = "class:transcript.tool-error"
-            elif line.startswith("      "):
-                style = "class:transcript.tool-detail"
             elif stripped.startswith("["):
                 style = "class:transcript.notice"
             else:
@@ -116,9 +108,11 @@ class OpenTulpaTUI:
         self.notification_cursor = 0
         self.seen_run_ids: set[str] = set()
         self.runs_with_text: set[str] = set()
-        self._transcript: list[str | _ToolView] = []
+        self._transcript: list[str] = []
         self._tools: list[_ToolView] = []
         self._active_tools: dict[str, _ToolView] = {}
+        self._tool_history_expanded = False
+        self._selected_tool_number: int | None = None
         self._phase = "idle"
         self._spinner_index = 0
         self._closed = False
@@ -202,6 +196,15 @@ class OpenTulpaTUI:
                     FormattedTextControl(self._activity),
                     height=1,
                     style="class:activity",
+                ),
+                ConditionalContainer(
+                    Window(
+                        FormattedTextControl(self._tool_activity),
+                        height=self._tool_activity_height,
+                        wrap_lines=True,
+                        style="class:tools",
+                    ),
+                    filter=Condition(self._show_tool_activity),
                 ),
                 ConditionalContainer(
                     HSplit(
@@ -306,6 +309,86 @@ class OpenTulpaTUI:
     def _show_approval_panel(self) -> bool:
         return bool(self.approvals) and not self.busy and not self._approval_click_pending
 
+    def _show_tool_activity(self) -> bool:
+        return bool(self._tools)
+
+    def _tool_activity_height(self) -> Dimension:
+        if not self._tool_history_expanded:
+            return Dimension.exact(1)
+        visible_count = min(len(self._tools), 8)
+        detail_lines = 7 if self._selected_tool_number is not None else 0
+        hidden_notice = 1 if len(self._tools) > visible_count else 0
+        return Dimension.exact(1 + visible_count + detail_lines + hidden_notice)
+
+    def _tool_activity(self) -> FormattedText:
+        if not self._tools:
+            return FormattedText()
+        latest = next(reversed(self._active_tools.values()), self._tools[-1])
+        marker, marker_style = _tool_marker(latest)
+        count = len(self._tools)
+        noun = "tool" if count == 1 else "tools"
+        toggle = "▾" if self._tool_history_expanded else "▸"
+        fragments: list[tuple[Any, ...]] = [
+            (
+                "class:tools.summary",
+                f" {toggle} {count} {noun}  ",
+                self._tool_mouse_handler(None),
+            ),
+            (marker_style, f"{marker} ", self._tool_mouse_handler(None)),
+            (
+                "class:tools.latest",
+                _tool_label(latest.name, latest.arguments),
+                self._tool_mouse_handler(None),
+            ),
+        ]
+        if not self._tool_history_expanded:
+            fragments.append(("class:tools.hint", "  click or ctrl-t for history"))
+            return FormattedText(fragments)
+
+        fragments.append(("class:tools.hint", "  click a tool for details"))
+        visible_tools = self._tools[-8:]
+        for tool in visible_tools:
+            marker, marker_style = _tool_marker(tool)
+            selected = tool.number == self._selected_tool_number
+            pointer = "›" if selected else " "
+            handler = self._tool_mouse_handler(tool.number)
+            fragments.extend(
+                [
+                    ("class:tools.row", f"\n {pointer} ", handler),
+                    (marker_style, f"{marker} ", handler),
+                    (
+                        "class:tools.row.selected" if selected else "class:tools.row",
+                        f"{tool.number:<2} {_tool_label(tool.name, tool.arguments)}",
+                        handler,
+                    ),
+                ]
+            )
+            if selected:
+                fragments.extend(_tool_detail_fragments(tool))
+        hidden_count = len(self._tools) - len(visible_tools)
+        if hidden_count:
+            fragments.append(
+                ("class:tools.hint", f"\n   + {hidden_count} earlier; use /tool NUMBER")
+            )
+        return FormattedText(fragments)
+
+    def _tool_mouse_handler(self, number: int | None) -> Callable[[MouseEvent], None]:
+        def handle(mouse_event: MouseEvent) -> None:
+            if mouse_event.event_type != MouseEventType.MOUSE_UP:
+                return
+            if number is None:
+                self._tool_history_expanded = not self._tool_history_expanded
+                if not self._tool_history_expanded:
+                    self._selected_tool_number = None
+            else:
+                self._tool_history_expanded = True
+                self._selected_tool_number = (
+                    None if self._selected_tool_number == number else number
+                )
+            self._invalidate()
+
+        return handle
+
     def _approval_summary(self) -> FormattedText:
         current = self._current_approval()
         if current is None:
@@ -407,6 +490,10 @@ class OpenTulpaTUI:
             self._append("[busy] Wait for the current run, approve it, or use /cancel.\n")
             return
         self._append(f"YOU\n{_user_block(text)}\n\nOPENTULPA\n")
+        self._tools.clear()
+        self._active_tools.clear()
+        self._tool_history_expanded = False
+        self._selected_tool_number = None
         self.busy = True
         self.state = "working"
         self._phase = "thinking"
@@ -529,7 +616,17 @@ class OpenTulpaTUI:
 
     def _start_tool(self, data: dict[str, Any]) -> None:
         call_id = str(data.get("call_id") or "").strip()
-        name = str(data.get("name") or "tool").strip() or "tool"
+        name = str(data.get("name") or "").strip()
+        if not call_id or call_id.casefold() == "none" or not name:
+            return
+        existing = next((item for item in self._tools if item.call_id == call_id), None)
+        if existing is not None:
+            arguments = data.get("arguments")
+            if arguments:
+                existing.arguments = arguments
+            self._active_tools[call_id] = existing
+            self._invalidate()
+            return
         tool = _ToolView(
             number=len(self._tools) + 1,
             call_id=call_id or f"{name}:{len(self._tools) + 1}",
@@ -538,8 +635,7 @@ class OpenTulpaTUI:
         )
         self._tools.append(tool)
         self._active_tools[tool.call_id] = tool
-        self._transcript.append(tool)
-        self._refresh_output()
+        self._invalidate()
 
     def _complete_tool(self, data: dict[str, Any]) -> None:
         call_id = str(data.get("call_id") or "").strip()
@@ -558,29 +654,27 @@ class OpenTulpaTUI:
                 arguments={},
             )
             self._tools.append(tool)
-            self._transcript.append(tool)
         self._active_tools.pop(tool.call_id, None)
         tool.ok = data.get("ok") is not False
         tool.result = data.get("result") if tool.ok else data.get("error")
-        self._refresh_output()
+        self._invalidate()
 
     def _toggle_tool(self, number: int | None = None) -> None:
         if not self._tools:
             self._append("[no tool calls in this session]\n")
             return
-        tool = (
-            self._tools[-1]
-            if number is None
-            else next(
-                (item for item in self._tools if item.number == number),
-                None,
-            )
-        )
-        if tool is None:
+        if number is None:
+            self._tool_history_expanded = not self._tool_history_expanded
+            if not self._tool_history_expanded:
+                self._selected_tool_number = None
+            self._invalidate()
+            return
+        if not any(item.number == number for item in self._tools):
             self._append(f"[unknown tool call: {number}]\n")
             return
-        tool.expanded = not tool.expanded
-        self._refresh_output()
+        self._tool_history_expanded = True
+        self._selected_tool_number = None if self._selected_tool_number == number else number
+        self._invalidate()
 
     async def _animate_activity(self) -> None:
         while not self._closed:
@@ -729,6 +823,8 @@ class OpenTulpaTUI:
         self.attachments.clear()
         self._tools.clear()
         self._active_tools.clear()
+        self._tool_history_expanded = False
+        self._selected_tool_number = None
         self._transcript.clear()
         self._refresh_output()
         self._append(
@@ -929,16 +1025,14 @@ class OpenTulpaTUI:
 
     def _append(self, value: str) -> None:
         rendered = str(value)
-        if self._transcript and isinstance(self._transcript[-1], str):
+        if self._transcript:
             self._transcript[-1] += rendered
         else:
             self._transcript.append(rendered)
         self._refresh_output()
 
     def _refresh_output(self) -> None:
-        updated = "".join(
-            item if isinstance(item, str) else _render_tool(item) for item in self._transcript
-        )
+        updated = "".join(self._transcript)
         document = Document(updated, cursor_position=len(updated))
         self.output.buffer.set_document(document, bypass_readonly=True)
         self._invalidate()
@@ -991,27 +1085,34 @@ def _tool_label(name: str, arguments: Any) -> str:
     return display_name
 
 
-def _render_tool(tool: _ToolView) -> str:
+def _tool_marker(tool: _ToolView) -> tuple[str, str]:
     if tool.ok is None:
-        marker = "▣"
-    elif tool.ok:
-        marker = "✓"
-    else:
-        marker = "×"
-    value = f"\n  {marker} {tool.number:<2} {_tool_label(tool.name, tool.arguments)}"
-    if not tool.expanded:
-        return f"{value}\n"
-    value += "  [ctrl-t to collapse]\n"
-    value += _detail_block("arguments", tool.arguments)
-    if tool.ok is not None:
-        value += _detail_block("result" if tool.ok else "error", tool.result)
-    return value
+        return "●", "class:tools.running"
+    if tool.ok:
+        return "✓", "class:tools.ok"
+    return "×", "class:tools.error"
 
 
-def _detail_block(label: str, value: Any) -> str:
-    rendered = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-    lines = rendered.splitlines() or [""]
-    return f"      {label}\n" + "".join(f"        {line}\n" for line in lines)
+def _tool_detail_fragments(tool: _ToolView) -> list[tuple[str, str]]:
+    outcome_label = "result" if tool.ok is not False else "error"
+    outcome = "pending" if tool.ok is None else _compact_json(tool.result)
+    return [
+        ("class:tools.detail", f"\n      call  {tool.call_id}"),
+        ("class:tools.detail", f"\n      input {_compact_json(tool.arguments)}"),
+        ("class:tools.detail", f"\n      {outcome_label:<6}{outcome}"),
+    ]
+
+
+def _compact_json(value: Any, *, limit: int = 180) -> str:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ": "),
+        default=str,
+    )
+    rendered = " ".join(rendered.split())
+    return rendered if len(rendered) <= limit else f"{rendered[: limit - 3]}..."
 
 
 _HELP = """COMMANDS
@@ -1025,7 +1126,7 @@ _HELP = """COMMANDS
   /reject [ID]         reject an action
   /edit ID JSON        approve with edited arguments
   /cancel              cancel the active run
-  /tool [NUMBER]       expand or collapse sanitized tool details
+  /tool [NUMBER]       toggle tool history or sanitized call details
   /logs                show recent server runtime logs
   /settings            show connection and thread settings
   /disconnect          forget this server and credential
@@ -1043,6 +1144,16 @@ _STYLE = Style.from_dict(
         "prompt": "#ffffff bold",
         "activity": "bg:#000000 #777777",
         "activity.spinner": "bg:#000000 #5c9cf5 bold",
+        "tools": "bg:#0b0b0b #777777",
+        "tools.summary": "bg:#0b0b0b #888888 bold",
+        "tools.latest": "bg:#0b0b0b #dddddd",
+        "tools.hint": "bg:#0b0b0b #444444",
+        "tools.row": "bg:#0b0b0b #888888",
+        "tools.row.selected": "bg:#0b0b0b #ffffff bold",
+        "tools.running": "bg:#0b0b0b #5c9cf5 bold",
+        "tools.ok": "bg:#0b0b0b #66d9c2",
+        "tools.error": "bg:#0b0b0b #ff737d",
+        "tools.detail": "bg:#0b0b0b #666666",
         "approval": "bg:#111111 #e0e0e0",
         "approval.title": "bg:#111111 #e5c07b bold",
         "approval.tool": "bg:#111111 #ffffff bold",
@@ -1066,10 +1177,6 @@ _STYLE = Style.from_dict(
         "transcript.user-label": "bg:#000000 #777777 bold",
         "transcript.agent-label": "bg:#000000 #ffffff bold",
         "transcript.user": "bg:#111111 #e0e0e0",
-        "transcript.tool-running": "bg:#000000 #777777",
-        "transcript.tool-ok": "bg:#000000 #66d9c2",
-        "transcript.tool-error": "bg:#000000 #ff737d",
-        "transcript.tool-detail": "bg:#000000 #666666",
         "transcript.notice": "bg:#000000 #e5c07b",
     }
 )

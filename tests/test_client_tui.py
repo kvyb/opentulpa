@@ -108,9 +108,10 @@ async def test_tui_shows_activity_and_expandable_sanitized_tool_details(
                 },
             )
         )
-        assert "▣ 1" in interface.output.text
-        assert "Read File  workspace/notes.txt" in interface.output.text
-        assert "arguments" not in interface.output.text
+        collapsed = "".join(item[1] for item in interface._tool_activity())  # noqa: SLF001
+        assert "▸ 1 tool" in collapsed
+        assert "● Read File  workspace/notes.txt" in collapsed
+        assert "input" not in collapsed
 
         interface._render(  # noqa: SLF001
             ClientEvent(
@@ -126,11 +127,57 @@ async def test_tui_shows_activity_and_expandable_sanitized_tool_details(
                 },
             )
         )
-        assert "✓ 1" in interface.output.text
+        collapsed = "".join(item[1] for item in interface._tool_activity())  # noqa: SLF001
+        assert "✓ Read File  workspace/notes.txt" in collapsed
         assert await interface._command("/tool 1") is True  # noqa: SLF001
-        assert "arguments" in interface.output.text
-        assert '"path": "workspace/notes.txt"' in interface.output.text
-        assert '"status": "ok"' in interface.output.text
+        expanded = "".join(item[1] for item in interface._tool_activity())  # noqa: SLF001
+        assert "▾ 1 tool" in expanded
+        assert "call  call-1" in expanded
+        assert 'input {"path": "workspace/notes.txt"}' in expanded
+        assert 'result{"data": "hello","status": "ok"}' in expanded
+    finally:
+        await interface.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tui_compacts_tool_history_and_ignores_stream_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = Connection(
+        url="https://tulpa.example",
+        token="token",
+        thread_id="thread-1",
+        credential_storage="file",
+    )
+    monkeypatch.setattr(tui, "update_connection", lambda value, **changes: value)
+    interface = tui.OpenTulpaTUI(connection)
+    try:
+        for sequence, data in enumerate(
+            (
+                {"name": "web_search", "call_id": "call-1", "arguments": {"query": "cats"}},
+                {"name": "", "call_id": "None", "arguments": {"query": "cats"}},
+                {
+                    "name": "content_fetch",
+                    "call_id": "call-2",
+                    "arguments": {"url": "https://example.com"},
+                },
+            ),
+            start=1,
+        ):
+            interface._render(  # noqa: SLF001
+                ClientEvent("tool.started", "run-1", sequence, "now", data)
+            )
+
+        collapsed = "".join(item[1] for item in interface._tool_activity())  # noqa: SLF001
+        assert len(interface._tools) == 2  # noqa: SLF001
+        assert "▸ 2 tools" in collapsed
+        assert "Content Fetch  https://example.com" in collapsed
+        assert "Web Search" not in collapsed
+
+        assert await interface._command("/tool") is True  # noqa: SLF001
+        expanded = "".join(item[1] for item in interface._tool_activity())  # noqa: SLF001
+        assert "Web Search  cats" in expanded
+        assert "Content Fetch  https://example.com" in expanded
     finally:
         await interface.client.aclose()
 

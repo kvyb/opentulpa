@@ -14,7 +14,7 @@ from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.tools import BaseTool, tool
 
 from opentulpa.deep_agent import (
@@ -175,6 +175,46 @@ class _SummarizingGraph:
             "type": "messages",
             "data": (AIMessage(content="visible answer"), {}),
         }
+
+
+class _ChunkedToolGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        chunks = (
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "web_search",
+                        "args": "",
+                        "id": "call-search",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            ),
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": None,
+                        "args": '{"query":"cats"}',
+                        "id": None,
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+                chunk_position="last",
+            ),
+            ToolMessage(
+                name="web_search",
+                tool_call_id="call-search",
+                content='{"status":"ok"}',
+            ),
+            AIMessageChunk(content="Found cats.", chunk_position="last"),
+        )
+        for chunk in chunks:
+            yield {"type": "messages", "data": (chunk, {})}
 
 
 class _SerializedIntakeGraph:
@@ -362,6 +402,62 @@ def test_job_artifact_tool_output_emits_public_artifact_event() -> None:
         ),
     ]
     assert "/private/tenant/path" not in str(events)
+
+
+def test_partial_tool_call_chunks_do_not_emit_malformed_tool_events() -> None:
+    partial = AIMessageChunk(
+        content="",
+        tool_calls=[
+            {
+                "name": "",
+                "args": {"query": "cats"},
+                "id": None,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    assert DeepAgentService._message_events(partial) == []
+
+
+def test_accumulated_tool_call_chunks_emit_complete_tool_information() -> None:
+    start = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {
+                "name": "web_search",
+                "args": "",
+                "id": "call-search",
+                "index": 0,
+                "type": "tool_call_chunk",
+            }
+        ],
+    )
+    finish = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {
+                "name": None,
+                "args": '{"query":"cats"}',
+                "id": None,
+                "index": 0,
+                "type": "tool_call_chunk",
+            }
+        ],
+        chunk_position="last",
+    )
+
+    assert DeepAgentService._tool_start_events(start + finish) == [
+        (
+            "tool.started",
+            {
+                "name": "web_search",
+                "call_id": "call-search",
+                "arguments": {"query": "cats"},
+            },
+            "",
+        )
+    ]
 
 
 def _service(
@@ -878,6 +974,37 @@ async def test_summarization_tokens_are_not_exposed_as_agent_output(tmp_path: Pa
     assert events[1].data["text"] == "visible answer"
     assert snapshot is not None
     assert snapshot.final_text == "visible answer"
+
+
+@pytest.mark.asyncio
+async def test_chunked_tool_calls_emit_one_complete_start_event(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _ChunkedToolGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(
+                AgentRunRequest(context=_context(), text="Find cats")
+            )
+        ]
+    finally:
+        await service.shutdown()
+
+    assert [event.type for event in events] == [
+        "run.started",
+        "tool.started",
+        "tool.completed",
+        "message.delta",
+        "run.completed",
+    ]
+    assert events[1].data == {
+        "name": "web_search",
+        "call_id": "call-search",
+        "arguments": {"query": "cats"},
+    }
+    assert events[2].data["call_id"] == "call-search"
+    assert events[-1].data["text"] == "Found cats."
 
 
 @pytest.mark.asyncio
