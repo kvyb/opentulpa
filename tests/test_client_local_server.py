@@ -56,6 +56,30 @@ def test_loopback_url_detection() -> None:
     assert not local_server.is_loopback_url("https://tulpa.example")
 
 
+def test_port_probe_can_reuse_a_recently_released_local_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, int]] = []
+
+    class Listener:
+        def __enter__(self) -> Listener:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            calls.append((level, option, value))
+
+        def bind(self, address: tuple[str, int]) -> None:
+            assert address == ("127.0.0.1", 8000)
+
+    monkeypatch.setattr(local_server.socket, "socket", lambda *args: Listener())
+
+    assert local_server._port_available(8000) is True  # noqa: SLF001
+    assert calls == [(local_server.socket.SOL_SOCKET, local_server.socket.SO_REUSEADDR, 1)]
+
+
 def test_first_local_server_does_not_adopt_an_unremembered_instance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

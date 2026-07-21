@@ -242,6 +242,7 @@ def _port_available(port: int) -> bool:
     if not 1 <= port <= 65535:
         return False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             listener.bind(("127.0.0.1", port))
         except OSError:
