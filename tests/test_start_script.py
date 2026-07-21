@@ -336,6 +336,42 @@ def test_local_owner_token_is_private_and_reused(tmp_path: Path) -> None:
     assert token_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_local_owner_token_accepts_host_generated_urlsafe_credential(tmp_path: Path) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(0o755)
+    (tmp_path / ".env.example").write_text("", encoding="utf-8")
+    data_root = tmp_path / "data"
+    token_path = data_root / "bootstrap" / "owner.token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text(f"{'urlsafe_owner-token_' * 3}\n", encoding="utf-8")
+    token_path.chmod(0o600)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source ./start.sh; MODE=up; HOST=127.0.0.1; "
+            "unset OPENTULPA_OWNER_TOKEN PUBLIC_BASE_URL RAILWAY_PUBLIC_DOMAIN; "
+            "configure_local_server_defaults server; "
+            "test \"$OPENTULPA_OWNER_TOKEN\" = \"urlsafe_owner-token_urlsafe_owner-token_urlsafe_owner-token_\"",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "OPENTULPA_DATA_ROOT": str(data_root),
+            "OPENTULPA_OWNER_TOKEN": "",
+            "PUBLIC_BASE_URL": "",
+            "RAILWAY_PUBLIC_DOMAIN": "",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_start_script_dry_run_server_mode() -> None:
     result = _run_start(
         "server",

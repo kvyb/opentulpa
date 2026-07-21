@@ -759,7 +759,8 @@ configure_local_server_defaults() {
   [[ -f "${token_path}" && ! -L "${token_path}" ]] || die "owner credential must be a regular file"
   chmod 600 "${token_path}"
   token="$(tr -d '\r\n' < "${token_path}")"
-  [[ "${token}" =~ ^[0-9a-f]{64}$ ]] || die "owner credential file is invalid: ${token_path}"
+  [[ ${#token} -ge 32 && ${#token} -le 500 && "${token}" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || die "owner credential file is invalid: ${token_path}"
   export OPENTULPA_OWNER_TOKEN="${token}"
   log "using the private generated owner credential"
 }
