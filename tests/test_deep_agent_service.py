@@ -933,11 +933,43 @@ async def test_provider_rejection_retries_same_model_call_with_fallback() -> Non
             raise BadRequestResponseError("rejected")
         return "fallback response"
 
-    middleware = _ProviderFallbackMiddleware("glm-5.2")
+    middleware = _ProviderFallbackMiddleware(["glm-5.2"])
     result = await middleware.awrap_model_call(_MiddlewareRequest("kimi-k3"), handler)
 
     assert result == "fallback response"
     assert calls == ["kimi-k3", "glm-5.2"]
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_advances_through_entire_fallback_chain() -> None:
+    calls: list[Any] = []
+
+    async def handler(request: _MiddlewareRequest) -> str:
+        calls.append(request.model)
+        if len(calls) < 3:
+            raise ValueError("OpenRouter API returned an error: provider unavailable")
+        return "second fallback response"
+
+    middleware = _ProviderFallbackMiddleware(["glm-5.2", "gemini-3.1-pro"])
+    result = await middleware.awrap_model_call(_MiddlewareRequest("kimi-k3"), handler)
+
+    assert result == "second fallback response"
+    assert calls == ["kimi-k3", "glm-5.2", "gemini-3.1-pro"]
+
+
+@pytest.mark.asyncio
+async def test_non_provider_failure_does_not_advance_fallback_chain() -> None:
+    calls: list[Any] = []
+
+    async def handler(request: _MiddlewareRequest) -> str:
+        calls.append(request.model)
+        raise RuntimeError("application bug")
+
+    middleware = _ProviderFallbackMiddleware(["glm-5.2", "gemini-3.1-pro"])
+    with pytest.raises(RuntimeError, match="application bug"):
+        await middleware.awrap_model_call(_MiddlewareRequest("kimi-k3"), handler)
+
+    assert calls == ["kimi-k3"]
 
 
 @pytest.mark.asyncio
@@ -953,7 +985,7 @@ async def test_streaming_content_rejection_also_uses_fallback() -> None:
             )
         return "fallback response"
 
-    middleware = _ProviderFallbackMiddleware("glm-5.2")
+    middleware = _ProviderFallbackMiddleware(["glm-5.2"])
     result = await middleware.awrap_model_call(_MiddlewareRequest("kimi-k3"), handler)
 
     assert result == "fallback response"

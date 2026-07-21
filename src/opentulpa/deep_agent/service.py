@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol, cast
 from weakref import WeakValueDictionary
 
 import aiosqlite
+import httpx
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
 from deepagents.middleware.filesystem import FilesystemPermission
@@ -258,6 +259,19 @@ def _is_provider_rejection(error: BaseException) -> bool:
     )
 
 
+def _is_provider_fallback_error(error: BaseException) -> bool:
+    if _is_provider_rejection(error) or isinstance(error, httpx.TransportError):
+        return True
+    error_type = type(error)
+    if error_type.__module__.startswith("openrouter.errors"):
+        status_code = int(getattr(error, "status_code", 0) or 0)
+        return status_code not in {401, 402, 403}
+    message = str(error or "").casefold()
+    return "openrouter api returned an error" in message or (
+        "openrouter api returned a response with no choices" in message
+    )
+
+
 def _browser_action_requires_approval(request: Any) -> bool:
     """Auto-run only browser operations that cannot submit or modify page state."""
 
@@ -315,19 +329,26 @@ class _DenyToolsMiddleware(AgentMiddleware):
 
 
 class _ProviderFallbackMiddleware(AgentMiddleware):
-    """Retry one provider-rejected model call with the configured fallback model."""
+    """Try an ordered model chain for provider-level failures in one model call."""
 
-    def __init__(self, fallback_model: Any) -> None:
-        self._fallback_model = fallback_model
+    def __init__(self, fallback_models: Sequence[Any]) -> None:
+        self._fallback_models = tuple(fallback_models)
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-        try:
-            return await handler(request)
-        except Exception as exc:
-            if not _is_provider_rejection(exc):
-                raise
-            logger.warning("Primary model provider rejected a request; retrying with fallback")
-            return await handler(request.override(model=self._fallback_model))
+        candidates = (request.model, *self._fallback_models)
+        for index, model in enumerate(candidates):
+            candidate_request = request if index == 0 else request.override(model=model)
+            try:
+                return await handler(candidate_request)
+            except Exception as exc:
+                if not _is_provider_fallback_error(exc) or index == len(candidates) - 1:
+                    raise
+                logger.warning(
+                    "Model provider failed; trying fallback %d of %d",
+                    index + 1,
+                    len(self._fallback_models),
+                )
+        raise RuntimeError("model fallback chain was empty")
 
 
 _RUN_SCHEMA = """
@@ -430,7 +451,7 @@ class DeepAgentService:
         execution_provider: TenantExecutionProvider | None = None,
         run_observer: AgentRunObserver | None = None,
         attachment_resolver: AgentAttachmentResolver | None = None,
-        provider_rejection_fallback_model: Any | None = None,
+        provider_fallback_models: Sequence[Any] = (),
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
@@ -454,7 +475,7 @@ class DeepAgentService:
         self._execution_provider = execution_provider
         self._run_observer = run_observer
         self._attachment_resolver = attachment_resolver
-        self._provider_rejection_fallback_model = provider_rejection_fallback_model
+        self._provider_fallback_models = tuple(provider_fallback_models)
         self._checkpoint_conn: aiosqlite.Connection | None = None
         self._store_cm: Any | None = None
         self._checkpointer: AsyncSqliteSaver | None = None
@@ -1364,9 +1385,9 @@ class DeepAgentService:
         return create_deep_agent(**kwargs)
 
     def _provider_fallback_middleware(self) -> list[AgentMiddleware]:
-        if self._provider_rejection_fallback_model is None:
+        if not self._provider_fallback_models:
             return []
-        return [_ProviderFallbackMiddleware(self._provider_rejection_fallback_model)]
+        return [_ProviderFallbackMiddleware(self._provider_fallback_models)]
 
     def preflight_agent_spec(self, spec: AgentSpec) -> None:
         """Compile an exact revision before its active pointer can change."""
@@ -1843,9 +1864,9 @@ class DeepAgentService:
                 yield event
         except Exception as exc:
             final_text = "".join(final_parts).strip()
-            if _is_provider_rejection(exc) and final_text:
+            if _is_provider_fallback_error(exc) and final_text:
                 logger.warning(
-                    "Model provider rejected run after emitting output; preserving response: "
+                    "Model provider failed after emitting output; preserving response: "
                     "run_id=%s",
                     run_id,
                 )

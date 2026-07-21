@@ -34,7 +34,9 @@ sandbox_max_output_bytes: 512000
 
 # LLM/provider configuration
 llm_model: moonshotai/kimi-k3
-llm_provider_rejection_fallback_model: z-ai/glm-5.2
+llm_fallback_models:
+  - z-ai/glm-5.2
+  - google/gemini-3.1-pro-preview
 model_aliases: {}
 llm_reasoning_effort: medium
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview

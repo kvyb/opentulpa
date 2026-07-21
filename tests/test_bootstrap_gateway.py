@@ -543,4 +543,7 @@ def test_release_environment_never_injects_stable_recovery_authority(
     assert environment["OPENTULPA_INTERNAL_AGENT_API_URL"] == (
         "http://host.docker.internal:8000"
     )
+    assert environment["LLM_FALLBACK_MODELS"] == (
+        '["z-ai/glm-5.2","google/gemini-3.1-pro-preview"]'
+    )
     assert "SANDBOX_IMAGE" not in environment

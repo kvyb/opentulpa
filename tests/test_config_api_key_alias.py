@@ -48,8 +48,23 @@ def test_settings_default_deep_agent_model_uses_kimi_k3(monkeypatch, tmp_path: P
     settings = Settings()
 
     assert settings.llm_model == "moonshotai/kimi-k3"
-    assert settings.llm_provider_rejection_fallback_model == "z-ai/glm-5.2"
+    assert settings.llm_fallback_models == [
+        "z-ai/glm-5.2",
+        "google/gemini-3.1-pro-preview",
+    ]
     assert settings.business_knowledge_oracle_model == "google/gemini-3.1-flash-lite-preview"
+
+
+def test_settings_accepts_csv_model_fallback_chain() -> None:
+    settings = Settings(LLM_FALLBACK_MODELS="provider/one, provider/two,provider/one")
+
+    assert settings.llm_fallback_models == ["provider/one", "provider/two"]
+
+
+def test_settings_accepts_legacy_single_model_fallback_name() -> None:
+    settings = Settings(LLM_PROVIDER_REJECTION_FALLBACK_MODEL="provider/legacy")
+
+    assert settings.llm_fallback_models == ["provider/legacy"]
 
 
 def test_settings_accepts_business_knowledge_oracle_model_env(monkeypatch) -> None:

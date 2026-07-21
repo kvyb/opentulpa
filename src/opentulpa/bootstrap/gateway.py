@@ -712,6 +712,11 @@ def _production_environment(
         "OPENAI_COMPATIBLE_API_KEY": settings.openai_compatible_api_key,
         "OPENAI_COMPATIBLE_BASE_URL": settings.openai_compatible_base_url,
         "LLM_MODEL": settings.llm_model,
+        "LLM_FALLBACK_MODELS": json.dumps(
+            settings.llm_fallback_models,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ),
         "LLM_REASONING_EFFORT": settings.llm_reasoning_effort,
         "MODEL_ALIASES": json.dumps(
             settings.model_aliases,

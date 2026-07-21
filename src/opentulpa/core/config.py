@@ -1,13 +1,15 @@
 """Configuration from environment + YAML defaults."""
 
+import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
+    NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
@@ -190,13 +192,54 @@ class Settings(BaseSettings):
             "Recommended default is the OpenRouter slug moonshotai/kimi-k3 for main chat turns."
         ),
     )
-    llm_provider_rejection_fallback_model: str | None = Field(
-        default="z-ai/glm-5.2",
+    llm_fallback_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "z-ai/glm-5.2",
+            "google/gemini-3.1-pro-preview",
+        ],
+        validation_alias=AliasChoices(
+            "llm_fallback_models",
+            "LLM_FALLBACK_MODELS",
+            "llm_provider_rejection_fallback_model",
+            "LLM_PROVIDER_REJECTION_FALLBACK_MODEL",
+        ),
         description=(
-            "Model used once when the primary OpenRouter provider rejects a model call. "
-            "Set blank to disable provider-rejection fallback."
+            "Ordered fallback models for provider failures during a model call. "
+            "Environment values may be a JSON array or comma-separated model identifiers."
         ),
     )
+
+    @field_validator("llm_fallback_models", mode="before")
+    @classmethod
+    def validate_llm_fallback_models(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    value = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("LLM_FALLBACK_MODELS must be valid JSON or CSV") from exc
+            else:
+                value = raw.split(",")
+        if not isinstance(value, list | tuple):
+            raise ValueError("LLM_FALLBACK_MODELS must be a list")
+        models: list[str] = []
+        for raw_model in value:
+            model = str(raw_model or "").strip()
+            if not model:
+                continue
+            if len(model) > 300 or any(ord(char) < 32 for char in model):
+                raise ValueError("fallback model identifier is invalid")
+            if model not in models:
+                models.append(model)
+        if len(models) > 8:
+            raise ValueError("at most 8 fallback models may be configured")
+        return models
+
     model_aliases: dict[str, str] = Field(
         default_factory=dict,
         description=(
