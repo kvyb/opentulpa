@@ -860,7 +860,7 @@ def main() -> None:
             pid_limit=settings.sandbox_pid_limit,
             timeout_seconds=settings.sandbox_timeout_seconds,
             max_output_bytes=settings.sandbox_max_output_bytes,
-            network_enabled=False,
+            network_enabled=True,
         ),
         container_cli=container_cli,
     )

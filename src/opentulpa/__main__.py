@@ -1108,7 +1108,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 pid_limit=settings.sandbox_pid_limit,
                 timeout_seconds=settings.sandbox_timeout_seconds,
                 max_output_bytes=settings.sandbox_max_output_bytes,
-                network_enabled=False,
+                network_enabled=True,
             ),
             container_cli=settings.sandbox_container_cli,
             execution_provider=sandbox_execution,

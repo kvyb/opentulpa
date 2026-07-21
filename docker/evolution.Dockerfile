@@ -16,4 +16,8 @@ COPY src ./src
 # isolated mode and cannot import from the candidate checkout.
 RUN uv sync --frozen --all-extras --dev
 
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends curl git ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace

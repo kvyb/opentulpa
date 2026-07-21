@@ -40,11 +40,10 @@ def _mounted_workspace(argv: list[str]) -> Path:
     return Path(source)
 
 
-def test_policy_rejects_unsafe_image_and_unenforced_network() -> None:
+def test_policy_rejects_unsafe_image_and_accepts_explicit_network() -> None:
     with pytest.raises(ValueError, match="OCI image"):
         TenantContainerPolicy(image="--privileged")
-    with pytest.raises(ValueError, match="allowlist"):
-        TenantContainerPolicy(network_enabled=True)
+    assert TenantContainerPolicy(network_enabled=True).network_enabled is True
 
 
 def test_persistent_container_launch_is_least_privilege_and_bounded(
@@ -66,6 +65,7 @@ def test_persistent_container_launch_is_least_privilege_and_bounded(
             timeout_seconds=7,
             max_output_bytes=1_024,
             pid_limit=32,
+            network_enabled=True,
         ),
     )
 
@@ -87,7 +87,7 @@ def test_persistent_container_launch_is_least_privilege_and_bounded(
     assert _option(argv, "--pull") == "never"
     assert _option(argv, "--security-opt") == "no-new-privileges:true"
     assert _option(argv, "--cap-drop") == "ALL"
-    assert _option(argv, "--network") == "none"
+    assert _option(argv, "--network") == "bridge"
     assert _option(argv, "--ipc") == "none"
     assert _option(argv, "--cpus") == "1"
     assert _option(argv, "--memory") == "512m"

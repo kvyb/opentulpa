@@ -154,8 +154,9 @@ Expected outcomes:
    the same workspace.
 3. Have the agent edit a file, run a failing test, inspect its own `trace_get` result,
    repair the code, and rerun the test successfully.
-4. Verify the source shell cannot read production data, credentials, Git metadata,
-   bootstrap state, host paths, or the container socket and has no network by default.
+4. Verify the source shell can fetch a public HTTPS URL but cannot read production data,
+   credentials, Git metadata, bootstrap state, host paths, or the container socket.
+   Verify the fixed evaluator remains offline.
 5. Approve `source_release` once in the originating web or Telegram conversation.
 6. Verify fixed evaluation commits and builds the exact tested bytes and that bootstrap
    stages, drains, cuts over, and starts probation without a second CLI approval.

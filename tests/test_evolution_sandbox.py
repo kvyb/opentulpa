@@ -176,14 +176,18 @@ def test_candidate_shell_mount_is_writable_and_still_isolated(
         )
 
     monkeypatch.setattr(sandbox_module, "run_bounded_process", run)
-    backend = CandidateContainerBackend(workspace=candidate, allowed_root=allowed)
+    backend = CandidateContainerBackend(
+        workspace=candidate,
+        allowed_root=allowed,
+        policy=CandidateSandboxPolicy(network_enabled=True),
+    )
 
     result = backend.execute("true")
 
     mount = captured[captured.index("--mount") + 1]
     assert mount.endswith("dst=/workspace")
     assert "readonly" not in mount
-    assert captured[captured.index("--network") + 1] == "none"
+    assert captured[captured.index("--network") + 1] == "bridge"
     assert captured[-1].startswith("ulimit -S -f ")
     assert "ulimit -H -f" in captured[-1]
     assert (candidate / "created-by-shell.py").read_text(encoding="utf-8") == "VALUE = 1\n"

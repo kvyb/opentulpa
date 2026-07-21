@@ -78,6 +78,7 @@ def build_managed_evolution_runtime(
         pid_limit=settings.sandbox_pid_limit,
         timeout_seconds=max(300, settings.sandbox_timeout_seconds),
         max_output_bytes=settings.sandbox_max_output_bytes,
+        network_enabled=True,
     )
 
     def candidate_backend(workspace: Path) -> CandidateContainerBackend:

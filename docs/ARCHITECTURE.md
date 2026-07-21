@@ -272,12 +272,14 @@ Deep Agents routes:
 
 Each tenant workspace persists across releases. Tenant commands execute as non-root
 processes in disposable OCI containers with bounded CPU, memory, PIDs, wall time,
-paths, output, and default-deny network access. In direct mode the app uses a locally
+paths, output, and outbound bridge networking so the agent can fetch public code and
+dependencies and exercise networked integrations. In direct mode the app uses a locally
 resolved immutable image ID. In managed mode only the stable bootstrap owns the OCI
 engine and image ID: the active lease holder may submit a bounded command and hidden
 tenant ID to a private authenticated endpoint, while the host derives the workspace
 path. The repository, host credentials, environment files, and container socket are
-not mounted or exposed through that endpoint.
+not mounted or exposed through that endpoint. Operators that need destination-level
+egress restrictions enforce them at the OCI host or outbound proxy.
 
 Persistent commands are transactional. The sandbox mounts a private copy, validates
 the complete result, and atomically promotes it under a cross-process tenant lock.
@@ -403,8 +405,10 @@ workspace available for another edit-and-test turn.
 
 The source sandbox hides Git metadata and cannot see production data, credentials, deployment
 controls, bootstrap state, or the container socket. It runs rootless with CPU, memory, PID,
-output, and wall-time limits and no network by default. The trusted host owns commit creation,
-fixed evaluation, the release recipe, activation, and rollback.
+output, and wall-time limits and has outbound bridge networking for dependency installation,
+public repository access, and experiments. The separate trusted evaluator and release builder
+remain offline. The trusted host owns commit creation, fixed evaluation, the release recipe,
+activation, and rollback.
 
 The candidate's Dockerfile and ignore rules are not executed by the trusted builder. The builder
 exports the exact commit and replaces the application snapshot on an administrator-reviewed,

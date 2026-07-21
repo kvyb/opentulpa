@@ -126,8 +126,11 @@ by the model and enabled adapters. The setting is an explicit boundary, not an
 automatic hostname allowlist.
 
 Staging and candidate evaluation use isolated no-network containers. Production
-release egress is the only declared network path. Tenant shell containers remain
-default-deny unless a separate, reviewed policy enables them.
+release egress is the only declared runtime network path. Interactive tenant and source
+shells use outbound bridge networking by default so the owner agent can fetch dependencies,
+inspect public repositories, and run networked experiments. They still receive no host or
+service credentials. Apply stricter destination controls at the OCI host or egress proxy
+when the deployment requires them.
 
 ### 3. Install reviewed images
 

@@ -164,8 +164,8 @@ custom memory or skill database.
 ### Build a workspace artifact
 
 > Read the attached CSV, write a reusable script in my tenant workspace, run it in the
-> sandbox, and produce a Markdown summary artifact. Do not install packages or enable
-> network access unless I approve a capability change.
+> sandbox, install any small dependency you need, and produce a Markdown summary artifact.
+> Do not use credentials or make an external write.
 
 Tenant shell work happens in the persistent `/workspace`, not the OpenTulpa source
 checkout.

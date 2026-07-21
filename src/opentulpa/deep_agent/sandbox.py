@@ -217,8 +217,6 @@ class TenantContainerPolicy:
             raise ValueError("sandbox max_command_characters must be positive")
         if self.scratch_size_mb < 1:
             raise ValueError("sandbox scratch_size_mb must be positive")
-        if self.network_enabled:
-            raise ValueError("sandbox network access requires an external allowlist enforcer")
 
 
 class TenantContainerBackend(SandboxBackendProtocol):
@@ -915,7 +913,7 @@ class TenantContainerBackend(SandboxBackendProtocol):
             "--cap-drop",
             "ALL",
             "--network",
-            "none",
+            "bridge" if policy.network_enabled else "none",
             "--ipc",
             "none",
             "--cpus",
