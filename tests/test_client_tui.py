@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import shlex
+from pathlib import Path
+
 import pytest
 
-from opentulpa.client import tui
+from opentulpa.client import config, tui
 from opentulpa.client.api import ClientEvent
 from opentulpa.client.config import Connection
 
@@ -146,3 +149,67 @@ async def test_tui_reports_empty_completed_run(monkeypatch: pytest.MonkeyPatch) 
         await interface.client.aclose()
 
     assert "completed without a response" in interface.output.text
+
+
+@pytest.mark.asyncio
+async def test_tui_accepts_dragged_file_paths_as_attachments(
+    tmp_path: Path,
+) -> None:
+    connection = Connection(
+        url="https://tulpa.example",
+        token="token",
+        thread_id="thread-1",
+        credential_storage="file",
+    )
+    image = tmp_path / "image with spaces.png"
+    image.write_bytes(b"png")
+    interface = tui.OpenTulpaTUI(connection)
+    try:
+        await interface._dispatch(shlex.quote(str(image)))  # noqa: SLF001
+    finally:
+        await interface.client.aclose()
+
+    assert interface.attachments == [image.resolve()]
+    assert "[attached] image with spaces.png" in interface.output.text
+
+
+def test_tui_parses_multiple_paths_and_file_urls(tmp_path: Path) -> None:
+    first = tmp_path / "first image.png"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(b"png")
+    second.write_bytes(b"pdf")
+
+    dropped = tui._dropped_files(  # noqa: SLF001
+        f"{first.as_uri()} {shlex.quote(str(second))}"
+    )
+
+    assert dropped == [first.resolve(), second.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_tui_creates_lists_and_switches_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_CLIENT_CONFIG", str(tmp_path / "client.json"))
+    monkeypatch.setattr(config, "_keyring_set", lambda account, token: False)
+    connection = config.save_connection(
+        "https://tulpa.example",
+        "owner-secret",
+        thread_id="thread-main",
+    )
+    interface = tui.OpenTulpaTUI(connection)
+    try:
+        assert await interface._command("/new Research") is True  # noqa: SLF001
+        assert interface.session_name == "Research"
+        assert await interface._command("/sessions") is True  # noqa: SLF001
+        assert "Main" in interface.output.text
+        assert "Research" in interface.output.text
+        interface.attachments.append(tmp_path / "queued.png")
+        assert await interface._command("/session 1") is True  # noqa: SLF001
+    finally:
+        await interface.client.aclose()
+
+    assert interface.session_name == "Main"
+    assert interface.connection.thread_id == "thread-main"
+    assert interface.attachments == []

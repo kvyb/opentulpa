@@ -9,7 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from urllib.parse import unquote, urlsplit
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.document import Document
@@ -27,6 +27,12 @@ from opentulpa.client.config import (
     Connection,
     clear_connection,
     update_connection,
+)
+from opentulpa.client.sessions import (
+    SessionCatalogError,
+    create_session,
+    list_sessions,
+    switch_session,
 )
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -94,6 +100,7 @@ class OpenTulpaTUI:
         self.state = "connecting"
         self.model = ""
         self.base_url = ""
+        self.session_name = ""
         self.server_ready = False
         self.busy = False
         self.active_run_id: str | None = None
@@ -137,10 +144,18 @@ class OpenTulpaTUI:
                 self.state = "connected"
         except RemoteError:
             self.state = "reconnecting"
+        try:
+            sessions = list_sessions(self.connection)
+            current = next(
+                item for item in sessions if item.thread_id == self.connection.thread_id
+            )
+            self.session_name = current.name
+        except (SessionCatalogError, StopIteration) as exc:
+            self._append(f"[session catalog unavailable: {exc}]\n")
         self._append("OPENTULPA\n")
         self._append(
             f"{self.model + '  ·  ' if self.model else ''}{self.connection.url}\n"
-            f"thread {self.connection.thread_id}\n"
+            f"session {self.session_name or self.connection.thread_id}\n"
             "Type /help for commands.\n\n"
         )
         if self.state == "setup":
@@ -239,11 +254,12 @@ class OpenTulpaTUI:
 
     def _header(self) -> FormattedText:
         model = f"  {self.model}" if self.model else ""
+        session = self.session_name or self.connection.thread_id
         return FormattedText(
             [
                 ("class:brand", " OPENTULPA"),
                 ("class:header", model),
-                ("class:thread", f"  {self.connection.thread_id}"),
+                ("class:thread", f"  {session}"),
             ]
         )
 
@@ -278,6 +294,11 @@ class OpenTulpaTUI:
         )
 
     async def _dispatch(self, text: str) -> None:
+        dropped = _dropped_files(text)
+        if dropped:
+            for path in dropped:
+                self._attach_path(path)
+            return
         if text.startswith("/") and text != "/regenerate" and await self._command(text):
             return
         if self.busy:
@@ -501,19 +522,30 @@ class OpenTulpaTUI:
             if self.busy:
                 self._append("[busy] Finish or cancel the current run first.\n")
             else:
-                thread_id = f"cli-{uuid4()}"
                 try:
-                    self.connection = update_connection(
-                        self.connection,
-                        thread_id=thread_id,
-                        last_run_id=None,
-                        last_sequence=0,
+                    name = " ".join(parts[1:]).strip() or None
+                    self.connection = create_session(self.connection, name=name)
+                    sessions = list_sessions(self.connection)
+                    selected = next(
+                        item for item in sessions if item.thread_id == self.connection.thread_id
                     )
-                except ClientConfigError as exc:
+                except (ClientConfigError, SessionCatalogError) as exc:
                     self._append(f"[new thread failed] {exc}\n")
                     return True
-                self.last_sequence = 0
-                self._append(f"[new thread] {thread_id}\n\n")
+                self._enter_session(selected.name)
+        elif command == "/sessions":
+            self._list_sessions()
+        elif command == "/session":
+            if self.busy:
+                self._append("[busy] Finish or cancel the current run first.\n")
+            else:
+                try:
+                    selector = " ".join(parts[1:])
+                    self.connection, selected = switch_session(self.connection, selector)
+                except (ClientConfigError, SessionCatalogError) as exc:
+                    self._append(f"[session switch failed] {exc}\n")
+                    return True
+                self._enter_session(selected.name)
         elif command == "/attach":
             self._attach(parts[1:])
         elif command == "/approvals":
@@ -532,6 +564,7 @@ class OpenTulpaTUI:
         elif command == "/settings":
             self._append(
                 f"SERVER  {self.connection.url}\n"
+                f"SESSION {self.session_name or self.connection.thread_id}\n"
                 f"THREAD  {self.connection.thread_id}\n"
                 f"MODEL   {self.model or 'not configured'}\n"
                 f"API     {self.base_url or 'not configured'}\n"
@@ -561,9 +594,50 @@ class OpenTulpaTUI:
         if not path.is_file():
             self._append(f"[attachment not found] {path}\n")
             return
+        self._attach_path(path)
+
+    def _attach_path(self, path: Path) -> None:
         if path not in self.attachments:
             self.attachments.append(path)
-        self._append(f"[attached] {path.name}\n")
+            self._append(f"[attached] {path.name}\n")
+        else:
+            self._append(f"[already attached] {path.name}\n")
+
+    def _list_sessions(self) -> None:
+        try:
+            sessions = list_sessions(self.connection)
+        except SessionCatalogError as exc:
+            self._append(f"[sessions unavailable] {exc}\n")
+            return
+        self._append("SESSIONS\n")
+        for index, session in enumerate(sessions, start=1):
+            marker = "*" if session.thread_id == self.connection.thread_id else " "
+            self._append(f"{marker} {index:<2} {session.name}\n")
+        self._append("Use /session NUMBER_OR_NAME or /new [NAME].\n")
+
+    def _enter_session(self, name: str) -> None:
+        self.session_name = name
+        self.last_sequence = self.connection.last_sequence
+        self.active_run_id = None
+        self.runs_with_text.clear()
+        self.attachments.clear()
+        self._tools.clear()
+        self._active_tools.clear()
+        self._transcript.clear()
+        self._refresh_output()
+        self._append(
+            "OPENTULPA\n"
+            f"{self.model + '  ·  ' if self.model else ''}{name}\n"
+            f"thread {self.connection.thread_id}\n"
+            "[session context restored]\n\n"
+        )
+        if self.connection.last_run_id:
+            self.busy = True
+            self.state = "reconnecting"
+            self._restore_task = asyncio.create_task(self._restore_last_run())
+        else:
+            self.busy = False
+            self.state = "connected"
 
     def _list_approvals(self) -> None:
         if not self.approvals:
@@ -771,6 +845,30 @@ def _user_block(text: str) -> str:
     return "\n".join(f"│ {line}" for line in text.splitlines() or [""])
 
 
+def _dropped_files(value: str) -> list[Path]:
+    try:
+        tokens = shlex.split(value)
+    except ValueError:
+        return []
+    if not tokens:
+        return []
+    paths: list[Path] = []
+    for token in tokens:
+        candidate = token
+        if candidate.startswith("file://"):
+            parsed = urlsplit(candidate)
+            if parsed.netloc not in {"", "localhost"}:
+                return []
+            candidate = unquote(parsed.path)
+        path = Path(candidate).expanduser()
+        if not path.is_file():
+            return []
+        resolved = path.resolve()
+        if resolved not in paths:
+            paths.append(resolved)
+    return paths
+
+
 def _tool_label(name: str, arguments: Any) -> str:
     display_name = name.replace("_", " ").strip().title() or "Tool"
     if not isinstance(arguments, dict):
@@ -809,9 +907,11 @@ def _detail_block(label: str, value: Any) -> str:
 
 
 _HELP = """COMMANDS
-  /new                 start and remember a new thread
+  /new [NAME]          create and enter a remembered session
+  /sessions            list remembered sessions
+  /session NAME_OR_NUM switch to a previous session
   /regenerate          regenerate the previous agent answer
-  /attach PATH         attach a file to the next message
+  /attach PATH         attach a file, or drag files into the terminal
   /approvals           list pending approvals
   /approve [ID]        approve an action
   /reject [ID]         reject an action

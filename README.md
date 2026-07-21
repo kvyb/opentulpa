@@ -70,7 +70,9 @@ digest-checked patch for normal upstream review.
 FastAPI exposes the headless public API. The bundled `opentulpa` command is a local,
 keyboard-first terminal client that calls the run, file, approval, replay, notification,
 and log endpoints. Telegram is a versioned interface capability using the same protocol
-with a scoped credential.
+with a scoped credential. Drag files or images into the TUI to attach them; use
+`/new [NAME]`, `/sessions`, and `/session NAME_OR_NUMBER` to move between durable Deep
+Agents threads.
 
 For example, from the terminal client you can write:
 

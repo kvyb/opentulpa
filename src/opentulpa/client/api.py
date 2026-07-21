@@ -117,12 +117,13 @@ class OpenTulpaClient:
         except OSError as exc:
             raise RemoteError(f"Could not read attachment: {path}") from exc
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        kind = "image" if media_type.startswith("image/") else "document"
         try:
             response = await self._client.post(
                 "/v2/files",
                 headers={"Idempotency-Key": f"cli-file:{uuid4()}"},
                 files={"upload": (path.name, raw, media_type)},
-                data={"kind": "document"},
+                data={"kind": kind},
             )
         except httpx.HTTPError as exc:
             raise RemoteError("The attachment upload disconnected.") from exc

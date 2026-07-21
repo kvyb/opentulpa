@@ -148,3 +148,29 @@ async def test_client_uploads_files_with_idempotency(tmp_path: Path) -> None:
     assert payload["file"]["id"] == "file-1"
     assert captured[0].headers["idempotency-key"].startswith("cli-file:")
     assert b"hello" in captured[0].content
+
+
+@pytest.mark.asyncio
+async def test_client_marks_image_uploads_for_inline_vision(tmp_path: Path) -> None:
+    attachment = tmp_path / "photo.png"
+    attachment.write_bytes(b"png")
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(201, json={"file": {"id": "file-image"}})
+
+    client = OpenTulpaClient(_connection())
+    await client._client.aclose()  # noqa: SLF001
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url=_connection().url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await client.upload(attachment)
+    finally:
+        await client.aclose()
+
+    assert b'name="kind"' in captured[0].content
+    assert b"image" in captured[0].content
+    assert b"image/png" in captured[0].content
