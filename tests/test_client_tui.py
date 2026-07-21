@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
+from typing import Any
 
 import pytest
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 
 from opentulpa.client import config, tui
 from opentulpa.client.api import ClientEvent
@@ -213,3 +216,80 @@ async def test_tui_creates_lists_and_switches_sessions(
     assert interface.session_name == "Main"
     assert interface.connection.thread_id == "thread-main"
     assert interface.attachments == []
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_card_has_clickable_single_submission_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = Connection(
+        url="https://tulpa.example",
+        token="token",
+        thread_id="thread-1",
+        credential_storage="file",
+    )
+    interface = tui.OpenTulpaTUI(connection)
+    scheduled: list[Any] = []
+    monkeypatch.setattr(interface.app, "create_background_task", scheduled.append)
+    interface._remember_approval(  # noqa: SLF001
+        "run-1",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "integration_invoke",
+            "description": "Send the prepared message",
+            "arguments": {"action": "send"},
+            "allowed_decisions": ["approve", "reject", "edit"],
+        },
+    )
+    interface.busy = False
+    actions = interface._approval_actions()  # noqa: SLF001
+    approve = next(fragment for fragment in actions if "APPROVE" in fragment[1])
+    reject = next(fragment for fragment in actions if "REJECT" in fragment[1])
+    mouse_up = MouseEvent(
+        position=Point(x=1, y=1),
+        event_type=MouseEventType.MOUSE_UP,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+
+    try:
+        assert interface._show_approval_panel() is True  # noqa: SLF001
+        assert len(approve) == 3
+        assert len(reject) == 3
+        approve[2](mouse_up)
+        approve[2](mouse_up)
+
+        assert interface._approval_click_pending == {"approval-1"}  # noqa: SLF001
+        assert len(scheduled) == 1
+        assert interface._show_approval_panel() is False  # noqa: SLF001
+    finally:
+        for coroutine in scheduled:
+            coroutine.close()
+        await interface.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tui_clicked_approval_uses_existing_resume_command_and_unlocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = Connection(
+        url="https://tulpa.example",
+        token="token",
+        thread_id="thread-1",
+        credential_storage="file",
+    )
+    interface = tui.OpenTulpaTUI(connection)
+    calls: list[tuple[str, list[str]]] = []
+
+    async def approval_command(command: str, values: list[str]) -> None:
+        calls.append((command, values))
+
+    monkeypatch.setattr(interface, "_approval_command", approval_command)
+    interface._approval_click_pending.add("approval-1")  # noqa: SLF001
+    try:
+        await interface._run_clicked_approval("/reject", "approval-1")  # noqa: SLF001
+    finally:
+        await interface.client.aclose()
+
+    assert calls == [("/reject", ["approval-1"])]
+    assert interface._approval_click_pending == set()  # noqa: SLF001

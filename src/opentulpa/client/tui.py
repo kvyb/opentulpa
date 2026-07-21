@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,11 +14,13 @@ from urllib.parse import unquote, urlsplit
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
@@ -107,6 +110,7 @@ class OpenTulpaTUI:
         self.last_sequence = 0
         self.attachments: list[Path] = []
         self.approvals: dict[str, dict[str, Any]] = {}
+        self._approval_click_pending: set[str] = set()
         self.approval_notifications: dict[str, int] = {}
         self.notification_approvals: dict[int, set[str]] = {}
         self.notification_cursor = 0
@@ -127,7 +131,7 @@ class OpenTulpaTUI:
             key_bindings=self._bindings(),
             style=_STYLE,
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
         )
 
     async def run(self) -> None:
@@ -146,9 +150,7 @@ class OpenTulpaTUI:
             self.state = "reconnecting"
         try:
             sessions = list_sessions(self.connection)
-            current = next(
-                item for item in sessions if item.thread_id == self.connection.thread_id
-            )
+            current = next(item for item in sessions if item.thread_id == self.connection.thread_id)
             self.session_name = current.name
         except (SessionCatalogError, StopIteration) as exc:
             self._append(f"[session catalog unavailable: {exc}]\n")
@@ -200,6 +202,24 @@ class OpenTulpaTUI:
                     FormattedTextControl(self._activity),
                     height=1,
                     style="class:activity",
+                ),
+                ConditionalContainer(
+                    HSplit(
+                        [
+                            Window(
+                                FormattedTextControl(self._approval_summary),
+                                height=2,
+                                wrap_lines=True,
+                                style="class:approval",
+                            ),
+                            Window(
+                                FormattedTextControl(self._approval_actions),
+                                height=1,
+                                style="class:approval.actions",
+                            ),
+                        ]
+                    ),
+                    filter=Condition(self._show_approval_panel),
                 ),
                 Window(
                     FormattedTextControl(self._status),
@@ -282,6 +302,88 @@ class OpenTulpaTUI:
                 ("class:activity", label),
             ]
         )
+
+    def _show_approval_panel(self) -> bool:
+        return bool(self.approvals) and not self.busy and not self._approval_click_pending
+
+    def _approval_summary(self) -> FormattedText:
+        current = self._current_approval()
+        if current is None:
+            return FormattedText()
+        approval_id, approval = current
+        tool_name = str(approval.get("tool_name") or "action").replace("_", " ")
+        description = " ".join(str(approval.get("description") or "").split())
+        if len(description) > 100:
+            description = f"{description[:97]}..."
+        position = next(
+            index for index, key in enumerate(self.approvals, start=1) if key == approval_id
+        )
+        return FormattedText(
+            [
+                ("class:approval.title", f" APPROVAL REQUIRED  {position}/{len(self.approvals)}\n"),
+                ("class:approval.tool", f" {tool_name}"),
+                ("class:approval.description", f"  {description}" if description else ""),
+            ]
+        )
+
+    def _approval_actions(self) -> FormattedText:
+        current = self._current_approval()
+        if current is None:
+            return FormattedText()
+        approval_id, approval = current
+        allowed = {str(value) for value in approval.get("allowed_decisions") or []}
+        fragments: list[tuple[Any, ...]] = [("class:approval.actions", " ")]
+        fragments.extend(self._approval_button(approval_id, "/approve", " APPROVE ", allowed))
+        fragments.append(("class:approval.actions", "  "))
+        fragments.extend(self._approval_button(approval_id, "/reject", " REJECT ", allowed))
+        if "edit" in allowed:
+            fragments.append(("class:approval.hint", f"   /edit {approval_id} JSON"))
+        return FormattedText(fragments)
+
+    def _approval_button(
+        self,
+        approval_id: str,
+        command: str,
+        label: str,
+        allowed: set[str],
+    ) -> list[tuple[Any, ...]]:
+        decision = command.removeprefix("/")
+        if decision not in allowed:
+            return [("class:approval.button.disabled", label)]
+        style = (
+            "class:approval.button.approve"
+            if decision == "approve"
+            else "class:approval.button.reject"
+        )
+        return [(style, label, self._approval_mouse_handler(approval_id, command))]
+
+    def _approval_mouse_handler(
+        self,
+        approval_id: str,
+        command: str,
+    ) -> Callable[[MouseEvent], None]:
+        def handle(mouse_event: MouseEvent) -> None:
+            if (
+                mouse_event.event_type != MouseEventType.MOUSE_UP
+                or self.busy
+                or approval_id in self._approval_click_pending
+            ):
+                return
+            self._approval_click_pending.add(approval_id)
+            self._invalidate()
+            self.app.create_background_task(self._run_clicked_approval(command, approval_id))
+
+        return handle
+
+    async def _run_clicked_approval(self, command: str, approval_id: str) -> None:
+        try:
+            await self._approval_command(command, [approval_id])
+        finally:
+            self._approval_click_pending.discard(approval_id)
+            self._invalidate()
+
+    def _current_approval(self) -> tuple[str, dict[str, Any]] | None:
+        return next(iter(self.approvals.items()), None)
 
     def _status(self) -> FormattedText:
         attachment = f"  {len(self.attachments)} attachment(s)" if self.attachments else ""
@@ -466,9 +568,13 @@ class OpenTulpaTUI:
         if not self._tools:
             self._append("[no tool calls in this session]\n")
             return
-        tool = self._tools[-1] if number is None else next(
-            (item for item in self._tools if item.number == number),
-            None,
+        tool = (
+            self._tools[-1]
+            if number is None
+            else next(
+                (item for item in self._tools if item.number == number),
+                None,
+            )
         )
         if tool is None:
             self._append(f"[unknown tool call: {number}]\n")
@@ -662,7 +768,7 @@ class OpenTulpaTUI:
         edited_arguments: dict[str, Any] | None = None
         if decision == "edit":
             if len(values) < 2:
-                self._append(f"Usage: /edit {approval_id} '{{\"argument\": \"value\"}}'\n")
+                self._append(f'Usage: /edit {approval_id} \'{{"argument": "value"}}\'\n')
                 return
             try:
                 parsed = json.loads(" ".join(values[1:]))
@@ -717,7 +823,9 @@ class OpenTulpaTUI:
             self._append(f"[logs unavailable] {exc}\n")
             return
         for entry in entries[-40:]:
-            self._append(f"{entry.get('sequence', ''):>4} {entry.get('stream', ''):<6} {entry.get('text', '')}\n")
+            self._append(
+                f"{entry.get('sequence', ''):>4} {entry.get('stream', ''):<6} {entry.get('text', '')}\n"
+            )
 
     async def _restore_last_run(self) -> None:
         run_id = self.connection.last_run_id
@@ -935,6 +1043,15 @@ _STYLE = Style.from_dict(
         "prompt": "#ffffff bold",
         "activity": "bg:#000000 #777777",
         "activity.spinner": "bg:#000000 #5c9cf5 bold",
+        "approval": "bg:#111111 #e0e0e0",
+        "approval.title": "bg:#111111 #e5c07b bold",
+        "approval.tool": "bg:#111111 #ffffff bold",
+        "approval.description": "bg:#111111 #888888",
+        "approval.actions": "bg:#111111 #666666",
+        "approval.button.approve": "bg:#1d6b47 #ffffff bold",
+        "approval.button.reject": "bg:#792f38 #ffffff bold",
+        "approval.button.disabled": "bg:#222222 #555555",
+        "approval.hint": "bg:#111111 #666666",
         "status": "bg:#000000 #666666",
         "state.connected": "bg:#10291f #62d99c bold",
         "state.working": "bg:#13243a #5c9cf5 bold",

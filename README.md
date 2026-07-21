@@ -72,7 +72,8 @@ keyboard-first terminal client that calls the run, file, approval, replay, notif
 and log endpoints. Telegram is a versioned interface capability using the same protocol
 with a scoped credential. Drag files or images into the TUI to attach them; use
 `/new [NAME]`, `/sessions`, and `/session NAME_OR_NUMBER` to move between durable Deep
-Agents threads.
+Agents threads. Risky actions appear as clickable **Approve** and **Reject** cards, with
+the slash commands retained for keyboard-only use.
 
 For example, from the terminal client you can write:
 
