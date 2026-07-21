@@ -399,6 +399,7 @@ def build_openrouter_chat_model(
     model_name: str,
     reasoning_effort: str | None = "medium",
     max_completion_tokens: int | None = None,
+    provider_order: Sequence[str] = (),
 ) -> ChatOpenRouter:
     """Build the model adapter shared by OpenTulpa agent profiles."""
 
@@ -410,6 +411,7 @@ def build_openrouter_chat_model(
         raise RuntimeError("LLM_MODEL is required")
     effort = str(reasoning_effort or "").strip() or None
     reasoning = {"effort": effort, "exclude": False} if effort else None
+    providers = [str(provider).strip() for provider in provider_order if str(provider).strip()]
     return ChatOpenRouter(
         model=safe_model,
         api_key=SecretStr(safe_key),
@@ -418,6 +420,15 @@ def build_openrouter_chat_model(
         app_title="OpenTulpa",
         reasoning=reasoning,
         max_completion_tokens=max_completion_tokens,
+        openrouter_provider=(
+            {
+                "order": providers,
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+            if providers
+            else None
+        ),
         streaming=True,
         max_retries=0,
         # langchain-openrouter forwards this value to the SDK as milliseconds.

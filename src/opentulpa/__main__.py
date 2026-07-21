@@ -860,6 +860,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 model_name=fallback_model_name,
                 reasoning_effort=settings.llm_reasoning_effort,
                 max_completion_tokens=settings.agent_max_completion_tokens,
+                provider_order=settings.llm_provider_order.get(fallback_model_name, ()),
             )
             for fallback_model_name in fallback_model_names
         )

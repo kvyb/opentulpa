@@ -717,6 +717,12 @@ def _production_environment(
             ensure_ascii=True,
             separators=(",", ":"),
         ),
+        "LLM_PROVIDER_ORDER": json.dumps(
+            settings.llm_provider_order,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         "LLM_REASONING_EFFORT": settings.llm_reasoning_effort,
         "MODEL_ALIASES": json.dumps(
             settings.model_aliases,

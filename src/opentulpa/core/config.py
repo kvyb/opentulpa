@@ -240,6 +240,47 @@ class Settings(BaseSettings):
             raise ValueError("at most 8 fallback models may be configured")
         return models
 
+    llm_provider_order: Annotated[dict[str, list[str]], NoDecode] = Field(
+        default_factory=lambda: {
+            "z-ai/glm-5.2": ["z-ai/fp8", "fireworks", "deepinfra/fp4"],
+        },
+        validation_alias=AliasChoices("llm_provider_order", "LLM_PROVIDER_ORDER"),
+        description=(
+            "Optional ordered OpenRouter provider slugs per model. Only the listed providers "
+            "are used for that model before OpenTulpa advances to the next model."
+        ),
+    )
+
+    @field_validator("llm_provider_order", mode="before")
+    @classmethod
+    def validate_llm_provider_order(cls, value: Any) -> dict[str, list[str]]:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("LLM_PROVIDER_ORDER must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("LLM_PROVIDER_ORDER must be an object")
+        result: dict[str, list[str]] = {}
+        for raw_model, raw_providers in value.items():
+            model = str(raw_model or "").strip()
+            if not model or len(model) > 300 or any(ord(char) < 32 for char in model):
+                raise ValueError("provider-order model identifier is invalid")
+            if not isinstance(raw_providers, list | tuple):
+                raise ValueError("provider order must be a list")
+            providers: list[str] = []
+            for raw_provider in raw_providers:
+                provider = str(raw_provider or "").strip()
+                if not provider or len(provider) > 100 or any(ord(char) < 32 for char in provider):
+                    raise ValueError("provider-order provider identifier is invalid")
+                if provider not in providers:
+                    providers.append(provider)
+            if len(providers) > 8:
+                raise ValueError("at most 8 providers may be configured per model")
+            if providers:
+                result[model] = providers
+        return result
+
     model_aliases: dict[str, str] = Field(
         default_factory=dict,
         description=(

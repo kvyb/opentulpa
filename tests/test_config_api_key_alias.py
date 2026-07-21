@@ -52,6 +52,9 @@ def test_settings_default_deep_agent_model_uses_kimi_k3(monkeypatch, tmp_path: P
         "z-ai/glm-5.2",
         "google/gemini-3.1-pro-preview",
     ]
+    assert settings.llm_provider_order == {
+        "z-ai/glm-5.2": ["z-ai/fp8", "fireworks", "deepinfra/fp4"]
+    }
     assert settings.business_knowledge_oracle_model == "google/gemini-3.1-flash-lite-preview"
 
 
@@ -65,6 +68,19 @@ def test_settings_accepts_legacy_single_model_fallback_name() -> None:
     settings = Settings(LLM_PROVIDER_REJECTION_FALLBACK_MODEL="provider/legacy")
 
     assert settings.llm_fallback_models == ["provider/legacy"]
+
+
+def test_settings_accepts_model_provider_order(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "LLM_PROVIDER_ORDER",
+        '{"provider/model":["provider/one","provider/two"]}',
+    )
+
+    settings = Settings()
+
+    assert settings.llm_provider_order == {
+        "provider/model": ["provider/one", "provider/two"]
+    }
 
 
 def test_settings_accepts_business_knowledge_oracle_model_env(monkeypatch) -> None:

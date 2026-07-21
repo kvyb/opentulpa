@@ -246,6 +246,25 @@ def test_openrouter_model_uses_sdk_timeout_units_without_hidden_retries() -> Non
         asyncio.run(sdk_config.async_client.aclose())
 
 
+def test_openrouter_model_restricts_provider_order_before_model_fallback() -> None:
+    model = build_openrouter_chat_model(
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        model_name="z-ai/glm-5.2",
+        provider_order=("z-ai/fp8", "fireworks", "deepinfra/fp4"),
+    )
+
+    try:
+        assert model.openrouter_provider == {
+            "order": ["z-ai/fp8", "fireworks", "deepinfra/fp4"],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+    finally:
+        model.client.sdk_configuration.client.close()
+        asyncio.run(model.client.sdk_configuration.async_client.aclose())
+
+
 @pytest.mark.parametrize("kind", ["navigate", "wait"])
 def test_browser_policy_auto_approves_non_submitting_actions(kind: str) -> None:
     request = SimpleNamespace(tool_call={"args": {"action": {"kind": kind}}})
