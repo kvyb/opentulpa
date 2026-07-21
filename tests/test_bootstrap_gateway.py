@@ -543,9 +543,7 @@ def test_release_environment_never_injects_stable_recovery_authority(
     assert environment["OPENTULPA_INTERNAL_AGENT_API_URL"] == (
         "http://host.docker.internal:8000"
     )
-    assert environment["LLM_FALLBACK_MODELS"] == (
-        '["z-ai/glm-5.2","google/gemini-3.1-pro-preview"]'
-    )
+    assert environment["LLM_FALLBACK_MODELS"] == '["z-ai/glm-5.2"]'
     assert environment["LLM_PROVIDER_ORDER"] == (
         '{"z-ai/glm-5.2":["z-ai/fp8","fireworks","deepinfra/fp4"]}'
     )

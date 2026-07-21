@@ -193,10 +193,7 @@ class Settings(BaseSettings):
         ),
     )
     llm_fallback_models: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: [
-            "z-ai/glm-5.2",
-            "google/gemini-3.1-pro-preview",
-        ],
+        default_factory=lambda: ["z-ai/glm-5.2"],
         validation_alias=AliasChoices(
             "llm_fallback_models",
             "LLM_FALLBACK_MODELS",

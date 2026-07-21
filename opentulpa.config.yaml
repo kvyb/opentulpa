@@ -36,7 +36,6 @@ sandbox_max_output_bytes: 512000
 llm_model: moonshotai/kimi-k3
 llm_fallback_models:
   - z-ai/glm-5.2
-  - google/gemini-3.1-pro-preview
 llm_provider_order:
   z-ai/glm-5.2:
     - z-ai/fp8
