@@ -140,7 +140,7 @@ Run streaming is normalized to `run.started`, `message.delta`, `tool.started`,
 `tool.completed`, `approval.required`, `artifact.ready`, `run.completed`, and
 `run.failed`. Each event has a run ID, monotonic sequence, and timestamp. The durable
 notification stream carries schedule results, pending approvals, candidate results,
-activation failures, and rollback outcomes back to web and Telegram after restarts.
+activation failures, and rollback outcomes back to the TUI and Telegram after restarts.
 
 Tool arguments never contain tenant IDs, credentials, filesystem roots, or ownership
 identifiers. The registry in `opentulpa.tooling` generates LangChain tools, approval
@@ -184,9 +184,10 @@ checkout:
 
 The source shell cannot see production data, credentials, the serving checkout,
 bootstrap state, deployment controls, or a container socket. It is rootless,
-resource-bounded, and has no network by default. The agent may change core runtime,
-API, integrations, interfaces, tools, prompts, schedules, or add new code. The stable
-bootstrap and its release recipe remain outside the mutable release.
+resource-bounded, and has outbound network access without gaining access to host
+secrets. The agent may change core runtime, API, integrations, interfaces, tools,
+prompts, schedules, or add new code. The stable bootstrap and its release recipe remain
+outside the mutable release.
 
 Evaluation and release building are bound to the source commit, dependency lock hash,
 evaluator fingerprint, and OCI artifact digest. The candidate's Dockerfile is not used.
@@ -210,73 +211,25 @@ and idempotency; image rollback is not a transaction over the outside world.
 
 ## Start
 
-For a local installation, run one command:
-
 ```bash
-./start.sh
-```
-
-The stable host starts immediately, even without a model key. Open `/_host`, enter the
-OpenAI-compatible endpoint, model key, and optional Telegram bot token plus numeric
-owner ID. Credentials are AES-GCM encrypted in the host database with a separate mode
-`0600` host key. The host validates the candidate, starts the Deep Agents child, and
-activates Telegram through its capability API. Failed candidates leave the host online
-and restore the previous active runtime.
-
-Python 3.12 and [`uv`](https://docs.astral.sh/uv/) are installed or resolved by the
-launcher. A rootless Docker/Podman engine, or a recognized macOS Docker Desktop or
-OrbStack VM, enables the sandbox shell. Without an isolated engine, chat still starts
-but shell execution reports that it is unavailable; it never falls back to the host.
-
-### Direct development mode
-
-```bash
-git clone https://github.com/kvyb/opentulpa.git
-cd opentulpa
-./start.sh server
-```
-
-This starts the mutable application directly. It is useful for development and
-platforms that already own deployments, but it cannot replace itself safely.
-Public/non-loopback deployments must still configure their persistent data root and
-owner authentication explicitly.
-
-### Terminal and Telegram together
-
-`serve` is the normal entrypoint. The setup console is available at `/_host`; the
-server itself has no chat UI. You may provide an initial configuration non-interactively:
-
-```bash
-./start.sh serve \
-  --api-key '<openai-compatible-key>' \
-  --telegram-bot-token '<telegram-bot-token>' \
-  --telegram-user-id 123456789
-```
-
-Telegram uses its long-poll capability worker, so it does not need a public URL or a
-Cloudflare tunnel. Omit both Telegram arguments for terminal-only use. Local host access
-is automatic. A remote unclaimed host prints a one-time pairing code; claiming it returns
-an owner token once. `--owner-token` can pre-claim unattended deployments. Command-line
-secrets are imported into encrypted host storage and are not written to `.env`, but
-environment variables or the setup UI are safer because command arguments can remain
-in shell history.
-
-Connect once from the machine where you want to use OpenTulpa:
-
-```bash
-opentulpa connect https://tulpa.example.com
-# paste the owner token or one-time pairing code when prompted
-
-# later launches reconnect and restore the same Deep Agents thread
+curl -fsSL https://opentulpa.com/install | sh
 opentulpa
-opentulpa status
-opentulpa logs --follow
 ```
 
-The URL and last thread are stored in `~/.config/opentulpa/client.json`. The owner token
-uses the operating-system keychain when available, with a mode-`0600` config fallback.
-The TUI streams agent and tool activity, restores interrupted streams, uploads files,
-handles persisted approvals and notifications, and supports `/regenerate`.
+Choose **Run here**, enter the model API key once, and the CLI starts the private server
+and opens the TUI. Later, just run `opentulpa` again.
+
+```bash
+# Remote server
+opentulpa server --public-url https://tulpa.example
+
+# Local machine
+opentulpa connect https://tulpa.example
+```
+
+Paste the one-time pairing code printed by the server. See
+[Deployment](docs/DEPLOYMENT.md) for Docker, Railway, managed self-improvement, and
+non-interactive configuration.
 
 ### Managed self-improving mode
 

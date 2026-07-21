@@ -7,7 +7,9 @@ import asyncio
 import getpass
 import json
 import os
+import re
 import secrets
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,9 +22,15 @@ from opentulpa.client.config import (
     ClientConfigError,
     Connection,
     clear_connection,
+    config_path,
     load_connection,
     normalize_url,
     save_connection,
+)
+from opentulpa.client.local_server import (
+    LocalServerError,
+    ensure_local_server,
+    is_loopback_url,
 )
 from opentulpa.client.tui import run_tui
 from opentulpa.core.config import get_settings
@@ -53,8 +61,34 @@ def _private_token(path: Path) -> str:
     return value
 
 
+def _private_pairing_code(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.is_symlink():
+        raise RuntimeError("host credential directory cannot be a symlink")
+    if not path.exists():
+        alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        compact = "".join(secrets.choice(alphabet) for _ in range(15))
+        value = "-".join(compact[index : index + 5] for index in range(0, 15, 5))
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(f"{value}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+        raise RuntimeError("host credential must be a private regular file")
+    value = path.read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{16,500}", value) is None:
+        raise RuntimeError("host pairing code is invalid")
+    return value
+
+
 def build_host_application() -> tuple[Any, str, str, Path]:
-    project_root = Path(__file__).resolve().parents[3]
+    configured_source = str(os.environ.get("OPENTULPA_SOURCE_ROOT") or "").strip()
+    project_root = (
+        Path(configured_source).expanduser().resolve()
+        if configured_source
+        else Path(__file__).resolve().parents[3]
+    )
     settings = get_settings()
     configured_root = str(os.environ.get("OPENTULPA_DATA_ROOT") or "").strip()
     data_root = (
@@ -63,7 +97,7 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         else Path.home() / ".local" / "share" / "opentulpa"
     ).resolve()
     data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    setup_token = _private_token(data_root / "bootstrap" / "host-setup.token")
+    setup_token = _private_pairing_code(data_root / "bootstrap" / "host-setup.token")
     store = HostStore(
         data_root / "bootstrap" / "host.db",
         cipher=load_or_create_host_cipher(data_root),
@@ -104,14 +138,16 @@ def build_host_application() -> tuple[Any, str, str, Path]:
     return app, host, setup_token, data_root
 
 
-def serve() -> None:
+def serve(*, public_url: str | None = None) -> None:
     app, host, setup_token, data_root = build_host_application()
     port = int(os.environ.get("PORT") or 8000)
-    print(f"OpenTulpa host: http://{host}:{port}/")
-    print(f"Setup and recovery: http://{host}:{port}/_host")
+    origin = _server_origin(host=host, port=port, public_url=public_url)
+    print("OpenTulpa is starting.\n")
+    print(f"Admin:   {origin}/_host")
+    print(f"Connect: opentulpa connect {origin}")
     if host not in {"127.0.0.1", "localhost", "::1"} and not app.state.host_store.claimed:
-        print(f"One-time pairing code: {setup_token}")
-    print(f"Persistent data: {data_root}")
+        print(f"\nPairing code: {setup_token}")
+    print(f"\nData: {data_root}", flush=True)
     uvicorn.run(
         app,
         host=host,
@@ -120,6 +156,20 @@ def serve() -> None:
         ws="none",
         timeout_graceful_shutdown=15,
     )
+
+
+def _server_origin(*, host: str, port: int, public_url: str | None) -> str:
+    candidate = str(public_url or os.environ.get("PUBLIC_BASE_URL") or "").strip()
+    if not candidate:
+        railway_domain = str(os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+        if railway_domain:
+            candidate = f"https://{railway_domain}"
+    if candidate:
+        return normalize_url(candidate)
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        return f"http://127.0.0.1:{port}"
+    hostname = socket.getfqdn().strip() or "SERVER"
+    return f"http://{hostname}:{port}"
 
 
 def _remote(args: argparse.Namespace) -> int:
@@ -146,6 +196,7 @@ def _remote(args: argparse.Namespace) -> int:
         )
         if args.no_tui:
             return 0
+        _configure_runtime(connection)
         asyncio.run(run_tui(connection))
         return 0
     try:
@@ -218,13 +269,63 @@ def _owner_headers(token: str) -> dict[str, str]:
 
 def _interactive_connection() -> Connection:
     try:
-        return load_connection()
-    except ClientConfigError:
+        connection = load_connection()
+    except ClientConfigError as exc:
+        if config_path().exists():
+            raise SystemExit(str(exc)) from exc
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise SystemExit("Run `opentulpa connect SERVER_URL` first.") from None
-    print("Connect this terminal to an OpenTulpa server.")
+        return _first_connection()
+    if is_loopback_url(connection.url):
+        try:
+            url = ensure_local_server(preferred_url=connection.url)
+        except LocalServerError as exc:
+            raise SystemExit(str(exc)) from exc
+        if url != connection.url:
+            connection = save_connection(
+                url,
+                connection.token,
+                thread_id=connection.thread_id,
+                last_run_id=connection.last_run_id,
+                last_sequence=connection.last_sequence,
+            )
+        _configure_runtime(connection)
+    else:
+        try:
+            status = _get_host_status(connection)
+        except (httpx.HTTPError, ValueError):
+            return connection
+        if not bool(status.get("configured")):
+            _configure_runtime(connection, status=status)
+    return connection
+
+
+def _first_connection() -> Connection:
+    print("\nOPENTULPA\n")
+    print("  1  Run here")
+    print("  2  Connect remotely\n")
+    choice = input("Choose [1]: ").strip().casefold()
+    if choice in {"", "1", "local", "run", "run here"}:
+        print("\nStarting your private OpenTulpa server...")
+        try:
+            url = ensure_local_server()
+        except LocalServerError as exc:
+            raise SystemExit(str(exc)) from exc
+        token = _connect_credential(url, "")
+        if token is None:
+            raise SystemExit("The local OpenTulpa server rejected its owner connection.")
+        connection = save_connection(url, token)
+        _configure_runtime(connection)
+        return connection
+    if choice not in {"2", "remote", "connect", "connect remotely"}:
+        raise SystemExit("Choose 1 to run here or 2 to connect remotely.")
+    return _prompt_remote_connection()
+
+
+def _prompt_remote_connection() -> Connection:
+    print("\nConnect to an OpenTulpa server.")
     url = input("Server URL: ").strip()
-    credential = getpass.getpass("Owner token or pairing code (blank for local): ").strip()
+    credential = getpass.getpass("Owner token or pairing code: ").strip()
     try:
         normalized = normalize_url(url)
     except ClientConfigError as exc:
@@ -233,23 +334,113 @@ def _interactive_connection() -> Connection:
     if token is None:
         raise SystemExit(1)
     try:
-        return save_connection(normalized, token)
+        connection = save_connection(normalized, token)
     except ClientConfigError as exc:
         raise SystemExit(str(exc)) from exc
+    _configure_runtime(connection)
+    return connection
+
+
+def _get_host_status(connection: Connection) -> dict[str, Any]:
+    headers = _owner_headers(connection.token)
+    with httpx.Client(timeout=10, trust_env=False) as client:
+        response = client.get(f"{connection.url}/_host/api/status", headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("OpenTulpa returned an invalid host status.")
+    return payload
+
+
+def _configure_runtime(
+    connection: Connection,
+    *,
+    status: dict[str, Any] | None = None,
+) -> None:
+    try:
+        payload = status if status is not None else _get_host_status(connection)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SystemExit(f"Could not inspect the OpenTulpa server: {exc}") from exc
+    if bool(payload.get("configured")):
+        return
+    headers = _owner_headers(connection.token)
+
+    print("\nConnect a model. The key is sent only to the encrypted OpenTulpa host.\n")
+    api_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY") or "").strip()
+    if not api_key:
+        if not sys.stdin.isatty():
+            raise SystemExit("Set OPENAI_COMPATIBLE_API_KEY or run `opentulpa` interactively.")
+        api_key = getpass.getpass("Model API key: ").strip()
+    if not api_key:
+        raise SystemExit("A model API key is required.")
+    default_base_url = str(
+        os.environ.get("OPENAI_COMPATIBLE_BASE_URL") or "https://openrouter.ai/api/v1"
+    ).strip()
+    default_model = str(os.environ.get("LLM_MODEL") or "moonshotai/kimi-k3").strip()
+    if sys.stdin.isatty():
+        base_url = input(f"Endpoint [{default_base_url}]: ").strip() or default_base_url
+        model = input(f"Model [{default_model}]: ").strip() or default_model
+    else:
+        base_url = default_base_url
+        model = default_model
+    try:
+        with httpx.Client(timeout=120, trust_env=False) as client:
+            response = client.put(
+                f"{connection.url}/_host/api/config",
+                headers=headers,
+                json={"api_key": api_key, "base_url": base_url, "model": model},
+            )
+    except httpx.HTTPError as exc:
+        raise SystemExit("The OpenTulpa server disconnected during setup.") from exc
+    if not response.is_success:
+        detail = "OpenTulpa could not activate this model configuration."
+        try:
+            value = response.json().get("detail")
+            if isinstance(value, str) and value.strip():
+                detail = value.strip()
+        except ValueError:
+            pass
+        raise SystemExit(detail)
+    print("\nOpenTulpa is ready.\n")
+
+
+def _server_command(args: argparse.Namespace) -> None:
+    if not 1 <= args.port <= 65535:
+        raise SystemExit("Server port must be between 1 and 65535.")
+    if not str(args.host or "").strip() or any(
+        character.isspace() for character in str(args.host)
+    ):
+        raise SystemExit("Server host is invalid.")
+    os.environ["HOST"] = args.host
+    os.environ["PORT"] = str(args.port)
+    if args.public_url:
+        try:
+            os.environ["PUBLIC_BASE_URL"] = normalize_url(args.public_url)
+        except ClientConfigError as exc:
+            raise SystemExit(str(exc)) from exc
+    serve(public_url=args.public_url)
 
 
 def _open_tui() -> None:
-    connection = _interactive_connection()
     try:
+        connection = _interactive_connection()
         asyncio.run(run_tui(connection))
-    except KeyboardInterrupt:
+    except (EOFError, KeyboardInterrupt):
+        print("\nSetup cancelled.")
         return
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="opentulpa")
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("serve", help="start the stable host and mutable agent runtime")
+    server = subparsers.add_parser(
+        "server",
+        aliases=["serve"],
+        help="run a headless OpenTulpa server",
+    )
+    server.add_argument("--host", default=os.environ.get("HOST") or "0.0.0.0")
+    server.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8000))
+    server.add_argument("--public-url")
     connect = subparsers.add_parser("connect", help="connect and open the terminal client")
     connect.add_argument("url")
     credential = connect.add_mutually_exclusive_group()
@@ -261,8 +452,8 @@ def main() -> None:
     logs.add_argument("--follow", action="store_true")
     subparsers.add_parser("disconnect", help="forget the server and owner credential")
     args = parser.parse_args()
-    if args.command == "serve":
-        serve()
+    if args.command in {"server", "serve"}:
+        _server_command(args)
         return
     if args.command is None:
         _open_tui()

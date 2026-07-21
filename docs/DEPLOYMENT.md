@@ -51,12 +51,13 @@ uses that degraded path and additionally requires:
 ## Stable Host
 
 ```bash
-git clone https://github.com/kvyb/opentulpa.git
-cd opentulpa
-./start.sh
+curl -fsSL https://opentulpa.com/install | sh
+opentulpa
 ```
 
-The host opens its setup console at `http://127.0.0.1:8000/_host`. It remains healthy
+Choose **Run here** and enter the model key. The CLI starts the host in the background,
+configures it through the host API, and opens the TUI. The host console remains available
+at `http://127.0.0.1:8000/_host`. It remains healthy
 while unconfigured or while a candidate child fails. Local owner access needs no token.
 Remote first boot prints a one-time pairing code, and the returned owner token can be
 used by `opentulpa connect`. The server root redirects to `/_host`; agent conversation

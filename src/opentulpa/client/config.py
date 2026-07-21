@@ -59,9 +59,14 @@ def save_connection(
     token: str,
     *,
     thread_id: str | None = None,
+    last_run_id: str | None = None,
+    last_sequence: int = 0,
 ) -> Connection:
     normalized = normalize_url(url)
     safe_token = str(token or "").strip()
+    safe_thread_id = str(thread_id or f"cli-{uuid4()}").strip()
+    if not safe_thread_id or len(safe_thread_id) > 200:
+        raise ClientConfigError("OpenTulpa thread is invalid.")
     account = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     try:
         previous = _read_payload()
@@ -78,8 +83,10 @@ def save_connection(
     connection = Connection(
         url=normalized,
         token=safe_token,
-        thread_id=str(thread_id or f"cli-{uuid4()}").strip(),
+        thread_id=safe_thread_id,
         credential_storage=storage,
+        last_run_id=str(last_run_id or "").strip() or None,
+        last_sequence=max(0, int(last_sequence)),
     )
     try:
         _write_payload(_payload(connection, account=account, fallback_token=payload_token))
