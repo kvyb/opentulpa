@@ -51,7 +51,9 @@ uses that degraded path and additionally requires:
 ## Stable Host
 
 ```bash
-curl -fsSL https://opentulpa.com/install | sh
+git clone https://github.com/kvyb/opentulpa.git
+cd opentulpa
+./install.sh
 opentulpa
 ```
 

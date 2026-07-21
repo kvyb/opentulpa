@@ -212,7 +212,9 @@ and idempotency; image rollback is not a transaction over the outside world.
 ## Start
 
 ```bash
-curl -fsSL https://opentulpa.com/install | sh
+git clone https://github.com/kvyb/opentulpa.git
+cd opentulpa
+./install.sh
 opentulpa
 ```
 

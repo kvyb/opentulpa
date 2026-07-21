@@ -4,13 +4,22 @@ set -eu
 REPOSITORY="${OPENTULPA_INSTALL_REPOSITORY:-https://github.com/kvyb/opentulpa.git}"
 REF="${OPENTULPA_INSTALL_REF:-main}"
 DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
-SOURCE_ROOT="${OPENTULPA_INSTALL_SOURCE:-${DATA_HOME}/opentulpa/source}"
+SCRIPT_SOURCE=""
+if [ -f "$0" ]; then
+  candidate_source="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+  if [ -f "${candidate_source}/pyproject.toml" ] \
+    && [ -f "${candidate_source}/uv.lock" ] \
+    && [ -e "${candidate_source}/.git" ]; then
+    SCRIPT_SOURCE="${candidate_source}"
+  fi
+fi
+SOURCE_ROOT="${OPENTULPA_INSTALL_SOURCE:-${SCRIPT_SOURCE:-${DATA_HOME}/opentulpa/source}}"
 
 say() {
   printf '%s\n' "[opentulpa] $*"
 }
 
-if [ -z "${OPENTULPA_INSTALL_SOURCE:-}" ]; then
+if [ -z "${OPENTULPA_INSTALL_SOURCE:-}" ] && [ -z "${SCRIPT_SOURCE}" ]; then
   command -v git >/dev/null 2>&1 || {
     printf '%s\n' "OpenTulpa requires git so it can maintain and improve its source." >&2
     exit 1
@@ -29,6 +38,8 @@ if [ -z "${OPENTULPA_INSTALL_SOURCE:-}" ]; then
 elif [ ! -f "${SOURCE_ROOT}/pyproject.toml" ]; then
   printf '%s\n' "OPENTULPA_INSTALL_SOURCE is not an OpenTulpa source tree: ${SOURCE_ROOT}" >&2
   exit 1
+else
+  say "using the source checkout at ${SOURCE_ROOT}"
 fi
 
 if command -v uv >/dev/null 2>&1; then
