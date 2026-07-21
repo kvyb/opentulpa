@@ -237,9 +237,18 @@ def _failure_diagnostic(error: BaseException, *, phase: str) -> dict[str, str]:
 
 
 def _public_run_failure(error: BaseException) -> tuple[str, str, bool]:
-    if type(error).__name__ == "BadRequestResponseError":
+    if _is_provider_rejection(error):
         return "model_provider_rejected", _PUBLIC_PROVIDER_REJECTION_MESSAGE, False
     return "agent_run_failed", _PUBLIC_RUN_FAILURE_MESSAGE, False
+
+
+def _is_provider_rejection(error: BaseException) -> bool:
+    if type(error).__name__ == "BadRequestResponseError":
+        return True
+    message = str(error or "").casefold()
+    return "openrouter api returned an error" in message and (
+        "inappropriate content" in message or "provider returned error" in message
+    )
 
 
 def _browser_action_requires_approval(request: Any) -> bool:
@@ -296,6 +305,22 @@ class _DenyToolsMiddleware(AgentMiddleware):
                 status="error",
             )
         return await handler(request)
+
+
+class _ProviderFallbackMiddleware(AgentMiddleware):
+    """Retry one provider-rejected model call with the configured fallback model."""
+
+    def __init__(self, fallback_model: Any) -> None:
+        self._fallback_model = fallback_model
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        try:
+            return await handler(request)
+        except Exception as exc:
+            if not _is_provider_rejection(exc):
+                raise
+            logger.warning("Primary model provider rejected a request; retrying with fallback")
+            return await handler(request.override(model=self._fallback_model))
 
 
 _RUN_SCHEMA = """
@@ -398,6 +423,7 @@ class DeepAgentService:
         execution_provider: TenantExecutionProvider | None = None,
         run_observer: AgentRunObserver | None = None,
         attachment_resolver: AgentAttachmentResolver | None = None,
+        provider_rejection_fallback_model: Any | None = None,
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
@@ -421,6 +447,7 @@ class DeepAgentService:
         self._execution_provider = execution_provider
         self._run_observer = run_observer
         self._attachment_resolver = attachment_resolver
+        self._provider_rejection_fallback_model = provider_rejection_fallback_model
         self._checkpoint_conn: aiosqlite.Connection | None = None
         self._store_cm: Any | None = None
         self._checkpointer: AsyncSqliteSaver | None = None
@@ -1169,6 +1196,7 @@ class DeepAgentService:
         owner_tools = [tool for tool in self._tools if tool.name in _OWNER_PRODUCT_TOOL_NAMES]
         routine_tools = [tool for tool in owner_tools if tool.name in _ROUTINE_PRODUCT_TOOL_NAMES]
         intake_tools = [tool for tool in owner_tools if tool.name in _INTAKE_PRODUCT_TOOL_NAMES]
+        middleware = self._provider_fallback_middleware()
 
         return {
             "owner": create_deep_agent(
@@ -1183,6 +1211,7 @@ class DeepAgentService:
                 context_schema=AgentRunContext,
                 checkpointer=self._checkpointer,
                 store=self._store,
+                middleware=middleware,
             ),
             "routine": create_deep_agent(
                 model=model,
@@ -1197,6 +1226,7 @@ class DeepAgentService:
                 },
                 context_schema=AgentRunContext,
                 checkpointer=self._checkpointer,
+                middleware=self._provider_fallback_middleware(),
             ),
             "intake": create_deep_agent(
                 model=model,
@@ -1207,6 +1237,7 @@ class DeepAgentService:
                 response_format=IntakeDecision,
                 context_schema=AgentRunContext,
                 checkpointer=self._checkpointer,
+                middleware=self._provider_fallback_middleware(),
             ),
         }
 
@@ -1299,6 +1330,7 @@ class DeepAgentService:
                 exit_behavior="error",
             )
         ]
+        middleware.extend(self._provider_fallback_middleware())
         if denied:
             middleware.append(_DenyToolsMiddleware(frozenset(denied)))
         kwargs: dict[str, Any] = {
@@ -1323,6 +1355,11 @@ class DeepAgentService:
         elif spec.output_schema is not None:
             kwargs["response_format"] = spec.output_schema
         return create_deep_agent(**kwargs)
+
+    def _provider_fallback_middleware(self) -> list[AgentMiddleware]:
+        if self._provider_rejection_fallback_model is None:
+            return []
+        return [_ProviderFallbackMiddleware(self._provider_rejection_fallback_model)]
 
     def preflight_agent_spec(self, spec: AgentSpec) -> None:
         """Compile an exact revision before its active pointer can change."""

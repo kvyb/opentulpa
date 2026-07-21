@@ -31,6 +31,7 @@ from opentulpa.deep_agent.contracts import (
 )
 from opentulpa.deep_agent.service import (
     _browser_action_requires_approval,
+    _ProviderFallbackMiddleware,
     build_openrouter_chat_model,
 )
 from opentulpa.specs import AgentSpecRef, AgentSpecStore, AgentSpecWrite, OriginRef
@@ -97,6 +98,14 @@ class _ProviderRejectedGraph:
         if False:
             yield {}
         raise BadRequestResponseError("private provider response")
+
+
+class _MiddlewareRequest:
+    def __init__(self, model: Any) -> None:
+        self.model = model
+
+    def override(self, *, model: Any) -> _MiddlewareRequest:
+        return _MiddlewareRequest(model)
 
 
 class _BlockingGraph:
@@ -858,6 +867,43 @@ async def test_provider_bad_request_has_actionable_public_failure(tmp_path: Path
     assert snapshot is not None
     assert snapshot.error == events[-1].data["message"]
     assert "private provider response" not in snapshot.error
+
+
+@pytest.mark.asyncio
+async def test_provider_rejection_retries_same_model_call_with_fallback() -> None:
+    calls: list[Any] = []
+
+    async def handler(request: _MiddlewareRequest) -> str:
+        calls.append(request.model)
+        if len(calls) == 1:
+            raise BadRequestResponseError("rejected")
+        return "fallback response"
+
+    middleware = _ProviderFallbackMiddleware("glm-5.2")
+    result = await middleware.awrap_model_call(_MiddlewareRequest("kimi-k3"), handler)
+
+    assert result == "fallback response"
+    assert calls == ["kimi-k3", "glm-5.2"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_content_rejection_also_uses_fallback() -> None:
+    calls: list[Any] = []
+
+    async def handler(request: _MiddlewareRequest) -> str:
+        calls.append(request.model)
+        if len(calls) == 1:
+            raise ValueError(
+                "OpenRouter API returned an error during streaming: "
+                "Output data may contain inappropriate content"
+            )
+        return "fallback response"
+
+    middleware = _ProviderFallbackMiddleware("glm-5.2")
+    result = await middleware.awrap_model_call(_MiddlewareRequest("kimi-k3"), handler)
+
+    assert result == "fallback response"
+    assert calls == ["kimi-k3", "glm-5.2"]
 
 
 @pytest.mark.asyncio

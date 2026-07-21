@@ -48,6 +48,7 @@ def test_settings_default_deep_agent_model_uses_kimi_k3(monkeypatch, tmp_path: P
     settings = Settings()
 
     assert settings.llm_model == "moonshotai/kimi-k3"
+    assert settings.llm_provider_rejection_fallback_model == "z-ai/glm-5.2"
     assert settings.business_knowledge_oracle_model == "google/gemini-3.1-flash-lite-preview"
 
 

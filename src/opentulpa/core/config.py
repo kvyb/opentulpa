@@ -190,6 +190,13 @@ class Settings(BaseSettings):
             "Recommended default is the OpenRouter slug moonshotai/kimi-k3 for main chat turns."
         ),
     )
+    llm_provider_rejection_fallback_model: str | None = Field(
+        default="z-ai/glm-5.2",
+        description=(
+            "Model used once when the primary OpenRouter provider rejects a model call. "
+            "Set blank to disable provider-rejection fallback."
+        ),
+    )
     model_aliases: dict[str, str] = Field(
         default_factory=dict,
         description=(

@@ -241,6 +241,7 @@ check_model_catalog() {
 
   local -a role_specs=(
     "llm_model|LLM_MODEL|llm_model"
+    "llm_provider_rejection_fallback_model|LLM_PROVIDER_REJECTION_FALLBACK_MODEL|llm_provider_rejection_fallback_model"
     "business_knowledge_oracle_model|BUSINESS_KNOWLEDGE_ORACLE_MODEL|business_knowledge_oracle_model"
   )
   local expected_lines="" spec role env_key yaml_key model

@@ -848,6 +848,20 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             reasoning_effort=settings.llm_reasoning_effort,
             max_completion_tokens=settings.agent_max_completion_tokens,
         )
+        fallback_model_name = str(
+            settings.llm_provider_rejection_fallback_model or ""
+        ).strip()
+        provider_rejection_fallback_model = (
+            build_openrouter_chat_model(
+                api_key=api_key,
+                base_url=settings.openai_compatible_base_url,
+                model_name=fallback_model_name,
+                reasoning_effort=settings.llm_reasoning_effort,
+                max_completion_tokens=settings.agent_max_completion_tokens,
+            )
+            if fallback_model_name and fallback_model_name != settings.llm_model
+            else None
+        )
         model_aliases = {
             "default": settings.llm_model,
             settings.llm_model: settings.llm_model,
@@ -1132,6 +1146,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             container_cli=settings.sandbox_container_cli,
             execution_provider=sandbox_execution,
             attachment_resolver=file_vault,
+            provider_rejection_fallback_model=provider_rejection_fallback_model,
         )
         deferred_agent.bind(agent_service)
 
