@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import secrets
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -22,7 +19,6 @@ from opentulpa.inference.codex import (
     CHATGPT_DEVICE_TOKEN_URL,
     CHATGPT_TOKEN_URL,
     CODEX_MODELS_URL,
-    DEFAULT_SCOPE,
     CodexAuthenticationError,
     CodexProviderError,
     CodexTokenProvider,
@@ -36,6 +32,7 @@ from opentulpa.secrets.cipher import HostKeySecretCipher
 _API_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 _MODEL_CACHE_LIMIT = 24
 _CATALOG_TTL = timedelta(minutes=5)
+_CODEX_DEVICE_VERIFICATION_URL = "https://auth.openai.com/codex/device"
 
 
 class InferenceConflictError(RuntimeError):
@@ -177,22 +174,11 @@ class InferenceService:
         return resolved
 
     async def start_device_login(self, tenant_id: str) -> dict[str, Any]:
-        verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode("ascii")
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
-            .rstrip(b"=")
-            .decode("ascii")
-        )
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     CHATGPT_DEVICE_CODE_URL,
-                    data={
-                        "client_id": CHATGPT_CLIENT_ID,
-                        "scope": DEFAULT_SCOPE,
-                        "code_challenge": challenge,
-                        "code_challenge_method": "S256",
-                    },
+                    json={"client_id": CHATGPT_CLIENT_ID},
                     headers={"Accept": "application/json"},
                 )
             if response.status_code >= 400:
@@ -204,42 +190,26 @@ class InferenceService:
             raise CodexProviderError("Codex device login could not be started") from exc
         if not isinstance(payload, dict):
             raise CodexProviderError("Codex returned an invalid device login response")
-        device_code = str(payload.get("device_code") or "").strip()
+        device_auth_id = str(payload.get("device_auth_id") or "").strip()
         user_code = str(payload.get("user_code") or "").strip()
-        verification_url = str(
-            payload.get("verification_uri") or payload.get("verification_uri_complete") or ""
-        ).strip()
-        if not device_code or not user_code or not verification_url:
+        if not device_auth_id or not user_code:
             raise CodexProviderError("Codex returned an incomplete device login response")
-        try:
-            verification_target = httpx.URL(verification_url)
-        except httpx.InvalidURL as exc:
-            raise CodexProviderError("Codex returned an invalid verification URL") from exc
-        if verification_target.scheme != "https" or verification_target.host not in {
-            "auth.openai.com",
-            "chatgpt.com",
-        }:
-            raise CodexProviderError("Codex returned an invalid verification URL")
         now = datetime.now(UTC)
         try:
-            interval = max(1.0, float(payload.get("interval") or 5.0))
+            interval = max(3.0, float(payload.get("interval") or 5.0))
         except (TypeError, ValueError):
             interval = 5.0
-        try:
-            expires_in = max(30, int(payload.get("expires_in") or 600))
-        except (TypeError, ValueError):
-            expires_in = 600
+        expires_at = self._device_expiry(payload.get("expires_at"), now=now)
         login = DeviceLogin(
             id=new_short_id("login", suffix_chars=12),
             tenant_id=tenant_id,
             status="pending",
-            verification_url=verification_url,
+            verification_url=_CODEX_DEVICE_VERIFICATION_URL,
             user_code=user_code,
-            device_code=device_code,
-            code_verifier=verifier,
+            device_auth_id=device_auth_id,
             interval_seconds=interval,
             next_poll_at=now,
-            expires_at=now + timedelta(seconds=expires_in),
+            expires_at=expires_at,
         )
         self._store.create_device_login(login)
         return self._public_login(login)
@@ -280,7 +250,10 @@ class InferenceService:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     CHATGPT_DEVICE_TOKEN_URL,
-                    data={"client_id": CHATGPT_CLIENT_ID, "device_code": login.device_code},
+                    json={
+                        "device_auth_id": login.device_auth_id,
+                        "user_code": login.user_code,
+                    },
                     headers={"Accept": "application/json"},
                 )
             payload = response.json()
@@ -294,11 +267,16 @@ class InferenceService:
         if not isinstance(payload, dict):
             payload = {}
         authorization_code = str(payload.get("authorization_code") or "").strip()
-        if authorization_code:
-            return await self._exchange_device_login(login, authorization_code)
-        error = str(payload.get("error") or "").strip()
-        interval = login.interval_seconds + (5.0 if error == "slow_down" else 0.0)
-        if not error or error in {"authorization_pending", "slow_down"}:
+        code_verifier = str(payload.get("code_verifier") or "").strip()
+        if response.status_code == 200 and authorization_code and code_verifier:
+            return await self._exchange_device_login(login, authorization_code, code_verifier)
+        error = self._oauth_error_code(payload)
+        slow_down = response.status_code == 429 or error == "slow_down"
+        interval = login.interval_seconds + (5.0 if slow_down else 0.0)
+        if response.status_code in {403, 404, 429} or error in {
+            "authorization_pending",
+            "slow_down",
+        }:
             pending = self._replace_login(
                 login,
                 interval_seconds=interval,
@@ -314,6 +292,7 @@ class InferenceService:
         self,
         login: DeviceLogin,
         authorization_code: str,
+        code_verifier: str,
     ) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -324,7 +303,7 @@ class InferenceService:
                         "code": authorization_code,
                         "redirect_uri": CHATGPT_DEVICE_REDIRECT_URI,
                         "client_id": CHATGPT_CLIENT_ID,
-                        "code_verifier": login.code_verifier,
+                        "code_verifier": code_verifier,
                     },
                     headers={"Accept": "application/json"},
                 )
@@ -352,6 +331,21 @@ class InferenceService:
             (key, value) for key, value in self._models.items() if key[0] != login.tenant_id
         )
         return self._public_login(authorized)
+
+    @staticmethod
+    def _device_expiry(raw: Any, *, now: datetime) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(UTC)
+        except (TypeError, ValueError):
+            return now + timedelta(minutes=15)
+        return parsed if parsed > now else now + timedelta(seconds=30)
+
+    @staticmethod
+    def _oauth_error_code(payload: dict[str, Any]) -> str:
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return str(error.get("code") or error.get("type") or "").strip()
+        return str(error or "").strip()
 
     async def _codex_models(self, tenant_id: str) -> tuple[InferenceModel, ...]:
         if not self.codex_connected(tenant_id):

@@ -21,6 +21,8 @@ from opentulpa.deep_agent.service import (
     _ProviderFallbackMiddleware,
 )
 from opentulpa.inference.codex import (
+    CHATGPT_CLIENT_ID,
+    CHATGPT_DEVICE_REDIRECT_URI,
     CodexProviderError,
     CodexTokenProvider,
     build_codex_model,
@@ -184,19 +186,25 @@ async def test_device_login_persists_authorized_credential_without_exposing_toke
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    expires_at = (datetime.now(UTC) + timedelta(minutes=15)).isoformat()
     responses = iter(
         (
             httpx.Response(
                 200,
                 json={
-                    "device_code": "private-device-code",
+                    "device_auth_id": "private-device-auth-id",
                     "user_code": "ABCD-EFGH",
-                    "verification_uri": "https://auth.openai.com/codex/device",
-                    "interval": 1,
-                    "expires_in": 600,
+                    "interval": "3",
+                    "expires_at": expires_at,
                 },
             ),
-            httpx.Response(200, json={"authorization_code": "private-authorization-code"}),
+            httpx.Response(
+                200,
+                json={
+                    "authorization_code": "private-authorization-code",
+                    "code_verifier": "private-code-verifier",
+                },
+            ),
             httpx.Response(
                 200,
                 json={
@@ -207,6 +215,7 @@ async def test_device_login_persists_authorized_credential_without_exposing_toke
             ),
         )
     )
+    requests: list[dict[str, Any]] = []
 
     class Client:
         def __init__(self, **_: Any) -> None:
@@ -218,7 +227,8 @@ async def test_device_login_persists_authorized_credential_without_exposing_toke
         async def __aexit__(self, *_: Any) -> None:
             return None
 
-        async def post(self, *_: Any, **__: Any) -> httpx.Response:
+        async def post(self, *_: Any, **kwargs: Any) -> httpx.Response:
+            requests.append(kwargs)
             return next(responses)
 
     monkeypatch.setattr("opentulpa.inference.service.httpx.AsyncClient", Client)
@@ -228,41 +238,25 @@ async def test_device_login_persists_authorized_credential_without_exposing_toke
     authorized = await service.get_device_login("tenant-1", started["login_id"])
 
     assert started["status"] == "pending"
+    assert started["verification_url"] == "https://auth.openai.com/codex/device"
     assert authorized is not None and authorized["status"] == "authorized"
     assert "access_token" not in authorized
     assert service.codex_connected("tenant-1") is True
     assert b"private-access-token" not in (tmp_path / "inference.db").read_bytes()
-
-
-@pytest.mark.asyncio
-async def test_device_login_rejects_untrusted_verification_url(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Client:
-        def __init__(self, **_: Any) -> None:
-            pass
-
-        async def __aenter__(self) -> Client:
-            return self
-
-        async def __aexit__(self, *_: Any) -> None:
-            return None
-
-        async def post(self, *_: Any, **__: Any) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "device_code": "private-device-code",
-                    "user_code": "ABCD-EFGH",
-                    "verification_uri": "https://evil.example/collect",
-                    "expires_in": 600,
-                },
-            )
-
-    monkeypatch.setattr("opentulpa.inference.service.httpx.AsyncClient", Client)
-    with pytest.raises(CodexProviderError, match="invalid verification URL"):
-        await _inference(tmp_path).start_device_login("tenant-1")
+    assert requests[0]["json"] == {"client_id": CHATGPT_CLIENT_ID}
+    assert "data" not in requests[0]
+    assert requests[1]["json"] == {
+        "device_auth_id": "private-device-auth-id",
+        "user_code": "ABCD-EFGH",
+    }
+    assert "data" not in requests[1]
+    assert requests[2]["data"] == {
+        "grant_type": "authorization_code",
+        "code": "private-authorization-code",
+        "redirect_uri": CHATGPT_DEVICE_REDIRECT_URI,
+        "client_id": CHATGPT_CLIENT_ID,
+        "code_verifier": "private-code-verifier",
+    }
 
 
 @pytest.mark.asyncio
@@ -272,7 +266,7 @@ async def test_device_login_slow_down_expiry_and_denial_are_sanitized(
 ) -> None:
     responses = iter(
         (
-            httpx.Response(400, json={"error": "slow_down"}),
+            httpx.Response(429, json={"error": "slow_down"}),
             httpx.Response(400, json={"error": "access_denied", "error_description": "secret"}),
         )
     )
@@ -299,8 +293,7 @@ async def test_device_login_slow_down_expiry_and_denial_are_sanitized(
         status="pending",
         verification_url="https://auth.openai.com/codex/device",
         user_code="ABCD-EFGH",
-        device_code="private-device",
-        code_verifier="private-verifier",
+        device_auth_id="private-device-auth-id",
         interval_seconds=1,
         next_poll_at=now - timedelta(seconds=1),
         expires_at=now + timedelta(minutes=10),

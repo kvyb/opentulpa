@@ -39,8 +39,7 @@ class DeviceLogin:
     status: str
     verification_url: str
     user_code: str
-    device_code: str
-    code_verifier: str
+    device_auth_id: str
     interval_seconds: float
     next_poll_at: datetime
     expires_at: datetime
@@ -344,8 +343,7 @@ class InferenceCredentialStore:
             status=str(row["status"]),
             verification_url=str(payload["verification_url"]),
             user_code=str(payload["user_code"]),
-            device_code=str(payload["device_code"]),
-            code_verifier=str(payload["code_verifier"]),
+            device_auth_id=str(payload["device_auth_id"]),
             interval_seconds=float(payload["interval_seconds"]),
             next_poll_at=datetime.fromisoformat(str(payload["next_poll_at"])).astimezone(UTC),
             expires_at=datetime.fromisoformat(str(payload["expires_at"])).astimezone(UTC),
@@ -357,8 +355,7 @@ class InferenceCredentialStore:
         return {
             "verification_url": login.verification_url,
             "user_code": login.user_code,
-            "device_code": login.device_code,
-            "code_verifier": login.code_verifier,
+            "device_auth_id": login.device_auth_id,
             "interval_seconds": login.interval_seconds,
             "next_poll_at": login.next_poll_at.astimezone(UTC).isoformat(),
             "expires_at": login.expires_at.astimezone(UTC).isoformat(),
