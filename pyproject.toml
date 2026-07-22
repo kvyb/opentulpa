@@ -1,7 +1,7 @@
 [project]
 name = "opentulpa"
 version = "0.1.0"
-description = "A self-hosted persistent agent runtime with durable context and guarded execution"
+description = "A self-hosted Deep Agents operator with explicit product and safety boundaries"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
@@ -11,34 +11,68 @@ license = { text = "MIT" }
 dependencies = [
     "langchain>=0.3",
     "langgraph>=0.2",
-    "langchain-openai>=0.3",
     "langgraph-checkpoint-sqlite>=2.0",
     "fastapi>=0.109",
     "uvicorn[standard]>=0.27",
     "httpx>=0.26",
-    "crawl4ai>=0.7.0",
-    "chardet<6",
-    "mem0ai>=1.0.8",
-    "pypdf>=5.0",
     "apscheduler>=3.10",
     "pydantic-settings>=2.0",
-    "browser-use==0.12.2",
-    "composio>=0.11.4",
-    "composio-langchain>=0.11.4",
+    "deepagents==0.6.12",
+    "cryptography>=45",
     "langfuse>=3.0.0",
-    "headroom-ai>=0.5.25",
-    "openpyxl>=3.1.5",
+    "langchain-mcp-adapters>=0.1.0",
+    "langchain-openai==1.3.5",
     "langchain-openrouter>=0.2.1",
-    "langchain-deepseek>=1.0.1",
+    "python-multipart>=0.0.22",
+    "keyring>=25,<26",
 ]
 
+[project.scripts]
+opentulpa = "opentulpa.host.cli:main"
+opentulpa-host = "opentulpa.host.cli:serve"
+opentulpa-bootstrap = "opentulpa.bootstrap.gateway:main"
+opentulpa-recovery = "opentulpa.bootstrap.recovery_cli:main"
+opentulpa-migrate-deepagents = "opentulpa.migrations.deepagents:main"
+
 [project.optional-dependencies]
+browser = [
+    "playwright>=1.50",
+    "browser-use-sdk>=1.0.0",
+]
+integrations = [
+    "composio>=0.11.4",
+    "composio-langchain>=0.11.4",
+]
+documents = [
+    "chardet<6",
+    "openpyxl>=3.1.5",
+    "pypdf>=5.0",
+]
+research = [
+    "crawl4ai>=0.7.0",
+]
+bundled = [
+    "browser-use-sdk>=1.0.0",
+    "chardet<6",
+    "composio>=0.11.4",
+    "composio-langchain>=0.11.4",
+    "crawl4ai>=0.7.0",
+    "openpyxl>=3.1.5",
+    "playwright>=1.50",
+    "pypdf>=5.0",
+]
 dev = [
+    "crawl4ai>=0.7.0",
+    "openpyxl>=3.1.5",
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "qdrant-client>=1.16,<2",
     "ruff>=0.1",
     "mypy>=1.0",
     "pre-commit>=3.0",
+]
+migration = [
+    "qdrant-client>=1.16,<2",
 ]
 
 [build-system]
@@ -50,8 +84,11 @@ packages = ["src/opentulpa"]
 
 [tool.uv]
 dev-dependencies = [
+    "crawl4ai>=0.7.0",
+    "openpyxl>=3.1.5",
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "qdrant-client>=1.16,<2",
     "ruff>=0.1",
     "mypy>=1.0",
 ]

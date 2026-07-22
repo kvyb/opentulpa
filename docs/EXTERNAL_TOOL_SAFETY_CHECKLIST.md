@@ -1,50 +1,64 @@
 # External Tool Safety Checklist
 
-Use this checklist whenever you add or modify a tool/integration that can read/write external systems.
+Use this checklist for every product tool or external adapter.
 
-## 1. Classify the tool
+## Contract
 
-- Define `recipient_scope` behavior: `self`, `external`, or `unknown`.
-- Define `impact_type`: `read`, `write`, `purchase`, or `costly`.
-- Treat unknown scope as higher-risk and make the model spell out what it is touching.
+- Add one versioned `ToolSpec` with explicit provider, effect, approval, idempotency, execution mode, and timeout.
+- Expose only the minimum model-visible arguments; inject tenant, actor, thread, channel, credentials, and roots through trusted runtime context.
+- Generate the LangChain schema, approval policy, audit metadata, JSON Schema, and `tool-contract.md` from the registry.
+- Reject unregistered operations and unknown action classifications.
+- If the feature is an interface, submit work through `RunSubmission`, resume through the run API, and consume the durable notification stream; do not add another agent loop or checkpoint store.
+- Keep fixed-kernel changes separate from mutable capability work. A capability cannot replace trusted identity, the Agent API, tool policy, sandbox, evaluator, or bootstrap.
 
-## 2. Define the execution contract before execution
+## Authorization
 
-- Keep read operations separate from write operations where practical.
-- Make side effects explicit in tool inputs and results.
-- Return enough evidence for the assistant to know whether the requested action actually happened.
-- Prefer idempotent writes or explicit duplicate detection when the target system allows it.
+- Validate tenant ownership in the application service immediately before every read and write.
+- Revalidate provider accounts, browser sessions, files, jobs, and artifacts at execution time.
+- Never infer ownership from a model argument or provider display name.
+- Add explicit cross-tenant tests for every resource identifier.
 
-## 3. Keep support act-as execution tenant-correct
+## Side Effects
 
-For support act-as flows:
+- Require persisted owner approval for deletes, authorization changes, external sends, purchases, workflow activation, browser submission, and risky execution.
+- Require an idempotency key for every external write and reject key reuse with different arguments.
+- Distinguish accepted background work from completed side effects.
+- Return concrete success/failure evidence without leaking raw provider payloads.
 
-- Execute the action against the bound customer tenant, not the support operator's own tenant.
-- Do not leak support setup/debug chat into the owner thread.
-- Do not notify the owner about support setup/debug chatter unless the action intentionally produces a customer-facing or owner-facing event.
-- Record support user id, username, support chat id, bound customer id, support thread id, action/tool name, timestamp, and outcome in internal audit state.
+## Data And Network
 
-## 4. Minimize data exposure
+- Keep secrets in host-side adapters; never place them in prompts, tool arguments/results, traces, or sandbox mounts.
+- Redact tokens, cookies, headers, credentials, internal paths, and media payloads from events and audit output.
+- Bound response bytes, execution time, redirects, and content types.
+- Reject private, loopback, link-local, metadata, rebinding, traversal, symlink, and special-file targets.
 
-- Store secrets in env/local secure config, never in prompts or logs.
-- Keep tool args/results redacted when they can contain tokens, cookies, headers, or uploaded media.
-- Summarize side effects instead of dumping raw external payloads into chat or traces.
+## Failure And Recovery
 
-## 5. Add interface handling
+- Sanitize provider exceptions and accurately mark retryable errors.
+- Persist approval interrupts and job state before returning to a client.
+- Test restart recovery, rejected and edited approvals, duplicate requests, partial failures, and indeterminate provider outcomes.
+- Fail closed when ownership, classification, idempotency, or enforcement cannot be proven.
 
-- Add same-interface status updates first when a tool can take more than a few seconds.
-- Ensure the user sees when work is still running versus when the result is final.
+## Mutable Capabilities
 
-## 6. Add tests before merge
+- Bind activation to an immutable manifest revision, content digest, and passing deterministic test result.
+- In managed production, launch every source-overlay worker through the stable lease-fenced rootless OCI authority; mount only capability `/state`, never product `/workspace`, source, databases, credentials, or a container socket.
+- Permit reviewed subprocess workers only in direct development, and state that direct mode has no safe self-replacement or stable rollback.
+- Give a worker only scoped, revocable Agent API credentials and declared secret handles; never an owner token.
+- Record the exact config, secret-handle revisions, worker protocol, permissions, and network policy in the activation generation.
+- Reconcile or disable the worker when a bound secret rotates; never continue with an untracked stale credential.
+- Block duplicate transports, such as webhook and polling consumers for the same Telegram bot.
+- Stop an old interface generation before starting its replacement; persist non-secret lifecycle state and restart the old generation without advancing activation if handover fails.
+- Atomically replace same-capability MCP generations, reject collisions across capabilities, and namespace intentional alternatives to fixed tools instead of shadowing them.
+- Require owner approval for activation, rollback, and deactivation.
 
-- Self-target action auto-allowed.
-- External write action returns concrete success/failure evidence.
-- Unknown recipient scope does not produce a misleading success claim.
-- Repeated execution does not duplicate side effects unexpectedly.
-- Support act-as actions use the bound customer id and keep support history separate from owner history.
+## Source Evolution
 
-## 7. Document the integration
-
-- Update README capability/safety notes.
-- Document tool classification and the execution contract.
-- Include operational caveats (rate limits, retries, partial failures).
+- Give the owner agent only a context-owned detached source worktree; never edit the serving checkout.
+- Permit normal repository source paths, but reject secrets, traversal, `.git`, `.venv`, symlinks, special files, and oversized trees before commit.
+- Run fixed public, security, and kernel-contract checks in a no-network evaluator outside candidate control.
+- Require one persisted owner approval before committing, evaluating, building, and queuing activation; bind the resulting release to source commit, lock hash, evaluator fingerprint, and OCI artifact digest.
+- State the trust model explicitly: the chat approval assumes the active release is trusted; hostile-release authorization requires a separate external authority.
+- Stage and health-check before cutover; retain a content-addressed previous release for automatic rollback.
+- Deliver sanitized failure and rollback context through the durable owner notification stream.
+- Sanitize contribution patches and keep upstream credentials outside OpenTulpa.

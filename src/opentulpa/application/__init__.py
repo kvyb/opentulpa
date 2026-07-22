@@ -1,11 +1,17 @@
-"""Application-layer orchestrators (use-case boundaries)."""
+"""Application services for the explicit OpenTulpa product boundary."""
 
-from opentulpa.application.turn_orchestrator import TurnOrchestrator
-from opentulpa.application.wake_orchestrator import WakeOrchestrator
-from opentulpa.application.workflow_setup_orchestrator import WorkflowSetupOrchestrator
+from opentulpa.application.product_tools import (
+    AgentSpecPort,
+    CapabilityPort,
+    ProductToolApplication,
+    SecretHandlePort,
+    TriggerSpecPort,
+)
 
 __all__ = [
-    "TurnOrchestrator",
-    "WakeOrchestrator",
-    "WorkflowSetupOrchestrator",
+    "AgentSpecPort",
+    "CapabilityPort",
+    "ProductToolApplication",
+    "SecretHandlePort",
+    "TriggerSpecPort",
 ]

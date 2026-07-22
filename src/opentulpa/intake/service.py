@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.ids import new_short_id
@@ -18,6 +20,7 @@ from opentulpa.intake.decision_applier import DecisionApplier
 from opentulpa.intake.decision_maker import DecisionMaker
 from opentulpa.intake.messaging_adapters import (
     AdapterRegistry,
+    ConversationSummary,
     build_messaging_adapter_registry,
     messaging_adapter_context,
 )
@@ -54,7 +57,7 @@ from opentulpa.intake.sink_utils import (
 from opentulpa.intake.sink_utils import (
     sheet_cell_value as _sheet_cell_value,
 )
-from opentulpa.intake.sink_writer import SinkWriter
+from opentulpa.intake.sink_writer import SinkWriter, normalize_local_csv_path
 from opentulpa.intake.store import IntakeWorkflowStore
 from opentulpa.intake.workflow_boundaries import (
     DECISION_BOOKING_ACTIONS,
@@ -79,9 +82,9 @@ from opentulpa.intake.workflow_runtime import (
 from opentulpa.intake.workflow_runtime import (
     utc_now as _utc_now,
 )
-from opentulpa.intake.workflow_skill import build_intake_workflow_skill, workflow_skill_name
-from opentulpa.interfaces.telegram.relay import NO_NOTIFY_TOKEN
-from opentulpa.scheduler.models import Routine
+from opentulpa.interfaces.telegram.constants import NO_NOTIFY_TOKEN
+from opentulpa.persistence.idempotency import IdempotencyStore
+from opentulpa.specs import AgentSpecRef
 
 _ALLOWED_CHANNELS = {"instagram_dm", "telegram_business_dm"}
 _ALLOWED_PROVIDERS = {"composio", "telegram_bot_api"}
@@ -106,6 +109,9 @@ _BUSINESS_FACTS_MAX_LIST_ITEMS = 20
 _BUSINESS_FACTS_MAX_STRING_CHARS = 500
 _BUSINESS_FACTS_MAX_JSON_CHARS = 12000
 logger = logging.getLogger(__name__)
+_PUBLIC_TELEGRAM_INTAKE_ERROR = (
+    "Telegram Business intake could not process an update. Check server logs."
+)
 
 
 def _utc_now_iso() -> str:
@@ -117,10 +123,6 @@ def _is_older_than(value: Any, *, max_age: timedelta) -> bool:
     if parsed is None:
         return False
     return (_utc_now() - parsed) > max_age
-
-
-def _channel_uses_scheduler(channel: str) -> bool:
-    return str(channel or "").strip().lower() != "telegram_business_dm"
 
 
 def _scheduled_poll_interval(schedule: Any) -> timedelta | None:
@@ -238,20 +240,29 @@ class IntakeWorkflowService:
         *,
         db_path: Path,
         project_root: Path,
-        scheduler: Any | None = None,
-        skill_store: Any | None = None,
+        sink_root: Path | None = None,
+        idempotency: IdempotencyStore | None = None,
         composio: Any | None = None,
+        sink_composio: Any | None = None,
         telegram_business: Any | None = None,
         file_vault: FileVaultService | None = None,
         knowledge_service: Any | None = None,
-        get_agent_runtime: Any | None = None,
+        get_intake_agent: Any | None = None,
+        resolve_agent_spec: Callable[[str, str], AgentSpecRef] | None = None,
     ) -> None:
         self._db_path = db_path.resolve()
         self._store = IntakeWorkflowStore(db_path=self._db_path)
         self._project_root = project_root.resolve()
-        self._scheduler = scheduler
-        self._skill_store = skill_store
+        self._sink_root = (
+            sink_root.expanduser()
+            if sink_root is not None
+            else self._project_root / ".opentulpa" / "intake_sinks"
+        )
+        self._idempotency = idempotency or IdempotencyStore(
+            self._db_path.with_name(f"{self._db_path.stem}_external_effects.db")
+        )
         self._composio = composio
+        self._sink_composio = sink_composio
         self._telegram_business = telegram_business
         self._messaging_adapters: AdapterRegistry = build_messaging_adapter_registry(
             composio=composio,
@@ -268,10 +279,15 @@ class IntakeWorkflowService:
             utc_now_iso=_utc_now_iso,
         )
         self._decision_maker = DecisionMaker(self)
-        self._sink_writer = SinkWriter(project_root=self._project_root, composio=composio)
+        self._sink_writer = SinkWriter(
+            sink_root=self._sink_root,
+            composio=sink_composio,
+            idempotency=self._idempotency,
+        )
         self._file_vault = file_vault
         self._knowledge_service = knowledge_service
-        self._get_agent_runtime = get_agent_runtime
+        self._get_intake_agent = get_intake_agent
+        self._resolve_agent_spec = resolve_agent_spec
         self._conversation_locks_guard = threading.Lock()
         self._conversation_locks: dict[str, asyncio.Lock] = {}
         self._pending_worker_task: asyncio.Task[None] | None = None
@@ -310,8 +326,8 @@ class IntakeWorkflowService:
         self._pending_worker_task = None
         self._pending_worker_stop = None
 
-    def _runtime_for_observability(self) -> Any | None:
-        getter = self._get_agent_runtime
+    def _agent_for_observability(self) -> Any | None:
+        getter = self._get_intake_agent
         if not callable(getter):
             return None
         with suppress(Exception):
@@ -344,7 +360,6 @@ class IntakeWorkflowService:
             "customer_id": str(workflow.get("customer_id", "") or "").strip(),
             "workflow_id": str(workflow.get("workflow_id", "") or "").strip(),
             "workflow_name": str(workflow.get("name", "") or "").strip(),
-            "routine_id": str(workflow.get("routine_id", "") or "").strip(),
             "channel": str(workflow.get("channel", "") or "").strip() or "instagram_dm",
             "provider": str(workflow.get("provider", "") or "").strip() or "composio",
             "sink_type": str(workflow.get("sink_type", "") or "").strip(),
@@ -372,14 +387,14 @@ class IntakeWorkflowService:
         conversation_summary: dict[str, Any],
         **extra: Any,
     ) -> None:
-        runtime = self._runtime_for_observability()
+        agent = self._agent_for_observability()
         fields = self._intake_observability_fields(
             workflow=workflow,
             conversation_summary=conversation_summary,
             **extra,
         )
         customer_id = str(fields.pop("customer_id", "") or "").strip() or None
-        record = getattr(runtime, "record_observability_event", None)
+        record = getattr(agent, "record_observability_event", None)
         if callable(record):
             record(
                 event=event,
@@ -387,7 +402,7 @@ class IntakeWorkflowService:
                 **fields,
             )
             return
-        log_event = getattr(runtime, "log_behavior_event", None)
+        log_event = getattr(agent, "log_behavior_event", None)
         if callable(log_event):
             log_event(event=event, **fields)
 
@@ -660,10 +675,11 @@ class IntakeWorkflowService:
                 event_type=_TELEGRAM_BUSINESS_SETTLED_EVENT_TYPE,
             )
         except Exception as exc:
+            self._log_pending_run_failure("intake pending run raised", exc)
             result = {
                 "ok": False,
                 "workflow_id": workflow_id,
-                "summary": f"Intake workflow {workflow_id} failed: {exc}",
+                "summary": _PUBLIC_TELEGRAM_INTAKE_ERROR,
             }
         if (
             not bool(result.get("ok", False))
@@ -671,9 +687,17 @@ class IntakeWorkflowService:
             and str(result.get("summary", "") or "").strip()
             and str(result.get("summary", "") or "").strip() != NO_NOTIFY_TOKEN
         ):
+            logger.error(
+                "intake pending run failed: %r",
+                result,
+                extra={
+                    "workflow_id": workflow_id,
+                    "conversation_id": conversation_id,
+                },
+            )
             await self._notify_pending_run_owner(
                 owner_chat_id=owner_chat_id,
-                summary=str(result.get("summary", "") or "").strip(),
+                summary=_PUBLIC_TELEGRAM_INTAKE_ERROR,
             )
         self._finish_pending_run(
             workflow_id=workflow_id,
@@ -695,6 +719,7 @@ class IntakeWorkflowService:
         )
 
     async def _notify_pending_run_owner(self, *, owner_chat_id: str, summary: str) -> None:
+        del summary
         telegram_business = self._telegram_business
         client = getattr(telegram_business, "client", None)
         if client is None:
@@ -702,7 +727,7 @@ class IntakeWorkflowService:
         with suppress(Exception):
             await client.send_message(
                 chat_id=owner_chat_id,
-                text=f"Telegram Business workflow issue: {summary}",
+                text=_PUBLIC_TELEGRAM_INTAKE_ERROR,
                 parse_mode="HTML",
             )
 
@@ -905,14 +930,6 @@ class IntakeWorkflowService:
             workflow_id=safe_workflow_id,
             customer_id=safe_customer,
         )
-        if _channel_uses_scheduler(safe_channel):
-            safe_routine_id = (
-                str(existing_record.get("routine_id", "")).strip()
-                if existing is not None
-                else ""
-            ) or new_short_id("rtn")
-        else:
-            safe_routine_id = ""
         return {
             "workflow_id": safe_workflow_id,
             "customer_id": safe_customer,
@@ -931,7 +948,7 @@ class IntakeWorkflowService:
             "schedule": safe_schedule,
             "notify_user": bool(notify_user),
             "enabled": bool(enabled),
-            "routine_id": safe_routine_id,
+            "routine_id": "",
             "reply_mode": safe_reply_mode,
         }
 
@@ -987,7 +1004,10 @@ class IntakeWorkflowService:
                 or safe_config.get("filename", "")
                 or ""
             ).strip()
-            file_path = requested_path or f"tulpa_stuff/intake_{workflow_id or 'workflow'}.csv"
+            file_path = normalize_local_csv_path(
+                requested_path,
+                workflow_id=workflow_id,
+            )
             return {"file_path": file_path}
 
         field_mapping = _clean_mapping(safe_config.get("field_mapping"))
@@ -1023,6 +1043,17 @@ class IntakeWorkflowService:
                 raise ValueError(
                     "sink_config.operation_hint is required for generic_composio_write"
                 )
+            if "booking_id" not in field_mapping.values():
+                raise ValueError(
+                    "generic_composio_write requires a field_mapping target sourced from booking_id"
+                )
+            operation_tokens = operation_hint.replace("_", " ").replace("-", " ").split()
+            if validate_target and not any(
+                token in operation_tokens for token in ("upsert", "update")
+            ):
+                raise ValueError(
+                    "generic_composio_write operation_hint must describe an upsert or update"
+                )
         normalized = {
             "toolkit": toolkit,
             "operation_hint": operation_hint,
@@ -1031,12 +1062,16 @@ class IntakeWorkflowService:
         }
         if connected_account_id:
             normalized["connected_account_id"] = connected_account_id
+        if legacy_tool_slug:
+            normalized["tool_slug"] = legacy_tool_slug
         if validate_target:
-            self._validate_sink_target(
+            binding = self._validate_sink_target(
                 customer_id=customer_id,
                 sink_type=sink_type,
                 sink_config=normalized,
             )
+            normalized["tool_slug"] = str(binding.tool_slug)
+            normalized["connected_account_id"] = str(binding.connected_account_id)
         return normalized
 
     def _validate_sink_target(
@@ -1045,27 +1080,38 @@ class IntakeWorkflowService:
         customer_id: str,
         sink_type: str,
         sink_config: dict[str, Any],
-    ) -> None:
-        del customer_id
-        if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
-            return
+    ) -> Any:
+        configured_slug = str(sink_config.get("tool_slug") or "").strip() or None
+        if self._sink_composio is None or not bool(
+            getattr(self._sink_composio, "enabled", False)
+        ):
+            raise ValueError("tenant-aware Composio sink validation is unavailable")
         toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
         if not toolkit:
             raise ValueError("sink_config.toolkit is required for composio sink types")
         operation_hint = str(sink_config.get("operation_hint", "") or "").strip().lower()
+        field_mapping = _clean_mapping(sink_config.get("field_mapping"))
+        static_arguments = _safe_dict(sink_config.get("static_arguments"))
+        required_arguments = set(static_arguments)
+        if sink_type == "google_sheets_composio":
+            required_arguments.update({"headers", "rows", "keyColumn"})
+        else:
+            required_arguments.update(field_mapping)
         try:
-            resolved_slug = self._resolve_composio_sink_tool_slug(
-                sink_type=sink_type,
-                sink_config=sink_config,
+            return self._sink_composio.resolve_sink_binding(
+                tenant_id=customer_id,
+                toolkit=toolkit,
+                connected_account_id=str(
+                    sink_config.get("connected_account_id") or ""
+                ).strip()
+                or None,
+                tool_slug=configured_slug,
+                operation_hint=operation_hint,
+                required_arguments=required_arguments,
+                allow_discovery=configured_slug is None,
             )
         except Exception as exc:
             raise ValueError(f"unable to resolve sink tool from toolkit={toolkit}: {exc}") from exc
-        if not resolved_slug:
-            raise ValueError(
-                f"unable to resolve sink tool from toolkit={toolkit}"
-            )
-        if sink_type == "generic_composio_write" and not operation_hint:
-            raise ValueError("sink_config.operation_hint is required for generic_composio_write")
 
     def _resolve_google_sheets_sheet_name_for_sink(
         self,
@@ -1283,17 +1329,22 @@ class IntakeWorkflowService:
         sink_type = str(workflow.get("sink_type", "") or "").strip().lower()
         toolkit = _normalize_toolkit_slug(sink_config.get("toolkit"))
         connected_account_id = str(sink_config.get("connected_account_id", "") or "").strip() or None
-        tool_slug = ""
-        if self._composio is None or not bool(getattr(self._composio, "enabled", False)):
+        tool_slug = str(sink_config.get("tool_slug") or "").strip()
+        if self._sink_composio is None or not bool(
+            getattr(self._sink_composio, "enabled", False)
+        ):
             warnings.append("Composio is not configured, so the write tool could not be validated.")
         else:
             try:
-                tool_slug = self._resolve_composio_sink_tool_slug(
+                binding = self._validate_sink_target(
+                    customer_id=str(workflow.get("customer_id") or ""),
                     sink_type=sink_type,
                     sink_config=sink_config,
                 )
+                tool_slug = str(binding.tool_slug)
+                connected_account_id = str(binding.connected_account_id)
             except Exception as exc:
-                warnings.append(f"Could not resolve Composio write tool during dry run: {exc}")
+                warnings.append(f"Could not validate Composio write tool during dry run: {exc}")
         enriched_payload = {
             **sample_payload,
             "booking_id": "sample_booking_id",
@@ -1376,15 +1427,9 @@ class IntakeWorkflowService:
                 existing_telegram_workflow_id = str(
                     existing_telegram_workflow.get("workflow_id", "") or ""
                 ).strip()
-                if existing is not None and safe_workflow_id == existing_telegram_workflow_id:
+                if safe_workflow_id != existing_telegram_workflow_id:
                     raise ValueError(
-                        "telegram_business_dm workflows cannot be edited in place; fetch the "
-                        "existing workflow for context, delete it, then create a new workflow"
-                    )
-                if not safe_workflow_id:
-                    raise ValueError(
-                        "telegram_business_dm workflows cannot be updated in place; fetch the "
-                        "existing workflow for context, delete it, then create a new workflow"
+                        "telegram_business_dm supports only one active workflow per customer"
                     )
         workflow = self._normalize_workflow_payload(
             workflow_id=safe_workflow_id or None,
@@ -1411,14 +1456,13 @@ class IntakeWorkflowService:
         created_at = str(existing.get("created_at", "")).strip() if existing else ""
         if not created_at:
             created_at = now
-        self._store.upsert_workflow_record(
+        revision = self._store.upsert_workflow_record(
             workflow=workflow,
             created_at=created_at,
             updated_at=now,
         )
+        workflow["revision"] = revision
         self._index_workflow_knowledge(workflow)
-        self._sync_routine(workflow)
-        self._sync_skill(workflow)
         return self.get_workflow(
             customer_id=workflow["customer_id"],
             workflow_id=workflow["workflow_id"],
@@ -1459,21 +1503,21 @@ class IntakeWorkflowService:
     def get_workflow(self, *, customer_id: str, workflow_id: str) -> dict[str, Any] | None:
         return self._store.get_workflow(customer_id=customer_id, workflow_id=workflow_id)
 
-    def delete_workflow(self, *, customer_id: str, workflow_id: str) -> dict[str, Any]:
+    def delete_workflow(
+        self,
+        *,
+        customer_id: str,
+        workflow_id: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
         workflow = self.get_workflow(customer_id=customer_id, workflow_id=workflow_id)
         if workflow is None:
             return {"ok": False, "deleted": False}
-        self._store.delete_workflow_records(workflow_id=str(workflow["workflow_id"]))
-        if self._scheduler is not None:
-            with suppress(Exception):
-                self._scheduler.remove_routine(str(workflow.get("routine_id", "")).strip())
-        if self._skill_store is not None:
-            with suppress(Exception):
-                self._skill_store.delete_skill(
-                    scope="user",
-                    customer_id=str(workflow["customer_id"]),
-                    name=workflow_skill_name(str(workflow["workflow_id"])),
-                )
+        self._store.delete_workflow_records(
+            customer_id=customer_id,
+            workflow_id=str(workflow["workflow_id"]),
+            expected_revision=expected_revision,
+        )
         return {"ok": True, "deleted": True, "workflow_id": workflow["workflow_id"]}
 
     def list_bookings(
@@ -1488,6 +1532,83 @@ class IntakeWorkflowService:
             workflow_id=workflow_id,
             conversation_id=conversation_id,
         )
+
+    def reconcile_sink_effect(
+        self,
+        *,
+        customer_id: str,
+        actor_id: str,
+        workflow_id: str,
+        booking_id: str,
+        effect_revision: int,
+        decision: str,
+        reason: str,
+        provider_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply an explicit owner decision to one indeterminate sink effect."""
+
+        workflow = self.get_workflow(customer_id=customer_id, workflow_id=workflow_id)
+        if workflow is None:
+            raise LookupError("intake workflow not found")
+        booking = next(
+            (
+                item
+                for item in self.list_bookings(
+                    customer_id=customer_id,
+                    workflow_id=workflow_id,
+                )
+                if str(item.get("booking_id") or "") == booking_id
+            ),
+            None,
+        )
+        if booking is None:
+            raise LookupError("intake booking not found")
+        revision = int(booking.get("sink_effect_revision") or 0)
+        phase = str(booking.get("sink_effect_phase") or "").strip()
+        if revision != effect_revision or not phase:
+            raise ValueError("sink effect revision conflict")
+        if str(booking.get("sink_write_status") or "") not in {
+            "pending",
+            "indeterminate",
+        }:
+            raise ValueError("sink effect is not awaiting reconciliation")
+        if decision not in {"confirm_applied", "retry_no_effect", "reject"}:
+            raise ValueError("unsupported sink reconciliation decision")
+        key = SinkWriter.effect_idempotency_key(
+            booking_id=booking_id,
+            phase=phase,
+            revision=revision,
+        )
+        result = {
+            "sink_type": str(workflow.get("sink_type") or ""),
+            "toolkit": str(_safe_dict(workflow.get("sink_config")).get("toolkit") or ""),
+            "tool_slug": str(
+                _safe_dict(workflow.get("sink_config")).get("tool_slug") or ""
+            ),
+            "booking_id": booking_id,
+            "data": _safe_dict(provider_result),
+            "reconciled": True,
+        }
+        self._idempotency.reconcile_pending(
+            tenant_id=customer_id,
+            idempotency_key=key,
+            decision=cast(Any, decision),
+            actor_id=actor_id,
+            reason=reason,
+            result=result if decision == "confirm_applied" else None,
+        )
+        booking["sink_write_status"] = (
+            "pending" if decision == "confirm_applied" else "failed"
+        )
+        booking["updated_at"] = _utc_now().isoformat()
+        self._store.upsert_booking(booking)
+        return {
+            "booking_id": booking_id,
+            "effect_revision": revision,
+            "phase": phase,
+            "decision": decision,
+            "sink_write_status": booking["sink_write_status"],
+        }
 
     def _index_workflow_knowledge(self, workflow: dict[str, Any]) -> None:
         knowledge = self._knowledge_service
@@ -1630,69 +1751,6 @@ class IntakeWorkflowService:
                 f"Business knowledge answer: {answer_text[:3000]}"
             )[:3600]
         return ""
-
-    def _sync_routine(self, workflow: dict[str, Any]) -> None:
-        if self._scheduler is None:
-            return
-        if not _channel_uses_scheduler(str(workflow.get("channel", "") or "").strip()):
-            routine_id = str(workflow.get("routine_id", "") or "").strip()
-            if routine_id:
-                with suppress(Exception):
-                    self._scheduler.remove_routine(routine_id)
-            return
-        payload = {
-            "instruction": (
-                "Run the configured intake workflow, inspect recent external customer messages, "
-                "continue conversations when needed, and save completed bookings using the stored sink."
-            ),
-            "customer_id": workflow["customer_id"],
-            "notify_user": bool(workflow["notify_user"]),
-            "notification_opt_out": not bool(workflow["notify_user"]),
-            "workflow_type": "intake_workflow",
-            "workflow_id": workflow["workflow_id"],
-            "channel": workflow["channel"],
-            "provider": workflow["provider"],
-        }
-        routine = Routine(
-            id=str(workflow["routine_id"]),
-            name=str(workflow["name"]),
-            schedule=str(workflow["schedule"]),
-            payload=payload,
-            enabled=bool(workflow["enabled"]),
-            is_cron=" " in str(workflow["schedule"]) and len(str(workflow["schedule"]).split()) >= 5,
-        )
-        self._scheduler.add_routine(routine)
-
-    def _sync_skill(self, workflow: dict[str, Any]) -> None:
-        if self._skill_store is None:
-            return
-        skill = build_intake_workflow_skill(workflow)
-        self._skill_store.upsert_skill(
-            scope="user",
-            customer_id=str(workflow["customer_id"]),
-            name=str(skill["name"]),
-            skill_markdown=str(skill["skill_markdown"]),
-            source="intake_workflow",
-            enabled=True,
-            supporting_files=dict(skill.get("supporting_files") or {}),
-        )
-
-    def _workflow_skill_context(self, *, customer_id: str, workflow_id: str) -> str:
-        if self._skill_store is None:
-            return ""
-        try:
-            skill = self._skill_store.get_skill(
-                customer_id=str(customer_id or "").strip(),
-                name=workflow_skill_name(str(workflow_id or "").strip()),
-                include_files=False,
-                include_global=False,
-            )
-        except Exception:
-            logger.exception("Failed to load generated intake workflow skill")
-            return ""
-        if not isinstance(skill, dict):
-            return ""
-        return str(skill.get("skill_markdown", "") or "").strip()
 
     def _get_active_booking(
         self,
@@ -2055,7 +2113,7 @@ class IntakeWorkflowService:
         adapter = self._messaging_adapters.get(context.key)
         if adapter is not None:
             result = adapter.list_source_items(context=context)
-            return result.items, result.error, result.warnings
+            return [dict(item) for item in result.items], result.error, result.warnings
         return [], (
             f"Workflow {context.workflow_name} failed: unsupported source "
             f"{context.channel}/{context.provider}."
@@ -2071,7 +2129,7 @@ class IntakeWorkflowService:
         adapter = self._messaging_adapters.get(context.key)
         if adapter is not None:
             result = adapter.load_conversation(context=context, conversation_id=conversation_id)
-            return result.summary, result.conversation, result.error
+            return dict(result.summary), result.conversation, result.error
         return {}, {}, "unsupported source"
 
     async def _send_source_reply(
@@ -2086,7 +2144,7 @@ class IntakeWorkflowService:
         if adapter is not None:
             return await adapter.send_reply(
                 context=context,
-                conversation_summary=conversation_summary,
+                conversation_summary=cast(ConversationSummary, conversation_summary),
                 reply_text=reply_text,
             )
         return f"unsupported reply source {context.channel}/{context.provider}"
@@ -2098,11 +2156,56 @@ class IntakeWorkflowService:
         conversation_summary: dict[str, Any],
         reply_text: str,
     ) -> str | None:
-        return await self._send_source_reply(
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            reply_text=reply_text,
+        workflow_id = str(workflow.get("workflow_id", "") or "").strip()
+        customer_id = str(workflow.get("customer_id", "") or "").strip()
+        conversation_id = str(conversation_summary.get("conversation_id", "") or "").strip()
+        source_message_id = str(
+            conversation_summary.get("latest_inbound_message_id", "") or ""
+        ).strip()
+        if not all((workflow_id, customer_id, conversation_id, source_message_id)):
+            return "intake reply is missing a durable workflow, conversation, or inbound message identity"
+
+        reply_hash = hashlib.sha256(reply_text.encode("utf-8")).hexdigest()
+        claim = self._store.claim_reply_delivery(
+            workflow_id=workflow_id,
+            customer_id=customer_id,
+            conversation_id=conversation_id,
+            source_message_id=source_message_id,
+            reply_hash=reply_hash,
         )
+        if claim != "claimed":
+            self._emit_observability(
+                event="intake.reply.suppressed",
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                reason=(
+                    "already_delivered"
+                    if claim == "completed"
+                    else "indeterminate_prior_attempt"
+                    if claim == "pending"
+                    else "different_reply_already_claimed"
+                ),
+            )
+            return None
+
+        try:
+            error = await self._send_source_reply(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                reply_text=reply_text,
+            )
+        except Exception:
+            return "intake reply delivery outcome is indeterminate"
+        if error is not None:
+            return error
+        self._store.complete_reply_delivery(
+            workflow_id=workflow_id,
+            customer_id=customer_id,
+            conversation_id=conversation_id,
+            source_message_id=source_message_id,
+            reply_hash=reply_hash,
+        )
+        return None
 
     async def run_workflow(
         self,
@@ -2202,6 +2305,8 @@ class IntakeWorkflowService:
                 "extracted_fields": {},
                 "sink_write_status": "pending",
                 "sink_record_ref": {},
+                "sink_effect_revision": 0,
+                "sink_effect_phase": "",
                 "conversation_summary": "",
                 "last_customer_message_at": "",
                 "opened_at": _utc_now_iso(),
@@ -2255,7 +2360,6 @@ class IntakeWorkflowService:
                 "save_payload": _safe_dict(decision.get("save_payload")),
                 "sink_action": str(decision.get("sink_action", "") or "").strip().lower(),
                 "sink_payload": _safe_dict(decision.get("sink_payload")),
-                "sink_arguments": _safe_dict(decision.get("sink_arguments")),
             },
         }
 
@@ -2266,7 +2370,6 @@ class IntakeWorkflowService:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
-        sink_arguments: dict[str, Any] | None = None,
         record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         return self._sink_writer.write_to_sink(
@@ -2274,7 +2377,6 @@ class IntakeWorkflowService:
             booking=booking,
             conversation_summary=conversation_summary,
             payload=payload,
-            sink_arguments=sink_arguments,
             record_status=record_status,
         )
 
@@ -2301,7 +2403,6 @@ class IntakeWorkflowService:
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
-        sink_arguments: dict[str, Any] | None = None,
         record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         return self._sink_writer.write_to_composio_sink(
@@ -2309,34 +2410,7 @@ class IntakeWorkflowService:
             booking=booking,
             conversation_summary=conversation_summary,
             payload=payload,
-            sink_arguments=sink_arguments,
             record_status=record_status,
-        )
-
-    def _resolve_composio_sink_tool_slug(
-        self,
-        *,
-        sink_type: str,
-        sink_config: dict[str, Any],
-    ) -> str:
-        return self._sink_writer.resolve_composio_sink_tool_slug(
-            sink_type=sink_type,
-            sink_config=sink_config,
-        )
-
-    @staticmethod
-    def _select_composio_sink_candidate(
-        *,
-        sink_type: str,
-        toolkit: str,
-        operation_hint: str,
-        candidates: list[dict[str, Any]],
-    ) -> str:
-        return SinkWriter.select_composio_sink_candidate(
-            sink_type=sink_type,
-            toolkit=toolkit,
-            operation_hint=operation_hint,
-            candidates=candidates,
         )
 
     def _upsert_booking(self, booking: dict[str, Any]) -> None:

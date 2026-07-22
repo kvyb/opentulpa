@@ -1,0 +1,146 @@
+#!/bin/sh
+set -eu
+
+REPOSITORY="${OPENTULPA_INSTALL_REPOSITORY:-https://github.com/kvyb/opentulpa.git}"
+REF="${OPENTULPA_INSTALL_REF:-main}"
+DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+SCRIPT_SOURCE=""
+if [ -f "$0" ]; then
+  candidate_source="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+  if [ -f "${candidate_source}/pyproject.toml" ] \
+    && [ -f "${candidate_source}/uv.lock" ] \
+    && [ -e "${candidate_source}/.git" ]; then
+    SCRIPT_SOURCE="${candidate_source}"
+  fi
+fi
+SOURCE_ROOT="${OPENTULPA_INSTALL_SOURCE:-${SCRIPT_SOURCE:-${DATA_HOME}/opentulpa/source}}"
+
+say() {
+  printf '%s\n' "[opentulpa] $*"
+}
+
+if [ -z "${OPENTULPA_INSTALL_SOURCE:-}" ] && [ -z "${SCRIPT_SOURCE}" ]; then
+  command -v git >/dev/null 2>&1 || {
+    printf '%s\n' "OpenTulpa requires git so it can maintain and improve its source." >&2
+    exit 1
+  }
+  if [ -d "${SOURCE_ROOT}/.git" ]; then
+    say "using the existing source at ${SOURCE_ROOT}"
+  else
+    [ ! -e "${SOURCE_ROOT}" ] || {
+      printf '%s\n' "Install path exists but is not an OpenTulpa checkout: ${SOURCE_ROOT}" >&2
+      exit 1
+    }
+    mkdir -p "$(dirname "${SOURCE_ROOT}")"
+    say "downloading OpenTulpa"
+    git clone --branch "${REF}" --single-branch "${REPOSITORY}" "${SOURCE_ROOT}"
+  fi
+elif [ ! -f "${SOURCE_ROOT}/pyproject.toml" ]; then
+  printf '%s\n' "OPENTULPA_INSTALL_SOURCE is not an OpenTulpa source tree: ${SOURCE_ROOT}" >&2
+  exit 1
+else
+  say "using the source checkout at ${SOURCE_ROOT}"
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  UV_BIN="$(command -v uv)"
+else
+  command -v curl >/dev/null 2>&1 || {
+    printf '%s\n' "OpenTulpa requires curl to install its Python runtime." >&2
+    exit 1
+  }
+  say "installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  UV_BIN="${HOME}/.local/bin/uv"
+  [ -x "${UV_BIN}" ] || {
+    printf '%s\n' "uv installation did not create ${UV_BIN}" >&2
+    exit 1
+  }
+fi
+
+say "installing the OpenTulpa command"
+UV_PYTHON=3.12 "${UV_BIN}" sync --locked --no-dev --project "${SOURCE_ROOT}"
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) TUI_TARGET="darwin-arm64" ;;
+  Darwin-x86_64) TUI_TARGET="darwin-x64" ;;
+  Linux-aarch64|Linux-arm64) TUI_TARGET="linux-arm64" ;;
+  Linux-x86_64) TUI_TARGET="linux-x64" ;;
+  *) TUI_TARGET="" ;;
+esac
+TUI_ROOT="${SOURCE_ROOT}/clients/tui"
+BUN_VERSION="1.3.14"
+if [ -n "${TUI_TARGET}" ] && [ -f "${TUI_ROOT}/package.json" ] \
+  && [ ! -x "${TUI_ROOT}/dist/opentulpa-tui-${TUI_TARGET}" ]; then
+  if command -v bun >/dev/null 2>&1 \
+    && [ "$(bun --version 2>/dev/null || true)" = "${BUN_VERSION}" ]; then
+    BUN_BIN="$(command -v bun)"
+  else
+    command -v curl >/dev/null 2>&1 || {
+      printf '%s\n' "OpenTulpa requires curl to install its terminal renderer." >&2
+      exit 1
+    }
+    BUN_HOME="${DATA_HOME}/opentulpa/bun"
+    say "installing the pinned terminal build tool"
+    BUN_INSTALL="${BUN_HOME}" curl -fsSL https://bun.com/install \
+      | BUN_INSTALL="${BUN_HOME}" bash -s "bun-v${BUN_VERSION}"
+    BUN_BIN="${BUN_HOME}/bin/bun"
+  fi
+  [ -x "${BUN_BIN}" ] || {
+    printf '%s\n' "Bun installation did not create ${BUN_BIN}" >&2
+    exit 1
+  }
+  say "building the native terminal client"
+  (cd "${TUI_ROOT}" && "${BUN_BIN}" install --frozen-lockfile && "${BUN_BIN}" run build)
+fi
+
+COMMAND_SOURCE="${SOURCE_ROOT}/.venv/bin/opentulpa"
+[ -x "${COMMAND_SOURCE}" ] || {
+  printf '%s\n' "OpenTulpa installation did not create ${COMMAND_SOURCE}" >&2
+  exit 1
+}
+BIN_DIR="${OPENTULPA_BIN_DIR:-${HOME}/.local/bin}"
+mkdir -p "${BIN_DIR}"
+for command in opentulpa opentulpa-host opentulpa-bootstrap opentulpa-recovery opentulpa-migrate-deepagents; do
+  source_command="${SOURCE_ROOT}/.venv/bin/${command}"
+  target_command="${BIN_DIR}/${command}"
+  [ -x "${source_command}" ] || continue
+  if [ -e "${target_command}" ] && [ ! -L "${target_command}" ]; then
+    printf '%s\n' "Refusing to replace existing command: ${target_command}" >&2
+    exit 1
+  fi
+  ln -sfn "${source_command}" "${target_command}"
+done
+
+case ":${PATH}:" in
+  *":${BIN_DIR}:"*) ;;
+  *)
+    LINKED=0
+    OLD_IFS="${IFS}"
+    IFS=:
+    for candidate in ${PATH}; do
+      if [ -d "${candidate}" ] && [ -w "${candidate}" ] \
+        && [ ! -e "${candidate}/opentulpa" ] && [ ! -L "${candidate}/opentulpa" ]; then
+        ln -s "${COMMAND_SOURCE}" "${candidate}/opentulpa"
+        LINKED=1
+        break
+      fi
+    done
+    IFS="${OLD_IFS}"
+    SHELL_RC="${HOME}/.profile"
+    case "${SHELL:-}" in
+      */zsh) SHELL_RC="${HOME}/.zshrc" ;;
+      */bash) SHELL_RC="${HOME}/.bashrc" ;;
+    esac
+    PATH_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
+    if ! grep -F "${BIN_DIR}" "${SHELL_RC}" >/dev/null 2>&1; then
+      printf '\n%s\n' "${PATH_LINE}" >> "${SHELL_RC}"
+    fi
+    say "added ${BIN_DIR} to PATH in ${SHELL_RC}"
+    if [ "${LINKED}" -eq 0 ]; then
+      say "open a new terminal once to refresh PATH"
+    fi
+    ;;
+esac
+
+printf '\nOpenTulpa installed. Start it with:\n\n  opentulpa\n\n'

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>OpenTulpa Host</title>
+    <link rel="icon" href="/_host/assets/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/_host/assets/app.css">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="wordmark" href="/_host"><span class="mark">O</span> OpenTulpa</a>
+        <div class="runtime-badge"><span id="status-dot" class="dot"></span><span id="runtime-label">HOST ONLINE</span></div>
+        <nav>
+          <a class="active" href="/_host">HOST</a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="intro">
+          <p class="eyebrow">STABLE CONTROL PLANE / ONE DEPLOYMENT</p>
+          <h1>Make the runtime yours.</h1>
+          <p class="lede">Connect a model, add an interface, and watch the mutable agent start. The host stays up when the agent changes or fails.</p>
+        </section>
+
+        <section id="auth-panel" class="command-panel hidden" aria-labelledby="auth-title">
+          <div class="line-number">01</div>
+          <div class="panel-body">
+            <p class="prompt" id="auth-title"><span>$</span> claim deployment</p>
+            <p id="auth-copy" class="muted">Enter the one-time pairing code printed by the server.</p>
+            <form id="claim-form" class="form-grid">
+              <input class="visually-hidden" type="text" value="owner" autocomplete="username" tabindex="-1" aria-hidden="true">
+              <label>PAIRING CODE<input id="setup-token" type="password" autocomplete="one-time-code" placeholder="one-time pairing code"></label>
+              <button type="submit">CLAIM HOST</button>
+            </form>
+            <form id="login-form" class="form-grid hidden">
+              <input class="visually-hidden" type="text" value="owner" autocomplete="username" tabindex="-1" aria-hidden="true">
+              <label>OWNER TOKEN<input id="owner-token" type="password" autocomplete="current-password" placeholder="owner access token"></label>
+              <button type="submit">UNLOCK</button>
+            </form>
+          </div>
+        </section>
+
+        <div id="issued-token" class="issued hidden">
+          <span>OWNER TOKEN, SHOWN ONCE. STORE IT BEFORE LEAVING THIS PAGE.</span>
+          <code id="issued-token-value"></code>
+          <code id="issued-connect-command"></code>
+        </div>
+
+        <section id="config-panel" class="command-panel hidden" aria-labelledby="config-title">
+          <div class="line-number">02</div>
+          <div class="panel-body">
+            <div class="panel-heading">
+              <div>
+                <p class="prompt" id="config-title"><span>$</span> configure runtime</p>
+                <p class="muted">Secrets are encrypted on this host and never returned by the API.</p>
+              </div>
+              <span id="revision-label" class="revision">UNCONFIGURED</span>
+            </div>
+            <form id="config-form">
+              <div class="form-grid two">
+                <label>MODEL API KEY<input id="api-key" type="password" autocomplete="off" placeholder="required on first setup"></label>
+                <label>MODEL<input id="model" type="text" value="moonshotai/kimi-k3"></label>
+                <label class="wide">OPENAI-COMPATIBLE BASE URL<input id="base-url" type="url" value="https://openrouter.ai/api/v1"></label>
+              </div>
+              <div class="divider"><span>OPTIONAL INTERFACE</span></div>
+              <div class="form-grid two">
+                <label>TELEGRAM BOT TOKEN<input id="telegram-token" type="password" autocomplete="off" placeholder="123456:bot-token"></label>
+                <label>TELEGRAM USER ID<input id="telegram-user-id" inputmode="numeric" pattern="[0-9]*" placeholder="numeric owner id"></label>
+              </div>
+              <div class="actions">
+                <button id="apply-button" type="submit">VALIDATE + START</button>
+                <button id="restart-button" class="secondary hidden" type="button">RESTART RUNTIME</button>
+              </div>
+              <p id="form-status" class="form-status" role="status"></p>
+            </form>
+            <div class="divider"><span>LOCAL TERMINAL</span></div>
+            <p class="muted">The server is headless. Connect from a local OpenTulpa installation:</p>
+            <code id="connect-command"></code>
+          </div>
+        </section>
+
+        <section id="log-panel" class="terminal hidden" aria-labelledby="log-title">
+          <header>
+            <p id="log-title">RUNTIME OUTPUT</p>
+            <span id="log-count">0 LINES</span>
+          </header>
+          <div id="logs" class="log-lines" aria-live="polite"></div>
+        </section>
+      </main>
+      <footer><span>HOST API V2</span><span>SETUP / RECOVERY / LOGS</span><span>HEADLESS DEEP AGENTS</span></footer>
+    </div>
+    <script src="/_host/assets/app.js" defer></script>
+  </body>
+</html>

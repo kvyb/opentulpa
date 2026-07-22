@@ -70,7 +70,6 @@ class DecisionApplyService(Protocol):
         booking: dict[str, Any],
         conversation_summary: dict[str, Any],
         payload: dict[str, Any],
-        sink_arguments: dict[str, Any] | None = None,
         record_status: str | None = None,
     ) -> tuple[dict[str, Any], str | None]: ...
 
@@ -145,7 +144,6 @@ class ApplyState:
     target_booking: dict[str, Any]
     sink_ref: dict[str, Any]
     sink_status: str
-    sink_arguments: dict[str, Any]
     saved_summary: str
     reply_action: str
     reply_text: str
@@ -272,7 +270,6 @@ class DecisionApplier:
             target_booking=target_booking,
             sink_ref=dict(_safe_dict(target_booking.get("sink_record_ref"))),
             sink_status=str(target_booking.get("sink_write_status", "pending") or "pending").strip(),
-            sink_arguments=dict(_safe_dict(request.decision.get("sink_arguments"))),
             saved_summary="",
             reply_action=request.actions.reply_action,
             reply_text=request.actions.reply_text,
@@ -294,6 +291,21 @@ class DecisionApplier:
         if self._should_skip_cancel_sink(request, state, save_payload):
             self._persist_cancel_without_sink(request, state, save_payload)
             return None
+        effect_error = self._begin_sink_effect(
+            request,
+            state,
+            phase=self._completed_record_status(state),
+        )
+        if effect_error is not None:
+            return effect_error
+        state.target_booking.update(
+            {
+                "extracted_fields": save_payload,
+                "sink_record_ref": state.sink_ref,
+                "updated_at": self._utc_now_iso(),
+            }
+        )
+        self._service._upsert_booking(state.target_booking)
         return self._write_completed_sink(request, state, save_payload)
 
     def _update_active_booking(
@@ -311,6 +323,8 @@ class DecisionApplier:
         state.target_booking["sink_record_ref"] = state.sink_ref
         state.target_booking["updated_at"] = self._utc_now_iso()
         self._normalize_active_missing_field_reply(request, state)
+        # Persist the stable booking identity before any external sink effect.
+        self._service._upsert_booking(state.target_booking)
         if request.actions.sink_action == "upsert_partial" and request.actions.sink_payload:
             partial_result = self._write_partial_sink(request, state)
             if partial_result is not None:
@@ -404,7 +418,6 @@ class DecisionApplier:
             booking=state.target_booking,
             conversation_summary=request.conversation_summary,
             payload=save_payload,
-            sink_arguments=state.sink_arguments,
             record_status=self._completed_record_status(state),
         )
         if sink_error is not None:
@@ -458,6 +471,9 @@ class DecisionApplier:
         if sink_type not in {"google_sheets_composio", "generic_composio_write"}:
             error = "sink_action=upsert_partial requires a Composio upsert sink"
             return self._decision_validation_error(request, error, booking_id=self._booking_id(state), sink_type=sink_type)
+        effect_error = self._begin_sink_effect(request, state, phase="partial")
+        if effect_error is not None:
+            return effect_error
         self._service._emit_observability(
             event="intake.sink_write.partial_start",
             workflow=request.workflow,
@@ -471,10 +487,9 @@ class DecisionApplier:
             booking=state.target_booking,
             conversation_summary=request.conversation_summary,
             payload=request.actions.sink_payload,
-            sink_arguments=state.sink_arguments,
         )
         if sink_error is not None:
-            state.target_booking["sink_write_status"] = "failed"
+            state.target_booking["sink_write_status"] = self._sink_failure_status(sink_error)
             self._service._upsert_booking(state.target_booking)
             self._service._emit_observability(
                 event="intake.sink_write.partial_error",
@@ -555,7 +570,7 @@ class DecisionApplier:
         sink_error: str,
     ) -> ApplyResult:
         state.target_booking["status"] = "active"
-        state.target_booking["sink_write_status"] = "failed"
+        state.target_booking["sink_write_status"] = self._sink_failure_status(sink_error)
         state.target_booking["sink_record_ref"] = state.sink_ref
         self._service._upsert_booking(state.target_booking)
         self._service._emit_observability(
@@ -580,6 +595,48 @@ class DecisionApplier:
             decision=request.decision,
         )
         return {}, sink_error, feedback
+
+    def _begin_sink_effect(
+        self,
+        request: ApplyRequest,
+        state: ApplyState,
+        *,
+        phase: str,
+    ) -> ApplyResult | None:
+        previous_status = str(
+            state.target_booking.get("sink_write_status", state.sink_status) or ""
+        ).strip()
+        previous_phase = str(state.target_booking.get("sink_effect_phase") or "").strip()
+        previous_revision = int(state.target_booking.get("sink_effect_revision") or 0)
+        if previous_status == "indeterminate" and previous_revision > 0:
+            return self._sink_error(
+                request,
+                state,
+                "intake sink outcome is indeterminate",
+            )
+        if (
+            previous_revision > 0
+            and previous_status in {"pending", "failed"}
+            and previous_phase == phase
+        ):
+            revision = previous_revision
+        else:
+            revision = previous_revision + 1
+        state.sink_status = "pending"
+        state.target_booking.update(
+            {
+                "sink_write_status": "pending",
+                "sink_effect_phase": phase,
+                "sink_effect_revision": revision,
+                "updated_at": self._utc_now_iso(),
+            }
+        )
+        self._service._upsert_booking(state.target_booking)
+        return None
+
+    @staticmethod
+    def _sink_failure_status(error: str) -> str:
+        return "indeterminate" if "indeterminate" in str(error).casefold() else "failed"
 
     def _reply_error(
         self,

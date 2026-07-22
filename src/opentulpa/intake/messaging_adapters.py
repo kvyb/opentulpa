@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, NotRequired, Protocol, TypedDict
+from typing import Any, NotRequired, Protocol, TypedDict, cast
 
 from opentulpa.core.ids import new_short_id
+
+logger = logging.getLogger(__name__)
+_PUBLIC_SOURCE_ERROR = "intake source is temporarily unavailable"
+_PUBLIC_REPLY_ERROR = "intake reply delivery failed"
 
 _DEFAULT_INSTAGRAM_SCAN_LIMIT = 20
 _MAX_INSTAGRAM_SCAN_LIMIT = 20
@@ -206,9 +211,14 @@ class ComposioInstagramMessagingAdapter:
                 items = _conversation_summaries(conversations_payload.get("items"))
                 warnings = _conversation_warnings(conversations_payload)
         except Exception as exc:
+            logger.error(
+                "Instagram intake source read failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={"customer_id": context.customer_id},
+            )
             return SourceItemsResult(
                 items=[],
-                error=f"Workflow {context.workflow_name} failed while reading Instagram DMs: {exc}",
+                error=_PUBLIC_SOURCE_ERROR,
                 warnings=warnings,
             )
         return SourceItemsResult(items=items, warnings=warnings)
@@ -230,7 +240,19 @@ class ComposioInstagramMessagingAdapter:
                 connected_account_id=connected_account_id,
             )
         except Exception as exc:
-            return ConversationLoadResult(summary={}, conversation={}, error=str(exc))
+            logger.error(
+                "Instagram intake conversation read failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "customer_id": context.customer_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+            return ConversationLoadResult(
+                summary={},
+                conversation={},
+                error=_PUBLIC_SOURCE_ERROR,
+            )
         return ConversationLoadResult(
             summary=_conversation_summary(detailed.get("summary")),
             conversation=_safe_dict(detailed.get("conversation")),
@@ -271,9 +293,25 @@ class ComposioInstagramMessagingAdapter:
                 connected_account_id=connected_account_id,
             )
         except Exception as exc:
-            return f"failed to send Instagram DM reply: {exc}"
+            logger.error(
+                "Instagram intake reply failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "customer_id": context.customer_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+            return _PUBLIC_REPLY_ERROR
         if not bool(result.get("successful", False)):
-            return str(result.get("error") or "Instagram DM reply failed")
+            logger.error(
+                "Instagram intake reply provider rejected the request: %r",
+                result.get("error"),
+                extra={
+                    "customer_id": context.customer_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+            return _PUBLIC_REPLY_ERROR
         return None
 
 
@@ -325,10 +363,18 @@ class TelegramBusinessMessagingAdapter:
             conversation_id=conversation_id,
         )
         if not bool(detailed.get("ok", False)):
+            logger.error(
+                "Telegram Business intake conversation read failed: %r",
+                detailed.get("error"),
+                extra={
+                    "customer_id": context.customer_id,
+                    "conversation_id": conversation_id,
+                },
+            )
             return ConversationLoadResult(
                 summary={},
                 conversation={},
-                error=str(detailed.get("error") or "conversation not found"),
+                error=_PUBLIC_SOURCE_ERROR,
             )
         return ConversationLoadResult(
             summary=_conversation_summary(detailed.get("summary")),
@@ -365,7 +411,15 @@ class TelegramBusinessMessagingAdapter:
                 reply_to_message_id=int(latest_inbound) if latest_inbound.isdigit() else None,
             )
         except Exception as exc:
-            return f"failed to send Telegram Business reply: {exc}"
+            logger.error(
+                "Telegram Business intake reply failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "customer_id": context.customer_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+            return _PUBLIC_REPLY_ERROR
         if not sent:
             return "Telegram Business reply failed"
 
@@ -426,11 +480,11 @@ def _conversation_summaries(value: Any) -> list[ConversationSummary]:
 
 def _conversation_summary(value: Any) -> ConversationSummary:
     raw = _safe_dict(value)
-    summary: ConversationSummary = {}
-    summary.update(raw)
+    summary = cast(ConversationSummary, dict(raw))
+    mutable = cast(dict[str, Any], summary)
     for key in _CONVERSATION_SUMMARY_STRING_FIELDS:
         if key in raw:
-            summary[key] = str(raw.get(key, "") or "").strip()
+            mutable[key] = str(raw.get(key, "") or "").strip()
     unanswered = raw.get("unanswered_customer_messages")
     if isinstance(unanswered, list):
         summary["unanswered_customer_messages"] = [_safe_dict(item) for item in unanswered]
@@ -446,15 +500,13 @@ def _safe_list(value: Any) -> list[Any]:
 
 
 def _configured_conversation_ids(source_config: dict[str, Any]) -> list[str]:
-    configured = (
-        source_config.get("conversation_ids")
-        if isinstance(source_config.get("conversation_ids"), list)
-        else (
-            [source_config.get("conversation_id")]
-            if str(source_config.get("conversation_id", "")).strip()
-            else []
-        )
-    )
+    raw_ids = source_config.get("conversation_ids")
+    if isinstance(raw_ids, list):
+        configured: list[Any] = raw_ids
+    elif str(source_config.get("conversation_id", "")).strip():
+        configured = [source_config.get("conversation_id")]
+    else:
+        configured = []
     return _unique_string_list(configured)
 
 

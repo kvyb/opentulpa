@@ -19,6 +19,8 @@ TELEGRAM_WEBHOOK_ALLOWED_UPDATES = (
     "deleted_business_messages",
 )
 
+NO_NOTIFY_TOKEN = "__NO_NOTIFY__"
+
 LOW_SIGNAL_REPLIES = {
     "i see",
     "understood",

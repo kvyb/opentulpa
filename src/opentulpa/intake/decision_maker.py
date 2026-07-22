@@ -1,25 +1,22 @@
-"""Model decision orchestration for intake workflows."""
+"""Restricted Deep Agent decision orchestration for intake workflows."""
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from collections.abc import Iterable
+from typing import Any, cast
 
-from opentulpa.intake.workflow_runtime import (
-    safe_dict as _safe_dict,
-)
-from opentulpa.intake.workflow_runtime import (
-    safe_list as _safe_list,
-)
-from opentulpa.intake.workflow_runtime import (
-    unique_string_list as _unique_string_list,
-)
-from opentulpa.intake.workflow_runtime import (
-    workflow_requires_intent_match as _workflow_requires_intent_match,
-)
+from opentulpa.intake.decision import IntakeDecision
+from opentulpa.intake.workflow_runtime import safe_dict, unique_string_list
+from opentulpa.specs import AgentSpecRef, OriginRef
+from opentulpa.tooling import AgentChannel, AgentRunContext, AgentRunKind
+
+logger = logging.getLogger(__name__)
+_PUBLIC_DECISION_ERROR = "intake decision could not be completed"
 
 
 class DecisionMaker:
-    """Builds intake decision context and handles knowledge-assisted retries."""
+    """Ask the intake profile for advice and translate it for deterministic application."""
 
     def __init__(self, service: Any) -> None:
         self._service = service
@@ -34,332 +31,222 @@ class DecisionMaker:
         recent_completed_booking: dict[str, Any] | None,
         execution_feedback: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        runtime = self._runtime()
-        if runtime is None:
-            error = "agent runtime does not support intake workflow decisions"
-            self._emit_decision_error(workflow, conversation_summary, error)
+        agent = self._agent()
+        if agent is None:
+            error = "intake decision agent is unavailable"
+            self._emit_error(workflow, conversation_summary, error)
             return {}, error
         recent_messages = self._service._normalize_conversation_messages(
             workflow=workflow,
             conversation=conversation,
             recipient_id=str(conversation_summary.get("recipient_id", "") or "").strip() or None,
         )
-        unanswered = self._service._unanswered_customer_messages(recent_messages)
-        workflow_context = self._workflow_context(workflow)
-        self._emit_decision_start(
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            active_booking=active_booking,
-            recent_completed_booking=recent_completed_booking,
-            recent_message_count=len(recent_messages),
-            execution_feedback=execution_feedback,
-        )
-        decision, error = await self._call_runtime(
-            runtime=runtime,
-            workflow=workflow,
-            workflow_context=workflow_context,
-            conversation_summary=conversation_summary,
-            recent_messages=recent_messages,
-            unanswered_customer_messages=unanswered,
-            active_booking=active_booking,
-            recent_completed_booking=recent_completed_booking,
-            execution_feedback=execution_feedback,
-        )
-        if error is not None:
-            self._emit_decision_error(workflow, conversation_summary, error)
-            return {}, error
-        decision, error = await self._normalize_or_retry_with_knowledge(
-            runtime=runtime,
-            workflow=workflow,
-            workflow_context=workflow_context,
-            conversation_summary=conversation_summary,
-            recent_messages=recent_messages,
-            unanswered_customer_messages=unanswered,
-            active_booking=active_booking,
-            recent_completed_booking=recent_completed_booking,
-            execution_feedback=execution_feedback,
-            decision=decision,
-        )
-        if error is not None:
-            self._emit_decision_error(workflow, conversation_summary, error)
-            return {}, error
-        if not isinstance(decision, dict) or not bool(decision.get("ok", False)):
-            error = str(_safe_dict(decision).get("error", "invalid intake workflow decision"))
-            self._emit_decision_error(workflow, conversation_summary, error, decision=decision)
-            return {}, error
-        self._emit_decision_ok(workflow, conversation_summary, decision)
-        return decision, None
-
-    def _runtime(self) -> Any | None:
-        getter = getattr(self._service, "_get_agent_runtime", None)
-        runtime = getter() if callable(getter) else None
-        if runtime is None or not hasattr(runtime, "decide_intake_workflow"):
-            return None
-        return runtime
-
-    def _workflow_context(self, workflow: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "workflow_id": workflow.get("workflow_id"),
-            "name": workflow.get("name"),
-            "intent_description": workflow.get("intent_description"),
-            "intent_match_required": _workflow_requires_intent_match(workflow),
-            "required_fields": workflow.get("required_fields"),
-            "field_guidance": workflow.get("field_guidance"),
-            "assistant_instructions": workflow.get("assistant_instructions", ""),
-            "business_facts": _safe_dict(workflow.get("business_facts")),
-            "workflow_skill": self._service._workflow_skill_context(
-                customer_id=str(workflow.get("customer_id", "") or ""),
-                workflow_id=str(workflow.get("workflow_id", "") or ""),
-            ),
-            "knowledge_file_ids": _unique_string_list(workflow.get("knowledge_file_ids")),
-            "knowledge_answer": "",
-            "sink_type": workflow.get("sink_type"),
-            "sink_config": workflow.get("sink_config"),
-            "channel": workflow.get("channel"),
-            "provider": workflow.get("provider"),
+        decision_input = {
+            "workflow": self._workflow_context(workflow),
+            "conversation": {
+                "summary": conversation_summary,
+                "recent_messages": recent_messages,
+                "unanswered_customer_messages": self._service._unanswered_customer_messages(
+                    recent_messages
+                ),
+            },
+            "active_booking": active_booking,
+            "recent_completed_booking": recent_completed_booking,
+            "execution_feedback": execution_feedback or [],
         }
-
-    async def _call_runtime(
-        self,
-        *,
-        runtime: Any,
-        workflow: dict[str, Any],
-        workflow_context: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        recent_messages: list[dict[str, Any]],
-        unanswered_customer_messages: list[dict[str, Any]],
-        active_booking: dict[str, Any] | None,
-        recent_completed_booking: dict[str, Any] | None,
-        execution_feedback: list[dict[str, Any]] | None,
-    ) -> tuple[dict[str, Any], str | None]:
-        try:
-            decision = await runtime.decide_intake_workflow(
-                customer_id=str(workflow["customer_id"]),
-                workflow=dict(workflow_context),
-                conversation={
-                    "summary": conversation_summary,
-                    "recent_messages": recent_messages,
-                    "unanswered_customer_messages": unanswered_customer_messages,
-                },
-                active_booking=active_booking,
-                recent_completed_booking=recent_completed_booking,
-                execution_feedback=execution_feedback,
-            )
-        except Exception as exc:
-            return {}, str(exc)
-        return _safe_dict(decision), None
-
-    async def _normalize_or_retry_with_knowledge(
-        self,
-        *,
-        runtime: Any,
-        workflow: dict[str, Any],
-        workflow_context: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        recent_messages: list[dict[str, Any]],
-        unanswered_customer_messages: list[dict[str, Any]],
-        active_booking: dict[str, Any] | None,
-        recent_completed_booking: dict[str, Any] | None,
-        execution_feedback: list[dict[str, Any]] | None,
-        decision: dict[str, Any],
-    ) -> tuple[dict[str, Any], str | None]:
-        if not self._needs_business_knowledge(decision):
-            return decision, None
-        file_ids = _unique_string_list(workflow.get("knowledge_file_ids"))
-        if not file_ids:
-            return self._normalize_no_file_decision(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                active_booking=active_booking,
-                decision=decision,
-            ), None
-        return await self._retry_with_knowledge(
-            runtime=runtime,
-            workflow=workflow,
-            workflow_context=workflow_context,
-            conversation_summary=conversation_summary,
-            recent_messages=recent_messages,
-            unanswered_customer_messages=unanswered_customer_messages,
-            active_booking=active_booking,
-            recent_completed_booking=recent_completed_booking,
-            execution_feedback=execution_feedback,
-            decision=decision,
-        )
-
-    async def _retry_with_knowledge(
-        self,
-        *,
-        runtime: Any,
-        workflow: dict[str, Any],
-        workflow_context: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        recent_messages: list[dict[str, Any]],
-        unanswered_customer_messages: list[dict[str, Any]],
-        active_booking: dict[str, Any] | None,
-        recent_completed_booking: dict[str, Any] | None,
-        execution_feedback: list[dict[str, Any]] | None,
-        decision: dict[str, Any],
-    ) -> tuple[dict[str, Any], str | None]:
-        query = str(decision.get("business_knowledge_query", "") or "").strip()
-        if not query:
-            query = self._service._business_knowledge_query_text(
-                workflow=workflow,
-                conversation_summary=conversation_summary,
-                recent_messages=recent_messages,
-                active_booking=active_booking,
-            )
-        self._emit_knowledge_start(workflow, conversation_summary, query)
-        knowledge_answer = self._service._business_knowledge_answer_for_workflow(
-            customer_id=str(workflow["customer_id"]),
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            recent_messages=recent_messages,
-            active_booking=active_booking,
-            query_override=query,
-            include_no_source=True,
-        )
-        workflow_context["knowledge_answer"] = knowledge_answer
-        self._emit_knowledge_retry(workflow, conversation_summary, query, knowledge_answer)
-        return await self._call_runtime(
-            runtime=runtime,
-            workflow=workflow,
-            workflow_context=workflow_context,
-            conversation_summary=conversation_summary,
-            recent_messages=recent_messages,
-            unanswered_customer_messages=unanswered_customer_messages,
-            active_booking=active_booking,
-            recent_completed_booking=recent_completed_booking,
-            execution_feedback=execution_feedback,
-        )
-
-    def _normalize_no_file_decision(
-        self,
-        *,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        active_booking: dict[str, Any] | None,
-        decision: dict[str, Any],
-    ) -> dict[str, Any]:
-        prior_query = str(decision.get("business_knowledge_query", "") or "").strip()
-        normalized = self._service._normalize_no_file_business_knowledge_decision(
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            active_booking=active_booking,
-            decision=decision,
-        )
-        self._service._emit_observability(
-            event="intake.decision.normalized_no_knowledge_files",
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            business_knowledge_query=prior_query,
-            reply_action=str(normalized.get("reply_action", "") or "").strip().lower(),
-            missing_fields=_unique_string_list(normalized.get("missing_fields")),
-        )
-        return normalized
-
-    @staticmethod
-    def _needs_business_knowledge(decision: dict[str, Any]) -> bool:
-        return bool(decision.get("ok", False)) and bool(
-            decision.get("needs_business_knowledge", False)
-        )
-
-    def _emit_decision_start(
-        self,
-        *,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        active_booking: dict[str, Any] | None,
-        recent_completed_booking: dict[str, Any] | None,
-        recent_message_count: int,
-        execution_feedback: list[dict[str, Any]] | None,
-    ) -> None:
         self._service._emit_observability(
             event="intake.decision.start",
             workflow=workflow,
             conversation_summary=conversation_summary,
-            active_booking_id=str((active_booking or {}).get("booking_id", "") or "").strip(),
-            recent_completed_booking_id=str(
-                (recent_completed_booking or {}).get("booking_id", "") or ""
-            ).strip(),
-            recent_message_count=recent_message_count,
-            knowledge_answer_chars=0,
+            recent_message_count=len(recent_messages),
             execution_feedback_count=len(execution_feedback or []),
-            execution_feedback=_safe_list(execution_feedback),
         )
-
-    def _emit_decision_error(
-        self,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        error: str,
-        *,
-        decision: dict[str, Any] | None = None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "event": "intake.decision.error",
-            "workflow": workflow,
-            "conversation_summary": conversation_summary,
-            "error": error,
-        }
-        if decision is not None:
-            payload["decision"] = _safe_dict(decision)
-        self._service._emit_observability(**payload)
-
-    def _emit_decision_ok(
-        self,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        decision: dict[str, Any],
-    ) -> None:
+        context = AgentRunContext(
+            tenant_id=str(workflow.get("customer_id", "") or "").strip(),
+            actor_id="intake",
+            thread_id=self._service._intake_thread_id(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+            ),
+            channel=AgentChannel.INTAKE,
+            run_kind=AgentRunKind.INTAKE,
+            correlation_id=self._service._intake_trace_id(
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+            ),
+            origin=OriginRef(
+                interface="intake",
+                source_id=str(workflow.get("workflow_id") or "intake-workflow"),
+                conversation_id=str(
+                    conversation_summary.get("conversation_id") or "conversation"
+                ),
+            ),
+            agent_spec=self._agent_spec(
+                str(workflow.get("customer_id", "") or "").strip()
+            ),
+            trust_class="external",
+        )
+        try:
+            typed = await agent.decide_intake(context=context, decision_input=decision_input)
+            decision = (
+                typed
+                if isinstance(typed, IntakeDecision)
+                else IntakeDecision.model_validate(typed)
+            )
+            self._validate_grounding(
+                decision,
+                workflow=workflow,
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+            )
+            normalized = self._to_application_decision(
+                decision,
+                active_booking=active_booking,
+                recent_completed_booking=recent_completed_booking,
+            )
+        except Exception as exc:
+            logger.error(
+                "intake decision agent failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "workflow_id": str(workflow.get("workflow_id") or ""),
+                    "conversation_id": str(
+                        conversation_summary.get("conversation_id") or ""
+                    ),
+                },
+            )
+            self._emit_error(workflow, conversation_summary, _PUBLIC_DECISION_ERROR)
+            return {}, _PUBLIC_DECISION_ERROR
         self._service._emit_observability(
             event="intake.decision.ok",
             workflow=workflow,
             conversation_summary=conversation_summary,
-            matches_workflow=bool(decision.get("matches_workflow")),
-            confidence=decision.get("confidence"),
-            booking_action=str(decision.get("booking_action", "") or "").strip().lower(),
-            reply_action=str(decision.get("reply_action", "") or "").strip().lower(),
-            ready_to_save=bool(decision.get("ready_to_save")),
-            needs_business_knowledge=bool(decision.get("needs_business_knowledge", False)),
-            business_knowledge_query=str(decision.get("business_knowledge_query", "") or "").strip(),
-            missing_fields=_unique_string_list(decision.get("missing_fields")),
-            extracted_fields=_safe_dict(decision.get("extracted_fields")),
-            save_payload=_safe_dict(decision.get("save_payload")),
-            sink_action=str(decision.get("sink_action", "") or "").strip().lower(),
-            sink_payload=_safe_dict(decision.get("sink_payload")),
-            reason=str(decision.get("reason", "") or "").strip(),
+            action=decision.action,
+            evidence_source_ids=decision.evidence_source_ids,
+            booking_action=normalized["booking_action"],
+            ready_to_save=normalized["ready_to_save"],
         )
+        return normalized, None
 
-    def _emit_knowledge_start(
+    def _agent(self) -> Any | None:
+        getter = getattr(self._service, "_get_intake_agent", None)
+        agent = getter() if callable(getter) else None
+        return agent if agent is not None and hasattr(agent, "decide_intake") else None
+
+    def _agent_spec(self, tenant_id: str) -> AgentSpecRef:
+        resolver = getattr(self._service, "_resolve_agent_spec", None)
+        if callable(resolver):
+            return cast(AgentSpecRef, resolver(tenant_id, AgentRunKind.INTAKE.value))
+        return AgentSpecRef(tenant_id=tenant_id, spec_id="intake", revision=1)
+
+    @staticmethod
+    def _workflow_context(workflow: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "workflow_id": workflow.get("workflow_id"),
+            "name": workflow.get("name"),
+            "intent_description": workflow.get("intent_description"),
+            "required_fields": workflow.get("required_fields"),
+            "field_guidance": workflow.get("field_guidance"),
+            "assistant_instructions": workflow.get("assistant_instructions", ""),
+            "business_facts": safe_dict(workflow.get("business_facts")),
+            "knowledge_file_ids": unique_string_list(workflow.get("knowledge_file_ids")),
+            "reply_mode": workflow.get("reply_mode", "auto"),
+        }
+
+    @staticmethod
+    def _source_ids(values: Iterable[dict[str, Any]]) -> set[str]:
+        source_ids: set[str] = set()
+        for value in values:
+            for key in ("id", "message_id", "source_id"):
+                candidate = str(value.get(key, "") or "").strip()
+                if candidate:
+                    source_ids.add(candidate)
+        return source_ids
+
+    @classmethod
+    def _validate_grounding(
+        cls,
+        decision: IntakeDecision,
+        *,
+        workflow: dict[str, Any],
+        conversation_summary: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+    ) -> None:
+        if decision.action == "ignore":
+            return
+        allowed = cls._source_ids(recent_messages)
+        allowed.update(unique_string_list(workflow.get("knowledge_file_ids")))
+        allowed.update(
+            value
+            for value in (
+                str(conversation_summary.get("latest_inbound_message_id", "") or "").strip(),
+                str(conversation_summary.get("latest_outbound_message_id", "") or "").strip(),
+            )
+            if value
+        )
+        if not decision.evidence_source_ids:
+            raise ValueError("non-ignore intake decisions require evidence_source_ids")
+        unknown = sorted(set(decision.evidence_source_ids) - allowed)
+        if unknown:
+            raise ValueError("intake decision cited unknown evidence: " + ", ".join(unknown))
+
+    @staticmethod
+    def _to_application_decision(
+        decision: IntakeDecision,
+        *,
+        active_booking: dict[str, Any] | None,
+        recent_completed_booking: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        patch = decision.booking_patch
+        fields = dict(patch.fields) if patch is not None else {}
+        missing_fields = list(patch.missing_fields) if patch is not None else []
+        booking_action = "ignore"
+        if patch is not None:
+            booking_id = str(patch.booking_id or "").strip()
+            if active_booking is not None and (
+                not booking_id or booking_id == str(active_booking.get("booking_id", "") or "")
+            ):
+                booking_action = "update_active"
+            elif recent_completed_booking is not None and booking_id == str(
+                recent_completed_booking.get("booking_id", "") or ""
+            ):
+                booking_action = "edit_recent_completed"
+            else:
+                booking_action = "create_new_booking"
+        ready_to_save = bool(patch is not None and patch.status in {"completed", "cancelled"})
+        reply_action = "send_reply" if decision.reply_text else "none"
+        if patch is not None and patch.status == "cancelled":
+            reply_action = "mark_cancelled"
+            fields["status"] = "cancelled"
+        return {
+            "ok": True,
+            "matches_workflow": decision.action != "ignore",
+            "confidence": 1.0,
+            "booking_action": booking_action,
+            "reply_action": reply_action,
+            "reply_text": decision.reply_text or "",
+            "ready_to_save": ready_to_save,
+            "missing_fields": missing_fields,
+            "extracted_fields": fields,
+            "save_payload": fields if ready_to_save else {},
+            "sink_action": "none",
+            "sink_payload": {},
+            "evidence_source_ids": decision.evidence_source_ids,
+            "reason": f"intake_action={decision.action}",
+        }
+
+    def _emit_error(
         self,
         workflow: dict[str, Any],
         conversation_summary: dict[str, Any],
-        query: str,
+        error: str,
     ) -> None:
         self._service._emit_observability(
-            event="intake.knowledge_query.start",
+            event="intake.decision.error",
             workflow=workflow,
             conversation_summary=conversation_summary,
-            query=query,
+            error=error,
         )
 
-    def _emit_knowledge_retry(
-        self,
-        workflow: dict[str, Any],
-        conversation_summary: dict[str, Any],
-        query: str,
-        knowledge_answer: str,
-    ) -> None:
-        self._service._emit_observability(
-            event="intake.knowledge_query.ok",
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            query=query,
-            knowledge_answer_chars=len(knowledge_answer),
-        )
-        self._service._emit_observability(
-            event="intake.decision.retry_with_knowledge",
-            workflow=workflow,
-            conversation_summary=conversation_summary,
-            knowledge_answer_chars=len(knowledge_answer),
-        )
+
+__all__ = ["DecisionMaker"]

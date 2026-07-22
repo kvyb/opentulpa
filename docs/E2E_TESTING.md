@@ -1,288 +1,193 @@
-# E2E Testing
+# End-To-End Testing
 
-This repo has two different kinds of end-to-end tests:
+OpenTulpa does not maintain a second agent harness. Tests exercise the Deep Agents
+service, universal protocol, deterministic product services, interface workers, and
+immutable bootstrap directly.
 
-- `tests/e2e/scenarios/`
-  - realistic app-level scenarios that drive the FastAPI app, the LangGraph runtime, and the Telegram/webhook surfaces together
-- `tests/e2e/live/`
-  - heavier smoke tests for live external integrations such as Composio
-
-The important distinction is that the `live_llm` scenarios use a real model. They are not mocked unit tests.
-
-## How env loading works
-
-OpenTulpa settings load `.env` automatically through `src/opentulpa/core/config.py`.
-
-That means:
-
-- you do **not** need to manually `export` the keys first if you run tests from the repo root
-- `uv run pytest ...` will pick up `.env` through the app settings loader
-
-Required minimum for the live-LLM scenario suite:
-
-```env
-OPENAI_COMPATIBLE_API_KEY=...
-```
-
-Accepted backward-compatible alias:
-
-```env
-OPENROUTER_API_KEY=...
-```
-
-The generic scenario harness accepts either name. Some standalone smokes under
-`tests/e2e/live/` have extra opt-in gates:
-
-- `test_browser_use_google.py`: `OPENROUTER_API_KEY`, Playwright Chromium, plus `OPENTULPA_ENABLE_LIVE_BROWSER_USE_E2E=1`
-- `test_intake_workflow_composio.py`: `COMPOSIO_API_KEY` plus `OPENTULPA_ENABLE_LIVE_COMPOSIO_INTAKE_E2E=1`; write coverage also requires `OPENTULPA_ENABLE_LIVE_COMPOSIO_INTAKE_WRITE_E2E=1` and the live sink mapping env values in that test file
-
-Optional but common:
-
-```env
-OPENAI_COMPATIBLE_BASE_URL=https://openrouter.ai/api/v1
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_WEBHOOK_SECRET=test-secret
-COMPOSIO_API_KEY=...
-```
-
-## Fast commands
-
-Run all scenario e2e tests:
+## Automated Gates
 
 ```bash
-uv run pytest tests/e2e/scenarios --run-e2e -q -rs
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check .
+uv run mypy src
+git diff --check
 ```
 
-Run only Telegram scenario tests:
-
-```bash
-uv run pytest tests/e2e/scenarios -m telegram --run-e2e -q -rs
-```
-
-Run live e2e by default with the parallel section runner:
-
-```bash
-uv run python scripts/run_live_e2e_sections.py --workers 4
-```
-
-The section runner is the canonical full live-LLM command. It launches separate
-pytest processes with isolated `--basetemp` directories, writes per-section
-logs, and emits a `summary.json` with trace token/cost totals from
-`llm_call_traces.jsonl`.
-
-Run only the Telegram intake workflow real-chat section with live LLM calls:
-
-```bash
-uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1
-```
-
-Run all e2e tests in one pytest process only for debugging section-runner issues:
-
-```bash
-uv run pytest tests/e2e --run-e2e --run-live-llm -q -rs
-```
-
-Useful variants:
-
-```bash
-# Show section boundaries.
-uv run python scripts/run_live_e2e_sections.py --list
-
-# Run only intake workflow and interactive sections.
-uv run python scripts/run_live_e2e_sections.py \
-  --section intake_workflow \
-  --section interactive \
-  --workers 2
-
-# Add normal pytest flags after --.
-uv run python scripts/run_live_e2e_sections.py --workers 4 -- -vv -s
-```
-
-Some standalone live smokes have their own env gates and are skipped unless those gates are set. See "How env loading works" above for the exact flags.
-
-Run opted-in scenario-level real Composio tests only when you intentionally want real connected-account access:
-
-```bash
-uv run python scripts/run_live_e2e_sections.py --workers 4 -- --run-real-composio
-```
-
-Standalone live Composio smokes under `tests/e2e/live/` are controlled by their `OPENTULPA_ENABLE_LIVE_COMPOSIO_*` env flags instead of `--run-real-composio`.
-
-## What the Telegram intake workflow e2e covers
-
-`tests/e2e/scenarios/test_telegram_intake_workflow_real_chat.py` exercises realistic Telegram intake paths:
-
-1. Owner Telegram chat creates a `telegram_business_dm` workflow through the actual Telegram webhook path
-2. Owner Telegram chat deletes an existing workflow through the same path
-3. A Telegram Business lead message hits an active workflow and the lead gets a real reply on the business connection
-4. Owner Telegram chat creates a car-wash workflow, a lead completes the booking over multiple Telegram DM turns, and the completed booking is persisted to the configured sink
-5. Owner Telegram chat uploads source material, OpenTulpa prepares scoped workflow knowledge, confirms setup, and then handles realistic Russian leads for `Мойка` and `Шиномонтаж`
-6. Edge cases cover out-of-scope services, missing phone, ambiguous vehicle class, unavailable price, and update/cancel requests
-
-These are intentionally close to real usage:
-
-- owner messages go through `/webhook/telegram`
-- interactive owner chat runs through `TelegramChatService`
-- workflow creation/deletion goes through the actual tool/runtime flow
-- uploaded files go through the file vault and prepared workflow knowledge path
-- lead messages go through the `business_message` webhook path
-
-`tests/e2e/scenarios/test_telegram_support_act_as.py` covers support operator act-as behavior: customer listing, binding, support thread isolation, owner invisibility, and optional live-LLM setup under a bound customer.
-
-## Recommended test order while iterating on intake
-
-If you are changing Telegram intake behavior, use this order:
-
-1. Fast local safety checks
-
-```bash
-uv run pytest \
-  tests/test_intake_workflow_service.py \
-  tests/test_intake_workflow_routes.py \
-  tests/test_workflow_setup_service.py \
-  tests/test_intake_tools.py \
-  tests/test_runtime_thread_scope.py -q
-```
-
-2. Telegram surface checks
-
-```bash
-uv run pytest \
-  tests/test_telegram_business_webhook.py \
-  tests/test_telegram_interactive_mailbox.py \
-  tests/test_telegram_fresh_command.py -q
-```
-
-3. Real Telegram intake e2e
-
-```bash
-uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1 -- -s
-```
-
-This catches the exact class of bugs we hit recently:
-
-- workflow save/delete works, but the Telegram streamed turn crashes afterward
-- wizard path works in isolation, but not when triggered from real Telegram chat
-- workflow setup mode works through internal chat, but not through Telegram owner/support chat
-- source files are uploaded, but the prepared workflow knowledge is missing or too broad
-- Telegram Business workflows save correctly, but lead webhook execution breaks
-- multi-turn lead collection appears to work manually, but the booking never reaches the final storage sink
-
-## Recommended suite shape for intake flows
-
-For business-intake regressions, split the suite into two lanes:
-
-1. Stable PR-gating scenarios
-
-- use the real app, real runtime, real Telegram webhook path, and real live LLM decisions
-- keep external sinks fake or local so assertions stay exact
-- assert business outcomes, not just replies:
-  - workflow saved with the right channel/source
-  - missing-field follow-up happened before save
-  - booking reached `completed`
-  - sink write succeeded
-  - stored row contains the expected fields
-
-2. Exploratory realism runs
-
-- keep the same app-level harness, but replace brittle scripted owner/lead turns with LLM-driven simulators that act from hidden goal cards
-- keep hard assertions for infrastructure invariants, but score conversation success with the LLM judge against an explicit objective
-- use these on demand or nightly, not as the only gating signal
-- capture full artifacts so you can inspect failures:
-  - owner transcript
-  - lead inbound messages
-  - assistant outbound messages
-  - prepared workflow knowledge
-  - workflow snapshot
-  - booking snapshots
-  - sink arguments / written rows
-  - stage judgements
-  - behavior log and LLM trace log
-
-This gives you one lane that is consistent enough to block regressions, and another lane that is realistic enough to expose prompt and skill weaknesses.
-
-## Model selection for e2e
-
-By default, the e2e harness uses the same repo settings as normal runtime:
-
-- `settings.llm_model`
-- `settings.wake_classifier_model`
-- `google/gemini-3-flash-preview` for the optional lead simulator lane
-
-You can still override them explicitly for e2e-only runs:
-
-```bash
-OPENTULPA_E2E_MODEL=...
-OPENTULPA_E2E_WAKE_MODEL=...
-OPENTULPA_E2E_LEAD_SIM_MODEL=google/gemini-3-flash-preview
-uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1 -- -s
-```
-
-`OPENTULPA_E2E_LEAD_SIM_MODEL` controls the incoming-lead simulator used by the simulator-backed Telegram intake scenario.
-`OPENTULPA_E2E_OWNER_SIM_MODEL` controls the owner simulator used by agentic workflow-setup scenarios.
-
-## Reports and logs
-
-The scenario harness writes structured artifacts under the pytest temp directory for each run:
-
-- system events
-- agent behavior log
-- LLM trace log
-- scenario status report
-- owner and lead transcripts
-- prepared workflow knowledge
-- workflow snapshot
-- sheet writes
-- stage judgements where enabled
-
-The status report includes the concrete file paths so you can inspect what happened after a failure.
-
-When a scenario fails, rerun with:
-
-```bash
-uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1 -- -vv -s
-```
-
-## Common failure modes
-
-### Test is skipped even though `.env` exists
-
-Run pytest from the repo root:
-
-```bash
-cd /path/to/opentulpa
-uv run python scripts/run_live_e2e_sections.py --section intake_workflow --workers 1
-```
-
-The skip gate uses the same settings loader as the app, so `.env` should count. You still need the opt-in flags: `--run-e2e` for all e2e tests and `--run-live-llm` for live model tests.
-
-### Telegram owner chat returns a backend error
-
-Check these first:
-
-- `tests/test_runtime_thread_scope.py`
-- `tests/test_telegram_interactive_mailbox.py`
-- the scenario status report path from the failed test output
-
-This class of bug is usually in the interactive streaming/runtime boundary, not in the workflow DB write itself.
-
-### Lead webhook did not reply
-
-Check:
-
-- `tests/test_telegram_business_webhook.py`
-- whether the created workflow is:
-  - `channel=telegram_business_dm`
-  - `provider=telegram_bot_api`
-  - `enabled=true`
-- whether the Telegram Business connection exists and matches the workflow source
-
-## CI note
-
-If you later wire these tests into CI, separate them by cost:
-
-- fast unit/integration tests on every PR
-- scenario `live_llm` e2e on demand or protected branches
-- heavier `tests/e2e/live/` integration smokes only when the required external credentials are intentionally available
-- real Composio scenario tests only behind explicit `--run-real-composio`
-- standalone live Composio smokes only behind their `OPENTULPA_ENABLE_LIVE_COMPOSIO_*` env flags
+The suite covers:
+
+- Deep Agent compilation, new checkpoints, memory/skills, ordered streaming, and
+  approval approve/edit/reject after restart;
+- generated tool schemas, hidden context, ownership, effect policy, idempotency,
+  direct-service invocation, and sanitized errors;
+- tenant sandbox mounts, paths, network, limits, and secret absence;
+- AgentSpec and TriggerSpec revisions, model/tool policy, event authentication,
+  schedules, timezones, misfires, duplicate dispatch, and paused approvals;
+- intake draft revision/token conflicts, atomic activation, deterministic decisions,
+  send-once delivery, sink retry, cursor handling, and recovery;
+- jobs, file ownership, integration ownership, SSRF protection, browser sessions,
+  capability workers, secret rotation, and Telegram;
+- persistent source worktrees, secret/path rejection, fixed kernel-contract evaluation,
+  exact full-source OCI construction, promotion persistence, bootstrap fencing,
+  staging, automatic rollback, and restart recovery;
+- migration dry-run, idempotency, counts, and checksums.
+
+Default pytest uses fake adapters or deterministic local fixtures. Live model, Telegram,
+Composio, Browser Use, and external sink calls are separate smoke tests.
+
+## Data Migration Rehearsal
+
+Use a copy of representative legacy data:
+
+1. Stop every process that can mutate the copied databases.
+2. Configure fake messaging, booking, and integration sinks.
+3. Run `opentulpa-migrate-deepagents --dry-run` and archive the count/checksum report.
+4. Run the migration without `--dry-run`.
+5. Verify profiles, files, knowledge, workflows, setup drafts, bookings, connections,
+   routines, memories, and user skills against the report.
+6. Confirm invalid routines and setup rows are reported and disabled, not guessed.
+7. Start the V2 application against the migrated copy.
+8. Restart it and verify approvals, jobs, specs, triggers, memory, skills, and workspaces.
+9. Confirm no fake sink received duplicate writes or sends.
+
+Any product-data loss, unexpected checksum change, cross-tenant access, duplicate
+external effect, or non-resumable approval fails the rehearsal.
+
+## Universal Interface Rehearsal
+
+Exercise the local TUI first, then prove another interface uses the same state:
+
+1. Start a terminal-only deployment with no host `TELEGRAM_BOT_TOKEN`.
+2. Connect with `opentulpa connect`, submit text and an attachment, and observe ordered SSE.
+3. Trigger a risky reversible test tool and verify the TUI approval can be approved,
+   edited, and rejected.
+4. Paste a dedicated BotFather test token and ask OpenTulpa to enable Telegram.
+5. Verify the stored run text and traces contain only `secret://telegram_bot_token`, not
+   plaintext.
+6. Verify the Telegram manifest test is digest-bound and activation interrupts for
+   owner approval.
+7. Approve it, message the bot, and verify Telegram continues the same tenant's Deep
+   Agents context. Pair the first account with `/start <last-eight-token-characters>`
+   or the configured host override.
+8. Trigger a background run and verify both web and Telegram receive their own durable
+   notification and acknowledgement state.
+9. Rotate the Telegram secret and verify the worker restarts on the new vault revision
+   without replaying old updates.
+
+Repeat with a host-configured webhook bot. Confirm the dynamic Telegram capability is
+blocked so only one consumer owns the bot.
+
+## AgentSpec And Trigger Rehearsal
+
+1. Create an AgentSpec with a non-default configured model alias, a small tool
+   allowlist, spec-local memory, no workspace, and bounded calls/time.
+2. Activate that exact revision.
+3. Create an `At` TriggerSpec referring to it and verify one execution.
+4. Create a cron trigger in an explicit IANA timezone and exercise both DST directions.
+5. Restart before a fire and prove it still executes once.
+6. Replay the same source event ID and prove it does not execute twice.
+7. Miss a one-off and a stale cron fire and prove both are skipped.
+8. Make the run request approval and prove the dispatcher pauses rather than
+   auto-approving.
+9. Resume through web and Telegram and verify one terminal notification.
+
+Also exercise `/v2/schedules` to prove its reminder and agent-job records are projections
+over the same TriggerSpec store rather than a second scheduler database.
+
+## Managed Self-Improvement Rehearsal
+
+Run this against a copied release workspace and fake external sinks. Keep production
+credentials out of the evaluator and candidate environment.
+
+1. Build reviewed runtime/evaluator images with `./start.sh install managed`.
+2. Create and restrict a dedicated `OPENTULPA_RELEASE_EGRESS_NETWORK`.
+3. Run `./start.sh doctor managed`.
+4. Start managed mode with empty bootstrap state and verify the canonical checkout is
+   built, started with ingress disabled, health-checked, and installed as the first
+   release.
+5. Verify the gateway serves `/`, `/healthz`, `/agent/healthz`, and V2 streaming while
+   the mutable container has no source mount, bootstrap state, `.env`, secrets file, or
+   OCI socket.
+6. Ask for a harmless core or UI improvement. Verify `source_shell` creates a detached
+   worktree, can change the requested source, and resumes it on the next chat turn.
+7. Run tests in the source shell, inspect a redacted `trace_get`, and iterate after owner
+   feedback without creating another agent run loop.
+8. Call `source_release` and approve its one persisted Deep Agents interrupt.
+9. Verify fixed public, security, and kernel-contract evaluation run without network and
+   are bound to the same source commit, lock hash, evaluator fingerprint, and OCI digest.
+10. Observe staging, old-release drain, cutover, health checks, and probation. Verify the
+    web change and the same conversation/memory after restart.
+11. Verify the origin receives the release outcome through the
+    notification stream and trusted thread event.
+12. Queue rollback and verify the previous content-addressed image and lease return.
+
+### Failure And Rollback Cases
+
+Run separate candidates or fake-host injections for:
+
+- evaluator failure before an artifact exists;
+- staging health failure before cutover;
+- drain timeout with in-flight work;
+- production health failure after cutover;
+- probation failure;
+- bootstrap restart at every persisted activation phase;
+- previous image missing during rollback;
+- duplicate approval and promotion requests;
+- candidate dependency-lock change;
+- candidate attempt to commit a secret, symlink, traversal path, or special file;
+- binary, secret-bearing, private-path, or oversized contribution patch.
+
+Expected outcomes:
+
+- pre-cutover failure leaves the old release active;
+- post-cutover failure automatically restores the old release;
+- failed restoration enters safe mode and stops forwarding;
+- activation records and sanitized failure context survive restart;
+- the originating owner receives failure/rollback notifications;
+- the restored agent can explain the failure in the original thread using the
+  persisted trusted event, without raw logs or secrets.
+
+## Interactive Self-Improvement Rehearsal
+
+1. Ask the owner agent to make a small core or interface change.
+2. Verify `source_shell` creates one detached workspace and that later chat turns resume
+   the same workspace.
+3. Have the agent edit a file, run a failing test, inspect its own `trace_get` result,
+   repair the code, and rerun the test successfully.
+4. Verify the source shell can fetch a public HTTPS URL but cannot read production data,
+   credentials, Git metadata, bootstrap state, host paths, or the container socket.
+   Verify the fixed evaluator remains offline.
+5. Approve `source_release` once in the originating web or Telegram conversation.
+6. Verify fixed evaluation commits and builds the exact tested bytes and that bootstrap
+   stages, drains, cuts over, and starts probation without a second CLI approval.
+7. Inject a startup or probation failure and verify automatic previous-image rollback.
+8. Verify the original conversation receives the release or rollback outcome and the
+   agent can explain it using durable traces after restart.
+9. Verify a dependency-lock change is rejected and the editable workspace remains
+   available for repair.
+10. Do not include irreversible product-data migrations: image rollback deliberately
+    does not rewind product databases.
+
+This is the convergence path for independently evolved instances. Promotion of a local
+candidate and contribution to the canonical repository remain separate decisions.
+
+## Live Smoke
+
+Before resuming production consumers, verify with dedicated accounts and reversible
+actions:
+
+- `/healthz` and `/agent/healthz` return success;
+- web streams ordered events and restores pending approvals after refresh;
+- Telegram owner chat and attachments use the expected tenant and thread;
+- an approval can be approved, edited, and rejected from web and Telegram;
+- one intake reply and one booking reach the intended sink exactly once;
+- one reminder and one restricted AgentSpec trigger execute and notify the owner;
+- Composio connection ownership and a risky invocation require approval;
+- a risky browser submission requires approval;
+- tenant workspace data persists after release replacement and is invisible to another
+  tenant;
+- Langfuse contains corresponding run/model/tool traces without secrets;
+- a benign managed candidate can activate and roll back without losing context.
+
+Do not point rehearsal traffic at production customer inboxes, payment actions, or
+irreversible sinks.

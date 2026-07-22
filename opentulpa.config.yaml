@@ -9,47 +9,41 @@
 host: 0.0.0.0
 port: 8000
 
-# Data paths
-agent_checkpoint_db_path: .opentulpa/langgraph_checkpoints.sqlite
-mem0_qdrant_path: .opentulpa/qdrant
-mem0_qdrant_on_disk: true
-link_alias_db_path: .opentulpa/link_aliases.db
-agent_behavior_log_path: .opentulpa/logs/agent_behavior.jsonl
+# Deep Agents persistence. Checkpoints and runs intentionally start fresh;
+# store, schedules, and intake drafts are migration destinations.
+deepagents_checkpoint_db_path: .opentulpa/deepagents/checkpoints.db
+deepagents_store_db_path: .opentulpa/deepagents/store.db
+deepagents_runs_db_path: .opentulpa/deepagents/runs.db
+deepagents_workspaces_root: .opentulpa/deepagents/workspaces
+intake_drafts_db_path: .opentulpa/deepagents/intake_drafts.db
 
-# Agent/runtime limits
-agent_recursion_limit: 250
+# Self-evolution is Git-native and only activates when the canonical source checkout is present.
+evolution_enabled: true
+evolution_sandbox_image: opentulpa-evolution:0.1.0
+evolution_evaluator_image: opentulpa-evolution:0.1.0
+
+# Deep Agent and sandbox limits
 agent_max_completion_tokens: 4096
-agent_max_user_reply_chars: 4000
-agent_context_token_limit: 20000
-agent_context_recent_tokens: 3500
-agent_context_rollup_tokens: 2200
-agent_context_compaction_source_tokens: 12000
+sandbox_container_cli: docker
+sandbox_image: opentulpa-tenant-sandbox:0.1.0
+sandbox_cpu_limit: "1"
+sandbox_memory_limit: 512m
+sandbox_pid_limit: 128
+sandbox_timeout_seconds: 60
+sandbox_max_output_bytes: 512000
 
 # LLM/provider configuration
-llm_model: z-ai/glm-5.2
-memory_llm_model: google/gemini-3-flash-preview
-llm_reasoning_effort: medium
-wake_classifier_model: null
-wake_execution_model: z-ai/glm-5.2
-workflow_setup_input_classifier_model: z-ai/glm-5.2
-multimodal_llm: google/gemini-3.1-flash-lite-preview
+llm_model: moonshotai/kimi-k3
+llm_fallback_models:
+  - z-ai/glm-5.2
+llm_provider_order:
+  z-ai/glm-5.2:
+    - z-ai/fp8
+    - fireworks
+    - deepinfra/fp4
+model_aliases: {}
+llm_reasoning_effort: low
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
-openai_compatible_embedding_model: openai/text-embedding-3-small
-agent_prompt_caching_enabled: true
-agent_prompt_cache_ttl_1h: false
 
-# Behavioral/runtime toggles
-proactive_heartbeat_default_hours: 3
-agent_behavior_log_enabled: true
-browser_use_headless: true
-browser_use_model: google/gemini-3-flash-preview
-browser_use_max_concurrent_tasks: 2
-browser_use_task_retention_seconds: 1800
-browser_use_cloud_proxy_country_code: us
-browser_use_cloud_timeout_minutes: 15
-
-# Integrations (non-secret)
-opentulpa_app_url: http://127.0.0.1:8000
-
-# Memory service
-mem0_user_id: default
+# Injected integration defaults
+browser_use_user_data_dir: .opentulpa/browser_profiles

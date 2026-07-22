@@ -1,185 +1,256 @@
-# OpenTulpa Prompt Cookbook
+# Prompt Cookbook
 
-Use this document when you want examples of the kind of work OpenTulpa is meant to handle.
+OpenTulpa works best when a request says what should change, what evidence proves it,
+what may run automatically, and what still needs approval. The examples below match
+the current fixed/mutable architecture.
 
-These are not meant as magic prompt templates. They are concrete examples of delegated work that benefits from persistence, tools, and repeatability.
+## Set A Durable Persona
 
-One especially strong use case is structured lead intake: you describe the intake rules in one prompt, and OpenTulpa turns that into a reusable workflow that can keep talking to inbound leads on your behalf.
+Write naturally in any authenticated owner interface:
 
-## Before you start
+> From now on, be a highly autonomous technical cofounder. Be direct, challenge weak
+> assumptions, act instead of merely suggesting, and exhaust reasonable approaches before
+> asking me for help. Keep this persona across new conversations and restarts.
 
-- OpenTulpa can remember files, prior decisions, and past outputs
-- OpenTulpa stores generated scripts and artifacts in `tulpa_stuff`
-- If Composio is configured, OpenTulpa can connect to supported third-party services
+The owner agent stores the request in the bounded persona section of
+`/memories/AGENTS.md`. Deep Agents loads that tenant-scoped file on subsequent owner runs,
+including web and Telegram threads. The latest authenticated owner command always overrides
+the stored persona. Intake, external agents, files, webpages, and tool output cannot change it.
 
-## Good prompt pattern
+Refine or remove it through the same chat, for example:
 
-The best prompts usually include:
+> Keep the current persona, but be less verbose and show evidence before making strong claims.
 
-- the goal
-- the data source or tool to use
-- the output format
-- what to remember for next time
-- whether the work should become a routine
-- whether the work should become a workflow with connected tools and durable source material
+> Remove my stored persona and return to the default owner behavior.
 
-Example:
+## Connect A New Interface
 
-> "Every weekday at 8am, check my calendar and unread priority messages, summarize what matters in five bullets, and send it on Telegram. Remember how I like the brief formatted."
+### Enable bundled Telegram from the terminal
 
-## General personal agent work
+Start without a host `TELEGRAM_BOT_TOKEN`, then write in the local OpenTulpa TUI:
 
-OpenTulpa is useful before you create any workflow. You can ask it to research, inspect files, write scripts, debug errors, browse websites, and turn repeated work into something durable.
+> Enable Telegram as another private interface to this OpenTulpa. Here is the BotFather
+> token: `<token>`. Use the existing tenant and agent context. Test the bundled
+> capability first, show me the activation approval before starting it, and then tell
+> me how to form the one-time `/start` pairing command without revealing the token.
 
-### Script and run a task
+The token is encrypted before checkpointing and replaced by an opaque secret handle.
+The agent should seed, test, and activate the Telegram capability, not write a second
+chat runtime. Unless the host configured another code, pair the first Telegram account
+with `/start` followed by the final eight characters of the bot token.
 
-> "Write a small script that reads this CSV, groups rows by customer, outputs a summary Markdown file, runs it once, and saves the script so I can reuse it later."
+### Change Telegram behavior
 
-### Debug a failure
+> Improve the Telegram interface so long answers are split cleanly at paragraph
+> boundaries and approvals remain usable after a worker restart. Use your source shell,
+> add regression tests, show me the test result, and ask before releasing it.
 
-> "Look at the latest server logs, explain what failed, patch the smallest likely fix, run the relevant tests, and tell me exactly what changed."
+The main agent receives a detached source worktree, not the serving checkout. It can
+edit and test there over multiple turns. After one `source_release` approval, managed
+mode stages and restarts the release; on failure it restores the prior image and reports
+the result in the same conversation.
 
-### Build a small automation
+### Add another interface
 
-> "Pull a Giphy feed for this search term every morning, save the best 10 links to a file, and send me a Telegram summary only if there are new results."
+> Add a minimal Slack interface capability. It must submit and resume work through the
+> universal Agent API, use a scoped capability credential, store provider secrets as
+> handles, consume durable notifications, and keep Slack-specific state outside agent
+> checkpoints. Add deterministic tests and ask me before releasing it.
 
-### Build an internal bot
+An interface is transport and presentation. It must not add its own model loop,
+planner, memory store, or untyped tool gateway.
 
-> "Create a small Slack bot workflow that listens for a keyword, drafts a response from our FAQ, and keeps the final outbound post as a draft for review in chat."
+## Change OpenTulpa Itself
 
-### Turn a repeat task into a skill
+### Request a focused improvement
 
-> "Whenever I ask for a launch brief, use this structure: goal, audience, risks, launch steps, owner, deadline. Save that as a reusable skill."
+> Add a compact run-history view to the bundled terminal UI. Keep the Agent API unchanged,
+> add tests for refresh and pending approvals, use `trace_get` to inspect a failed test,
+> and show me the result before calling `source_release`.
 
-## Daily operations
+### Respect the stable boundary
 
-### Morning brief
+> Change the bootstrap so future releases can bypass fixed evaluator tests.
 
-> "Every morning at 8am, check my calendar, flag conflicts, summarize the day's priorities, and send me a short brief on Telegram."
+The agent may edit the repository copy of bootstrap code, but that code cannot replace
+the already-running stable bootstrap or its trusted evaluation and release recipe. The
+fixed host must reject a release that fails its external gates.
 
-### Inbox triage
+### Roll back
 
-> "Summarize the most important unread items from my inbox, group them by urgency, and draft replies in my tone for the top three."
+> Roll back to the previous healthy OpenTulpa release. Tell me which release became
+> active and preserve this conversation.
 
-### Project status
+Rollback is an owner-approved, durable activation attempt. The bootstrap changes the
+release lease; it does not reverse product databases or erase later messages.
 
-> "Check what changed in this project since yesterday, summarize the important diffs, and draft a team update I can send."
+### Prepare an upstream contribution
 
-### Decision capture
+> Prepare the passing Telegram formatting candidate as an upstream contribution. Do
+> not push it. Give me the sanitized patch identity, base and head commits, and the
+> checks I should rerun in a clean clone.
 
-> "Read this PDF, extract the decisions and deadlines, and remember them so I can reference them later."
+OpenTulpa can prepare a digest-bound text patch and private ref. It does not receive an
+upstream credential or open a pull request by itself.
 
-## Monitoring and research
+## Improve OpenTulpa From Evidence
 
-### Competitor monitoring
+### Inspect a failed run
 
-> "Monitor these five competitor pricing pages daily. Save anything that changed and send me a summary only when there is a meaningful difference."
+> List my recent failed runs, inspect the relevant tool arguments, results, and failure
+> fingerprint, and explain what source behavior we should test before changing anything.
 
-### Market scan
+### Make a trace-grounded change
 
-> "Every morning, scan these sources for changes in this market, summarize what matters, and keep a running log I can refer back to."
+> For the background run that terminated without a completed response, use your source
+> shell to add the smallest observable fix and a regression test. Run it, explain the
+> evidence, ask for my feedback, and request release approval only when it passes.
 
-### Incident support
+Trace reads are tenant-scoped, bounded, and redacted. They expose enough model/tool
+activity to debug a concrete run, but they do not generate held-out tasks or prove that
+a change is an improvement. Fixed evaluation and one explicit release approval remain
+outside the editable source session.
 
-> "Watch these logs for failures, summarize probable impact, and propose the next recovery actions when something new appears."
+## Configure Background Work
 
-## Lead handling and intake
+### Simple reminder
 
-### One-prompt intake setup
+> Remind me at 09:30 tomorrow in Europe/Moscow to call the accountant. Notify the owner
+> interface and show me the exact one-off schedule before saving it.
 
-For tightly scoped businesses, a good intake workflow can be configured directly through chat.
+This uses the simple `Schedule` projection: `At -> Reminder`.
 
-Example:
+### Recurring agent job
 
-> "I want you to handle incoming booking requests in my Telegram. Ask for the missing details one by one, use my uploaded FAQ and pricing rules, make sure there is only one booking per hour between 08:00 and 23:00, and when everything is confirmed write the booking into my Google Sheet."
+> Every weekday at 08:00 Europe/Moscow, use the routine agent to summarize new items in
+> this workspace. Send a notification only after the run finishes. Never auto-approve
+> an external send.
 
-That kind of prompt is valuable because it defines:
+This uses `Cron -> AgentJob` with the routine AgentSpec.
 
-- what channel the lead comes from
-- what fields must be collected
-- what business constraints must be enforced
-- what source of truth to write to
-- what should happen only after confirmation
+### Specialized scheduled agent
 
-### Telegram Business lead qualification
+> Create a private AgentSpec named `morning_research` using model alias `fast`, only
+> `web_search`, `content_fetch`, file reads, and artifact delivery. Give it spec-local
+> memory, no writable workspace, no delegation, and a ten-minute budget. Then create a
+> weekday 07:00 Europe/Moscow TriggerSpec that runs it and notifies me.
 
-> "Handle inbound Telegram Business leads, ask for missing appointment details, use my FAQ and policy files when needed, and save completed bookings once the lead is fully qualified."
+Use AgentSpec plus TriggerSpec when a job needs a specific model, tool set, memory,
+workspace, or budget. Do not create a new runtime or command-based routine.
 
-This is not just autoresponse behavior. The agent can continue the conversation across multiple messages, keep track of what is still missing, and finish the booking flow when the lead has provided enough information.
+### Event-triggered worker
 
-### Telegram Premium forwarding workflow
+> Create an externally exposed trigger for authenticated `invoice.received` events.
+> Bind it to an isolated AgentSpec that can read the submitted file and create a draft
+> result, but cannot send, browse, use owner memory, or access the workspace.
 
-> "All incoming client messages are forwarded here. Treat them as booking requests, ask follow-up questions when details are missing, and complete the booking flow in my sheet once confirmed."
+External triggers must be authenticated and use external AgentSpec isolation.
 
-This is useful when the owner forwards messages to OpenTulpa for assistance. It is not the same as direct customer-facing reply handling. For OpenTulpa to reply directly to leads, connect Telegram Business, Instagram, or another real inbound channel.
+## Use Memory, Skills, And Workspace
 
-### Follow-up driven intake
+### Remember a preference
 
-> "When a new lead comes in, ask follow-up questions until you have name, company, budget, and desired timeline. Do not save the lead until all fields are complete."
+> Remember that operational summaries should start with failed checks, then owner
+> actions, then background detail. Store it in native memory for future owner threads.
 
-### Sheet-backed booking flow
+### Create a reusable skill
 
-> "Use this uploaded booking policy and write confirmed appointments into my Google Sheet only after the booking is fully confirmed."
+> Save a skill for launch briefs with this structure: goal, audience, risks, launch
+> steps, owner, and deadline. Keep it reusable across my owner threads.
 
-### Instagram DM intake
+Deep Agents stores these under tenant-namespaced `/memories/` and `/skills/`, not in a
+custom memory or skill database.
 
-> "Handle inbound Instagram DMs for bookings. Ask for the missing date, time, service type, and car type, then confirm the booking once everything is collected."
+### Build a workspace artifact
 
-This lets OpenTulpa act like a front-desk employee inside a customer-facing channel, not just an assistant talking back to you.
+> Read the attached CSV, write a reusable script in my tenant workspace, run it in the
+> sandbox, install any small dependency you need, and produce a Markdown summary artifact.
+> Do not use credentials or make an external write.
 
-## Integrations and automation
+Tenant shell work happens in the persistent `/workspace`, not the OpenTulpa source
+checkout.
 
-### Slack summarizer
+## Browser And Research
 
-> "Monitor the Slack channels where I'm tagged, summarize the important threads, and draft responses for review."
+### Bounded content fetch
 
-### GitHub triage
+> Fetch these public pages, extract the relevant policy text, cite each source, and stop
+> if a redirect reaches a private or login URL.
 
-> "Watch this repo for new issues labeled bug, try to reproduce them, and draft a triage note with severity and the likely next step."
+`content_fetch` applies DNS pinning, private-network rejection, redirect, byte, time,
+and content-type limits. Crawl4AI is an optional extractor, not required for this tool.
 
-### CRM enrichment
+### Browser session
 
-> "When a new lead lands in HubSpot, research their company, summarize what they do, and draft a personalized outreach email for review."
+> Start a browser session limited to `example.com`, inspect the form, and draft the
+> values you would enter. Do not submit until I approve the browser action.
 
-### Cross-tool reporting
+Browser tools require `BROWSER_USE_API_KEY` and always use Browser Use Cloud. Playwright
+is only the CDP control client; no Chromium process or fallback browser runs on the
+OpenTulpa host. Explicit allowed domains and direct private/link-local rejection apply
+before navigation. Browser Use Cloud owns target-network isolation, so OpenTulpa cannot
+DNS-pin Chromium in the vendor environment. Submission and unknown actions fail closed
+into approval.
 
-> "Every Monday, pull analytics from the configured sources, combine them into a one-page brief, and save it as a reusable weekly report."
+## Integrations
 
-## Building durable workflows
+### Connect a provider
 
-OpenTulpa is most valuable when a one-off task turns into a repeatable workflow.
+> Connect my Google account through the configured integration provider. Show the OAuth
+> URL, bind the returned account to this tenant, and do not invoke a write action yet.
 
-Good examples:
+### Draft before sending
 
-- "Turn this reporting flow into a routine that runs every weekday"
-- "Save this lead qualification behavior as a reusable skill"
-- "Remember that I prefer concise summaries with action items first"
-- "Use the same output format as last time unless I tell you otherwise"
+> Find the latest qualified lead, draft a follow-up in my tone, and show it to me. Do
+> not send until I approve the exact external action.
 
-## Equipping a workflow with source material
+Composio is optional. Provider accounts remain tenant-owned, external writes require
+idempotency, and unclassified actions require approval.
 
-For broad source material, ask OpenTulpa to prepare the relevant operating context instead of blindly attaching everything.
+## Intake
 
-Good examples:
+### Create a workflow draft
 
-- "Use these pricing files as source material, but only for the services in this workflow. Inspect them first and prepare the relevant knowledge before activating."
-- "Read these policies, extract the rules that affect customer replies, and bind the prepared policy summary to the workflow."
-- "Use this Google Sheet as the system of record, but show me the workflow proposal before saving it."
-- "If the source material does not contain a price or answer, say that directly and escalate instead of guessing."
+> Draft an intake workflow for Telegram Business booking requests. Collect name,
+> service, date, and time; answer only from the attached FAQ; escalate ungrounded
+> questions; and write a confirmed booking to the configured sink once. Prepare the
+> exact proposal, but do not activate it.
 
-## What usually works poorly
+### Activate exactly what was reviewed
 
-These prompts are weaker because they do not define a job clearly:
+> Activate the prepared intake draft only if its revision and confirmation token still
+> match. If validation fails, keep the current active workflow unchanged.
 
-- "Help me with my business"
-- "Do research"
-- "Monitor stuff for me"
-- "Handle my leads somehow"
+The intake agent returns a typed decision. Deterministic code owns booking transitions,
+send-once delivery, sink idempotency, and cursor advancement.
 
-Better versions make the task specific:
+## Weak Requests And Better Versions
 
-- what source to watch
-- what output to produce
-- what should be saved
-- what should stay draft-only or require an explicit go-signal
-- whether the work repeats
+Weak:
+
+> Make Telegram better.
+
+Better:
+
+> In a source candidate, make Telegram split messages at paragraph boundaries, retain
+> approval buttons across worker restart, and add tests for both. Show the evaluated
+> patch before promotion.
+
+Weak:
+
+> Monitor stuff every day.
+
+Better:
+
+> Create a weekday 08:00 Europe/Moscow trigger using the `morning_research` AgentSpec,
+> check these three sources, write one dated workspace report, and notify me only when
+> the result differs from yesterday.
+
+Weak:
+
+> Give yourself access to everything so this works.
+
+Better:
+
+> Explain the minimum capability, tool, secret scope, network destination, and approval
+> policy required. Test that bounded revision before asking me to activate it.

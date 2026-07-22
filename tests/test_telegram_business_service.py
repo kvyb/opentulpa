@@ -108,3 +108,52 @@ def test_telegram_business_service_rebinds_existing_connections_to_configured_ow
         business_connection_id="bc_existing",
     )
     assert conversations["items"][0]["conversation_id"] == "555"
+
+
+def test_business_ingress_receipt_is_durable_and_duplicate_safe(tmp_path: Path) -> None:
+    db_path = tmp_path / "telegram_business.db"
+    service = TelegramBusinessService(db_path=db_path, owner_customer_id="tenant-a")
+    service.upsert_connection(
+        {
+            "id": "bc_123",
+            "user_chat_id": 777,
+            "is_enabled": True,
+            "user": {"id": 123, "is_bot": False},
+            "rights": {"can_reply": True},
+        }
+    )
+    body = {
+        "update_id": 991,
+        "business_message": {
+            "business_connection_id": "bc_123",
+            "message_id": 10,
+            "date": 1_775_552_400,
+            "chat": {"id": 555, "type": "private"},
+            "from": {"id": 999, "is_bot": False},
+            "text": "Can I book 3pm?",
+        },
+    }
+
+    first = service.ingest_update(body)
+    duplicate_pending = service.ingest_update(body)
+
+    assert first["duplicate"] is False
+    assert first["dispatch_pending"] is True
+    assert duplicate_pending["duplicate"] is True
+    assert duplicate_pending["dispatch_pending"] is True
+    service.complete_ingress(str(first["ingress_key"]))
+    duplicate_dispatched = service.ingest_update(body)
+    assert duplicate_dispatched["dispatch_pending"] is False
+    conversations = service.list_conversations(
+        customer_id="tenant-a",
+        business_connection_id="bc_123",
+    )
+    assert len(conversations["items"]) == 1
+    assert conversations["items"][0]["latest_inbound_message_id"] == "10"
+    with service._conn() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT status, raw_json FROM telegram_business_ingress"
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "dispatched"
+    assert "Can I book 3pm?" in row["raw_json"]

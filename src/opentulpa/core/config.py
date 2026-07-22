@@ -1,13 +1,15 @@
 """Configuration from environment + YAML defaults."""
 
+import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
+    NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
@@ -17,8 +19,6 @@ PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
 LEGACY_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV = "OPENAI_COMPATIBLE_BASE_URL"
 LEGACY_OPENROUTER_BASE_URL_ENV = "OPENROUTER_BASE_URL"
-PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV = "OPENAI_COMPATIBLE_EMBEDDING_MODEL"
-LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV = "OPENROUTER_EMBEDDING_MODEL"
 DEFAULT_CONFIG_FILENAME = "opentulpa.config.yaml"
 
 
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_ignore_empty=True,
         extra="ignore",
     )
 
@@ -62,15 +63,46 @@ class Settings(BaseSettings):
     # Host
     host: str = Field(default="0.0.0.0", description="Bind host")
     port: int = Field(default=8000, ge=1, le=65535, description="FastAPI port")
-    agent_checkpoint_db_path: str = Field(
-        default=".opentulpa/langgraph_checkpoints.sqlite",
-        description="SQLite path for LangGraph thread checkpoints.",
+    deepagents_checkpoint_db_path: str = Field(
+        default=".opentulpa/deepagents/checkpoints.db",
+        description="Fresh Deep Agents checkpoint database; legacy chats are not imported.",
     )
-    agent_recursion_limit: int = Field(
-        default=80,
-        ge=5,
-        le=250,
-        description="Maximum LangGraph steps per turn.",
+    deepagents_store_db_path: str = Field(
+        default=".opentulpa/deepagents/store.db",
+        description="Tenant-namespaced native memory and skills store.",
+    )
+    deepagents_runs_db_path: str = Field(
+        default=".opentulpa/deepagents/runs.db",
+        description="Durable agent run and approval state.",
+    )
+    deepagents_workspaces_root: str = Field(
+        default=".opentulpa/deepagents/workspaces",
+        description="Persistent tenant workspace roots mounted into disposable sandboxes.",
+    )
+    evolution_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable source editing and self-release through the immutable managed bootstrap."
+        ),
+    )
+    evolution_source_repository: str | None = Field(
+        default=None,
+        description=(
+            "Canonical Git checkout used by the managed bootstrap to create disposable "
+            "source candidates. Defaults to the bootstrap project root."
+        ),
+    )
+    evolution_sandbox_image: str = Field(
+        default="opentulpa-evolution:0.1.0",
+        description="Locally built, reviewed OCI image used by the main agent's source shell.",
+    )
+    evolution_evaluator_image: str = Field(
+        default="opentulpa-evolution:0.1.0",
+        description="Locally built OCI image containing trusted candidate evaluation dependencies.",
+    )
+    intake_drafts_db_path: str = Field(
+        default=".opentulpa/deepagents/intake_drafts.db",
+        description="Revisioned intake workflow drafts migrated from setup sessions.",
     )
     agent_max_completion_tokens: int = Field(
         default=4096,
@@ -78,44 +110,26 @@ class Settings(BaseSettings):
         le=32768,
         description="Maximum model completion tokens per agent turn.",
     )
-    agent_max_user_reply_chars: int = Field(
-        default=4000,
-        ge=500,
-        le=20000,
-        description="Hard cap for any single user-visible assistant reply before truncation.",
+    sandbox_container_cli: str = Field(
+        default="docker",
+        validation_alias=AliasChoices(
+            "sandbox_container_cli",
+            "SANDBOX_CONTAINER_CLI",
+            "OPENTULPA_CONTAINER_CLI",
+        ),
     )
-    agent_context_token_limit: int = Field(
-        default=20000,
-        ge=10000,
-        le=1000000,
-        description="Short-term high-watermark (estimated tokens) before thread context compaction.",
+    sandbox_image: str = Field(
+        default="opentulpa-tenant-sandbox:0.1.0",
+        description=(
+            "Reviewed local tenant workspace image. Direct mode resolves this tag to its "
+            "immutable local image ID; managed mode resolves and owns it in the stable host."
+        ),
     )
-    agent_context_recent_tokens: int = Field(
-        default=3500,
-        ge=1000,
-        le=1000000,
-        description="Short-term low-watermark target (estimated tokens) after compaction.",
-    )
-    agent_context_rollup_tokens: int = Field(
-        default=2200,
-        ge=500,
-        le=300000,
-        description="Estimated token budget for compressed older-context rollup.",
-    )
-    agent_context_compaction_source_tokens: int = Field(
-        default=12000,
-        ge=1000,
-        le=500000,
-        description="Max oldest-token span folded into rollup in one compaction pass.",
-    )
-    agent_context_compaction_model: str = Field(
-        default="google/gemini-3-flash-preview",
-        description="Model used to compact old thread history before normal chat turns.",
-    )
-    link_alias_db_path: str = Field(
-        default=".opentulpa/link_aliases.db",
-        description="SQLite path for customer-scoped long-link alias registry.",
-    )
+    sandbox_cpu_limit: str = Field(default="1")
+    sandbox_memory_limit: str = Field(default="512m")
+    sandbox_pid_limit: int = Field(default=128, ge=16, le=4096)
+    sandbox_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    sandbox_max_output_bytes: int = Field(default=512_000, ge=1024, le=10_000_000)
     # Telegram
     telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")
     telegram_allowed_usernames: str | None = Field(
@@ -126,15 +140,6 @@ class Settings(BaseSettings):
         default=None,
         description="Optional CSV allowlist of Telegram numeric user IDs.",
     )
-    telegram_support_user_ids: str | None = Field(
-        default=None,
-        description="Optional CSV allowlist of trusted Telegram support operator numeric user IDs.",
-    )
-    telegram_support_usernames: str | None = Field(
-        default=None,
-        description="Optional CSV allowlist of trusted Telegram support operator usernames.",
-    )
-
     telegram_webhook_secret: str | None = Field(
         default=None,
         description="Optional secret for webhook path",
@@ -147,23 +152,12 @@ class Settings(BaseSettings):
             "a numeric Telegram id binding on first message."
         ),
     )
-    opentulpa_web_token: str | None = Field(
+    opentulpa_owner_token: str | None = Field(
         default=None,
-        description="Bearer token required for dashboard web operations against this deployment.",
+        description="Bearer token required for owner Agent API operations.",
     )
 
-    # Memory (mem0)
-    mem0_user_id: str = Field(default="default", description="Default user id for mem0")
-    mem0_qdrant_path: str = Field(
-        default=".opentulpa/qdrant",
-        description="Local path for embedded Qdrant vector store used by mem0.",
-    )
-    mem0_qdrant_on_disk: bool = Field(
-        default=True,
-        description="Persist Qdrant vectors on disk (recommended true for durability).",
-    )
-
-    # LLM: single OpenAI-compatible model backend used for agent calls and mem0.
+    # LLM: one OpenRouter-compatible model used by Deep Agents.
     openai_compatible_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -192,59 +186,134 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="z-ai/glm-5.2",
+        default="moonshotai/kimi-k3",
         description=(
             "Model identifier accepted by the configured provider. "
-            "Recommended default is the OpenRouter slug z-ai/glm-5.2 for main chat turns."
+            "Recommended default is the OpenRouter slug moonshotai/kimi-k3 for main chat turns."
         ),
     )
-    memory_llm_model: str = Field(
-        default="google/gemini-3-flash-preview",
+    llm_fallback_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["z-ai/glm-5.2"],
+        validation_alias=AliasChoices(
+            "llm_fallback_models",
+            "LLM_FALLBACK_MODELS",
+            "llm_provider_rejection_fallback_model",
+            "LLM_PROVIDER_REJECTION_FALLBACK_MODEL",
+        ),
         description=(
-            "Model used by mem0 for background memory extraction. "
-            "Defaults to google/gemini-3-flash-preview so chat can use a different main model "
-            "without making memory inference expensive or brittle."
+            "Ordered fallback models for provider failures during a model call. "
+            "Environment values may be a JSON array or comma-separated model identifiers."
         ),
     )
+
+    @field_validator("llm_fallback_models", mode="before")
+    @classmethod
+    def validate_llm_fallback_models(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    value = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("LLM_FALLBACK_MODELS must be valid JSON or CSV") from exc
+            else:
+                value = raw.split(",")
+        if not isinstance(value, list | tuple):
+            raise ValueError("LLM_FALLBACK_MODELS must be a list")
+        models: list[str] = []
+        for raw_model in value:
+            model = str(raw_model or "").strip()
+            if not model:
+                continue
+            if len(model) > 300 or any(ord(char) < 32 for char in model):
+                raise ValueError("fallback model identifier is invalid")
+            if model not in models:
+                models.append(model)
+        if len(models) > 8:
+            raise ValueError("at most 8 fallback models may be configured")
+        return models
+
+    llm_provider_order: Annotated[dict[str, list[str]], NoDecode] = Field(
+        default_factory=lambda: {
+            "z-ai/glm-5.2": ["z-ai/fp8", "fireworks", "deepinfra/fp4"],
+        },
+        validation_alias=AliasChoices("llm_provider_order", "LLM_PROVIDER_ORDER"),
+        description=(
+            "Optional ordered OpenRouter provider slugs per model. Only the listed providers "
+            "are used for that model before OpenTulpa advances to the next model."
+        ),
+    )
+
+    @field_validator("llm_provider_order", mode="before")
+    @classmethod
+    def validate_llm_provider_order(cls, value: Any) -> dict[str, list[str]]:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("LLM_PROVIDER_ORDER must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("LLM_PROVIDER_ORDER must be an object")
+        result: dict[str, list[str]] = {}
+        for raw_model, raw_providers in value.items():
+            model = str(raw_model or "").strip()
+            if not model or len(model) > 300 or any(ord(char) < 32 for char in model):
+                raise ValueError("provider-order model identifier is invalid")
+            if not isinstance(raw_providers, list | tuple):
+                raise ValueError("provider order must be a list")
+            providers: list[str] = []
+            for raw_provider in raw_providers:
+                provider = str(raw_provider or "").strip()
+                if not provider or len(provider) > 100 or any(ord(char) < 32 for char in provider):
+                    raise ValueError("provider-order provider identifier is invalid")
+                if provider not in providers:
+                    providers.append(provider)
+            if len(providers) > 8:
+                raise ValueError("at most 8 providers may be configured per model")
+            if providers:
+                result[model] = providers
+        return result
+
+    model_aliases: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Trusted AgentSpec model aliases mapped to provider model identifiers. "
+            "Environment values use a JSON object."
+        ),
+    )
+
+    @field_validator("model_aliases")
+    @classmethod
+    def validate_model_aliases(cls, value: dict[str, str]) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+        for raw_alias, raw_model in value.items():
+            alias = str(raw_alias or "").strip()
+            model = str(raw_model or "").strip()
+            if (
+                not alias
+                or len(alias) > 100
+                or not alias[0].isalnum()
+                or any(
+                    char
+                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+                    for char in alias
+                )
+            ):
+                raise ValueError("model alias is invalid")
+            if not model or len(model) > 300 or any(ord(char) < 32 for char in model):
+                raise ValueError("model identifier is invalid")
+            aliases[alias] = model
+        return aliases
     llm_reasoning_effort: str | None = Field(
-        default="medium",
+        default="low",
         description=(
             "Optional reasoning effort for providers/models that support it "
-            "(for example: low, medium, high). Defaults to medium for agent-owned "
+            "(for example: low, medium, high). Defaults to low for responsive agent-owned "
             "LLM calls; set empty/null to avoid sending reasoning_effort."
-        ),
-    )
-    wake_classifier_model: str | None = Field(
-        default=None,
-        description=(
-            "Optional cheaper model for wake/heartbeat notify decisions. If unset, uses LLM_MODEL."
-        ),
-    )
-    wake_execution_model: str | None = Field(
-        default="z-ai/glm-5.2",
-        description=(
-            "Model used for wake/routine execution turns that need stronger reasoning "
-            "and tool use. Recommended default aligns this with the main chat model: z-ai/glm-5.2."
-        ),
-    )
-    multimodal_llm: str = Field(
-        default="google/gemini-3.1-flash-lite-preview",
-        validation_alias=AliasChoices(
-            "MULTIMODAL_LLM",
-            "TELEGRAM_MEDIA_MODEL",
-        ),
-        description=(
-            "Model used for multimodal understanding of non-text inputs such as Telegram "
-            "attachments, browser screenshots, voice notes, and audio/video files before "
-            "passing text summaries into the main chat model. "
-            "Recommended default is google/gemini-3.1-flash-lite-preview."
-        ),
-    )
-    workflow_setup_input_classifier_model: str = Field(
-        default="z-ai/glm-5.2",
-        description=(
-            "Model used to classify messages sent while workflow setup is already running "
-            "as status nudges versus real setup edits."
         ),
     )
     business_knowledge_oracle_model: str = Field(
@@ -254,64 +323,11 @@ class Settings(BaseSettings):
             "answers over normalized uploaded files."
         ),
     )
-    proactive_heartbeat_default_hours: int = Field(
-        default=3,
-        ge=1,
-        le=24,
-        description="Default heartbeat interval (hours) when proactive mode auto-enables.",
-    )
-    agent_behavior_log_enabled: bool = Field(
-        default=True,
-        description="Enable structured JSONL behavior logging for agent execution flow.",
-    )
-    agent_behavior_log_path: str = Field(
-        default=".opentulpa/logs/agent_behavior.jsonl",
-        description="Path for structured JSONL behavior logs.",
-    )
-    openrouter_embedding_model: str = Field(
-        default="openai/text-embedding-3-small",
-        validation_alias=AliasChoices(
-            "openai_compatible_embedding_model",
-            "openrouter_embedding_model",
-            PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV,
-            LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV,
-        ),
-        description=(
-            "Embedding model identifier for mem0 via the configured "
-            "OpenAI-compatible embeddings endpoint. "
-            f"{PRIMARY_OPENAI_COMPATIBLE_EMBEDDING_MODEL_ENV} is the preferred env name; "
-            f"{LEGACY_OPENROUTER_EMBEDDING_MODEL_ENV} is accepted as a backward-compatible alias."
-        ),
-    )
-    browser_use_headless: bool = Field(
-        default=True,
-        description="Run local Browser Use sessions in headless mode by default.",
-    )
-    browser_use_model: str | None = Field(
-        default=None,
-        description=(
-            "Optional Browser Use model override. If unset, Browser Use reuses "
-            "MULTIMODAL_LLM so browser steps keep a multimodal-capable model."
-        ),
-    )
-    browser_use_max_concurrent_tasks: int = Field(
-        default=2,
-        ge=1,
-        le=16,
-        description="Maximum concurrent local Browser Use tasks.",
-    )
-    browser_use_task_retention_seconds: int = Field(
-        default=1800,
-        ge=60,
-        le=86400,
-        description="How long completed local Browser Use task records remain queryable in memory.",
-    )
     browser_use_user_data_dir: str = Field(
         default=".opentulpa/browser_use_profiles",
         description=(
-            "Directory for persistent Browser Use profile storage. Each Browser Use "
-            "session_id gets its own subdirectory here so cookies/localStorage can "
-            "survive process restarts when local/container storage persists."
+            "Directory for tenant-scoped Browser Use Cloud profile metadata. Browser "
+            "cookies remain in the vendor profile, not on the OpenTulpa host."
         ),
     )
     browser_use_api_key: str | None = Field(
@@ -331,13 +347,6 @@ class Settings(BaseSettings):
         ge=1,
         le=240,
         description="Browser Use Cloud hosted browser session timeout in minutes.",
-    )
-    capsolver_api_key: str | None = Field(
-        default=None,
-        description=(
-            "Optional CapSolver API key. When set, local Browser Use tasks get an explicit "
-            "CAPTCHA-solving action for supported reCAPTCHA v2 and Cloudflare Turnstile pages."
-        ),
     )
     composio_api_key: str | None = Field(
         default=None,
@@ -379,26 +388,6 @@ class Settings(BaseSettings):
         default="full_debug",
         description="Langfuse capture mode for OpenTulpa payloads. Defaults to full_debug with redaction.",
     )
-    agent_prompt_caching_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices(
-            "AGENT_PROMPT_CACHING_ENABLED",
-            "AGENT_ANTHROPIC_PROMPT_CACHING",
-        ),
-        description=(
-            "When True, enable provider-specific request prompt caching when supported by "
-            "the current model/provider. Unsupported models silently no-op. "
-            "See https://openrouter.ai/docs/guides/best-practices/prompt-caching"
-        ),
-    )
-    agent_prompt_cache_ttl_1h: bool = Field(
-        default=False,
-        description=(
-            "When prompt caching is enabled, request 1-hour cache TTL instead of the "
-            "default 5-minute TTL where supported (higher cache write cost, better for "
-            "long sessions)."
-        ),
-    )
 
     # The OPENROUTER_* env names are kept for compatibility even when pointing at
     # another OpenAI-compatible endpoint.
@@ -412,11 +401,6 @@ class Settings(BaseSettings):
     def openai_compatible_base_url(self) -> str:
         """Preferred neutral provider naming for base URL."""
         return self.openrouter_base_url
-
-    @property
-    def openai_compatible_embedding_model(self) -> str:
-        """Preferred neutral provider naming for embedding model."""
-        return self.openrouter_embedding_model
 
 
 @lru_cache
