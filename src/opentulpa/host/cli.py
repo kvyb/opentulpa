@@ -39,6 +39,7 @@ from opentulpa.client.local_server import (
 )
 from opentulpa.core.config import get_settings
 from opentulpa.host.app import create_host_app
+from opentulpa.host.evolution_composition import build_host_evolution_runtime
 from opentulpa.host.models import HostConfigInput
 from opentulpa.host.runtime import RuntimeSupervisor
 from opentulpa.host.service import HostService
@@ -102,6 +103,7 @@ def build_host_application() -> tuple[Any, str, str, Path]:
     ).resolve()
     data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     setup_token = _private_pairing_code(data_root / "bootstrap" / "host-setup.token")
+    evolution_token = _private_token(data_root / "bootstrap" / "evolution.token")
     store = HostStore(
         data_root / "bootstrap" / "host.db",
         cipher=load_or_create_host_cipher(data_root),
@@ -132,12 +134,30 @@ def build_host_application() -> tuple[Any, str, str, Path]:
             telegram_user_id=telegram_id if telegram_token else None,
         )
     runtime = RuntimeSupervisor(project_root=project_root, data_root=data_root)
-    service = HostService(store=store, runtime=runtime, bootstrap_config=bootstrap)
+    port = int(os.environ.get("PORT") or 8000)
+    evolution = build_host_evolution_runtime(
+        runtime=runtime,
+        data_root=data_root,
+        settings=settings,
+    )
+    if evolution is not None:
+        runtime.configure_evolution_control(
+            base_url=(f"http://127.0.0.1:{port}/bootstrap/internal/v1/evolution"),
+            token=evolution_token,
+        )
+    service = HostService(
+        store=store,
+        runtime=runtime,
+        bootstrap_config=bootstrap,
+        evolution=evolution,
+    )
     app = create_host_app(
         store=store,
         service=service,
         local_owner_enabled=host in {"127.0.0.1", "localhost", "::1"},
         setup_token=setup_token,
+        evolution_service=evolution.service if evolution is not None else None,
+        evolution_token=evolution_token if evolution is not None else None,
     )
     return app, host, setup_token, data_root
 
@@ -195,8 +215,7 @@ def _remote(args: argparse.Namespace) -> int:
             print(str(exc), file=sys.stderr)
             return 2
         print(
-            f"Connected to {connection.url}; credential stored in "
-            f"{connection.credential_storage}."
+            f"Connected to {connection.url}; credential stored in {connection.credential_storage}."
         )
         if args.no_tui:
             return 0
@@ -411,9 +430,7 @@ def _configure_runtime(
 def _server_command(args: argparse.Namespace) -> None:
     if not 1 <= args.port <= 65535:
         raise SystemExit("Server port must be between 1 and 65535.")
-    if not str(args.host or "").strip() or any(
-        character.isspace() for character in str(args.host)
-    ):
+    if not str(args.host or "").strip() or any(character.isspace() for character in str(args.host)):
         raise SystemExit("Server host is invalid.")
     os.environ["HOST"] = args.host
     os.environ["PORT"] = str(args.port)

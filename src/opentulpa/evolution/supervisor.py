@@ -299,9 +299,7 @@ class EvolutionSupervisor:
                 expected_diff_sha256=safe_diff_sha256,
             )
             current_release = await self._archive.get_current_release()
-            operation_digest = hashlib.sha256(
-                f"{tenant_id}\x00{safe_key}".encode()
-            ).hexdigest()
+            operation_digest = hashlib.sha256(f"{tenant_id}\x00{safe_key}".encode()).hexdigest()
             operation = await self._archive.create_source_release_operation(
                 SourceReleaseOperation(
                     id=f"source_release_{operation_digest[:48]}",
@@ -368,13 +366,10 @@ class EvolutionSupervisor:
             if attempt_id is not None:
                 existing = await self._archive.get_promotion_attempt(attempt_id)
                 if existing is not None:
-                    if (
-                        existing.candidate_id != candidate_id
-                        or (release_id is not None and existing.release.id != release_id)
+                    if existing.candidate_id != candidate_id or (
+                        release_id is not None and existing.release.id != release_id
                     ):
-                        raise EvolutionSupervisorError(
-                            "source release promotion binding changed"
-                        )
+                        raise EvolutionSupervisorError("source release promotion binding changed")
                     return existing
             candidate = await self._required_candidate(candidate_id)
             self._require_revision(candidate, expected_revision)
@@ -390,12 +385,9 @@ class EvolutionSupervisor:
                 raise EvolutionSupervisorError("release activation is unavailable")
             current = await self._archive.get_current_release()
             if expected_previous_source_commit is not None and (
-                current is None
-                or current.source_commit != expected_previous_source_commit
+                current is None or current.source_commit != expected_previous_source_commit
             ):
-                raise EvolutionSupervisorError(
-                    "source session is based on an inactive release"
-                )
+                raise EvolutionSupervisorError("source session is based on an inactive release")
             audit = self._audit_context(audit_context)
             release_metadata = self._release_artifact_metadata(candidate)
             release_values: dict[str, Any] = {
@@ -412,11 +404,7 @@ class EvolutionSupervisor:
                         if "requested_by" in candidate.metadata
                         else {}
                     ),
-                    **(
-                        {"requested_by": audit}
-                        if audit
-                        else {}
-                    ),
+                    **({"requested_by": audit} if audit else {}),
                 },
             }
             if release_id is not None:
@@ -484,10 +472,7 @@ class EvolutionSupervisor:
                 and current.id != expected_current_release_id
             ):
                 raise EvolutionSupervisorError("rollback source changed before approval")
-            if (
-                expected_target_release_id is not None
-                and target.id != expected_target_release_id
-            ):
+            if expected_target_release_id is not None and target.id != expected_target_release_id:
                 raise EvolutionSupervisorError("rollback target changed before approval")
             if self._release_activator is None:
                 raise EvolutionSupervisorError("release activation is unavailable")
@@ -512,11 +497,7 @@ class EvolutionSupervisor:
                         if idempotency_digest is not None and expected_tenant_id is not None
                         else {}
                     ),
-                    **(
-                        {"requested_by": audit}
-                        if audit
-                        else {}
-                    ),
+                    **({"requested_by": audit} if audit else {}),
                 },
             }
             if release_id is not None:
@@ -828,13 +809,11 @@ class EvolutionSupervisor:
         if current is None or current.id != rollback_of:
             raise EvolutionSupervisorError("rollback predecessor changed")
         if (
-            str(attempt.release.metadata.get("rollback_target") or "")
-            != rollback_target.id
+            str(attempt.release.metadata.get("rollback_target") or "") != rollback_target.id
             or rollback_target.candidate_id != attempt.candidate_id
             or rollback_target.source_commit != attempt.release.source_commit
             or rollback_target.artifact_digest != attempt.release.artifact_digest
-            or candidate.status
-            not in {CandidateStatus.PROMOTED, CandidateStatus.ROLLED_BACK}
+            or candidate.status not in {CandidateStatus.PROMOTED, CandidateStatus.ROLLED_BACK}
         ):
             raise EvolutionSupervisorError("rollback target changed")
 
@@ -873,9 +852,12 @@ class EvolutionSupervisor:
             or report is None
             or not candidate.evaluator_fingerprint
         ):
-            raise EvolutionSupervisorError("candidate has no verified OCI release manifest")
+            raise EvolutionSupervisorError("candidate has no verified release manifest")
+        artifact_kind = str(candidate.metadata.get("artifact_kind") or "")
+        if artifact_kind not in {"oci_image", "source_overlay"}:
+            raise EvolutionSupervisorError("candidate release artifact kind is invalid")
         return {
-            "artifact_kind": "oci_image",
+            "artifact_kind": artifact_kind,
             "manifest_digest": manifest_digest,
             "release_entrypoint": [str(item) for item in raw_entrypoint],
             "base_commit": candidate.base_commit,
@@ -926,9 +908,7 @@ class EvolutionSupervisor:
             manifest_digest=manifest_digest,
             entrypoint=tuple(str(item) for item in raw_entrypoint),
             metadata={
-                key: value
-                for key, value in release.metadata.items()
-                if key != "requested_by"
+                key: value for key, value in release.metadata.items() if key != "requested_by"
             },
         )
 
@@ -1103,12 +1083,12 @@ class EvolutionSupervisor:
         builder = self._release_builder
         if builder is None:
             return None, EvaluationCommandResult(
-                name="oci.release",
+                name="release.artifact",
                 stage="build",
                 passed=False,
                 exit_code=1,
                 duration_seconds=0,
-                output="Trusted OCI release builder is unavailable.",
+                output="Trusted release builder is unavailable.",
             )
         try:
             artifact = await builder.build(
@@ -1123,9 +1103,9 @@ class EvolutionSupervisor:
                 )
             )
         except ReleaseBuildError as exc:
-            message = str(exc or "Candidate OCI image build failed.")[:4_000]
+            message = str(exc or "Candidate release build failed.")[:4_000]
             return None, EvaluationCommandResult(
-                name="oci.release",
+                name="release.artifact",
                 stage="build",
                 passed=False,
                 exit_code=1,
@@ -1133,22 +1113,22 @@ class EvolutionSupervisor:
                 output=message,
             )
         except Exception:
-            logger.exception("trusted candidate OCI build failed: candidate=%s", candidate_id)
+            logger.exception("trusted candidate release build failed: candidate=%s", candidate_id)
             return None, EvaluationCommandResult(
-                name="oci.release",
+                name="release.artifact",
                 stage="build",
                 passed=False,
                 exit_code=1,
                 duration_seconds=asyncio.get_running_loop().time() - started,
-                output="Candidate OCI image build failed.",
+                output="Candidate release build failed.",
             )
         return artifact, EvaluationCommandResult(
-            name="oci.release",
+            name="release.artifact",
             stage="build",
             passed=True,
             exit_code=0,
             duration_seconds=asyncio.get_running_loop().time() - started,
-            output="Verified immutable OCI image and release manifest.",
+            output=f"Verified immutable {artifact.artifact_kind} release manifest.",
         )
 
     def _evaluation_report(
@@ -1268,12 +1248,9 @@ class EvolutionSupervisor:
             raise EvolutionSupervisorError("source release candidate is not resumable")
         current_release = await self._archive.get_current_release()
         if (
-            (current_release.id if current_release is not None else None)
-            != operation.base_release_id
-            or (
-                current_release is not None
-                and current_release.source_commit != candidate.base_commit
-            )
+            current_release.id if current_release is not None else None
+        ) != operation.base_release_id or (
+            current_release is not None and current_release.source_commit != candidate.base_commit
         ):
             raise EvolutionSupervisorError("source session is based on an inactive release")
 
@@ -1338,7 +1315,7 @@ class EvolutionSupervisor:
         if artifact is not None:
             metadata.update(
                 {
-                    "artifact_kind": "oci_image",
+                    "artifact_kind": artifact.artifact_kind,
                     "manifest_digest": artifact.manifest_digest,
                     "image_reference": artifact.image_reference,
                     "release_entrypoint": list(artifact.entrypoint),
@@ -1419,8 +1396,7 @@ class EvolutionSupervisor:
                 "diff_sha256": commit.diff_sha256,
                 "evaluation_input_digest": evaluation_input_digest,
                 "promotion_eligible": bool(
-                    commit.promotion_eligible
-                    and current.metadata.get("promotion_eligible", True)
+                    commit.promotion_eligible and current.metadata.get("promotion_eligible", True)
                 ),
             }
         )
@@ -1458,9 +1434,7 @@ class EvolutionSupervisor:
             current_release = await self._archive.get_current_release()
             current_release_id = current_release.id if current_release is not None else None
             if current_release_id != operation.base_release_id:
-                raise EvolutionSupervisorError(
-                    "source session is based on an inactive release"
-                )
+                raise EvolutionSupervisorError("source session is based on an inactive release")
             candidate = await self._cleanup_released_source_workspace(candidate)
             await self._publish_candidate_event(candidate)
         candidate_data = self._source_candidate_data(candidate)
@@ -1539,10 +1513,49 @@ class EvolutionSupervisor:
                     ):
                         await self._execute_source_release(current)
             except Exception:
-                logger.exception(
-                    "source release recovery remains pending: operation=%s",
-                    operation.id,
-                )
+                candidate = await self._archive.get_candidate(operation.candidate_id)
+                if candidate is None or candidate.status is CandidateStatus.FAILED:
+                    current = await self._archive.get_source_release_operation(
+                        tenant_id=operation.tenant_id,
+                        idempotency_key=operation.idempotency_key,
+                    )
+                    if (
+                        current is not None
+                        and current.status is SourceReleaseOperationStatus.PENDING
+                    ):
+                        await self._complete_source_release_operation(
+                            current,
+                            {
+                                "active": False,
+                                "candidate_id": current.candidate_id,
+                                "candidate": (
+                                    {
+                                        "id": candidate.id,
+                                        "status": candidate.status.value,
+                                    }
+                                    if candidate is not None
+                                    else None
+                                ),
+                                "promotion": None,
+                                "error": {
+                                    "code": "source_release_unrecoverable",
+                                    "message": (
+                                        "Source release could not be recovered; start a new "
+                                        "source session."
+                                    ),
+                                    "retryable": False,
+                                },
+                            },
+                        )
+                    logger.warning(
+                        "unrecoverable source release was closed: operation=%s",
+                        operation.id,
+                    )
+                else:
+                    logger.exception(
+                        "source release recovery remains pending: operation=%s",
+                        operation.id,
+                    )
 
     async def _require_current_source_base(self, candidate: Candidate) -> None:
         current = await self._archive.get_current_release()
@@ -1574,9 +1587,7 @@ class EvolutionSupervisor:
             head = await asyncio.to_thread(self._workspaces.head, workspace)
             expected_head = candidate.source_commit or candidate.base_commit
             if head != expected_head:
-                operation = await self._archive.get_pending_source_release_operation(
-                    candidate.id
-                )
+                operation = await self._archive.get_pending_source_release_operation(candidate.id)
                 if operation is not None:
                     commit = await asyncio.to_thread(
                         self._workspaces.recover_commit,
@@ -1592,9 +1603,7 @@ class EvolutionSupervisor:
                         commit=commit,
                     )
                 else:
-                    raise EvolutionSupervisorError(
-                        "source session commit changed unexpectedly"
-                    )
+                    raise EvolutionSupervisorError("source session commit changed unexpectedly")
         except Exception:
             logger.exception(
                 "interactive source session recovery failed: candidate=%s",
@@ -1637,10 +1646,7 @@ class EvolutionSupervisor:
             if self._is_source_session(candidate) and (
                 candidate.metadata.get("source_session_key") == session_key
                 or candidate.metadata.get("source_tenant_id") == tenant_id
-                or (
-                    isinstance(requested_by, dict)
-                    and requested_by.get("tenant_id") == tenant_id
-                )
+                or (isinstance(requested_by, dict) and requested_by.get("tenant_id") == tenant_id)
             ):
                 matches.append(candidate)
         if len(matches) > 1:
@@ -1661,7 +1667,9 @@ class EvolutionSupervisor:
         if existing is not None:
             return existing, self._source_workspace(existing)
         current_release = await self._archive.get_current_release()
-        base_ref = current_release.source_commit if current_release is not None else self._source_ref
+        base_ref = (
+            current_release.source_commit if current_release is not None else self._source_ref
+        )
         candidate_id = new_short_id("candidate", suffix_chars=12)
         workspace = await asyncio.to_thread(
             self._workspaces.create,

@@ -103,6 +103,7 @@ async def test_fetch_pins_validated_ip_and_extracts_bounded_html_text() -> None:
 
 
 def test_crawl4ai_adapter_transforms_already_fetched_html_offline() -> None:
+    pytest.importorskip("crawl4ai")
     text, title = Crawl4AIContentExtractor().extract(
         body=b"<html><head><title>Docs</title></head><body><h1>Hello</h1><a href='/a'>A</a></body></html>",
         content_type="text/html",

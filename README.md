@@ -38,15 +38,17 @@ OpenTulpa keeps deployment machinery outside the application image it replaces.
 |---|---|
 | Setup, owner authentication, encrypted configuration, process health, logs, proxy, recovery | Deep Agent service, prompts, tools, and approval policy |
 | Source-worktree sandbox limits and trusted evaluation commands | Agent API, product services, integrations, and interfaces |
-| Optional managed release builder, probation, and rollback | Capability workers, manifests, local TUI, tests, and documentation |
-| Host credentials, deployment controls, and OCI authority | Any other normal, secret-free repository source path |
+| Source sandbox, fixed evaluator, activation health, and rollback | Capability workers, manifests, local TUI, tests, and documentation |
+| Host credentials and deployment authority | Any other normal, secret-free repository source path |
 
-In managed mode, the owner can ask the main OpenTulpa agent to change any source. That
-agent edits a detached Git worktree through a rootless sandbox, never the serving checkout. It can run
+The owner can ask the main OpenTulpa agent to change any source. That agent edits a
+detached Git worktree through an unprivileged sandbox, never the serving checkout. It can run
 tests and experiments over multiple chat turns, inspect its own traces, and ask the owner
 for feedback. `source_release` creates one persisted chat approval; after approval the
-fixed supervisor commits and evaluates the exact bytes, builds a full-source image, and
-queues staged activation. No second model or host-shell approval participates.
+fixed supervisor commits and evaluates the exact bytes, binds a release artifact, and
+queues health-checked activation. Railway and Docker use a persistent source overlay
+inside the stable host; managed VM mode builds a rootless OCI image. No second model or
+host-shell approval participates.
 
 The dependency lock and trusted image recipe remain fixed during this path. A dependency
 change requires an administrator to rebuild the immutable runtime base. Host recovery
@@ -94,12 +96,12 @@ account with `/start <code>`; by default the one-time code is the last eight cha
 of the bot token. A later request to change Telegram behavior becomes a source
 candidate and managed release rather than an in-place edit.
 
-In managed mode the stable bootstrap derives the active release image and runs that
+In managed OCI mode the stable bootstrap derives the active release image and runs that
 worker rootless with only private capability `/state`; product `/workspace`, source,
 databases, host credentials, and the container socket are never mounted. Generation
 handover stops the old poller first and restores it if the new generation fails. Direct
-mode keeps reviewed subprocess workers for development, but cannot safely replace or
-roll back itself.
+development mode keeps reviewed subprocess workers. The bundled Docker and Railway host
+can replace and roll back its Deep Agents child without a container socket.
 
 The stable setup host imports `TELEGRAM_BOT_TOKEN` into the encrypted capability vault
 and starts only the long-poll worker. Explicit direct `server` mode retains the webhook
@@ -190,10 +192,10 @@ Use full AgentSpec and TriggerSpec revisions when a background process needs ano
 model, a narrower tool set, isolated memory, different instructions, or an external
 event source.
 
-## Managed Self-Improvement
+## Self-Improvement
 
-In managed mode, the owner agent directly controls one persistent, isolated source
-checkout:
+On Docker, Railway, and managed installations, the owner agent controls one isolated
+source checkout backed by persistent Git lineage:
 
 - `source_shell` creates or resumes it and can inspect, edit, test, and experiment with
   any OpenTulpa source using ordinary shell commands;
@@ -201,17 +203,17 @@ checkout:
 - `trace_list` and `trace_get` expose the agent's own redacted durable execution traces;
 - `source_release` requests one native chat approval, runs fixed checks, builds the exact
   source commit, and queues safe activation;
-- `source_rollback` restores the previous healthy image with owner approval.
+- `source_rollback` restores the previous healthy release with owner approval.
 
 The source shell cannot see production data, credentials, the serving checkout,
-bootstrap state, deployment controls, or a container socket. It is rootless,
+bootstrap state, deployment controls, or a container socket. It is unprivileged,
 resource-bounded, and has outbound network access without gaining access to host
 secrets. The agent may change core runtime, API, integrations, interfaces, tools,
 prompts, schedules, or add new code. The stable bootstrap and its release recipe remain
 outside the mutable release.
 
 Evaluation and release building are bound to the source commit, dependency lock hash,
-evaluator fingerprint, and OCI artifact digest. The candidate's Dockerfile is not used.
+evaluator fingerprint, and artifact digest. The candidate's Dockerfile is not used.
 Dependency-lock changes still require an administrator-built runtime base.
 
 Failures remain in the lineage with a sanitized cause. The originating owner thread

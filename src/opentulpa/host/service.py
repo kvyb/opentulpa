@@ -27,6 +27,7 @@ class HostService:
         runtime: RuntimeSupervisor,
         client: httpx.AsyncClient | None = None,
         bootstrap_config: HostConfigInput | None = None,
+        evolution: Any | None = None,
     ) -> None:
         self.store = store
         self.runtime = runtime
@@ -35,6 +36,7 @@ class HostService:
         )
         self._owns_client = client is None
         self._bootstrap_config = bootstrap_config
+        self._evolution = evolution
         self._activation_lock = asyncio.Lock()
         self._activating = False
 
@@ -43,6 +45,8 @@ class HostService:
         return self._activating
 
     async def start(self) -> None:
+        if self._evolution is not None:
+            await self._evolution.prepare()
         active = self.store.active()
         if active is None:
             if self._bootstrap_config is not None:
@@ -56,8 +60,12 @@ class HostService:
         except Exception:
             # The stable setup and recovery surface stays available.
             return
+        if self._evolution is not None:
+            await self._evolution.start()
 
     async def shutdown(self) -> None:
+        if self._evolution is not None:
+            await self._evolution.shutdown()
         await self.runtime.shutdown()
         if self._owns_client:
             await self._client.aclose()
@@ -76,6 +84,8 @@ class HostService:
             await self._configure_telegram(staged)
             if staged.telegram_bot_token is None:
                 self.runtime.clear_telegram_identity()
+            if self._evolution is not None:
+                await self._evolution.start()
             active = self.store.activate(staged.revision)
         except Exception as exc:
             self.store.fail(staged.revision, self._safe_error(exc))

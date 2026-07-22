@@ -42,6 +42,7 @@ class _Child:
     process: asyncio.subprocess.Process
     endpoint: str
     config: HostConfig
+    project_root: Path
     readers: tuple[asyncio.Task[None], ...]
 
 
@@ -73,6 +74,8 @@ class RuntimeSupervisor:
         self._sequence = 0
         self._log_changed = asyncio.Condition()
         self._lock = asyncio.Lock()
+        self._evolution_url: str | None = None
+        self._evolution_token: str | None = None
 
     @property
     def endpoint(self) -> str | None:
@@ -89,6 +92,29 @@ class RuntimeSupervisor:
     @property
     def revision(self) -> int | None:
         return self._child.config.revision if self._child is not None else None
+
+    @property
+    def project_root(self) -> Path:
+        return self._project_root
+
+    def set_project_root(self, project_root: Path) -> None:
+        """Select the verified source root before a child is running."""
+
+        if self._child is not None:
+            raise RuntimeUnavailableError("cannot change source while runtime is running")
+        self._project_root = self._validated_project_root(project_root)
+
+    def configure_evolution_control(self, *, base_url: str, token: str) -> None:
+        if self._child is not None:
+            raise RuntimeUnavailableError(
+                "cannot change evolution control while runtime is running"
+            )
+        cleaned_url = str(base_url or "").strip().rstrip("/")
+        cleaned_token = str(token or "").strip()
+        if not cleaned_url.startswith("http://127.0.0.1:") or len(cleaned_token) < 32:
+            raise ValueError("evolution control configuration is invalid")
+        self._evolution_url = cleaned_url
+        self._evolution_token = cleaned_token
 
     async def start(self, config: HostConfig) -> None:
         async with self._lock:
@@ -124,6 +150,33 @@ class RuntimeSupervisor:
             raise RuntimeUnavailableError("runtime is not configured")
         await self.replace(child.config, rollback=child.config)
 
+    async def replace_source(self, project_root: Path) -> None:
+        """Activate verified source and restore the current source if it is unhealthy."""
+
+        candidate_root = self._validated_project_root(project_root)
+        async with self._lock:
+            previous = self._child
+            if previous is None:
+                raise RuntimeUnavailableError("runtime is not configured")
+            previous_root = previous.project_root
+            config = previous.config
+            await self._stop_child(previous)
+            self._child = None
+            try:
+                candidate = await self._spawn(config, project_root=candidate_root)
+            except Exception:
+                self._append_log("host", "source candidate failed; restoring previous release")
+                try:
+                    self._child = await self._spawn(config, project_root=previous_root)
+                    self._project_root = previous_root
+                except Exception as rollback_error:
+                    self._error = "candidate and rollback source releases failed to start"
+                    self._append_log("host", self._error)
+                    raise RuntimeUnavailableError(self._error) from rollback_error
+                raise
+            self._child = candidate
+            self._project_root = candidate_root
+
     def clear_telegram_identity(self) -> None:
         """Forget a stopped Telegram interface after a committed disconnect."""
 
@@ -157,7 +210,8 @@ class RuntimeSupervisor:
                 await asyncio.wait_for(self._log_changed.wait(), timeout=timeout)
         return self.logs(after=after)
 
-    async def _spawn(self, config: HostConfig) -> _Child:
+    async def _spawn(self, config: HostConfig, *, project_root: Path | None = None) -> _Child:
+        source_root = self._validated_project_root(project_root or self._project_root)
         port = self._free_port()
         endpoint = f"http://127.0.0.1:{port}"
         self._status = "starting"
@@ -173,17 +227,18 @@ class RuntimeSupervisor:
                 config.telegram_pairing_code.get_secret_value()
                 if config.telegram_pairing_code is not None
                 else "",
+                self._evolution_token or "",
             )
             if value
         }
         self._append_log("host", f"starting runtime revision {config.revision}")
         self._seed_telegram_identity(config)
-        environment = self._child_environment(config, port=port)
+        environment = self._child_environment(config, port=port, project_root=source_root)
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "opentulpa",
-            cwd=self._project_root,
+            cwd=source_root,
             env=environment,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -193,7 +248,13 @@ class RuntimeSupervisor:
             for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
             if stream is not None
         )
-        child = _Child(process=process, endpoint=endpoint, config=config, readers=readers)
+        child = _Child(
+            process=process,
+            endpoint=endpoint,
+            config=config,
+            project_root=source_root,
+            readers=readers,
+        )
         try:
             await self._wait_ready(child)
         except Exception as exc:
@@ -264,7 +325,14 @@ class RuntimeSupervisor:
         with suppress(RuntimeError):
             asyncio.get_running_loop().create_task(notify())
 
-    def _child_environment(self, config: HostConfig, *, port: int) -> dict[str, str]:
+    def _child_environment(
+        self,
+        config: HostConfig,
+        *,
+        port: int,
+        project_root: Path | None = None,
+    ) -> dict[str, str]:
+        source_root = project_root or self._project_root
         environment = os.environ.copy()
         for key in (
             "TELEGRAM_BOT_TOKEN",
@@ -287,8 +355,17 @@ class RuntimeSupervisor:
                 "OPENTULPA_OWNER_CUSTOMER_ID": "owner",
                 "OPENTULPA_INTERNAL_AGENT_API_URL": f"http://127.0.0.1:{port}",
                 "OPENTULPA_DYNAMIC_HOST": "1",
+                "PYTHONPATH": str(source_root / "src"),
             }
         )
+        if self._evolution_url is not None and self._evolution_token is not None:
+            environment.update(
+                {
+                    "EVOLUTION_ENABLED": "true",
+                    "OPENTULPA_BOOTSTRAP_EVOLUTION_URL": self._evolution_url,
+                    "OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN": self._evolution_token,
+                }
+            )
         if config.telegram_pairing_code is not None:
             environment["OPENTULPA_TELEGRAM_PAIRING_CODE"] = (
                 config.telegram_pairing_code.get_secret_value()
@@ -329,6 +406,16 @@ class RuntimeSupervisor:
     def _safe_error(error: Exception) -> str:
         text = str(error or "runtime failed").strip()
         return _SECRET_LINE.sub(r"\1\2[redacted]", text)[:1_000]
+
+    @staticmethod
+    def _validated_project_root(project_root: Path) -> Path:
+        root = project_root.expanduser()
+        if root.is_symlink() or not root.is_dir():
+            raise RuntimeUnavailableError("runtime source root is unavailable")
+        resolved = root.resolve(strict=True)
+        if not (resolved / "src" / "opentulpa" / "__init__.py").is_file():
+            raise RuntimeUnavailableError("runtime source root is invalid")
+        return resolved
 
 
 __all__ = ["RuntimeLogEntry", "RuntimeSupervisor", "RuntimeUnavailableError"]

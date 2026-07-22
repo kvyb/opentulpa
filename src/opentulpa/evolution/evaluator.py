@@ -7,7 +7,11 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
+import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -20,9 +24,7 @@ from opentulpa.evolution.process import run_bounded_process
 EvaluationStage = Literal["build", "contract", "public", "security"]
 
 _IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}\Z")
-_SECRET_RE = re.compile(
-    r"(?i)\b(api[_-]?key|authorization|password|secret|token)\s*[:=]\s*\S+"
-)
+_SECRET_RE = re.compile(r"(?i)\b(api[_-]?key|authorization|password|secret|token)\s*[:=]\s*\S+")
 
 
 def _force_remove_container(container_cli: str, container_name: str) -> None:
@@ -119,6 +121,148 @@ class LocalEvaluationRunner:
             command,
             self._env,
         )
+
+
+class IsolatedProcessEvaluationRunner:
+    """Run fixed Railway gates as a secret-less unprivileged Linux process."""
+
+    def __init__(
+        self,
+        *,
+        uid: int = 65_532,
+        gid: int = 65_532,
+        memory_bytes: int = 2 * 1024 * 1024 * 1024,
+        pid_limit: int = 256,
+        max_output_bytes: int = 1_000_000,
+        temporary_root: Path = Path("/var/tmp/opentulpa-evaluation"),
+    ) -> None:
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            raise RuntimeError("isolated process evaluation requires a root host supervisor")
+        if shutil.which("setpriv") is None or shutil.which("prlimit") is None:
+            raise RuntimeError("isolated process evaluation requires setpriv and prlimit")
+        if uid < 1 or gid < 1 or memory_bytes < 64 * 1024 * 1024:
+            raise ValueError("isolated process evaluation limits are invalid")
+        if pid_limit < 16 or pid_limit > 4_096 or max_output_bytes < 1_024:
+            raise ValueError("isolated process evaluation limits are invalid")
+        safe_temporary_root = temporary_root.expanduser()
+        if safe_temporary_root.is_symlink():
+            raise ValueError("isolated process evaluation temporary root is invalid")
+        safe_temporary_root.mkdir(parents=True, exist_ok=True, mode=0o711)
+        os.chown(safe_temporary_root, 0, 0)
+        safe_temporary_root.chmod(0o711)
+        self._uid = uid
+        self._gid = gid
+        self._memory_bytes = memory_bytes
+        self._pid_limit = pid_limit
+        self._max_output_bytes = max_output_bytes
+        self._temporary_root = safe_temporary_root.resolve(strict=True)
+
+    @property
+    def fingerprint(self) -> str:
+        return (
+            f"isolated-process-v4:uid={self._uid}:gid={self._gid}:"
+            f"memory={self._memory_bytes}:pids={self._pid_limit}"
+        )
+
+    async def run(
+        self,
+        *,
+        workspace: Path,
+        command: EvaluationCommand,
+    ) -> EvaluationCommandResult:
+        root = _validated_workspace(workspace)
+        await asyncio.to_thread(self._require_immutable_source, root)
+        evaluation_root, evaluation_workspace = await asyncio.to_thread(
+            self._evaluation_copy,
+            root,
+        )
+        try:
+            argv = [
+                "setpriv",
+                f"--reuid={self._uid}",
+                f"--regid={self._gid}",
+                "--clear-groups",
+                "--no-new-privs",
+                "prlimit",
+                f"--as={self._memory_bytes}:{self._memory_bytes}",
+                f"--nproc={self._pid_limit}:{self._pid_limit}",
+                f"--fsize={20 * 1024 * 1024}:{20 * 1024 * 1024}",
+                f"--cpu={command.timeout_seconds + 5}:{command.timeout_seconds + 5}",
+                "--",
+                "/bin/sh",
+                "-c",
+                _shell_with_group_cleanup(shlex.join(command.argv)),
+            ]
+            return await asyncio.to_thread(
+                _run_process,
+                argv,
+                evaluation_workspace,
+                command,
+                {
+                    "HOME": str(evaluation_root / "home"),
+                    "PATH": os.environ.get("PATH", os.defpath),
+                    "MYPY_CACHE_DIR": str(evaluation_root / "mypy-cache"),
+                    "PYTEST_ADDOPTS": "-p no:cacheprovider",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONHASHSEED": "0",
+                    "PYTHONPYCACHEPREFIX": str(evaluation_root / "pycache"),
+                    "RUFF_CACHE_DIR": str(evaluation_root / "ruff-cache"),
+                    "TMPDIR": str(evaluation_root / "tmp"),
+                },
+                self._max_output_bytes,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, evaluation_root, True)
+
+    @staticmethod
+    def _require_immutable_source(root: Path) -> None:
+        root_metadata = root.stat()
+        if root_metadata.st_uid != 0 or root_metadata.st_mode & 0o022:
+            raise RuntimeError("candidate source is not owned by the stable host")
+        for directory, directory_names, file_names in os.walk(
+            root,
+            topdown=True,
+            followlinks=False,
+        ):
+            for name in (*directory_names, *file_names):
+                path = Path(directory) / name
+                metadata = path.lstat()
+                if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                    raise RuntimeError("candidate source is not owned by the stable host")
+
+    def _evaluation_copy(self, root: Path) -> tuple[Path, Path]:
+        evaluation_root = Path(
+            tempfile.mkdtemp(prefix="run-", dir=str(self._temporary_root))
+        )
+        workspace = evaluation_root / "workspace"
+        try:
+            shutil.copytree(root, workspace, symlinks=True)
+            (evaluation_root / "home").mkdir()
+            (evaluation_root / "tmp").mkdir()
+            self._make_owned_writable(evaluation_root)
+        except Exception:
+            shutil.rmtree(evaluation_root, ignore_errors=True)
+            raise
+        return evaluation_root, workspace
+
+    def _make_owned_writable(self, root: Path) -> None:
+        for directory, directory_names, file_names in os.walk(
+            root,
+            topdown=True,
+            followlinks=False,
+        ):
+            directory_path = Path(directory)
+            os.chown(directory_path, self._uid, self._gid, follow_symlinks=False)
+            directory_path.chmod(directory_path.stat().st_mode | stat.S_IRWXU)
+            for name in directory_names:
+                path = directory_path / name
+                if path.is_symlink():
+                    os.chown(path, self._uid, self._gid, follow_symlinks=False)
+            for name in file_names:
+                path = directory_path / name
+                os.chown(path, self._uid, self._gid, follow_symlinks=False)
+                if not path.is_symlink():
+                    path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
 
 
 class OciEvaluationRunner:
@@ -291,7 +435,17 @@ def trusted_default_commands(*, timeout_seconds: int = 900) -> tuple[EvaluationC
         EvaluationCommand(
             name="python.compile",
             stage="build",
-            argv=("python", "-I", "-m", "compileall", "-q", "src", "tests"),
+            argv=(
+                "python",
+                "-I",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "roots=(Path('src'),Path('tests')); "
+                    "files=(p for root in roots if root.exists() for p in root.rglob('*.py')); "
+                    "[compile(p.read_bytes(),str(p),'exec') for p in files]"
+                ),
+            ),
             timeout_seconds=timeout,
         ),
         EvaluationCommand(
@@ -409,12 +563,20 @@ def _run_process(
     )
 
 
+def _shell_with_group_cleanup(command: str) -> str:
+    cleanup = (
+        "status=$?; trap '' TERM HUP INT; kill -TERM -$$ >/dev/null 2>&1 || true; exit $status"
+    )
+    return f"trap {shlex.quote(cleanup)} EXIT; {command}"
+
+
 __all__ = [
     "CandidateEvaluator",
     "EvaluationCommand",
     "EvaluationCommandResult",
     "EvaluationRunner",
     "EvaluationStage",
+    "IsolatedProcessEvaluationRunner",
     "LocalEvaluationRunner",
     "OciEvaluationRunner",
     "trusted_default_commands",

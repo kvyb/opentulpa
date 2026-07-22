@@ -2,6 +2,10 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl git util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy
@@ -26,9 +30,10 @@ RUN mkdir -p /app/tulpa_stuff \
          esac; \
          set -- "$@" --extra "${extra}"; \
        done \
-    && uv sync --frozen --no-dev "$@"
+    && uv sync --frozen --no-dev --extra evaluation "$@"
 
 COPY start.sh /app/start.sh
+COPY . /opt/opentulpa-source
 
 ENV HOST=0.0.0.0
 ENV PORT=8000

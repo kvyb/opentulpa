@@ -10,7 +10,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -70,12 +70,13 @@ class ReleaseBuildRequest:
 
 
 class OciReleaseArtifact(BaseModel):
-    """Verified local image plus the manifest bound into its labels."""
+    """Verified release artifact plus the manifest bound to its source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     manifest_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    artifact_kind: Literal["oci_image", "source_overlay"] = "oci_image"
     image_reference: str = Field(min_length=1, max_length=300)
     entrypoint: tuple[str, ...] = Field(min_length=1, max_length=64)
 
@@ -122,6 +123,148 @@ class OciReleaseBuildPolicy:
             raise ValueError("release build context limit is too small")
         if self.max_context_entries < 100:
             raise ValueError("release build entry limit is too small")
+
+
+@dataclass(frozen=True, slots=True)
+class SourceOverlayBuildPolicy:
+    """Trusted bounds for a source overlay using the host's pinned environment."""
+
+    base_dependency_lock_hash: str
+    git_cli: str = "git"
+    entrypoint: tuple[str, ...] = ("python", "-m", "opentulpa")
+    max_tree_bytes: int = 512 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if not _LOCK_HASH_RE.fullmatch(self.base_dependency_lock_hash):
+            raise ValueError("base_dependency_lock_hash must be a SHA-256 lockfile hash")
+        if Path(self.git_cli).name != "git" or "\x00" in self.git_cli:
+            raise ValueError("git_cli must be a Git executable")
+        if not self.entrypoint or any(not item or "\x00" in item for item in self.entrypoint):
+            raise ValueError("entrypoint must contain safe exec arguments")
+        if self.max_tree_bytes < 1024 * 1024:
+            raise ValueError("source overlay tree limit is too small")
+
+
+class TrustedSourceOverlayBuilder:
+    """Bind an evaluated commit to the immutable dependencies in the host image."""
+
+    def __init__(self, *, policy: SourceOverlayBuildPolicy) -> None:
+        self._policy = policy
+
+    async def build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
+        return await asyncio.to_thread(self._build, request)
+
+    def _build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
+        workspace = request.workspace.expanduser().resolve(strict=True)
+        if not workspace.is_dir() or workspace.is_symlink():
+            raise ReleaseBuildError("candidate build workspace is invalid")
+        if not _COMMIT_RE.fullmatch(request.base_commit) or not _COMMIT_RE.fullmatch(
+            request.source_commit
+        ):
+            raise ReleaseBuildError("candidate source commit is invalid")
+        if request.dependency_lock_hash != self._policy.base_dependency_lock_hash:
+            raise ReleaseBuildError(
+                "candidate dependency lock changed; a trusted host rebuild is required"
+            )
+        environment = {"PATH": os.environ.get("PATH", os.defpath), "HOME": "/tmp"}
+        head = self._git(workspace, "rev-parse", "--verify", "HEAD^{commit}")
+        if head.decode("ascii", errors="ignore").strip().lower() != request.source_commit:
+            raise ReleaseBuildError("candidate workspace no longer matches its evaluated commit")
+        if self._git(
+            workspace,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ).strip():
+            raise ReleaseBuildError("candidate workspace changed after evaluation")
+        ancestor = run_bounded_process(
+            (
+                self._policy.git_cli,
+                "-C",
+                str(workspace),
+                "merge-base",
+                "--is-ancestor",
+                request.base_commit,
+                request.source_commit,
+            ),
+            cwd=workspace,
+            env=environment,
+            timeout_seconds=30,
+            max_output_bytes=1_024,
+        )
+        if ancestor.returncode != 0 or ancestor.truncated:
+            raise ReleaseBuildError("candidate base commit is not an ancestor of evaluated source")
+        changed = self._git(
+            workspace,
+            "diff",
+            "--name-only",
+            "--no-ext-diff",
+            "--diff-filter=ACDMRTUXB",
+            "-z",
+            request.base_commit,
+            request.source_commit,
+            "--",
+        )
+        paths = tuple(
+            path for path in changed.decode("utf-8", errors="replace").split("\0") if path
+        )
+        if any(not candidate_path_is_promotable(path) for path in paths):
+            raise ReleaseBuildError(
+                "candidate changes are contribution-only and cannot enter a production release"
+            )
+        listing = self._git(
+            workspace,
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            request.source_commit,
+            max_output_bytes=self._policy.max_tree_bytes,
+        )
+        tree_digest = hashlib.sha256(listing).hexdigest()
+        manifest = {
+            "artifact_kind": "source_overlay",
+            "base_commit": request.base_commit,
+            "candidate_id": request.candidate_id,
+            "dependency_lock_hash": request.dependency_lock_hash,
+            "entrypoint": list(self._policy.entrypoint),
+            "evaluator_fingerprint": request.evaluator_fingerprint,
+            "evaluator_version": request.evaluator_version,
+            "protocol_version": 1,
+            "source_commit": request.source_commit,
+            "source_tree_sha256": tree_digest,
+        }
+        encoded = json.dumps(
+            manifest,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return OciReleaseArtifact(
+            artifact_kind="source_overlay",
+            artifact_digest=f"sha256:{tree_digest}",
+            manifest_digest=f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+            image_reference=f"source-overlay:{request.source_commit}",
+            entrypoint=self._policy.entrypoint,
+        )
+
+    def _git(
+        self,
+        workspace: Path,
+        *arguments: str,
+        max_output_bytes: int = 256 * 1024,
+    ) -> bytes:
+        result = run_bounded_process(
+            (self._policy.git_cli, "-C", str(workspace), *arguments),
+            cwd=workspace,
+            env={"PATH": os.environ.get("PATH", os.defpath), "HOME": "/tmp"},
+            timeout_seconds=60,
+            max_output_bytes=max_output_bytes,
+        )
+        if result.returncode != 0 or result.truncated:
+            raise ReleaseBuildError("candidate source could not be verified")
+        return result.output
 
 
 class TrustedOciReleaseBuilder:
@@ -284,9 +427,7 @@ class TrustedOciReleaseBuilder:
         if changed.returncode != 0 or changed.truncated:
             raise ReleaseBuildError("candidate source change set could not be verified")
         paths = tuple(
-            path
-            for path in changed.output.decode("utf-8", errors="replace").split("\0")
-            if path
+            path for path in changed.output.decode("utf-8", errors="replace").split("\0") if path
         )
         if any(not candidate_path_is_promotable(path) for path in paths):
             raise ReleaseBuildError(
@@ -371,7 +512,9 @@ class TrustedOciReleaseBuilder:
             try:
                 destination.write_bytes(blob.output)
             except OSError as exc:
-                raise ReleaseBuildError("candidate build context could not be materialized") from exc
+                raise ReleaseBuildError(
+                    "candidate build context could not be materialized"
+                ) from exc
             destination.chmod(0o755 if mode == b"100755" else 0o644)
         # Candidate Docker ignore rules are restored inside the image, but cannot
         # alter which exact Git blobs enter the trusted build context.
@@ -604,5 +747,7 @@ __all__ = [
     "ReleaseBuildError",
     "ReleaseBuildRequest",
     "ReleaseBuilder",
+    "SourceOverlayBuildPolicy",
     "TrustedOciReleaseBuilder",
+    "TrustedSourceOverlayBuilder",
 ]

@@ -1203,7 +1203,7 @@ configure_container_engine() {
     if [[ "${runtime}" == "managed" && "${MODE}" != "doctor" ]]; then
       die "managed mode requires a running rootless Docker or Podman engine"
     fi
-    warn "${requested} is unavailable or lacks required isolation; chat will start but sandbox shell commands will be unavailable."
+    warn "${requested} is unavailable or lacks required isolation; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
     return 0
   fi
 
@@ -1228,7 +1228,7 @@ configure_container_engine() {
   if [[ "${runtime}" == "managed" && "${MODE}" != "doctor" ]]; then
     die "managed mode requires a running rootless Docker or Podman engine"
   fi
-  warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable."
+  warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
 }
 
 run_doctor() {

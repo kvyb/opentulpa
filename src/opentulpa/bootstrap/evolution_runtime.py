@@ -75,7 +75,7 @@ class TrustedSourceReleaseProvider:
             manifest_digest=artifact.manifest_digest,
             entrypoint=artifact.entrypoint,
             metadata={
-                "artifact_kind": "oci_image",
+                "artifact_kind": artifact.artifact_kind,
                 "image_reference": artifact.image_reference,
                 "initial": True,
                 "dependency_lock_hash": lock_hash,
@@ -198,9 +198,7 @@ class ManagedEvolutionRuntime:
     async def _seed_initial_lineage(self, release: ReleaseRecord) -> None:
         candidate = await self._archive.get_candidate(release.candidate_id)
         empty_diff_sha256 = hashlib.sha256(b"").hexdigest()
-        fingerprint = str(
-            release.metadata.get("evaluator_fingerprint") or release.manifest_digest
-        )
+        fingerprint = str(release.metadata.get("evaluator_fingerprint") or release.manifest_digest)
         evaluator_version = str(
             release.metadata.get("evaluator_version") or "bootstrap-trusted-install-v1"
         )
@@ -232,9 +230,7 @@ class ManagedEvolutionRuntime:
             or candidate.artifact_digest != release.artifact_digest
         ):
             raise RuntimeError("initial evolution lineage conflicts with the serving release")
-        expected_diff_sha256 = str(
-            release.metadata.get("diff_sha256") or empty_diff_sha256
-        )
+        expected_diff_sha256 = str(release.metadata.get("diff_sha256") or empty_diff_sha256)
         raw_release_paths = release.metadata.get("changed_paths")
         expected_changed_paths: list[JsonValue] = (
             [str(path) for path in raw_release_paths]
@@ -309,14 +305,12 @@ class ManagedEvolutionRuntime:
             artifact_digest=release.artifact_digest,
             reason="Trusted initial installation",
             metadata={
-                "artifact_kind": "oci_image",
+                "artifact_kind": str(release.metadata.get("artifact_kind") or "oci_image"),
                 "manifest_digest": release.manifest_digest,
                 "release_entrypoint": list(release.entrypoint),
                 "base_commit": candidate.base_commit,
                 "changed_paths": changed_paths,
-                "diff_sha256": str(
-                    candidate.metadata.get("diff_sha256") or empty_diff_sha256
-                ),
+                "diff_sha256": str(candidate.metadata.get("diff_sha256") or empty_diff_sha256),
                 "evaluation_report_id": evaluation_report.id,
                 "evaluation_summary": evaluation_report.summary,
                 "evaluator_fingerprint": evaluation_report.evaluator_fingerprint,

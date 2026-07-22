@@ -356,8 +356,10 @@ OpenTulpa controls it over CDP and cannot DNS-pin the vendor browser's connectio
 ## Docker Compose And Railway
 
 The included `docker-compose.yml` and `railway.toml` start the stable host plus its
-Deep Agents child. They do not provide the rootless OCI engine, canonical Git checkout,
-and release network needed for managed source self-replacement.
+Deep Agents child. The image bundles a secret-free source seed and fixed evaluation
+dependencies. On first boot the host creates persistent Git lineage; source commands
+run as an unprivileged UID with no inherited credentials, while the stable host alone
+commits, evaluates, activates, health-checks, and rolls back the child.
 
 For Docker Compose:
 
@@ -392,10 +394,15 @@ determine the owner identity; there is no tenant argument. Secrets are encrypted
 host database rather than saved to `.env`. Product, host, and Deep Agent state live
 under `OPENTULPA_DATA_ROOT`.
 
-Source evolution is unavailable in this direct shape. Do not mount a platform container
-socket into the app to imitate managed mode. Run the immutable bootstrap on a host that
-can enforce its OCI and storage contract, or let the platform own reviewed source
-deployments.
+Source evolution is enabled by default when the bundled source seed is present. It needs
+no Docker socket, repository token, Railway token, or extra environment variable. The
+Railway container remains the stable recovery boundary and swaps only the mutable child
+to an evaluated source overlay. The dependency lock cannot change through this path;
+deploy a new base image for dependency updates. Persist `/app/opentulpa_data`, because it
+contains the instance's source and release lineage as well as product state.
+
+The stronger managed VM mode remains available when every release must be rebuilt as an
+independent rootless OCI image with a dedicated release network.
 
 ## Migration Cutover
 

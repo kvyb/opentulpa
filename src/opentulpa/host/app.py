@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
+from opentulpa.bootstrap.evolution_api import register_evolution_control_api
 from opentulpa.host.models import HostConfigInput
 from opentulpa.host.service import HostActivationError, HostService
 from opentulpa.host.store import HostConfigConflictError, HostStore
@@ -64,6 +65,8 @@ def create_host_app(
     assets_root: Path | None = None,
     local_owner_enabled: bool = False,
     setup_token: str | None = None,
+    evolution_service: Any | None = None,
+    evolution_token: str | None = None,
 ) -> FastAPI:
     """Create the immutable host surface around one mutable Deep Agents child."""
 
@@ -263,6 +266,13 @@ def create_host_app(
                     yield f"id: {cursor}\ndata: {entry.model_dump_json()}\n\n"
 
         return StreamingResponse(events(), media_type="text/event-stream")
+
+    if evolution_service is not None:
+        register_evolution_control_api(
+            app,
+            service=evolution_service,
+            token=str(evolution_token or ""),
+        )
 
     @app.api_route(
         "/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]

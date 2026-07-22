@@ -2407,6 +2407,14 @@ documents = [
     { name = "openpyxl" },
     { name = "pypdf" },
 ]
+evaluation = [
+    { name = "mypy" },
+    { name = "openpyxl" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "qdrant-client" },
+    { name = "ruff" },
+]
 integrations = [
     { name = "composio" },
     { name = "composio-langchain" },
@@ -2456,9 +2464,11 @@ requires-dist = [
     { name = "langgraph", specifier = ">=0.2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "mypy", marker = "extra == 'evaluation'", specifier = ">=1.0" },
     { name = "openpyxl", marker = "extra == 'bundled'", specifier = ">=3.1.5" },
     { name = "openpyxl", marker = "extra == 'dev'", specifier = ">=3.1.5" },
     { name = "openpyxl", marker = "extra == 'documents'", specifier = ">=3.1.5" },
+    { name = "openpyxl", marker = "extra == 'evaluation'", specifier = ">=3.1.5" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.50" },
     { name = "playwright", marker = "extra == 'bundled'", specifier = ">=1.50" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },
@@ -2466,11 +2476,15 @@ requires-dist = [
     { name = "pypdf", marker = "extra == 'bundled'", specifier = ">=5.0" },
     { name = "pypdf", marker = "extra == 'documents'", specifier = ">=5.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'evaluation'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21" },
+    { name = "pytest-asyncio", marker = "extra == 'evaluation'", specifier = ">=0.21" },
     { name = "python-multipart", specifier = ">=0.0.22" },
     { name = "qdrant-client", marker = "extra == 'dev'", specifier = ">=1.16,<2" },
+    { name = "qdrant-client", marker = "extra == 'evaluation'", specifier = ">=1.16,<2" },
     { name = "qdrant-client", marker = "extra == 'migration'", specifier = ">=1.16,<2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1" },
+    { name = "ruff", marker = "extra == 'evaluation'", specifier = ">=0.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
 

@@ -64,6 +64,43 @@ class _Service(HostService):
             raise HostActivationError("Telegram worker failed readiness")
 
 
+class _Evolution:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    async def prepare(self) -> None:
+        self.events.append("prepare")
+
+    async def start(self) -> None:
+        self.events.append("start")
+
+    async def shutdown(self) -> None:
+        self.events.append("shutdown")
+
+
+@pytest.mark.asyncio
+async def test_host_prepares_evolution_before_runtime_and_starts_it_afterward(
+    tmp_path: Path,
+) -> None:
+    store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"e" * 32))
+    staged = store.stage(HostConfigInput(api_key=SecretStr("provider-secret")))
+    store.activate(staged.revision)
+    runtime = _Runtime()
+    evolution = _Evolution()
+    service = HostService(
+        store=store,
+        runtime=runtime,  # type: ignore[arg-type]
+        evolution=evolution,
+    )
+
+    await service.start()
+
+    assert runtime.current is not None
+    assert evolution.events == ["prepare", "start"]
+    await service.shutdown()
+    assert evolution.events == ["prepare", "start", "shutdown"]
+
+
 @pytest.mark.asyncio
 async def test_failed_candidate_keeps_previous_revision_and_runtime(tmp_path: Path) -> None:
     store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"s" * 32))

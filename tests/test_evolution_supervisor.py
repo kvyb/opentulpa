@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from opentulpa.evolution.models import (
     PromotionAttempt,
     PromotionAttemptStatus,
     Release,
+    SourceReleaseOperationStatus,
 )
 from opentulpa.evolution.release import AtomicReleasePointer
 from opentulpa.evolution.release_builder import (
@@ -287,9 +289,7 @@ def _route_command(route: str) -> str:
         )
     elif route == "capabilities":
         body = (
-            "@app.get('/capabilities')\n"
-            "def capabilities():\n"
-            "    return {'capabilities': ['web']}\n"
+            "@app.get('/capabilities')\ndef capabilities():\n    return {'capabilities': ['web']}\n"
         )
     else:
         raise ValueError("unsupported test route")
@@ -431,7 +431,7 @@ async def test_source_release_keeps_failed_session_editable_and_retries_same_com
         assert build_failure["promotion"] is None
         assert build_failure["candidate"]["id"] == candidate_id
         assert build_failure["candidate"]["evaluation"]["checks"][-1]["name"] == (
-            "build:oci.release"
+            "build:release.artifact"
         )
         assert build_failure["candidate"]["evaluation"]["passed"] is False
         assert len(builder.requests) == 1
@@ -509,10 +509,13 @@ async def test_source_release_rejects_edits_after_owner_approval_snapshot(
 
         assert changed["candidate_id"] == approved["candidate_id"]
         assert changed["diff_sha256"] != approved["diff_sha256"]
-        assert await supervisor._archive.get_source_release_operation(
-            tenant_id="owner",
-            idempotency_key="stale-owner-approval",
-        ) is None
+        assert (
+            await supervisor._archive.get_source_release_operation(
+                tenant_id="owner",
+                idempotency_key="stale-owner-approval",
+            )
+            is None
+        )
     finally:
         await supervisor.shutdown()
 
@@ -622,6 +625,7 @@ async def test_source_release_recovers_commit_before_archive_binding(
     finally:
         await restarted.shutdown()
 
+
 @pytest.mark.asyncio
 async def test_source_release_recovers_second_commit_after_prior_failed_release(
     tmp_path: Path,
@@ -687,6 +691,56 @@ async def test_source_release_recovers_second_commit_after_prior_failed_release(
         assert recovered.source_commit != prior_commit
         assert released["promotion"] is not None
         assert len(builder.requests) == 1
+    finally:
+        await restarted.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_source_release_closes_unrecoverable_operation_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_repository(tmp_path)
+    first = _supervisor(tmp_path, source)
+    audit = _source_audit()
+    await first.start()
+    edited = await first.source_shell(
+        command="printf 'unfinished\n' > unfinished.txt",
+        audit_context=audit,
+    )
+
+    async def crash_before_commit(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated source process loss")
+
+    monkeypatch.setattr(first, "_source_commit", crash_before_commit)
+    with pytest.raises(RuntimeError, match="source process loss"):
+        await first.source_release(
+            idempotency_key="unrecoverable-release",
+            **_release_binding(edited),
+            message="Interrupted source release",
+            audit_context=audit,
+        )
+    candidate = await first.get_candidate(str(edited["candidate_id"]))
+    assert candidate is not None and candidate.worktree_path is not None
+    worktree = Path(candidate.worktree_path)
+    await first.shutdown()
+    shutil.rmtree(worktree)
+
+    restarted = _supervisor(tmp_path, source)
+    await restarted.start()
+    try:
+        operation = await restarted._archive.get_source_release_operation(
+            tenant_id="owner",
+            idempotency_key="unrecoverable-release",
+        )
+        assert operation is not None
+        assert operation.status is SourceReleaseOperationStatus.COMPLETED
+        assert operation.result is not None
+        assert operation.result["error"] == {
+            "code": "source_release_unrecoverable",
+            "message": "Source release could not be recovered; start a new source session.",
+            "retryable": False,
+        }
     finally:
         await restarted.shutdown()
 
@@ -803,9 +857,9 @@ async def test_source_release_reuses_promotion_after_response_loss(
         idempotency_key="response-loss",
     )
     assert operation is not None
-    expected_attempt_id = "promotion_" + hashlib.sha256(
-        f"{operation.id}:promotion".encode()
-    ).hexdigest()[:48]
+    expected_attempt_id = (
+        "promotion_" + hashlib.sha256(f"{operation.id}:promotion".encode()).hexdigest()[:48]
+    )
     original_attempt = await first.get_promotion_attempt(expected_attempt_id)
     assert original_attempt is not None
     await first.shutdown()
@@ -865,10 +919,13 @@ async def test_source_release_rejects_a_session_based_on_an_inactive_release(
         current = await supervisor.get_candidate(str(stale["candidate"]["id"]))
         assert current is not None
         assert current.status is CandidateStatus.BUILDING
-        assert await supervisor._archive.get_source_release_operation(
-            tenant_id="owner",
-            idempotency_key="stale-release",
-        ) is None
+        assert (
+            await supervisor._archive.get_source_release_operation(
+                tenant_id="owner",
+                idempotency_key="stale-release",
+            )
+            is None
+        )
     finally:
         await supervisor.shutdown()
 
@@ -1010,9 +1067,7 @@ async def test_source_rollback_replays_after_response_loss_without_rolling_forwa
                 reason="Undo the capabilities release",
                 audit_context=audit,
             )
-        digest = hashlib.sha256(
-            b"owner\x00rollback-response-loss"
-        ).hexdigest()
+        digest = hashlib.sha256(b"owner\x00rollback-response-loss").hexdigest()
         expected_attempt_id = f"rollback_{digest[:48]}"
         queued = await first.get_promotion_attempt(expected_attempt_id)
         assert queued is not None
@@ -1035,9 +1090,7 @@ async def test_source_rollback_replays_after_response_loss_without_rolling_forwa
         current = await restarted._archive.get_current_release()
         assert current is not None
         assert current.id == completed.release.id
-        assert current.metadata["rollback_target"] == binding[
-            "expected_target_release_id"
-        ]
+        assert current.metadata["rollback_target"] == binding["expected_target_release_id"]
 
         with pytest.raises(EvolutionSupervisorError, match="another request"):
             await restarted.source_rollback(
@@ -1077,10 +1130,13 @@ async def test_source_rollback_replays_after_response_loss_without_rolling_forwa
         assert replayed_after_restart.status is PromotionAttemptStatus.ACTIVE
     finally:
         await final_restart.shutdown()
-    assert _promotion_attempt_count(
-        tmp_path / "evolution.db",
-        expected_attempt_id,
-    ) == 1
+    assert (
+        _promotion_attempt_count(
+            tmp_path / "evolution.db",
+            expected_attempt_id,
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -1123,13 +1179,14 @@ async def test_source_rollback_rejects_a_stale_approved_release_pair(
             )
         current_after_rejected_request = await supervisor._archive.get_current_release()
         assert current_after_rejected_request == current_before_rejected_request
-        digest = hashlib.sha256(
-            b"owner\x00rollback-stale-owner-approval"
-        ).hexdigest()
-        assert _promotion_attempt_count(
-            tmp_path / "evolution.db",
-            f"rollback_{digest[:48]}",
-        ) == 0
+        digest = hashlib.sha256(b"owner\x00rollback-stale-owner-approval").hexdigest()
+        assert (
+            _promotion_attempt_count(
+                tmp_path / "evolution.db",
+                f"rollback_{digest[:48]}",
+            )
+            == 0
+        )
     finally:
         await supervisor.shutdown()
 
@@ -1159,9 +1216,7 @@ async def test_source_release_rejects_a_base_change_during_evaluation(
         original_current_release = supervisor._archive.get_current_release
         base_release = await original_current_release()
         assert base_release is not None
-        intervening_release = base_release.model_copy(
-            update={"id": "release_intervening"}
-        )
+        intervening_release = base_release.model_copy(update={"id": "release_intervening"})
         original_evaluate = supervisor._evaluator.evaluate
         evaluation_finished = False
 
@@ -1196,10 +1251,13 @@ async def test_source_release_rejects_a_base_change_during_evaluation(
         )
         assert operation is not None
         attempt_digest = hashlib.sha256(f"{operation.id}:promotion".encode()).hexdigest()
-        assert _promotion_attempt_count(
-            tmp_path / "evolution.db",
-            f"promotion_{attempt_digest[:48]}",
-        ) == 0
+        assert (
+            _promotion_attempt_count(
+                tmp_path / "evolution.db",
+                f"promotion_{attempt_digest[:48]}",
+            )
+            == 0
+        )
         assert await original_current_release() == base_release
     finally:
         await supervisor.shutdown()

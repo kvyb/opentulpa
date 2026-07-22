@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from pydantic import SecretStr
 
 from opentulpa.host.models import HostConfig
-from opentulpa.host.runtime import RuntimeSupervisor
+from opentulpa.host.runtime import RuntimeSupervisor, RuntimeUnavailableError
 
 
 def _config() -> HostConfig:
@@ -33,6 +35,10 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "host-telegram-token")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "host-webhook-secret")
     runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+    runtime.configure_evolution_control(
+        base_url="http://127.0.0.1:8000/bootstrap/internal/v1/evolution",
+        token="e" * 48,
+    )
     config = _config()
 
     environment = runtime._child_environment(config, port=8123)
@@ -47,6 +53,11 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 
     assert environment["OPENAI_COMPATIBLE_API_KEY"] == "provider-secret-value"
     assert environment["OPENTULPA_OWNER_TOKEN"] == "internal-owner-secret-value"
+    assert environment["OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN"] == "e" * 48
+    assert environment["OPENTULPA_BOOTSTRAP_EVOLUTION_URL"].endswith(
+        "/bootstrap/internal/v1/evolution"
+    )
+    assert environment["PYTHONPATH"] == str(tmp_path / "src")
     assert "TELEGRAM_BOT_TOKEN" not in environment
     assert "TELEGRAM_WEBHOOK_SECRET" not in environment
     line = runtime.logs()[0].text
@@ -55,3 +66,42 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     assert "hunter2" not in line
     assert line.count("[redacted]") == 3
     await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_source_swap_restores_previous_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_root = tmp_path / "previous"
+    candidate_root = tmp_path / "candidate"
+    for root in (previous_root, candidate_root):
+        package = root / "src" / "opentulpa"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    runtime = RuntimeSupervisor(project_root=previous_root, data_root=tmp_path / "data")
+    previous = SimpleNamespace(project_root=previous_root, config=_config())
+    runtime._child = previous  # type: ignore[assignment]
+    spawned: list[Path] = []
+
+    async def stop_child(child: Any) -> None:
+        assert child is previous
+
+    async def spawn(config: HostConfig, *, project_root: Path | None = None) -> Any:
+        del config
+        assert project_root is not None
+        spawned.append(project_root)
+        if project_root == candidate_root:
+            raise RuntimeUnavailableError("candidate is unhealthy")
+        return previous
+
+    monkeypatch.setattr(runtime, "_stop_child", stop_child)
+    monkeypatch.setattr(runtime, "_spawn", spawn)
+
+    with pytest.raises(RuntimeUnavailableError, match="candidate is unhealthy"):
+        await runtime.replace_source(candidate_root)
+
+    assert spawned == [candidate_root, previous_root]
+    assert runtime._child is previous
+    assert runtime.project_root == previous_root
+    runtime._child = None

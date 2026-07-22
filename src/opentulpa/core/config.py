@@ -81,9 +81,7 @@ class Settings(BaseSettings):
     )
     evolution_enabled: bool = Field(
         default=True,
-        description=(
-            "Enable source editing and self-release through the immutable managed bootstrap."
-        ),
+        description=("Enable source editing and self-release through the stable host controller."),
     )
     evolution_source_repository: str | None = Field(
         default=None,
@@ -298,8 +296,7 @@ class Settings(BaseSettings):
                 or len(alias) > 100
                 or not alias[0].isalnum()
                 or any(
-                    char
-                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+                    char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
                     for char in alias
                 )
             ):
@@ -308,6 +305,7 @@ class Settings(BaseSettings):
                 raise ValueError("model identifier is invalid")
             aliases[alias] = model
         return aliases
+
     llm_reasoning_effort: str | None = Field(
         default="low",
         description=(

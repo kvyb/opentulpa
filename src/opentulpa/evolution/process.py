@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ def run_bounded_process(
     timeout_seconds: float,
     max_output_bytes: int,
     timeout_cleanup: Callable[[], None] | None = None,
+    abort_event: threading.Event | None = None,
 ) -> BoundedProcessResult:
     """Drain stdout continuously while retaining only a fixed-size prefix."""
 
@@ -60,12 +62,22 @@ def run_bounded_process(
     reader.start()
     timed_out = False
     try:
-        process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_process_group(process)
-        if timeout_cleanup is not None:
-            timeout_cleanup()
+        deadline = time.monotonic() + timeout_seconds
+        while process.poll() is None:
+            if abort_event is not None and abort_event.is_set():
+                _kill_process_group(process)
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                _kill_process_group(process)
+                if timeout_cleanup is not None:
+                    timeout_cleanup()
+                break
+            try:
+                process.wait(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired:
+                continue
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:

@@ -6,6 +6,7 @@ import asyncio
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -490,8 +491,193 @@ class CandidateContainerBackend(LocalShellBackend):
             raise
 
 
+class CandidateProcessBackend(CandidateContainerBackend):
+    """Railway source sandbox using a credential-less, unprivileged host process."""
+
+    def __init__(
+        self,
+        *,
+        workspace: str | Path,
+        allowed_root: str | Path,
+        policy: CandidateSandboxPolicy,
+        uid: int = 65_532,
+        gid: int = 65_532,
+    ) -> None:
+        if not policy.network_enabled:
+            raise ValueError("process source sandbox requires explicit network enablement")
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            raise RuntimeError("process source sandbox requires a root host supervisor")
+        if uid < 1 or gid < 1:
+            raise ValueError("process source sandbox identity is invalid")
+        if shutil.which("setpriv") is None or shutil.which("prlimit") is None:
+            raise RuntimeError("process source sandbox requires setpriv and prlimit")
+        self._process_uid = uid
+        self._process_gid = gid
+        super().__init__(
+            workspace=workspace,
+            allowed_root=allowed_root,
+            policy=policy,
+            container_cli="process",
+        )
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        safe_command = str(command or "").strip()
+        if not safe_command or "\x00" in safe_command:
+            return ExecuteResponse(output="command is invalid", exit_code=2, truncated=False)
+        effective_timeout = min(
+            self._policy.timeout_seconds,
+            max(1, int(timeout or self._policy.timeout_seconds)),
+        )
+        memory_bytes = _resource_bytes(self._policy.memory_limit)
+        file_bytes = self._policy.max_file_bytes
+        argv = (
+            "setpriv",
+            f"--reuid={self._process_uid}",
+            f"--regid={self._process_gid}",
+            "--clear-groups",
+            "--no-new-privs",
+            "prlimit",
+            f"--as={memory_bytes}:{memory_bytes}",
+            f"--nproc={self._policy.pid_limit}:{self._policy.pid_limit}",
+            f"--fsize={file_bytes}:{file_bytes}",
+            f"--cpu={effective_timeout + 5}:{effective_timeout + 5}",
+            "--",
+            "/bin/sh",
+            "-c",
+            _shell_with_group_cleanup(safe_command),
+        )
+        with self._lock:
+            backup: Path | None = None
+            backup_mode = 0o700
+            monitor_stop = threading.Event()
+            workspace_invalid = threading.Event()
+            monitor: threading.Thread | None = None
+
+            def monitor_workspace() -> None:
+                while not monitor_stop.wait(0.1):
+                    try:
+                        self._scan_tree()
+                    except (OSError, RuntimeError):
+                        workspace_invalid.set()
+                        return
+
+            try:
+                self._validate_tree()
+                self._chown_workspace(self._process_uid, self._process_gid)
+                backup, backup_mode = self._recovery_copy()
+                monitor = threading.Thread(
+                    target=monitor_workspace,
+                    name="opentulpa-process-candidate-quota",
+                    daemon=True,
+                )
+                monitor.start()
+                completed = run_bounded_process(
+                    argv,
+                    cwd=self._workspace,
+                    env={
+                        "HOME": "/tmp",
+                        "PATH": os.environ.get("PATH", os.defpath),
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                        "PYTHONHASHSEED": "0",
+                    },
+                    timeout_seconds=effective_timeout,
+                    max_output_bytes=self._policy.max_output_bytes,
+                    abort_event=workspace_invalid,
+                )
+                monitor_stop.set()
+                monitor.join(timeout=5)
+                try:
+                    self._scan_tree()
+                except (OSError, RuntimeError):
+                    workspace_invalid.set()
+                if workspace_invalid.is_set():
+                    self._restore_recovery_copy(backup, backup_mode)
+                    return ExecuteResponse(
+                        output="command exceeded workspace safety limits; changes were reverted",
+                        exit_code=126,
+                        truncated=False,
+                    )
+                if completed.timed_out:
+                    return ExecuteResponse(
+                        output=(
+                            completed.output.decode("utf-8", errors="replace")
+                            + "\ncommand timed out"
+                        ).strip(),
+                        exit_code=124,
+                        truncated=completed.truncated,
+                    )
+            except (OSError, RuntimeError):
+                if backup is not None:
+                    with suppress(RuntimeError):
+                        self._restore_recovery_copy(backup, backup_mode)
+                return ExecuteResponse(
+                    output="candidate workspace failed security validation",
+                    exit_code=126,
+                    truncated=False,
+                )
+            finally:
+                monitor_stop.set()
+                if monitor is not None:
+                    monitor.join(timeout=5)
+                if backup is not None:
+                    shutil.rmtree(backup, ignore_errors=True)
+                with suppress(OSError):
+                    self._chown_workspace(0, 0)
+        return ExecuteResponse(
+            output=completed.output.decode("utf-8", errors="replace"),
+            exit_code=completed.returncode,
+            truncated=completed.truncated,
+        )
+
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        return await asyncio.to_thread(self.execute, command, timeout=timeout)
+
+    def _chown_workspace(self, uid: int, gid: int) -> None:
+        os.chown(self._workspace, uid, gid)
+        for directory, directory_names, file_names in os.walk(
+            self._workspace,
+            topdown=True,
+            followlinks=False,
+        ):
+            for name in [*directory_names, *file_names]:
+                os.chown(
+                    Path(directory) / name,
+                    uid,
+                    gid,
+                    follow_symlinks=False,
+                )
+
+
+def _resource_bytes(value: str) -> int:
+    match = re.fullmatch(r"([1-9][0-9]*)(?:\.0+)?([kmgt]i?|b)?", value.strip(), re.I)
+    if match is None:
+        raise ValueError("candidate memory limit is invalid")
+    amount = int(match.group(1))
+    suffix = str(match.group(2) or "b").casefold()
+    multipliers: dict[str, int] = {
+        "b": 1,
+        "k": 1024,
+        "ki": 1024,
+        "m": 1024 * 1024,
+        "mi": 1024 * 1024,
+        "g": 1024 * 1024 * 1024,
+        "gi": 1024 * 1024 * 1024,
+        "t": 1024 * 1024 * 1024 * 1024,
+        "ti": 1024 * 1024 * 1024 * 1024,
+    }
+    return amount * multipliers[suffix]
+
+
+def _shell_with_group_cleanup(command: str) -> str:
+    cleanup = (
+        "status=$?; trap '' TERM HUP INT; kill -TERM -$$ >/dev/null 2>&1 || true; exit $status"
+    )
+    return f"trap {shlex.quote(cleanup)} EXIT; {command}"
+
+
 __all__ = [
     "CandidateContainerBackend",
+    "CandidateProcessBackend",
     "CandidateSandboxPolicy",
     "resolve_local_oci_image",
 ]

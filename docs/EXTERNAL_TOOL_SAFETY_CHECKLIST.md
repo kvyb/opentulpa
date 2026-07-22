@@ -56,8 +56,8 @@ Use this checklist for every product tool or external adapter.
 
 - Give the owner agent only a context-owned detached source worktree; never edit the serving checkout.
 - Permit normal repository source paths, but reject secrets, traversal, `.git`, `.venv`, symlinks, special files, and oversized trees before commit.
-- Run fixed public, security, and kernel-contract checks in a no-network evaluator outside candidate control.
-- Require one persisted owner approval before committing, evaluating, building, and queuing activation; bind the resulting release to source commit, lock hash, evaluator fingerprint, and OCI artifact digest.
+- Run fixed public, security, and kernel-contract checks in a secret-less evaluator over a disposable copy outside candidate control.
+- Require one persisted owner approval before committing, evaluating, building, and queuing activation; bind the resulting release to source commit, lock hash, evaluator fingerprint, and release artifact digest.
 - State the trust model explicitly: the chat approval assumes the active release is trusted; hostile-release authorization requires a separate external authority.
 - Stage and health-check before cutover; retain a content-addressed previous release for automatic rollback.
 - Deliver sanitized failure and rollback context through the durable owner notification stream.

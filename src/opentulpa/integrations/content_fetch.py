@@ -270,7 +270,7 @@ class Crawl4AIContentExtractor:
         if content_type not in {"text/html", "application/xhtml+xml"}:
             return fallback_text, title
         decoded = _decode_body(body, charset)
-        from crawl4ai.markdown_generation_strategy import (  # type: ignore[import-untyped]
+        from crawl4ai.markdown_generation_strategy import (  # type: ignore[import-not-found,import-untyped]
             DefaultMarkdownGenerator,
         )
 

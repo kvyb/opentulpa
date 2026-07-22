@@ -49,6 +49,11 @@ class _Service:
         self.runtime.status = "ready"
 
 
+class _Evolution:
+    async def source_status(self, *, audit_context: dict[str, str]) -> dict[str, Any]:
+        return {"active": False, "audit": audit_context}
+
+
 def _parts(tmp_path: Path) -> tuple[HostStore, _Service]:
     store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"h" * 32))
     store.configure_setup_token("setup-token-with-enough-entropy")
@@ -131,3 +136,29 @@ def test_owner_can_activate_first_config_without_exposing_secrets(tmp_path: Path
         root = client.get("/", follow_redirects=False)
         assert root.status_code == 307
         assert root.headers["location"] == "/_host"
+
+
+def test_evolution_control_route_is_registered_before_runtime_proxy(tmp_path: Path) -> None:
+    store, service = _parts(tmp_path)
+    token = "evolution-token-with-at-least-thirty-two-characters"
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        evolution_service=_Evolution(),
+        evolution_token=token,
+    )
+
+    with TestClient(app) as client:
+        denied = client.post(
+            "/bootstrap/internal/v1/evolution/source/status",
+            json={"audit_context": {}},
+        )
+        response = client.post(
+            "/bootstrap/internal/v1/evolution/source/status",
+            headers={"X-OpenTulpa-Evolution-Token": token},
+            json={"audit_context": {"tenant_id": "owner"}},
+        )
+
+    assert denied.status_code == 401
+    assert response.status_code == 200
+    assert response.json() == {"active": False, "audit": {"tenant_id": "owner"}}
