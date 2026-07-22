@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from opentulpa.application.product_tools import ProductToolApplication
+from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.persistence.idempotency import IdempotencyStore
 from opentulpa.specs import AgentSpecRef, OriginRef
@@ -109,6 +110,24 @@ def test_concrete_application_covers_registry_without_legacy_runtime_or_http() -
     assert "opentulpa" + ".agent" not in text
     assert "httpx" not in text
     assert "/internal/" not in text
+
+
+@pytest.mark.asyncio
+async def test_web_search_provider_failure_is_a_sanitized_retryable_tool_error() -> None:
+    research = _Port(
+        search=WebSearchProviderError(
+            "Web search returned no grounded sources.",
+            retryable=True,
+        )
+    )
+    application, _ = _application(research=research)
+
+    with pytest.raises(ProductToolApplicationError) as error:
+        await application.web_search(_invocation("web_search", {"query": "OpenTulpa", "limit": 8}))
+
+    assert error.value.code == "web_search_failed"
+    assert error.value.public_message == "Web search returned no grounded sources."
+    assert error.value.retryable is True
 
 
 @pytest.mark.asyncio
@@ -362,8 +381,7 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
         "channel": "web",
         "run_kind": "owner",
         "origin": (
-            '{"interface":"web","source_id":"test",'
-            '"conversation_id":null,"message_id":null}'
+            '{"interface":"web","source_id":"test","conversation_id":null,"message_id":null}'
         ),
     }
     assert evolution.calls == [

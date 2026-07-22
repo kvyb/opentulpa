@@ -12,6 +12,12 @@ document-parser packages. Those are the `browser`, `integrations`, `research`, a
 than adding behavior to the Deep Agents loop. `content_fetch` retains a bounded built-in
 extractor without Crawl4AI.
 
+For an OpenRouter-backed model endpoint, `web_search` calls the OpenRouter web plugin
+with the existing model API key, parses standardized `url_citation` annotations, and
+fails closed when the provider returns no grounded sources. A separately configured
+`EXA_API_KEY` continues to select the direct Exa adapter. Search discovers URLs;
+`content_fetch` remains the bounded reader for selected pages.
+
 Browser tools fail closed without Browser Use Cloud. Every session receives an explicit
 domain allowlist and rejects direct private and link-local targets. Chromium and target
 network access run in the vendor's isolation boundary. OpenTulpa can preflight and

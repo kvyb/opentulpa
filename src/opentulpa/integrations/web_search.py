@@ -18,13 +18,19 @@ from urllib.parse import urlparse
 
 import httpx
 
-from opentulpa.core.config import get_openai_compatible_api_key_from_env
+from opentulpa.core.config import (
+    LEGACY_OPENROUTER_API_KEY_ENV,
+    LEGACY_OPENROUTER_BASE_URL_ENV,
+    PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV,
+    get_openai_compatible_api_key_from_env,
+)
 
 logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 EXA_BASE = "https://api.exa.ai"
-DEFAULT_WEB_SEARCH_MODEL = "perplexity/sonar-pro-search"
+DEFAULT_WEB_SEARCH_MODEL = "z-ai/glm-5.2"
+DEFAULT_OPENROUTER_SEARCH_RESULTS = 10
 DEFAULT_EXA_SEARCH_RESULTS = 20
 RETRYABLE_WEB_SEARCH_STATUSES = {408, 429, 500, 502, 503, 504}
 EXA_SEARCH_TYPES = {"neural", "fast", "auto", "deep"}
@@ -42,12 +48,12 @@ EXA_CATEGORIES = {
 
 
 def _default_search_model() -> str:
-    """Default OpenRouter search model for web-search tool calls."""
+    """Return the model used to synthesize OpenRouter web-plugin results."""
     configured = str(os.environ.get("OPENROUTER_WEB_SEARCH_MODEL", "")).strip()
     selected = configured or DEFAULT_WEB_SEARCH_MODEL
-    if ":online" in selected.lower():
-        logger.warning("Ignoring legacy :online model override for web_search")
-        return DEFAULT_WEB_SEARCH_MODEL
+    if selected.lower().endswith(":online"):
+        logger.warning("Stripping redundant :online suffix from web_search model")
+        return selected[: -len(":online")]
     return selected
 
 
@@ -112,7 +118,12 @@ def _normalize_url(url: str) -> str:
     return value
 
 
-def _extract_sources(data: dict, answer: str) -> list[dict[str, str]]:
+def _extract_sources(
+    data: dict,
+    answer: str,
+    *,
+    include_answer_urls: bool = True,
+) -> list[dict[str, str]]:
     candidates: list[str] = []
     for key in ("citations", "sources", "references"):
         raw = data.get(key)
@@ -134,9 +145,19 @@ def _extract_sources(data: dict, answer: str) -> list[dict[str, str]]:
                         url = _extract_url_from_item(item)
                         if url:
                             candidates.append(url)
+            annotations = message.get("annotations")
+            if isinstance(annotations, list):
+                for annotation in annotations:
+                    if not isinstance(annotation, Mapping):
+                        continue
+                    citation = annotation.get("url_citation")
+                    url = _extract_url_from_item(citation)
+                    if url:
+                        candidates.append(url)
 
-    for match in re.findall(r"https?://[^\s<>\]\)\"']+", answer):
-        candidates.append(match)
+    if include_answer_urls:
+        for match in re.findall(r"https?://[^\s<>\]\)\"']+", answer):
+            candidates.append(match)
 
     seen: set[str] = set()
     out: list[dict[str, str]] = []
@@ -153,6 +174,20 @@ def _extract_sources(data: dict, answer: str) -> list[dict[str, str]]:
 def _exa_api_key() -> str | None:
     value = str(os.environ.get("EXA_API_KEY", "")).strip()
     return value or None
+
+
+def _openrouter_api_key() -> str | None:
+    explicit = str(os.environ.get(LEGACY_OPENROUTER_API_KEY_ENV, "")).strip()
+    if explicit:
+        return explicit
+    base_url = str(
+        os.environ.get(PRIMARY_OPENAI_COMPATIBLE_BASE_URL_ENV)
+        or os.environ.get(LEGACY_OPENROUTER_BASE_URL_ENV)
+        or OPENROUTER_BASE
+    ).strip()
+    if urlparse(base_url).hostname != "openrouter.ai":
+        return None
+    return get_openai_compatible_api_key_from_env()
 
 
 def _clean_optional_text(value: object) -> str | None:
@@ -179,6 +214,15 @@ class WebSearchResult:
         }
 
 
+class WebSearchProviderError(RuntimeError):
+    """Sanitized provider failure safe to expose through the product-tool boundary."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.public_message = message
+        self.retryable = retryable
+
+
 def _safe_exa_search_type(value: object) -> str | None:
     text = _clean_optional_text(value)
     if not text:
@@ -200,7 +244,7 @@ def _exa_search_options(kwargs: dict[str, object]) -> dict[str, object]:
     unexpected = sorted(
         key
         for key, value in kwargs.items()
-        if value is not None and key not in {"search_type", "category"}
+        if value is not None and key not in {"search_type", "category", "max_results"}
     )
     if unexpected:
         raise ValueError(f"unsupported Exa web_search args: {', '.join(unexpected)}")
@@ -219,6 +263,19 @@ def _exa_search_options(kwargs: dict[str, object]) -> dict[str, object]:
     if category:
         options["category"] = category
     return options
+
+
+def _search_result_limit(
+    kwargs: Mapping[str, object],
+    *,
+    default: int,
+) -> int:
+    value = kwargs.get("max_results")
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 20:
+        raise ValueError("max_results must be an integer between 1 and 20")
+    return value
 
 
 class WebSearchProvider(abc.ABC):
@@ -251,9 +308,16 @@ class ExaSearchProvider(WebSearchProvider):
             options = _exa_search_options(kwargs)
         except ValueError as exc:
             return f"Web search invalid argument: {exc!s}."
+        try:
+            max_results = _search_result_limit(
+                kwargs,
+                default=DEFAULT_EXA_SEARCH_RESULTS,
+            )
+        except ValueError as exc:
+            return f"Web search invalid argument: {exc!s}."
         payload: dict[str, object] = {
             "query": query,
-            "numResults": DEFAULT_EXA_SEARCH_RESULTS,
+            "numResults": max_results,
         }
         payload.update(options)
         data = await _post_json_with_retries(
@@ -278,25 +342,43 @@ class ExaSearchProvider(WebSearchProvider):
         )
 
 
-class PplxSearchProvider(WebSearchProvider):
+class OpenRouterWebSearchProvider(WebSearchProvider):
     @property
     def name(self) -> str:
-        return "pplx"
+        return "openrouter-web"
 
     def is_available(self) -> bool:
-        return get_openai_compatible_api_key_from_env() is not None
+        return _openrouter_api_key() is not None
 
     async def search(self, query: str, **kwargs: object) -> WebSearchResult | str:
-        if any(value is not None for value in kwargs.values()):
-            return "Web search provider 'pplx' supports only query."
-        api_key = get_openai_compatible_api_key_from_env()
+        unexpected = sorted(
+            key for key, value in kwargs.items() if value is not None and key != "max_results"
+        )
+        if unexpected:
+            return (
+                f"Web search provider 'openrouter-web' does not support: {', '.join(unexpected)}."
+            )
+        try:
+            max_results = _search_result_limit(
+                kwargs,
+                default=DEFAULT_OPENROUTER_SEARCH_RESULTS,
+            )
+        except ValueError as exc:
+            return f"Web search invalid argument: {exc!s}."
+        api_key = _openrouter_api_key()
         assert api_key is not None
         use_model = _default_search_model()
         payload = {
             "model": use_model,
             "messages": [{"role": "user", "content": query}],
             "max_tokens": 2048,
-            "reasoning": {"effort": "medium"},
+            "plugins": [
+                {
+                    "id": "web",
+                    "engine": "exa",
+                    "max_results": max_results,
+                }
+            ],
         }
         data = await _post_json_with_retries(
             f"{OPENROUTER_BASE}/chat/completions",
@@ -309,19 +391,19 @@ class PplxSearchProvider(WebSearchProvider):
         )
         if isinstance(data, str):
             return data
-        return _pplx_response_payload(data, use_model)
+        return _openrouter_response_payload(data, use_model)
 
 
 def _providers() -> dict[str, WebSearchProvider]:
     return {
         "exa": ExaSearchProvider(),
-        "pplx": PplxSearchProvider(),
+        "openrouter-web": OpenRouterWebSearchProvider(),
     }
 
 
 def get_web_search_provider() -> WebSearchProvider | None:
     available = _providers()
-    for name in ("exa", "pplx"):
+    for name in ("exa", "openrouter-web"):
         provider = available[name]
         if provider.is_available():
             return provider
@@ -397,7 +479,10 @@ async def _sleep_before_retry(
     await asyncio.sleep(delay)
 
 
-def _pplx_response_payload(data: dict[str, object], use_model: str) -> WebSearchResult | str:
+def _openrouter_response_payload(
+    data: dict[str, object],
+    use_model: str,
+) -> WebSearchResult | str:
     raw_choices = data.get("choices")
     choices = raw_choices if isinstance(raw_choices, list) else []
     if not choices:
@@ -407,10 +492,13 @@ def _pplx_response_payload(data: dict[str, object], use_model: str) -> WebSearch
     answer = _sanitize_answer_text(_extract_text_content(content))
     if not answer:
         answer = "No content in response."
+    sources = _extract_sources(data, answer, include_answer_urls=False)
+    if not sources:
+        return "Web search returned no grounded sources. Retry with a more specific query."
     return WebSearchResult(
         answer=answer,
-        sources=_extract_sources(data, answer),
-        provider="pplx",
+        sources=sources,
+        provider="openrouter-web",
         model=use_model,
     )
 
@@ -450,7 +538,7 @@ def _missing_provider_message() -> str:
     return (
         "Web search is not configured "
         "(set EXA_API_KEY or OPENAI_COMPATIBLE_API_KEY; "
-        "OPENROUTER_API_KEY also accepted for pplx)."
+        "OPENROUTER_API_KEY is also accepted for OpenRouter web search)."
     )
 
 

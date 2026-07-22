@@ -25,6 +25,8 @@ Required in every mode:
 
 The default host does not require `OPENAI_COMPATIBLE_API_KEY` to start. Configure it in
 `/_host` or provide it for non-interactive first boot.
+With the default OpenRouter endpoint, the same key also enables grounded `web_search`
+through OpenRouter's web plugin. No separate search key or optional package is needed.
 
 Local loopback startup generates and privately persists owner authentication and
 selects `${XDG_DATA_HOME:-$HOME/.local/share}/opentulpa` automatically. Public host

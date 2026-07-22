@@ -17,7 +17,7 @@ from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.files.analysis import FileAnalysisService
 from opentulpa.integrations.content_fetch import ContentFetchResult
-from opentulpa.integrations.web_search import WebSearchResult
+from opentulpa.integrations.web_search import WebSearchProviderError, WebSearchResult
 from opentulpa.jobs import JobArtifact
 
 
@@ -116,8 +116,9 @@ class _SearchProvider:
     def __init__(self) -> None:
         self.queries: list[str] = []
 
-    async def search(self, query: str) -> WebSearchResult:
+    async def search(self, query: str, **kwargs: object) -> WebSearchResult:
         self.queries.append(query)
+        assert kwargs == {"max_results": 2}
         return WebSearchResult(
             answer="Answer",
             sources=[
@@ -180,6 +181,29 @@ async def test_research_port_bounds_sources_and_uses_secure_fetch_adapter() -> N
         "sources": [],
         "source_count": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_research_port_rejects_ungrounded_search_results() -> None:
+    class _UngroundedSearchProvider:
+        name = "test-search"
+
+        async def search(self, query: str, **kwargs: object) -> WebSearchResult:
+            _ = query, kwargs
+            return WebSearchResult(
+                answer="Unsupported answer",
+                sources=[],
+                provider=self.name,
+                model="test-model",
+            )
+
+    port = ResearchProductPort(
+        web_search=cast(Any, _UngroundedSearchProvider()),
+        content_fetch=cast(Any, _ContentFetch()),
+    )
+
+    with pytest.raises(WebSearchProviderError, match="no grounded sources"):
+        await port.search(tenant_id="tenant-a", query="current answer", limit=2)
 
 
 def _artifact(*, tenant_id: str, artifact_id: str, path: Path) -> JobArtifact:

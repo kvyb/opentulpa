@@ -18,7 +18,11 @@ from opentulpa.intake.drafts import IntakeDraftService, IntakeWorkflowProposal
 from opentulpa.intake.poller import IntakePollDispatcher
 from opentulpa.intake.service import IntakeWorkflowService
 from opentulpa.integrations.content_fetch import ContentFetchService
-from opentulpa.integrations.web_search import WebSearchProvider, WebSearchResult
+from opentulpa.integrations.web_search import (
+    WebSearchProvider,
+    WebSearchProviderError,
+    WebSearchResult,
+)
 from opentulpa.jobs import (
     JobArguments,
     JobExecutionContext,
@@ -183,21 +187,23 @@ class ResearchProductPort:
                 "sources": [],
                 "source_count": 0,
             }
-        result = await self._web_search.search(query)
+        result = await self._web_search.search(query, max_results=limit)
         if isinstance(result, WebSearchResult):
             payload = result.to_payload()
             raw_sources = payload.get("sources")
             sources = raw_sources[:limit] if isinstance(raw_sources, list_type) else []
+            if not sources:
+                raise WebSearchProviderError(
+                    "Web search returned no grounded sources. Retry with a more specific query.",
+                    retryable=True,
+                )
             payload["sources"] = sources
             payload["source_count"] = len(sources)
             return payload
-        return {
-            "available": True,
-            "answer": str(result or "No response from web search."),
-            "sources": [],
-            "source_count": 0,
-            "provider": self._web_search.name,
-        }
+        raise WebSearchProviderError(
+            str(result or "Web search did not return a grounded response."),
+            retryable=True,
+        )
 
     async def fetch(self, *, tenant_id: str, url: str) -> Any:
         del tenant_id

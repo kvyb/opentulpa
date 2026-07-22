@@ -33,6 +33,15 @@ def test_extract_sources_collects_from_payload_and_answer() -> None:
             {
                 "message": {
                     "sources": [{"link": "https://three.example/c"}],
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url_citation": {
+                                "url": "https://five.example/e",
+                                "title": "Grounded source",
+                            },
+                        }
+                    ],
                     "content": "See https://four.example/d for more.",
                 }
             }
@@ -45,6 +54,7 @@ def test_extract_sources_collects_from_payload_and_answer() -> None:
     assert "https://two.example/b" in urls
     assert "https://three.example/c" in urls
     assert "https://four.example/d" in urls
+    assert "https://five.example/e" in urls
     # de-dup
     assert urls.count("https://two.example/b") == 1
 
@@ -62,7 +72,7 @@ def test_exa_result_list_answer_formats_twenty_results() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pplx_web_search_requests_medium_reasoning_effort(
+async def test_openrouter_web_search_uses_plugin_and_parses_citations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -82,18 +92,39 @@ async def test_pplx_web_search_requests_medium_reasoning_effort(
         return httpx.Response(
             status_code=200,
             request=request,
-            json={"choices": [{"message": {"content": "Answer"}}]},
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Grounded answer",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {
+                                        "url": "https://example.com/source",
+                                        "title": "Source",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
         )
 
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
     monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
 
-    result = await web_search_module.web_search("current news")
+    result = await web_search_module.web_search("current news", max_results=7)
 
     assert isinstance(result, dict)
-    assert result["provider"] == "pplx"
-    assert captured["json"]["reasoning"] == {"effort": "medium"}
+    assert result["provider"] == "openrouter-web"
+    assert result["source_count"] == 1
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["json"]["model"] == "z-ai/glm-5.2"
+    assert captured["json"]["plugins"] == [{"id": "web", "engine": "exa", "max_results": 7}]
+    assert "reasoning" not in captured["json"]
 
 
 @pytest.mark.asyncio
@@ -211,7 +242,7 @@ async def test_exa_web_search_rejects_invalid_options(
 
 
 @pytest.mark.asyncio
-async def test_pplx_web_search_rejects_provider_specific_options(
+async def test_openrouter_web_search_rejects_provider_specific_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("EXA_API_KEY", raising=False)
@@ -219,11 +250,11 @@ async def test_pplx_web_search_rejects_provider_specific_options(
 
     result = await web_search_module.web_search("current news", category="news")
 
-    assert result == "Web search provider 'pplx' supports only query."
+    assert result == "Web search provider 'openrouter-web' does not support: category."
 
 
 @pytest.mark.asyncio
-async def test_pplx_web_search_retries_transient_openrouter_errors(
+async def test_openrouter_web_search_retries_transient_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"count": 0}
@@ -246,7 +277,21 @@ async def test_pplx_web_search_retries_transient_openrouter_errors(
         return httpx.Response(
             status_code=200,
             request=request,
-            json={"choices": [{"message": {"content": "Recovered answer"}}]},
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Recovered answer",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {"url": "https://example.com/recovered"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
         )
 
     captured_delays: list[float] = []
@@ -261,3 +306,46 @@ async def test_pplx_web_search_retries_transient_openrouter_errors(
     assert captured_delays == [0.75]
     assert isinstance(result, dict)
     assert result["answer"] == "Recovered answer"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_web_search_fails_closed_without_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_post(
+        self: httpx.AsyncClient,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        _ = self, json, headers
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            status_code=200,
+            request=request,
+            json={
+                "choices": [
+                    {"message": {"content": "An unsupported answer at https://example.com/guessed"}}
+                ]
+            },
+        )
+
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    result = await web_search_module.web_search("current news")
+
+    assert result == ("Web search returned no grounded sources. Retry with a more specific query.")
+
+
+def test_openrouter_web_search_is_disabled_for_other_compatible_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://api.example.com/v1")
+
+    assert web_search_module.get_web_search_provider() is None

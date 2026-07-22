@@ -129,6 +129,10 @@ fallback. It requires explicit destination domains and rejects direct private or
 link-local targets, but it cannot DNS-pin Chromium inside the vendor environment.
 `content_fetch` has a bounded built-in HTML
 extractor and uses Crawl4AI only when the research extra is present.
+When the configured model endpoint is OpenRouter, `web_search` uses OpenRouter's
+model-agnostic web plugin with the same API key and returns only grounded URL-cited
+results; no separate search-provider key is required. `EXA_API_KEY` remains an
+optional direct-provider override.
 
 ## Runs, Notifications, And Approvals
 

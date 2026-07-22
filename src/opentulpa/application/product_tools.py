@@ -17,6 +17,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel
 
+from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.schedules.models import ScheduleWrite
 from opentulpa.secrets.models import SecretHandle
 from opentulpa.specs.models import AgentSpecWrite, TriggerSpec, TriggerSpecWrite
@@ -1116,14 +1117,21 @@ class ProductToolApplication:
         )
 
     async def web_search(self, invocation: ProductToolInvocation) -> ProductToolOutput:
-        return await self._output(
-            invocation,
-            lambda: self._research.search(
-                tenant_id=invocation.context.tenant_id,
-                query=str(invocation.arguments["query"]),
-                limit=int(invocation.arguments["limit"]),
-            ),
-        )
+        try:
+            return await self._output(
+                invocation,
+                lambda: self._research.search(
+                    tenant_id=invocation.context.tenant_id,
+                    query=str(invocation.arguments["query"]),
+                    limit=int(invocation.arguments["limit"]),
+                ),
+            )
+        except WebSearchProviderError as exc:
+            raise ProductToolApplicationError(
+                "web_search_failed",
+                exc.public_message,
+                retryable=exc.retryable,
+            ) from exc
 
     async def content_fetch(self, invocation: ProductToolInvocation) -> ProductToolOutput:
         return await self._output(
