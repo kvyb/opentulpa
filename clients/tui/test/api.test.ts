@@ -53,12 +53,14 @@ describe("V2 event transport", () => {
           provider: "codex",
           model: "gpt-test",
           reasoning_effort: "high",
+          service_tier: "priority",
           fallback_to_api: false,
         },
         effective: {
           provider: "codex",
           model: "gpt-test",
           reasoning_effort: "high",
+          service_tier: "priority",
           fallback_to_api: false,
         },
       })
@@ -69,6 +71,7 @@ describe("V2 event transport", () => {
       provider: "codex",
       model: "gpt-test",
       reasoning_effort: "high",
+      service_tier: "priority",
       fallback_to_api: false,
     })
 
@@ -81,6 +84,7 @@ describe("V2 event transport", () => {
         provider: "codex",
         model: "gpt-test",
         reasoning_effort: "high",
+        service_tier: "priority",
         fallback_to_api: false,
       },
     })

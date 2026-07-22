@@ -19,9 +19,10 @@ class InferenceSelection(_InferenceModel):
     provider: InferenceProvider
     model: str = Field(min_length=1, max_length=300)
     reasoning_effort: str | None = Field(default=None, max_length=50)
+    service_tier: str | None = Field(default=None, max_length=50)
     fallback_to_api: bool = False
 
-    @field_validator("model", "reasoning_effort")
+    @field_validator("model", "reasoning_effort", "service_tier")
     @classmethod
     def validate_identifier(cls, value: str | None) -> str | None:
         if value is None:
@@ -56,16 +57,25 @@ class ResolvedInferencePlan(_InferenceModel):
         )
 
 
+class InferenceServiceTier(_InferenceModel):
+    id: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+
 class InferenceModel(_InferenceModel):
     provider: InferenceProvider
     id: str = Field(min_length=1, max_length=300)
     reasoning_efforts: tuple[str, ...] = ()
     default_reasoning_effort: str | None = None
+    service_tiers: tuple[InferenceServiceTier, ...] = ()
+    default_service_tier: str | None = None
 
 
 __all__ = [
     "InferenceModel",
     "InferenceProvider",
     "InferenceSelection",
+    "InferenceServiceTier",
     "ResolvedInferencePlan",
 ]

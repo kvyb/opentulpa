@@ -25,7 +25,12 @@ from opentulpa.inference.codex import (
     build_codex_model,
     credential_from_oauth_payload,
 )
-from opentulpa.inference.models import InferenceModel, InferenceProvider, InferenceSelection
+from opentulpa.inference.models import (
+    InferenceModel,
+    InferenceProvider,
+    InferenceSelection,
+    InferenceServiceTier,
+)
 from opentulpa.inference.store import DeviceLogin, InferenceCredentialStore
 from opentulpa.secrets.cipher import HostKeySecretCipher
 
@@ -69,9 +74,9 @@ class InferenceService:
         self._api_default_model = str(api_default_model or "").strip()
         self._api_reasoning_effort = str(api_reasoning_effort or "").strip() or None
         self._api_fallback_models = tuple(api_fallback_models)
-        self._models: OrderedDict[tuple[str, int, str, str | None, bool], ResolvedModel] = (
-            OrderedDict()
-        )
+        self._models: OrderedDict[
+            tuple[str, int, str, str | None, str | None, bool], ResolvedModel
+        ] = OrderedDict()
         self._catalogs: dict[tuple[str, int], tuple[datetime, tuple[InferenceModel, ...]]] = {}
         self._device_locks: dict[str, asyncio.Lock] = {}
 
@@ -132,13 +137,20 @@ class InferenceService:
                 raise ValueError("Codex model is not available for this account")
             if (
                 selection.reasoning_effort is not None
-                and selected.reasoning_efforts
                 and selection.reasoning_effort not in selected.reasoning_efforts
             ):
                 raise ValueError("reasoning effort is not supported by this Codex model")
+            service_tier_ids = {tier.id for tier in selected.service_tiers}
+            if (
+                selection.service_tier is not None
+                and selection.service_tier not in service_tier_ids
+            ):
+                raise ValueError("service tier is not supported by this Codex model")
             return selection
-        if selection.fallback_to_api:
-            selection = selection.model_copy(update={"fallback_to_api": False})
+        if selection.fallback_to_api or selection.service_tier is not None:
+            selection = selection.model_copy(
+                update={"fallback_to_api": False, "service_tier": None}
+            )
         return selection
 
     def resolve_model(self, tenant_id: str, selection: InferenceSelection) -> ResolvedModel:
@@ -152,6 +164,7 @@ class InferenceService:
             revision,
             selection.model,
             selection.reasoning_effort,
+            selection.service_tier,
             selection.fallback_to_api,
         )
         cached = self._models.get(key)
@@ -163,6 +176,7 @@ class InferenceService:
             model=build_codex_model(
                 model=selection.model,
                 reasoning_effort=selection.reasoning_effort,
+                service_tier=selection.service_tier,
                 token_provider=provider,
                 buffer_for_fallback=selection.fallback_to_api,
             ),
@@ -383,9 +397,18 @@ class InferenceService:
             if not model_id or visibility in {"hide", "hidden"}:
                 continue
             efforts = self._reasoning_efforts(raw)
-            default_effort = str(raw.get("default_reasoning_effort") or "").strip() or None
+            default_effort = (
+                str(
+                    raw.get("default_reasoning_level") or raw.get("default_reasoning_effort") or ""
+                ).strip()
+                or None
+            )
             if default_effort and efforts and default_effort not in efforts:
                 default_effort = None
+            service_tiers = self._service_tiers(raw)
+            default_service_tier = str(raw.get("default_service_tier") or "").strip() or None
+            if default_service_tier not in {tier.id for tier in service_tiers}:
+                default_service_tier = None
             try:
                 priority = int(raw.get("priority", 10_000))
             except (TypeError, ValueError):
@@ -398,6 +421,8 @@ class InferenceService:
                         id=model_id,
                         reasoning_efforts=efforts,
                         default_reasoning_effort=default_effort,
+                        service_tiers=service_tiers,
+                        default_service_tier=default_service_tier,
                     ),
                 )
             )
@@ -448,7 +473,12 @@ class InferenceService:
 
     @staticmethod
     def _reasoning_efforts(raw: dict[str, Any]) -> tuple[str, ...]:
-        value = raw.get("supported_reasoning_efforts") or raw.get("reasoning_efforts") or []
+        value = (
+            raw.get("supported_reasoning_levels")
+            or raw.get("supported_reasoning_efforts")
+            or raw.get("reasoning_efforts")
+            or []
+        )
         efforts: list[str] = []
         if isinstance(value, dict):
             value = list(value)
@@ -461,6 +491,31 @@ class InferenceService:
                 if effort and effort not in efforts:
                     efforts.append(effort)
         return tuple(efforts)
+
+    @staticmethod
+    def _service_tiers(raw: dict[str, Any]) -> tuple[InferenceServiceTier, ...]:
+        value = raw.get("service_tiers") or []
+        if not isinstance(value, list | tuple):
+            return ()
+        tiers: list[InferenceServiceTier] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            tier_id = str(item.get("id") or "").strip()
+            name = str(item.get("name") or tier_id).strip()
+            description = str(item.get("description") or "").strip()
+            if not tier_id or not name or tier_id in seen:
+                continue
+            tiers.append(
+                InferenceServiceTier(
+                    id=tier_id,
+                    name=name,
+                    description=description,
+                )
+            )
+            seen.add(tier_id)
+        return tuple(tiers)
 
     @staticmethod
     def _replace_login(login: DeviceLogin, **changes: Any) -> DeviceLogin:

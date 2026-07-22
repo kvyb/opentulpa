@@ -74,8 +74,9 @@ tool calls, drag-and-drop attachments, server-backed sessions, and clickable
 scoped credential. Use `ctrl+p` or `/sessions` to reopen the same durable Deep Agents
 threads from another client. Type `/` in the composer to search and select commands.
 
-The API key remains the zero-friction default. Inside any owner conversation, `/model`
-and `/reasoning` select that thread's next-run model without restarting OpenTulpa.
+The API key remains the zero-friction default. Inside any owner conversation, `/model`,
+`/reasoning`, and `/speed` select that thread's next-run inference settings without
+restarting OpenTulpa.
 `/login codex` optionally connects a ChatGPT Codex subscription through device login;
 the rotating OAuth credential is encrypted on the server and never shared with an
 existing Codex CLI login. Codex has no implicit cross-provider fallback. Use
@@ -239,8 +240,9 @@ and opens the native TUI. A source checkout builds and caches the platform clien
 first run; CI also produces macOS and Linux platform archives. Later, just run
 `opentulpa` again.
 
-In the TUI, use `/model`, `/reasoning`, or `/login codex`. Remote connections change the
-remote thread; no Codex environment variable, callback server, or extra process is used.
+In the TUI, use `/model`, `/reasoning`, `/speed`, or `/login codex`. Remote
+connections change the remote thread; no Codex environment variable, callback server,
+or extra process is used.
 
 ```bash
 # Remote server

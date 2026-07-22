@@ -95,6 +95,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { value: "/session", description: "Open a session by name or number", acceptsArgument: true },
   { value: "/model", description: "Choose the provider and model" },
   { value: "/reasoning", description: "Choose the reasoning effort" },
+  { value: "/speed", description: "Choose normal or fast Codex inference" },
   { value: "/login codex", description: "Connect a ChatGPT Codex subscription" },
   { value: "/logout codex", description: "Disconnect the Codex subscription" },
   { value: "/regenerate", description: "Regenerate the latest response" },
@@ -524,6 +525,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
         provider: targetProvider,
         model: selected?.id ?? requestedModel,
         reasoning_effort: selected?.default_reasoning_effort ?? null,
+        service_tier: selected?.default_service_tier ?? null,
         fallback_to_api: targetProvider === "codex" && fallbackToApi,
       })
       return
@@ -546,11 +548,12 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       ...visibleModels.map((model) => ({
         id: `${model.provider}:${model.id}`,
         label: model.id,
-        detail: `${model.provider}${model.reasoning_efforts.length ? ` · ${model.reasoning_efforts.join(" / ")}` : ""}`,
+        detail: `${model.provider}${model.reasoning_efforts.length ? ` · ${model.reasoning_efforts.join(" / ")}` : ""}${model.service_tiers.length ? " · normal / fast" : ""}`,
         select: () => void applyInferenceSelection({
           provider: model.provider,
           model: model.id,
           reasoning_effort: model.default_reasoning_effort,
+          service_tier: model.default_service_tier,
           fallback_to_api: false,
         }),
       })),
@@ -564,6 +567,58 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       })
     }
     setPicker({ title: provider ? `${targetProvider === "codex" ? "Codex" : "API"} models` : "Models", hint: "Search providers and models", items })
+    setPickerQuery("")
+    setPickerIndex(0)
+  }
+
+  const chooseSpeed = async (requested?: string) => {
+    const current = inference()
+    if (!current) return
+    const selection = current.effective
+    if (selection.provider !== "codex") {
+      throw new ApiError("Normal/Fast selection is available for Codex models.")
+    }
+    const models = await api.inferenceModels("codex")
+    const model = models.find((item) => item.id === selection.model)
+    if (!model) throw new ApiError(`${selection.model} is not available from Codex.`)
+    const apply = (serviceTier: string | null) => void applyInferenceSelection(
+      { ...selection, service_tier: serviceTier },
+    )
+    if (requested !== undefined) {
+      const normalized = requested.toLocaleLowerCase()
+      if (normalized === "normal" || normalized === "default") {
+        apply(null)
+        return
+      }
+      const tier = model.service_tiers.find(
+        (item) => item.id.toLocaleLowerCase() === normalized
+          || item.name.toLocaleLowerCase() === normalized,
+      )
+      if (!tier) throw new ApiError(`${requested} is not supported by ${selection.model}.`)
+      apply(tier.id)
+      return
+    }
+    const items: PickerItem[] = [
+      {
+        id: "normal",
+        label: "Normal",
+        detail: selection.service_tier === null ? "Current" : "Standard usage and latency",
+        select: () => apply(null),
+      },
+      ...model.service_tiers.map((tier) => ({
+        id: tier.id,
+        label: tier.name,
+        detail: selection.service_tier === tier.id ? "Current" : tier.description || selection.model,
+        select: () => apply(tier.id),
+      })),
+    ]
+    setPicker({
+      title: `Speed · ${selection.model}`,
+      hint: model.service_tiers.length
+        ? "Choose normal or fast"
+        : "This model supports normal speed only",
+      items,
+    })
     setPickerQuery("")
     setPickerIndex(0)
   }
@@ -656,7 +711,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     const [name, ...parts] = input.split(/\s+/)
     if (name === "/quit") renderer.destroy()
     else if (name === "/help") {
-      setError("/new  /sessions  /model  /reasoning  /login codex  /logout codex  /regenerate  /attach  /cancel  /quit")
+      setError("/new  /sessions  /model  /reasoning  /speed  /login codex  /logout codex  /regenerate  /attach  /cancel  /quit")
     } else if (name === "/sessions") {
       setSessionDialog(true)
       setSessionQuery("")
@@ -686,6 +741,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
         await chooseModel(explicitProvider, model, fallback)
       }
     } else if (name === "/reasoning") await chooseReasoning(parts[0])
+    else if (name === "/speed") await chooseSpeed(parts[0])
     else if (name === "/login" && parts[0] === "codex") await startCodexLogin()
     else if (name === "/logout" && parts[0] === "codex") {
       try {
@@ -1328,7 +1384,7 @@ export function StatusBar(props: {
           wrapMode="none"
           truncate
         >
-          {props.inference!.provider} · {props.inference!.model} · {props.inference!.reasoning_effort ?? "default"}
+          {props.inference!.provider} · {props.inference!.model} · {props.inference!.reasoning_effort ?? "default"} · {props.inference!.service_tier === "priority" ? "fast" : props.inference!.service_tier ?? "normal"}
         </text>
       </Show>
       <Show when={props.width >= 40}>
