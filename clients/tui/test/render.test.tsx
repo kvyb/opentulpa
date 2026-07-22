@@ -48,6 +48,7 @@ const tools: ToolCall[] = [
 describe("slash command palette", () => {
   test("filters commands by command and description", () => {
     expect(filterSlashCommands("mo").map((item) => item.value)).toContain("/model")
+    expect(filterSlashCommands("fast").map((item) => item.value)).toContain("/speed")
     expect(filterSlashCommands("subscription").map((item) => item.value)).toEqual([
       "/login codex",
       "/logout codex",
@@ -165,6 +166,33 @@ describe("tool activity rendering", () => {
 })
 
 describe("terminal chrome", () => {
+  test("shows the effective Codex reasoning and speed", async () => {
+    const setup = await testRender(
+      () => (
+        <StatusBar
+          busy={false}
+          uploading={false}
+          status="Ready"
+          width={90}
+          inference={{
+            provider: "codex",
+            model: "gpt-5.6-sol",
+            reasoning_effort: "ultra",
+            service_tier: "priority",
+            fallback_to_api: false,
+          }}
+        />
+      ),
+      { width: 90, height: 3 },
+    )
+    await setup.renderOnce()
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("gpt-5.6-sol")
+    expect(frame).toContain("ultra")
+    expect(frame).toContain("fast")
+    setup.renderer.destroy()
+  })
+
   test("shows visible thinking activity before the first token or tool", async () => {
     const turn = emptyTurn("run-1", "Help me inspect this project")
     const setup = await testRender(
@@ -291,6 +319,7 @@ describe("terminal chrome", () => {
                 provider: "codex",
                 model: "a-very-long-model-identifier-that-must-be-truncated-cleanly",
                 reasoning_effort: "high",
+                service_tier: "priority",
                 fallback_to_api: false,
               }}
             />

@@ -86,9 +86,111 @@ def test_resolved_plan_digest_is_stable_and_revision_bound() -> None:
     first = ResolvedInferencePlan.resolve(selection, preference_revision=2)
     same = ResolvedInferencePlan.resolve(selection, preference_revision=2)
     changed = ResolvedInferencePlan.resolve(selection, preference_revision=3)
+    fast = ResolvedInferencePlan.resolve(
+        selection.model_copy(update={"service_tier": "priority"}),
+        preference_revision=2,
+    )
 
     assert first == same
     assert first.digest != changed.digest
+    assert first.digest != fast.digest
+
+
+@pytest.mark.asyncio
+async def test_codex_catalog_maps_reasoning_levels_and_service_tiers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _inference(tmp_path)
+    service._store.save_credential(  # noqa: SLF001
+        "tenant-1",
+        CodexCredential(
+            access_token="access-secret",
+            refresh_token="refresh-secret",
+            id_token=None,
+            account_id="account-1",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+    )
+
+    async def request(_: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "slug": "gpt-5.6-sol",
+                        "visibility": "list",
+                        "priority": 1,
+                        "supported_reasoning_levels": [
+                            {"effort": "low"},
+                            {"effort": "medium"},
+                            {"effort": "high"},
+                            {"effort": "xhigh"},
+                            {"effort": "max"},
+                            {"effort": "ultra"},
+                        ],
+                        "default_reasoning_level": "low",
+                        "service_tiers": [
+                            {
+                                "id": "priority",
+                                "name": "Fast",
+                                "description": "1.5x speed, increased usage",
+                            }
+                        ],
+                        "default_service_tier": None,
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(service, "_request_codex_models", request)
+    models = await service.models("tenant-1", "codex")
+
+    assert len(models) == 1
+    model = models[0]
+    assert model.reasoning_efforts == ("low", "medium", "high", "xhigh", "max", "ultra")
+    assert model.default_reasoning_effort == "low"
+    assert [tier.model_dump() for tier in model.service_tiers] == [
+        {
+            "id": "priority",
+            "name": "Fast",
+            "description": "1.5x speed, increased usage",
+        }
+    ]
+    assert model.default_service_tier is None
+    selected = await service.validate_selection(
+        "tenant-1",
+        InferenceSelection(
+            provider="codex",
+            model=model.id,
+            reasoning_effort="ultra",
+            service_tier="priority",
+        ),
+    )
+    assert selected.reasoning_effort == "ultra"
+    assert selected.service_tier == "priority"
+    with pytest.raises(ValueError, match="service tier"):
+        await service.validate_selection(
+            "tenant-1",
+            selected.model_copy(update={"service_tier": "unsupported"}),
+        )
+    with pytest.raises(ValueError, match="reasoning effort"):
+        await service.validate_selection(
+            "tenant-1",
+            selected.model_copy(update={"reasoning_effort": "unsupported"}),
+        )
+    sanitized_api = await service.validate_selection(
+        "tenant-1",
+        InferenceSelection(
+            provider="api",
+            model="test-model",
+            service_tier="priority",
+            fallback_to_api=True,
+        ),
+    )
+    assert sanitized_api.service_tier is None
+    assert sanitized_api.fallback_to_api is False
 
 
 def test_codex_credentials_are_encrypted_and_refresh_rotation_is_atomic(tmp_path: Path) -> None:
@@ -331,6 +433,7 @@ def test_pinned_langchain_codex_adapter_contract(tmp_path: Path) -> None:
         model="gpt-test",
         reasoning_effort="high",
         token_provider=provider,
+        service_tier="priority",
     )
     signature = inspect.signature(type(model))
 
@@ -342,11 +445,13 @@ def test_pinned_langchain_codex_adapter_contract(tmp_path: Path) -> None:
     assert model.originator == "opentulpa"
     assert model.include == ["reasoning.encrypted_content"]
     assert model.reasoning == {"effort": "high", "summary": "auto"}
+    assert model.service_tier == "priority"
     payload = model._get_request_payload(  # noqa: SLF001
         [SystemMessage(content="system instruction"), HumanMessage(content="hello")],
         _codex_headers={},
     )
     assert payload["instructions"] == "system instruction"
+    assert payload["service_tier"] == "priority"
     assert all(item.get("role") != "system" for item in payload["input"])
     bound = model.bind_tools(
         [
@@ -461,7 +566,7 @@ async def test_codex_401_refreshes_once_and_transient_fallback_stops_after_activ
     assert is_transient(UnauthorizedError()) is False
 
 
-def test_graph_cache_separates_provider_model_effort_and_is_bounded(tmp_path: Path) -> None:
+def test_graph_cache_separates_provider_model_effort_tier_and_is_bounded(tmp_path: Path) -> None:
     service = DeepAgentService(
         api_key="api-secret",
         base_url="https://openrouter.ai/api/v1",
@@ -487,10 +592,27 @@ def test_graph_cache_separates_provider_model_effort_and_is_bounded(tmp_path: Pa
             InferenceSelection(provider="api", model="two", reasoning_effort="high"),
             preference_revision=3,
         ),
+        ResolvedInferencePlan.resolve(
+            InferenceSelection(
+                provider="codex",
+                model="gpt-test",
+                reasoning_effort="high",
+            ),
+            preference_revision=4,
+        ),
+        ResolvedInferencePlan.resolve(
+            InferenceSelection(
+                provider="codex",
+                model="gpt-test",
+                reasoning_effort="high",
+                service_tier="priority",
+            ),
+            preference_revision=5,
+        ),
     )
 
     keys = {service._inference_cache_key("tenant-1", plan) for plan in plans}  # noqa: SLF001
-    assert len(keys) == 3
+    assert len(keys) == 5
     for index in range(10):
         service._cache_spec_graph((index,), object())  # noqa: SLF001
     assert list(service._spec_graphs) == [(index,) for index in range(2, 10)]  # noqa: SLF001

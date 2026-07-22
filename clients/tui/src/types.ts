@@ -82,6 +82,7 @@ export type InferenceSelection = {
   provider: InferenceProvider
   model: string
   reasoning_effort: string | null
+  service_tier: string | null
   fallback_to_api: boolean
 }
 
@@ -96,6 +97,14 @@ export type InferenceModel = {
   id: string
   reasoning_efforts: string[]
   default_reasoning_effort: string | null
+  service_tiers: InferenceServiceTier[]
+  default_service_tier: string | null
+}
+
+export type InferenceServiceTier = {
+  id: string
+  name: string
+  description: string
 }
 
 export type InferenceStatus = {

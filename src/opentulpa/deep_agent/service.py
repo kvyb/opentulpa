@@ -2034,6 +2034,7 @@ class DeepAgentService:
         if (
             plan.primary.model == self._model_name
             and plan.primary.reasoning_effort == self._reasoning_effort
+            and plan.primary.service_tier is None
         ):
             return ResolvedModel(model=self._provided_model or self._build_model())
         return ResolvedModel(
@@ -2118,6 +2119,7 @@ class DeepAgentService:
             plan.primary.provider,
             plan.primary.model,
             plan.primary.reasoning_effort,
+            plan.primary.service_tier,
             plan.primary.fallback_to_api,
             credential_revision,
         )
@@ -2522,6 +2524,7 @@ class DeepAgentService:
             "provider": inference_plan.primary.provider,
             "model": inference_plan.primary.model,
             "reasoning_effort": inference_plan.primary.reasoning_effort,
+            "service_tier": inference_plan.primary.service_tier,
             "inference_plan_digest": inference_plan.digest,
             "preference_revision": inference_plan.preference_revision,
         }
@@ -2764,6 +2767,7 @@ class DeepAgentService:
             "inference_provider": plan.primary.provider,
             "inference_model": plan.primary.model,
             "reasoning_effort": plan.primary.reasoning_effort,
+            "service_tier": plan.primary.service_tier,
             "inference_plan_digest": plan.digest,
             "preference_revision": plan.preference_revision,
         }

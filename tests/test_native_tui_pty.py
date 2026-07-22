@@ -56,6 +56,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "provider": "api",
                         "model": "moonshotai/kimi-k3",
                         "reasoning_effort": None,
+                        "service_tier": None,
                         "fallback_to_api": False,
                     },
                     "codex": {
@@ -76,6 +77,8 @@ class _Handler(BaseHTTPRequestHandler):
                             "id": "moonshotai/kimi-k3",
                             "reasoning_efforts": ["low", "medium", "high"],
                             "default_reasoning_effort": "low",
+                            "service_tiers": [],
+                            "default_service_tier": None,
                         }
                     ],
                 }
@@ -93,6 +96,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "provider": "api",
                         "model": "moonshotai/kimi-k3",
                         "reasoning_effort": None,
+                        "service_tier": None,
                         "fallback_to_api": False,
                     },
                 }

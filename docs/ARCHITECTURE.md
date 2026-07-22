@@ -75,10 +75,10 @@ never rendered as the assistant's answer.
 Owner threads may override the configured API model with a revisioned API or Codex
 selection. The service resolves and persists an immutable inference plan before a run
 starts; approval resume and restart recovery reuse that exact plan. Graphs are compiled
-and bounded-cached by AgentSpec, dynamic tools, provider, model, reasoning effort, and
-Codex credential revision, so Deep Agents delegation and summarization use the same
-model as the main turn. Routine, intake, and explicit non-default AgentSpec model aliases
-ignore owner-thread preferences.
+and bounded-cached by AgentSpec, dynamic tools, provider, model, reasoning effort,
+service tier, and Codex credential revision, so Deep Agents delegation and summarization
+use the same model as the main turn. Routine, intake, and explicit non-default AgentSpec
+model aliases ignore owner-thread preferences.
 
 Codex uses the pinned private LangChain adapter directly, not a Codex or Hermes process.
 OAuth credentials and device sessions are encrypted with the host key. A 401 forces one

@@ -7,7 +7,11 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from opentulpa.api.routes.v2_inference import register_v2_inference_routes
-from opentulpa.inference.models import InferenceModel, InferenceSelection
+from opentulpa.inference.models import (
+    InferenceModel,
+    InferenceSelection,
+    InferenceServiceTier,
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,7 @@ class _Inference:
                 "provider": "api",
                 "model": "kimi",
                 "reasoning_effort": "low",
+                "service_tier": None,
                 "fallback_to_api": False,
             },
             "codex": {"connected": self.connected, "credential_revision": 1},
@@ -41,6 +46,15 @@ class _Inference:
                 provider=provider,
                 id="gpt-test" if provider == "codex" else "kimi",
                 reasoning_efforts=("low", "high"),
+                service_tiers=(
+                    InferenceServiceTier(
+                        id="priority",
+                        name="Fast",
+                        description="1.5x speed, increased usage",
+                    ),
+                )
+                if provider == "codex"
+                else (),
             ),
         )
         return tuple(model for model in models if query.casefold() in model.id.casefold())
@@ -151,6 +165,7 @@ def test_inference_routes_use_authenticated_tenant_and_revisioned_thread_selecti
                 "provider": "codex",
                 "model": "gpt-test",
                 "reasoning_effort": "high",
+                "service_tier": "priority",
                 "fallback_to_api": False,
             },
         },
@@ -161,6 +176,7 @@ def test_inference_routes_use_authenticated_tenant_and_revisioned_thread_selecti
     assert updated.status_code == 200
     assert updated.json()["revision"] == 1
     assert threads.selection is not None and threads.selection.provider == "codex"
+    assert threads.selection.service_tier == "priority"
     assert (
         client.get(
             "/v2/agent/threads/thread-1/inference",

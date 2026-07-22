@@ -134,6 +134,7 @@ def build_codex_model(
     model: str,
     reasoning_effort: str | None,
     token_provider: CodexTokenProvider,
+    service_tier: str | None = None,
     buffer_for_fallback: bool = False,
 ) -> _ChatOpenAICodex:
     reasoning = (
@@ -146,6 +147,7 @@ def build_codex_model(
         reasoning=reasoning,
         include=["reasoning.encrypted_content"],
         output_version="responses/v1",
+        service_tier=service_tier,
         max_retries=0,
         timeout=60.0,
         # A streamed primary can emit text before middleware sees its terminal
