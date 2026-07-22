@@ -67,13 +67,12 @@ digest-checked patch for normal upstream review.
 
 ## Interfaces And Capabilities
 
-FastAPI exposes the headless public API. The bundled `opentulpa` command is a local,
-keyboard-first terminal client that calls the run, file, approval, replay, notification,
-and log endpoints. Telegram is a versioned interface capability using the same protocol
-with a scoped credential. Drag files or images into the TUI to attach them; use
-`/new [NAME]`, `/sessions`, and `/session NAME_OR_NUMBER` to move between durable Deep
-Agents threads. Risky actions appear as clickable **Approve** and **Reject** cards, with
-the slash commands retained for keyboard-only use.
+FastAPI exposes the headless public API. The bundled `opentulpa` command opens a native
+OpenTUI client with streamed Markdown, a visible activity spinner, compact expandable
+tool calls, drag-and-drop attachments, server-backed sessions, and clickable
+**Approve**, **Edit**, and **Reject** controls. Telegram uses the same Agent API with a
+scoped credential. Use `ctrl+p` or `/sessions` to reopen the same durable Deep Agents
+threads from another client.
 
 For example, from the terminal client you can write:
 
@@ -128,6 +127,10 @@ All owner interfaces use the same V2 surfaces:
 
 | Endpoint | Purpose |
 |---|---|
+| `POST /v2/agent/threads` | Create a durable server-backed conversation |
+| `GET /v2/agent/threads` | List tenant-owned conversations |
+| `GET /v2/agent/threads/{thread_id}/timeline` | Replay messages, tools, artifacts, and approvals |
+| `PATCH /v2/agent/threads/{thread_id}` | Rename or archive a conversation |
 | `POST /v2/agent/runs` | Start an owner run and stream normalized SSE events |
 | `GET /v2/agent/runs/{run_id}` | Read tenant-scoped status and pending approvals |
 | `POST /v2/agent/runs/{run_id}/resume` | Approve, edit, or reject an interrupted run |
@@ -222,7 +225,9 @@ opentulpa
 ```
 
 Choose **Run here**, enter the model API key once, and the CLI starts the private server
-and opens the TUI. Later, just run `opentulpa` again.
+and opens the native TUI. A source checkout builds and caches the platform client on the
+first run; CI also produces macOS and Linux platform archives. Later, just run
+`opentulpa` again.
 
 ```bash
 # Remote server

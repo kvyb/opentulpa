@@ -489,6 +489,49 @@ def _service(
     )
 
 
+@pytest.mark.asyncio
+async def test_threads_project_sanitized_requests_events_and_tenant_ownership(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["Hello from Tulpa"]))
+    await service.start()
+    try:
+        request = AgentRunRequest(
+            context=_context(),
+            text="Plan the launch",
+            file_ids=("file-1",),
+        )
+        result = await service.run(request)
+        listed = await service.list_threads(tenant_id="tenant-1")
+        timeline = await service.thread_timeline(
+            tenant_id="tenant-1",
+            thread_id=request.context.thread_id,
+        )
+        missing = await service.thread_timeline(
+            tenant_id="tenant-2",
+            thread_id=request.context.thread_id,
+        )
+    finally:
+        await service.shutdown()
+
+    assert listed["threads"][0]["title"] == "Plan the launch"
+    assert timeline is not None
+    assert timeline["entries"][0] == {
+        "id": f"{result.run_id}:user",
+        "type": "user",
+        "run_id": result.run_id,
+        "timestamp": result.created_at,
+        "text": "Plan the launch",
+        "file_ids": ["file-1"],
+    }
+    assert timeline["entries"][-1]["type"] == "assistant"
+    assert timeline["entries"][-1]["text"] == "Hello from Tulpa"
+    assert any(
+        entry.get("event_type") == "message.delta" for entry in timeline["entries"]
+    )
+    assert missing is None
+
+
 def test_request_content_inlines_tenant_owned_images_and_text(tmp_path: Path) -> None:
     resolver = _AttachmentResolver(
         {
@@ -981,13 +1024,18 @@ async def test_chunked_tool_calls_emit_one_complete_start_event(tmp_path: Path) 
     service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
     await service.start()
     service._graphs["owner"] = _ChunkedToolGraph()  # noqa: SLF001
+    context = _context()
     try:
         events = [
             event
             async for event in service.stream(
-                AgentRunRequest(context=_context(), text="Find cats")
+                AgentRunRequest(context=context, text="Find cats")
             )
         ]
+        timeline = await service.thread_timeline(
+            tenant_id=context.tenant_id,
+            thread_id=context.thread_id,
+        )
     finally:
         await service.shutdown()
 
@@ -1005,6 +1053,12 @@ async def test_chunked_tool_calls_emit_one_complete_start_event(tmp_path: Path) 
     }
     assert events[2].data["call_id"] == "call-search"
     assert events[-1].data["text"] == "Found cats."
+    assert timeline is not None
+    assert [
+        entry["event_type"]
+        for entry in timeline["entries"]
+        if entry.get("event_type")
+    ] == ["tool.started", "tool.completed", "message.delta", "run.completed"]
 
 
 @pytest.mark.asyncio

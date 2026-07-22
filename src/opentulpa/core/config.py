@@ -309,10 +309,10 @@ class Settings(BaseSettings):
             aliases[alias] = model
         return aliases
     llm_reasoning_effort: str | None = Field(
-        default="medium",
+        default="low",
         description=(
             "Optional reasoning effort for providers/models that support it "
-            "(for example: low, medium, high). Defaults to medium for agent-owned "
+            "(for example: low, medium, high). Defaults to low for responsive agent-owned "
             "LLM calls; set empty/null to avoid sending reasoning_effort."
         ),
     )

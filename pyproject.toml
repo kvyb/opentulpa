@@ -23,7 +23,6 @@ dependencies = [
     "langchain-mcp-adapters>=0.1.0",
     "langchain-openrouter>=0.2.1",
     "python-multipart>=0.0.22",
-    "prompt-toolkit>=3.0.52,<4",
     "keyring>=25,<26",
 ]
 

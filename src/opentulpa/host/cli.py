@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import getpass
+import hashlib
 import json
 import os
+import platform
 import re
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -26,13 +30,13 @@ from opentulpa.client.config import (
     load_connection,
     normalize_url,
     save_connection,
+    update_connection,
 )
 from opentulpa.client.local_server import (
     LocalServerError,
     ensure_local_server,
     is_loopback_url,
 )
-from opentulpa.client.tui import run_tui
 from opentulpa.core.config import get_settings
 from opentulpa.host.app import create_host_app
 from opentulpa.host.models import HostConfigInput
@@ -197,7 +201,7 @@ def _remote(args: argparse.Namespace) -> int:
         if args.no_tui:
             return 0
         _configure_runtime(connection)
-        asyncio.run(run_tui(connection))
+        _launch_tui(connection)
         return 0
     try:
         connection = load_connection()
@@ -424,9 +428,170 @@ def _server_command(args: argparse.Namespace) -> None:
 def _open_tui() -> None:
     try:
         connection = _interactive_connection()
-        asyncio.run(run_tui(connection))
+        _launch_tui(connection)
     except (EOFError, KeyboardInterrupt):
         print("\nSetup cancelled.")
+        return
+
+
+def _launch_tui(connection: Connection) -> None:
+    _migrate_legacy_session_names(connection)
+    binary = _ensure_tui_binary()
+    connection_read, connection_write = os.pipe()
+    state_read, state_write = os.pipe()
+    os.set_inheritable(connection_read, True)
+    os.set_inheritable(state_write, True)
+    environment = os.environ.copy()
+    environment["OPENTULPA_CONNECTION_FD"] = str(connection_read)
+    environment["OPENTULPA_STATE_FD"] = str(state_write)
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            [str(binary)],
+            env=environment,
+            pass_fds=(connection_read, state_write),
+        )
+        os.close(connection_read)
+        connection_read = -1
+        os.close(state_write)
+        state_write = -1
+        payload = json.dumps(
+            {
+                "url": connection.url,
+                "token": connection.token,
+                "thread_id": connection.thread_id,
+                "credential_storage": connection.credential_storage,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with os.fdopen(connection_write, "wb") as stream:
+            connection_write = -1
+            stream.write(payload)
+        process.wait()
+        with os.fdopen(state_read, "rb") as stream:
+            state_read = -1
+            raw_state = stream.read(16_384)
+        if raw_state:
+            state = json.loads(raw_state)
+            thread_id = str(state.get("thread_id") or "").strip()
+            if thread_id and thread_id != connection.thread_id:
+                update_connection(
+                    connection,
+                    thread_id=thread_id,
+                    last_run_id=None,
+                    last_sequence=0,
+                )
+        if process.returncode:
+            raise SystemExit(f"OpenTulpa terminal client exited with status {process.returncode}.")
+    except KeyboardInterrupt:
+        if process is not None:
+            process.terminate()
+            process.wait(timeout=5)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Could not launch the OpenTulpa terminal client: {exc}") from exc
+    finally:
+        for descriptor in (connection_read, connection_write, state_read, state_write):
+            if descriptor >= 0:
+                with suppress(OSError):
+                    os.close(descriptor)
+
+
+def _ensure_tui_binary() -> Path:
+    configured = str(os.environ.get("OPENTULPA_TUI_BINARY") or "").strip()
+    if configured:
+        binary = Path(configured).expanduser().resolve()
+        if binary.is_file() and os.access(binary, os.X_OK):
+            return binary
+        raise SystemExit(f"OpenTulpa terminal client is not executable: {binary}")
+    system = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    machine = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "AMD64": "x64"}.get(
+        platform.machine()
+    )
+    if system is None or machine is None:
+        raise SystemExit("The OpenTulpa terminal client supports macOS and Linux on arm64 or x64.")
+    target_name = f"opentulpa-tui-{system}-{machine}"
+    project_root = Path(__file__).resolve().parents[3]
+    client_root = project_root / "clients" / "tui"
+    binary = client_root / "dist" / target_name
+    if binary.is_file() and os.access(binary, os.X_OK):
+        return binary
+    for installed_name in ("opentulpa-tui", target_name):
+        installed = shutil.which(installed_name)
+        if installed:
+            return Path(installed).resolve()
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    bun_candidates = [
+        data_home / "opentulpa" / "bun" / "bin" / "bun",
+        Path(shutil.which("bun") or ""),
+    ]
+    bun = next(
+        (
+            str(candidate)
+            for candidate in bun_candidates
+            if candidate.is_file()
+            and os.access(candidate, os.X_OK)
+            and subprocess.run(
+                [str(candidate), "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            == "1.3.14"
+        ),
+        None,
+    )
+    if bun is None or not (client_root / "package.json").is_file():
+        raise SystemExit(
+            "The native terminal client is missing. Run ./install.sh from an OpenTulpa "
+            "source checkout to install its pinned build tool, or install a release build "
+            "for this platform."
+        )
+    try:
+        subprocess.run(
+            [bun, "install", "--frozen-lockfile"],
+            cwd=client_root,
+            check=True,
+        )
+        subprocess.run([bun, "run", "build"], cwd=client_root, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit("The native OpenTulpa terminal client could not be built.") from exc
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise SystemExit("The native OpenTulpa terminal client build produced no executable.")
+    return binary
+
+
+def _migrate_legacy_session_names(connection: Connection) -> None:
+    path = config_path().with_name("sessions.json")
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        servers = payload.get("servers", {}) if isinstance(payload, dict) else {}
+        server = servers.get(hashlib.sha256(connection.url.encode("utf-8")).hexdigest(), {})
+        sessions = server.get("sessions", []) if isinstance(server, dict) else []
+        names = {
+            str(item.get("thread_id")): str(item.get("name"))
+            for item in sessions
+            if isinstance(item, dict)
+            and str(item.get("thread_id") or "").strip()
+            and 0 < len(str(item.get("name") or "").strip()) <= 120
+        }
+        if not names:
+            return
+        headers = _owner_headers(connection.token)
+        with httpx.Client(timeout=10, trust_env=False, headers=headers) as client:
+            response = client.get(f"{connection.url}/v2/agent/threads?limit=100")
+            if not response.is_success:
+                return
+            for thread in response.json().get("threads", []):
+                thread_id = str(thread.get("thread_id") or "")
+                title = names.get(thread_id)
+                if title and title != str(thread.get("title") or ""):
+                    client.patch(
+                        f"{connection.url}/v2/agent/threads/{thread_id}",
+                        json={"title": title},
+                    )
+    except (OSError, ValueError, TypeError, httpx.HTTPError):
         return
 
 

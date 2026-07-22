@@ -1,0 +1,54 @@
+name: Native TUI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - working-directory: clients/tui
+        run: bun install --frozen-lockfile
+      - working-directory: clients/tui
+        run: bun run typecheck && bun test
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: darwin-arm64
+          - runner: macos-13
+            target: darwin-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: ubuntu-24.04
+            target: linux-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - working-directory: clients/tui
+        run: bun install --frozen-lockfile
+      - working-directory: clients/tui
+        run: bun run build
+      - working-directory: clients/tui
+        run: ./dist/opentulpa-tui-${{ matrix.target }} --version
+      - run: python3 tests/test_native_tui_pty.py clients/tui/dist/opentulpa-tui-${{ matrix.target }}
+      - run: |
+          mkdir -p clients/tui/release
+          install -m 755 clients/tui/dist/opentulpa-tui-${{ matrix.target }} clients/tui/release/opentulpa-tui
+          tar -czf clients/tui/dist/opentulpa-tui-${{ matrix.target }}.tar.gz -C clients/tui/release opentulpa-tui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opentulpa-tui-${{ matrix.target }}
+          path: clients/tui/dist/opentulpa-tui-${{ matrix.target }}.tar.gz

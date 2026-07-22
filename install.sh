@@ -60,6 +60,40 @@ fi
 
 say "installing the OpenTulpa command"
 UV_PYTHON=3.12 "${UV_BIN}" sync --locked --no-dev --project "${SOURCE_ROOT}"
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) TUI_TARGET="darwin-arm64" ;;
+  Darwin-x86_64) TUI_TARGET="darwin-x64" ;;
+  Linux-aarch64|Linux-arm64) TUI_TARGET="linux-arm64" ;;
+  Linux-x86_64) TUI_TARGET="linux-x64" ;;
+  *) TUI_TARGET="" ;;
+esac
+TUI_ROOT="${SOURCE_ROOT}/clients/tui"
+BUN_VERSION="1.3.14"
+if [ -n "${TUI_TARGET}" ] && [ -f "${TUI_ROOT}/package.json" ] \
+  && [ ! -x "${TUI_ROOT}/dist/opentulpa-tui-${TUI_TARGET}" ]; then
+  if command -v bun >/dev/null 2>&1 \
+    && [ "$(bun --version 2>/dev/null || true)" = "${BUN_VERSION}" ]; then
+    BUN_BIN="$(command -v bun)"
+  else
+    command -v curl >/dev/null 2>&1 || {
+      printf '%s\n' "OpenTulpa requires curl to install its terminal renderer." >&2
+      exit 1
+    }
+    BUN_HOME="${DATA_HOME}/opentulpa/bun"
+    say "installing the pinned terminal build tool"
+    BUN_INSTALL="${BUN_HOME}" curl -fsSL https://bun.com/install \
+      | BUN_INSTALL="${BUN_HOME}" bash -s "bun-v${BUN_VERSION}"
+    BUN_BIN="${BUN_HOME}/bin/bun"
+  fi
+  [ -x "${BUN_BIN}" ] || {
+    printf '%s\n' "Bun installation did not create ${BUN_BIN}" >&2
+    exit 1
+  }
+  say "building the native terminal client"
+  (cd "${TUI_ROOT}" && "${BUN_BIN}" install --frozen-lockfile && "${BUN_BIN}" run build)
+fi
+
 COMMAND_SOURCE="${SOURCE_ROOT}/.venv/bin/opentulpa"
 [ -x "${COMMAND_SOURCE}" ] || {
   printf '%s\n' "OpenTulpa installation did not create ${COMMAND_SOURCE}" >&2

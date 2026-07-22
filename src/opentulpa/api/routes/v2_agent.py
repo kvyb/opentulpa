@@ -68,6 +68,27 @@ class AgentRunService(Protocol):
 
     async def cancel(self, run_id: str) -> AgentRunSnapshot: ...
 
+    async def create_thread(
+        self, *, tenant_id: str, channel: str, title: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def list_threads(
+        self, *, tenant_id: str, cursor: str | None = None, limit: int = 50
+    ) -> dict[str, Any]: ...
+
+    async def thread_timeline(
+        self, *, tenant_id: str, thread_id: str, cursor: int = 0, limit: int = 30
+    ) -> dict[str, Any] | None: ...
+
+    async def update_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        title: str | None = None,
+        archived: bool | None = None,
+    ) -> dict[str, Any] | None: ...
+
 
 class AgentRunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -93,6 +114,25 @@ class AgentRunResumeRequest(BaseModel):
             raise ValueError("edited_arguments are required for edit decisions")
         if self.decision != "edit" and self.edited_arguments is not None:
             raise ValueError("edited_arguments are only allowed for edit decisions")
+        return self
+
+
+class AgentThreadCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class AgentThreadUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    archived: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> AgentThreadUpdateRequest:
+        if self.title is None and self.archived is None:
+            raise ValueError("title or archived is required")
         return self
 
 
@@ -217,6 +257,73 @@ def register_v2_agent_routes(
             run_kind=AgentRunKind.OWNER.value,
             trust_class="owner",
         )
+
+    @app.post("/v2/agent/threads", status_code=201)
+    async def create_agent_thread(
+        body: AgentThreadCreateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_SUBMIT.value)
+        return await service_or_503().create_thread(
+            tenant_id=principal.tenant_id,
+            channel=principal.channel,
+            title=body.title,
+        )
+
+    @app.get("/v2/agent/threads")
+    async def list_agent_threads(
+        request: Request,
+        cursor: str | None = None,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_REPLAY.value)
+        return await service_or_503().list_threads(
+            tenant_id=principal.tenant_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    @app.get("/v2/agent/threads/{thread_id}/timeline")
+    async def get_agent_thread_timeline(
+        thread_id: str,
+        request: Request,
+        cursor: int = Query(default=0, ge=0),
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> dict[str, Any]:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_REPLAY.value)
+        timeline = await service_or_503().thread_timeline(
+            tenant_id=principal.tenant_id,
+            thread_id=thread_id,
+            cursor=cursor,
+            limit=limit,
+        )
+        if timeline is None:
+            raise HTTPException(status_code=404, detail="agent thread not found")
+        return timeline
+
+    @app.patch("/v2/agent/threads/{thread_id}")
+    async def update_agent_thread(
+        thread_id: str,
+        body: AgentThreadUpdateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_SUBMIT.value)
+        try:
+            updated = await service_or_503().update_thread(
+                tenant_id=principal.tenant_id,
+                thread_id=thread_id,
+                title=body.title,
+                archived=body.archived,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="agent thread not found")
+        return updated
 
     @app.post(
         "/v2/agent/runs",

@@ -4,8 +4,10 @@ builder = "DOCKERFILE"
 [deploy]
 startCommand = "./start.sh serve --run-only"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 600
+healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
-overlapSeconds = 120
-drainingSeconds = 300
+# OpenTulpa is a single-active-process SQLite deployment. Never overlap releases
+# that share its persistent Railway volume.
+overlapSeconds = 0
+drainingSeconds = 15

@@ -1,6 +1,5 @@
-"""Local terminal client for a remote OpenTulpa deployment."""
+"""Local launcher state for a remote OpenTulpa deployment."""
 
-from opentulpa.client.api import ClientEvent, OpenTulpaClient, RemoteError
 from opentulpa.client.config import (
     ClientConfigError,
     Connection,
@@ -12,10 +11,7 @@ from opentulpa.client.config import (
 
 __all__ = [
     "ClientConfigError",
-    "ClientEvent",
     "Connection",
-    "OpenTulpaClient",
-    "RemoteError",
     "clear_connection",
     "load_connection",
     "save_connection",

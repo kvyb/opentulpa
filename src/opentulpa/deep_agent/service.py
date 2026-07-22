@@ -380,7 +380,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     last_sequence INTEGER NOT NULL DEFAULT 0,
     request_digest TEXT NOT NULL DEFAULT '',
     dynamic_generation INTEGER NOT NULL DEFAULT 0,
-    dynamic_digest TEXT NOT NULL DEFAULT ''
+    dynamic_digest TEXT NOT NULL DEFAULT '',
+    request_text TEXT NOT NULL DEFAULT '',
+    file_ids_json TEXT NOT NULL DEFAULT '[]'
 )
 """
 
@@ -396,13 +398,26 @@ CREATE TABLE IF NOT EXISTS agent_run_events (
 )
 """
 
+_THREAD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_threads (
+    tenant_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, thread_id)
+)
+"""
+
 
 def build_openrouter_chat_model(
     *,
     api_key: str,
     base_url: str,
     model_name: str,
-    reasoning_effort: str | None = "medium",
+    reasoning_effort: str | None = "low",
     max_completion_tokens: int | None = None,
     provider_order: Sequence[str] = (),
 ) -> ChatOpenRouter:
@@ -455,7 +470,7 @@ class DeepAgentService:
         workspaces_root: str | Path,
         tools: Sequence[BaseTool] = (),
         dynamic_tools: DynamicToolProvider | None = None,
-        reasoning_effort: str | None = "medium",
+        reasoning_effort: str | None = "low",
         max_completion_tokens: int | None = None,
         langfuse_tracer: Any | None = None,
         model: Any | None = None,
@@ -540,6 +555,7 @@ class DeepAgentService:
         await self._runs_db.execute("PRAGMA journal_mode=WAL")
         await self._runs_db.execute(_RUN_SCHEMA)
         await self._runs_db.execute(_RUN_EVENT_SCHEMA)
+        await self._runs_db.execute(_THREAD_SCHEMA)
         schema_cursor = await self._runs_db.execute("PRAGMA table_info(agent_runs)")
         columns = {str(row[1]) for row in await schema_cursor.fetchall()}
         await schema_cursor.close()
@@ -556,6 +572,8 @@ class DeepAgentService:
             ("request_digest", "TEXT NOT NULL DEFAULT ''"),
             ("dynamic_generation", "INTEGER NOT NULL DEFAULT 0"),
             ("dynamic_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("request_text", "TEXT NOT NULL DEFAULT ''"),
+            ("file_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
         ):
             if column not in columns:
                 await self._runs_db.execute(
@@ -572,6 +590,29 @@ class DeepAgentService:
             """
             CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_type
             ON agent_run_events (run_id, event_type)
+            """
+        )
+        await self._runs_db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_threads_tenant_updated
+            ON agent_threads (tenant_id, archived, updated_at DESC, thread_id DESC)
+            """
+        )
+        await self._runs_db.execute(
+            """
+            INSERT OR IGNORE INTO agent_threads (
+                tenant_id, thread_id, title, channel, archived, created_at, updated_at
+            )
+            SELECT
+                tenant_id,
+                thread_id,
+                'Previous session',
+                MIN(channel),
+                0,
+                MIN(created_at),
+                MAX(updated_at)
+            FROM agent_runs
+            GROUP BY tenant_id, thread_id
             """
         )
         await self._runs_db.commit()
@@ -646,6 +687,8 @@ class DeepAgentService:
             run_id,
             checkpoint_thread_id,
             request.context,
+            request_text=request.text,
+            file_ids=request.file_ids,
             idempotency_key=request.idempotency_key,
             request_digest=self._request_digest(request),
             dynamic_generation=dynamic.generation,
@@ -1230,6 +1273,262 @@ class DeepAgentService:
         updated = await self.get_run(run_id)
         assert updated is not None
         return updated
+
+    async def create_thread(
+        self,
+        *,
+        tenant_id: str,
+        channel: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Create durable client metadata without creating a Deep Agents checkpoint."""
+
+        self._require_started()
+        thread_id = new_short_id("thread", suffix_chars=12)
+        now = utc_now_iso()
+        safe_title = self._normalize_thread_title(title) or "New session"
+        db = self._require_runs_db()
+        await db.execute(
+            """
+            INSERT INTO agent_threads (
+                tenant_id, thread_id, title, channel, archived, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 0, ?, ?)
+            """,
+            (tenant_id, thread_id, safe_title, channel, now, now),
+        )
+        await db.commit()
+        return {
+            "thread_id": thread_id,
+            "title": safe_title,
+            "channel": channel,
+            "archived": False,
+            "created_at": now,
+            "updated_at": now,
+            "last_run_id": None,
+            "status": "idle",
+            "preview": "",
+        }
+
+    async def list_threads(
+        self,
+        *,
+        tenant_id: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        self._require_started()
+        safe_limit = min(max(1, int(limit)), 100)
+        cursor_updated, cursor_thread = self._decode_thread_cursor(cursor)
+        where = "thread.tenant_id = ? AND thread.archived = 0"
+        values: list[Any] = [tenant_id]
+        if cursor_updated and cursor_thread:
+            where += " AND (thread.updated_at, thread.thread_id) < (?, ?)"
+            values.extend((cursor_updated, cursor_thread))
+        values.append(safe_limit + 1)
+        db = self._require_runs_db()
+        query = f"""
+            SELECT
+                thread.thread_id,
+                thread.title,
+                thread.channel,
+                thread.archived,
+                thread.created_at,
+                thread.updated_at,
+                latest.run_id AS last_run_id,
+                COALESCE(latest.status, 'idle') AS status,
+                COALESCE(NULLIF(latest.final_text, ''), latest.request_text, '') AS preview
+            FROM agent_threads AS thread
+            LEFT JOIN agent_runs AS latest
+              ON latest.run_id = (
+                  SELECT run.run_id
+                  FROM agent_runs AS run
+                  WHERE run.tenant_id = thread.tenant_id
+                    AND run.thread_id = thread.thread_id
+                  ORDER BY run.created_at DESC, run.run_id DESC
+                  LIMIT 1
+              )
+            WHERE {where}
+            ORDER BY thread.updated_at DESC, thread.thread_id DESC
+            LIMIT ?
+        """
+        result = await db.execute(query, values)
+        rows = list(await result.fetchall())
+        await result.close()
+        has_more = len(rows) > safe_limit
+        rows = rows[:safe_limit]
+        items = [self._thread_row(row) for row in rows]
+        next_cursor = None
+        if has_more and rows:
+            last = rows[-1]
+            next_cursor = self._encode_thread_cursor(
+                str(last["updated_at"]), str(last["thread_id"])
+            )
+        return {"threads": items, "next_cursor": next_cursor}
+
+    async def thread_timeline(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        cursor: int = 0,
+        limit: int = 30,
+    ) -> dict[str, Any] | None:
+        self._require_started()
+        db = self._require_runs_db()
+        thread_cursor = await db.execute(
+            """
+            SELECT
+                thread.thread_id,
+                thread.title,
+                thread.channel,
+                thread.archived,
+                thread.created_at,
+                thread.updated_at,
+                latest.run_id AS last_run_id,
+                COALESCE(latest.status, 'idle') AS status,
+                COALESCE(NULLIF(latest.final_text, ''), latest.request_text, '') AS preview
+            FROM agent_threads AS thread
+            LEFT JOIN agent_runs AS latest
+              ON latest.run_id = (
+                  SELECT run.run_id
+                  FROM agent_runs AS run
+                  WHERE run.tenant_id = thread.tenant_id
+                    AND run.thread_id = thread.thread_id
+                  ORDER BY run.created_at DESC, run.run_id DESC
+                  LIMIT 1
+              )
+            WHERE thread.tenant_id = ? AND thread.thread_id = ?
+            """,
+            (tenant_id, thread_id),
+        )
+        thread = await thread_cursor.fetchone()
+        await thread_cursor.close()
+        if thread is None:
+            return None
+        safe_cursor = max(0, int(cursor))
+        safe_limit = min(max(1, int(limit)), 100)
+        runs_cursor = await db.execute(
+            """
+            SELECT *
+            FROM agent_runs
+            WHERE tenant_id = ? AND thread_id = ?
+            ORDER BY created_at, run_id
+            LIMIT ? OFFSET ?
+            """,
+            (tenant_id, thread_id, safe_limit + 1, safe_cursor),
+        )
+        runs = list(await runs_cursor.fetchall())
+        await runs_cursor.close()
+        has_more = len(runs) > safe_limit
+        runs = runs[:safe_limit]
+        entries: list[dict[str, Any]] = []
+        for run in runs:
+            run_id = str(run["run_id"])
+            request_text = str(run["request_text"] or "")
+            try:
+                file_ids = json.loads(str(run["file_ids_json"] or "[]"))
+            except ValueError:
+                file_ids = []
+            if request_text or file_ids:
+                entries.append(
+                    {
+                        "id": f"{run_id}:user",
+                        "type": "user",
+                        "run_id": run_id,
+                        "timestamp": str(run["created_at"]),
+                        "text": request_text,
+                        "file_ids": file_ids if isinstance(file_ids, list) else [],
+                    }
+                )
+            event_cursor = await db.execute(
+                """
+                SELECT sequence, event_type, timestamp, data_json
+                FROM agent_run_events
+                WHERE run_id = ?
+                ORDER BY sequence
+                """,
+                (run_id,),
+            )
+            for event in await event_cursor.fetchall():
+                event_type = str(event["event_type"])
+                if event_type == "run.started":
+                    continue
+                try:
+                    data = json.loads(str(event["data_json"] or "{}"))
+                except ValueError:
+                    data = {}
+                entries.append(
+                    {
+                        "id": f"{run_id}:{int(event['sequence'])}",
+                        "type": self._timeline_type(event_type),
+                        "event_type": event_type,
+                        "run_id": run_id,
+                        "sequence": int(event["sequence"]),
+                        "timestamp": str(event["timestamp"]),
+                        "data": data if isinstance(data, dict) else {},
+                    }
+                )
+            await event_cursor.close()
+            final_text = str(run["final_text"] or "")
+            if final_text:
+                entries.append(
+                    {
+                        "id": f"{run_id}:assistant",
+                        "type": "assistant",
+                        "run_id": run_id,
+                        "timestamp": str(run["updated_at"]),
+                        "text": final_text,
+                    }
+                )
+        summary = self._thread_row(thread)
+        return {
+            "thread": summary,
+            "entries": entries,
+            "next_cursor": safe_cursor + safe_limit if has_more else None,
+        }
+
+    async def update_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        title: str | None = None,
+        archived: bool | None = None,
+    ) -> dict[str, Any] | None:
+        self._require_started()
+        fields = ["updated_at = ?"]
+        values: list[Any] = [utc_now_iso()]
+        if title is not None:
+            normalized = self._normalize_thread_title(title)
+            if not normalized:
+                raise ValueError("thread title cannot be empty")
+            fields.append("title = ?")
+            values.append(normalized)
+        if archived is not None:
+            fields.append("archived = ?")
+            values.append(1 if archived else 0)
+        values.extend((tenant_id, thread_id))
+        db = self._require_runs_db()
+        result = await db.execute(
+            f"UPDATE agent_threads SET {', '.join(fields)} "
+            "WHERE tenant_id = ? AND thread_id = ?",
+            values,
+        )
+        found = result.rowcount == 1
+        await result.close()
+        await db.commit()
+        if not found:
+            return None
+        cursor = await db.execute(
+            """
+            SELECT thread_id, title, channel, archived, created_at, updated_at
+            FROM agent_threads WHERE tenant_id = ? AND thread_id = ?
+            """,
+            (tenant_id, thread_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return self._thread_row(row) if row is not None else None
 
     def _build_graphs(self) -> dict[str, Any]:
         assert self._checkpointer is not None
@@ -2224,6 +2523,8 @@ class DeepAgentService:
         checkpoint_thread_id: str,
         context: AgentRunContext,
         *,
+        request_text: str = "",
+        file_ids: Sequence[str] = (),
         idempotency_key: str | None = None,
         request_digest: str = "",
         dynamic_generation: int = 0,
@@ -2269,13 +2570,39 @@ class DeepAgentService:
                     )
                 await db.execute(
                     """
+                    INSERT INTO agent_threads (
+                        tenant_id, thread_id, title, channel, archived, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 0, ?, ?)
+                    ON CONFLICT (tenant_id, thread_id) DO UPDATE SET
+                        title = CASE
+                            WHEN agent_threads.title IN ('New session', 'Previous session')
+                              AND excluded.title != 'New session'
+                            THEN excluded.title
+                            ELSE agent_threads.title
+                        END,
+                        channel = excluded.channel,
+                        archived = 0,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        context.tenant_id,
+                        context.thread_id,
+                        self._thread_title(request_text),
+                        str(context.channel),
+                        now,
+                        now,
+                    ),
+                )
+                await db.execute(
+                    """
                     INSERT INTO agent_runs (
                         run_id, tenant_id, actor_id, thread_id, checkpoint_thread_id,
                         channel, run_kind, origin_json, agent_spec_id, agent_spec_revision,
                         trust_class, correlation_id, idempotency_key, status, created_at,
-                        updated_at, request_digest, dynamic_generation, dynamic_digest
+                        updated_at, request_digest, dynamic_generation, dynamic_digest,
+                        request_text, file_ids_json
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -2297,6 +2624,8 @@ class DeepAgentService:
                         request_digest,
                         dynamic_generation,
                         dynamic_digest,
+                        request_text,
+                        json.dumps(list(file_ids), ensure_ascii=False),
                     ),
                 )
                 await db.commit()
@@ -2305,6 +2634,66 @@ class DeepAgentService:
                     await db.rollback()
                 raise
         return run_id
+
+    @staticmethod
+    def _normalize_thread_title(value: str | None) -> str:
+        title = " ".join(str(value or "").split())
+        return title[:120]
+
+    @classmethod
+    def _thread_title(cls, request_text: str) -> str:
+        text = " ".join(str(request_text or "").split())
+        if not text or text == _REGENERATE_COMMAND:
+            return "New session"
+        return cls._normalize_thread_title(text[:80])
+
+    @staticmethod
+    def _encode_thread_cursor(updated_at: str, thread_id: str) -> str:
+        payload = json.dumps([updated_at, thread_id], separators=(",", ":"))
+        return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_thread_cursor(value: str | None) -> tuple[str, str]:
+        if not value:
+            return "", ""
+        try:
+            raw = str(value)
+            raw += "=" * (-len(raw) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(raw).decode("utf-8"))
+            if not isinstance(payload, list) or len(payload) != 2:
+                return "", ""
+            return str(payload[0]), str(payload[1])
+        except (ValueError, UnicodeDecodeError):
+            return "", ""
+
+    @staticmethod
+    def _thread_row(row: aiosqlite.Row) -> dict[str, Any]:
+        keys = set(row.keys())
+        return {
+            "thread_id": str(row["thread_id"]),
+            "title": str(row["title"]),
+            "channel": str(row["channel"]),
+            "archived": bool(row["archived"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "last_run_id": (
+                str(row["last_run_id"]) if "last_run_id" in keys and row["last_run_id"] else None
+            ),
+            "status": str(row["status"]) if "status" in keys else "idle",
+            "preview": str(row["preview"] or "")[:240] if "preview" in keys else "",
+        }
+
+    @staticmethod
+    def _timeline_type(event_type: str) -> str:
+        if event_type.startswith("tool."):
+            return "tool"
+        if event_type == "approval.required":
+            return "approval"
+        if event_type == "artifact.ready":
+            return "artifact"
+        if event_type == "run.failed":
+            return "error"
+        return "event"
 
     async def _reconcile_stale_running_runs(self) -> None:
         db = self._require_runs_db()
@@ -2512,6 +2901,16 @@ class DeepAgentService:
                 )
                 await db.execute(
                     """
+                    UPDATE agent_threads
+                    SET updated_at = ?
+                    WHERE (tenant_id, thread_id) = (
+                        SELECT tenant_id, thread_id FROM agent_runs WHERE run_id = ?
+                    )
+                    """,
+                    (timestamp, run_id),
+                )
+                await db.execute(
+                    """
                     INSERT INTO agent_run_events (
                         run_id, sequence, event_type, timestamp, data_json
                     ) VALUES (?, ?, ?, ?, ?)
@@ -2605,6 +3004,16 @@ class DeepAgentService:
                 await db.execute(
                     "UPDATE agent_runs SET last_sequence = ?, updated_at = ? WHERE run_id = ?",
                     (sequence, timestamp, run_id),
+                )
+                await db.execute(
+                    """
+                    UPDATE agent_threads
+                    SET updated_at = ?
+                    WHERE (tenant_id, thread_id) = (
+                        SELECT tenant_id, thread_id FROM agent_runs WHERE run_id = ?
+                    )
+                    """,
+                    (timestamp, run_id),
                 )
                 await db.commit()
             except BaseException:

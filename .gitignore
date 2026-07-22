@@ -35,6 +35,9 @@ graphify-out/
 .graphify_*
 .playwright-mcp/
 .playwright-cli/
+clients/tui/node_modules/
+clients/tui/dist/
+clients/tui/release/
 /output/
 notion-opentulpa-board.png
 

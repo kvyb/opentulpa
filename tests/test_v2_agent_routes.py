@@ -34,6 +34,7 @@ class _FakeAgentService:
     decisions: list[tuple[str, ApprovalDecision]] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
     stream_error: Exception | None = None
+    thread_tenant: str = "tenant-a"
 
     async def open_stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
         if self.stream_error is not None:
@@ -92,6 +93,50 @@ class _FakeAgentService:
         )
         self.snapshots[run_id] = cancelled
         return cancelled
+
+    async def create_thread(
+        self, *, tenant_id: str, channel: str, title: str | None = None
+    ) -> dict[str, Any]:
+        self.thread_tenant = tenant_id
+        return {
+            "thread_id": "thread-created",
+            "title": title or "New session",
+            "channel": channel,
+            "archived": False,
+        }
+
+    async def list_threads(
+        self, *, tenant_id: str, cursor: str | None = None, limit: int = 50
+    ) -> dict[str, Any]:
+        del cursor, limit
+        return {
+            "threads": (
+                [{"thread_id": "thread-1", "title": "Main", "channel": "web"}]
+                if tenant_id == self.thread_tenant
+                else []
+            ),
+            "next_cursor": None,
+        }
+
+    async def thread_timeline(
+        self, *, tenant_id: str, thread_id: str, cursor: int = 0, limit: int = 30
+    ) -> dict[str, Any] | None:
+        del cursor, limit
+        if tenant_id != self.thread_tenant or thread_id != "thread-1":
+            return None
+        return {"thread": {"thread_id": thread_id}, "entries": [], "next_cursor": None}
+
+    async def update_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        title: str | None = None,
+        archived: bool | None = None,
+    ) -> dict[str, Any] | None:
+        if tenant_id != self.thread_tenant or thread_id != "thread-1":
+            return None
+        return {"thread_id": thread_id, "title": title or "Main", "archived": bool(archived)}
 
 
 def _event(
@@ -227,6 +272,32 @@ def test_start_run_injects_principal_context_and_streams_normalized_sse() -> Non
     assert all(item[1]["run_id"] == "run_123" for item in events)
     assert all(item[1]["timestamp"] == "2026-07-19T12:00:00+00:00" for item in events)
     assert events[1][1]["data"] == {"text": "Hello", "api_key": "[redacted]"}
+
+
+def test_thread_routes_are_server_owned_and_tenant_scoped() -> None:
+    client, _ = _client()
+    headers = {"x-tenant-id": "tenant-a", "x-actor-id": "actor-1"}
+
+    created = client.post("/v2/agent/threads", headers=headers, json={"title": "Research"})
+    assert created.status_code == 201
+    assert created.json()["title"] == "Research"
+    assert client.get("/v2/agent/threads", headers=headers).json()["threads"][0]["title"] == "Main"
+    assert (
+        client.get("/v2/agent/threads/thread-1/timeline", headers=headers).status_code == 200
+    )
+    updated = client.patch(
+        "/v2/agent/threads/thread-1",
+        headers=headers,
+        json={"title": "Renamed"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "Renamed"
+
+    other = {"x-tenant-id": "tenant-b", "x-actor-id": "actor-2"}
+    assert client.get("/v2/agent/threads/thread-1/timeline", headers=other).status_code == 404
+    assert client.patch(
+        "/v2/agent/threads/thread-1", headers=other, json={"archived": True}
+    ).status_code == 404
 
 
 def test_idempotency_conflict_returns_409_before_sse_headers() -> None:

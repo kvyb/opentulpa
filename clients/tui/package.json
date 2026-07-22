@@ -1,0 +1,23 @@
+{
+  "name": "@opentulpa/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "bun run build.ts",
+    "dev": "bun --preload @opentui/solid/preload src/index.tsx",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.8.2"
+  }
+}
