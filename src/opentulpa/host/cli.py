@@ -500,9 +500,12 @@ def _ensure_tui_binary() -> Path:
     configured = str(os.environ.get("OPENTULPA_TUI_BINARY") or "").strip()
     if configured:
         binary = Path(configured).expanduser().resolve()
-        if binary.is_file() and os.access(binary, os.X_OK):
+        if binary.is_file() and os.access(binary, os.X_OK) and _tui_protocol(binary) == "2":
             return binary
-        raise SystemExit(f"OpenTulpa terminal client is not executable: {binary}")
+        raise SystemExit(
+            "The configured OpenTulpa terminal client is incompatible. Install the matching "
+            "OpenTulpa release."
+        )
     system = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
     machine = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "AMD64": "x64"}.get(
         platform.machine()
@@ -513,12 +516,30 @@ def _ensure_tui_binary() -> Path:
     project_root = Path(__file__).resolve().parents[3]
     client_root = project_root / "clients" / "tui"
     binary = client_root / "dist" / target_name
-    if binary.is_file() and os.access(binary, os.X_OK):
-        return binary
-    for installed_name in ("opentulpa-tui", target_name):
-        installed = shutil.which(installed_name)
-        if installed:
-            return Path(installed).resolve()
+    manifest_path = client_root / "dist" / "manifest.json"
+    source_digest = _tui_source_digest(client_root)
+    if binary.is_file() and os.access(binary, os.X_OK) and source_digest:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, ValueError, json.JSONDecodeError):
+            manifest = {}
+        if (
+            manifest.get("protocol_version") == 2
+            and manifest.get("source_digest") == source_digest
+            and _tui_protocol(binary) == "2"
+        ):
+            return binary
+    if not source_digest:
+        for installed_name in ("opentulpa-tui", target_name):
+            installed = shutil.which(installed_name)
+            if installed:
+                installed_binary = Path(installed).resolve()
+                if _tui_protocol(installed_binary) != "2":
+                    raise SystemExit(
+                        "The installed OpenTulpa terminal client is older than this server "
+                        "protocol. Upgrade OpenTulpa and try again."
+                    )
+                return installed_binary
     data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     bun_candidates = [
         data_home / "opentulpa" / "bun" / "bin" / "bun",
@@ -557,7 +578,41 @@ def _ensure_tui_binary() -> Path:
         raise SystemExit("The native OpenTulpa terminal client could not be built.") from exc
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise SystemExit("The native OpenTulpa terminal client build produced no executable.")
+    if _tui_protocol(binary) != "2":
+        raise SystemExit("The native OpenTulpa terminal client build is incompatible.")
     return binary
+
+
+def _tui_protocol(binary: Path) -> str:
+    try:
+        result = subprocess.run(
+            [str(binary), "--protocol-version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _tui_source_digest(client_root: Path) -> str:
+    paths = [
+        client_root / "build.ts",
+        client_root / "bun.lock",
+        client_root / "package.json",
+        *(path for path in (client_root / "src").rglob("*") if path.is_file()),
+    ]
+    if any(not path.is_file() for path in paths):
+        return ""
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(client_root).as_posix()):
+        relative = path.relative_to(client_root).as_posix()
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _migrate_legacy_session_names(connection: Connection) -> None:

@@ -1058,7 +1058,12 @@ async def test_chunked_tool_calls_emit_one_complete_start_event(tmp_path: Path) 
         entry["event_type"]
         for entry in timeline["entries"]
         if entry.get("event_type")
-    ] == ["tool.started", "tool.completed", "message.delta", "run.completed"]
+    ] == ["run.started", "tool.started", "tool.completed", "message.delta", "run.completed"]
+    started = next(
+        entry for entry in timeline["entries"] if entry.get("event_type") == "run.started"
+    )
+    assert started["data"]["provider"] == "api"
+    assert started["data"]["model"] == "test-model"
 
 
 @pytest.mark.asyncio

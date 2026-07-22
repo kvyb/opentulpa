@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { chmodSync, mkdirSync, rmSync } from "node:fs"
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
@@ -53,3 +54,17 @@ for (const target of targets) {
   chmodSync(output, 0o755)
   console.log(output)
 }
+
+const sourceFiles = [
+  "build.ts",
+  "bun.lock",
+  "package.json",
+  ...new Bun.Glob("src/**/*").scanSync({ onlyFiles: true }),
+].sort()
+const digest = createHash("sha256")
+for (const path of sourceFiles) {
+  digest.update(path)
+  digest.update("\0")
+  digest.update(new Uint8Array(await Bun.file(path).arrayBuffer()))
+}
+writeFileSync("dist/manifest.json", JSON.stringify({ protocol_version: 2, version: "0.2.0", source_digest: digest.digest("hex") }) + "\n")

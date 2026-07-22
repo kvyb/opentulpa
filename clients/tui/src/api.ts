@@ -1,4 +1,15 @@
-import type { AgentEvent, ClientConfig, ThreadSummary, TimelineEntry } from "./types.js"
+import type {
+  AgentEvent,
+  ClientConfig,
+  CodexDeviceLogin,
+  InferenceModel,
+  InferencePreference,
+  InferenceProvider,
+  InferenceSelection,
+  InferenceStatus,
+  ThreadSummary,
+  TimelineEntry,
+} from "./types.js"
 
 export class ApiError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -49,6 +60,54 @@ export class OpenTulpaApi {
     return this.json(`/v2/agent/threads/${encodeURIComponent(threadId)}`, {
       method: "PATCH",
       body: JSON.stringify(body),
+    })
+  }
+
+  async inferenceStatus(): Promise<InferenceStatus> {
+    return this.json("/v2/inference")
+  }
+
+  async inferenceModels(provider: InferenceProvider, query = ""): Promise<InferenceModel[]> {
+    const result = await this.json<{ models: InferenceModel[] }>(
+      `/v2/inference/models?provider=${provider}&query=${encodeURIComponent(query)}`,
+    )
+    return result.models
+  }
+
+  async threadInference(threadId: string): Promise<InferencePreference> {
+    return this.json(`/v2/agent/threads/${encodeURIComponent(threadId)}/inference`)
+  }
+
+  async updateThreadInference(
+    threadId: string,
+    expectedRevision: number,
+    selection: InferenceSelection | null,
+  ): Promise<InferencePreference> {
+    return this.json(`/v2/agent/threads/${encodeURIComponent(threadId)}/inference`, {
+      method: "PATCH",
+      body: JSON.stringify({ expected_revision: expectedRevision, selection }),
+    })
+  }
+
+  async startCodexLogin(): Promise<CodexDeviceLogin> {
+    return this.json("/v2/inference/codex/device-logins", { method: "POST" })
+  }
+
+  async codexLogin(loginId: string): Promise<CodexDeviceLogin> {
+    return this.json(`/v2/inference/codex/device-logins/${encodeURIComponent(loginId)}`)
+  }
+
+  async cancelCodexLogin(loginId: string): Promise<void> {
+    const response = await fetch(
+      `${this.config.url}/v2/inference/codex/device-logins/${encodeURIComponent(loginId)}`,
+      this.withHeaders({ method: "DELETE" }),
+    )
+    if (!response.ok) throw await this.error(response)
+  }
+
+  async logoutCodex(resetThreads = false): Promise<{ disconnected: boolean; reset_threads: number }> {
+    return this.json(`/v2/inference/codex/credential?reset_threads=${resetThreads}`, {
+      method: "DELETE",
     })
   }
 

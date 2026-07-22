@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
@@ -25,7 +26,13 @@ from langchain.agents.middleware import (
     InterruptOnConfig,
     ModelCallLimitMiddleware,
 )
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool
 from langchain_openrouter import ChatOpenRouter
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -56,6 +63,15 @@ from opentulpa.deep_agent.sandbox import (
     TenantContainerPolicy,
     TenantExecutionProvider,
     TenantSandboxBackend,
+)
+from opentulpa.inference.codex import is_transient as is_codex_transient
+from opentulpa.inference.codex import is_unauthorized as is_codex_unauthorized
+from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
+from opentulpa.inference.service import (
+    InferenceConflictError,
+    InferenceService,
+    InferenceUnavailableError,
+    ResolvedModel,
 )
 from opentulpa.intake.decision import IntakeDecision
 from opentulpa.logging.langfuse import redact_for_langfuse
@@ -309,6 +325,7 @@ class _PreparedRun:
     run_id: str
     checkpoint_thread_id: str
     created: bool
+    inference_plan: ResolvedInferencePlan
 
 
 class _DenyToolsMiddleware(AgentMiddleware):
@@ -336,8 +353,16 @@ class _DenyToolsMiddleware(AgentMiddleware):
 class _ProviderFallbackMiddleware(AgentMiddleware):
     """Try an ordered model chain for provider-level failures in one model call."""
 
-    def __init__(self, fallback_models: Sequence[Any]) -> None:
+    def __init__(
+        self,
+        fallback_models: Sequence[Any],
+        *,
+        eligible: Callable[[BaseException], bool] = _is_provider_fallback_error,
+        allow_request: Callable[[Any], bool] | None = None,
+    ) -> None:
         self._fallback_models = tuple(fallback_models)
+        self._eligible = eligible
+        self._allow_request = allow_request or (lambda _: True)
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
         candidates = (request.model, *self._fallback_models)
@@ -346,7 +371,11 @@ class _ProviderFallbackMiddleware(AgentMiddleware):
             try:
                 return await handler(candidate_request)
             except Exception as exc:
-                if not _is_provider_fallback_error(exc) or index == len(candidates) - 1:
+                if (
+                    not self._eligible(exc)
+                    or not self._allow_request(request)
+                    or index == len(candidates) - 1
+                ):
                     raise
                 logger.warning(
                     "Model provider failed; trying fallback %d of %d",
@@ -354,6 +383,75 @@ class _ProviderFallbackMiddleware(AgentMiddleware):
                     len(self._fallback_models),
                 )
         raise RuntimeError("model fallback chain was empty")
+
+
+class _CodexAuthRetryMiddleware(AgentMiddleware):
+    """Force one token refresh for a single unauthorized Codex model call."""
+
+    def __init__(self, resolved: ResolvedModel) -> None:
+        self._model = resolved.model
+        self._provider = resolved.token_provider
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        try:
+            return await handler(request)
+        except Exception as exc:
+            if (
+                self._provider is None
+                or request.model is not self._model
+                or not is_codex_unauthorized(exc)
+            ):
+                raise
+            await self._provider.aforce_refresh()
+            return await handler(request)
+
+
+class _InferenceMessageMiddleware(AgentMiddleware):
+    """Remove provider-specific reasoning blocks when a thread switches providers."""
+
+    def __init__(self, provider: Literal["api", "codex"]) -> None:
+        self._provider = provider
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        messages: list[Any] = []
+        changed = False
+        for message in request.messages:
+            if not isinstance(message, AIMessage) or not isinstance(message.content, list):
+                messages.append(message)
+                continue
+            content: list[Any] = []
+            message_changed = False
+            for block in message.content:
+                if not isinstance(block, dict) or block.get("type") != "reasoning":
+                    content.append(block)
+                    continue
+                if self._provider == "codex" and block.get("encrypted_content"):
+                    content.append(block)
+                else:
+                    changed = True
+                    message_changed = True
+            messages.append(
+                message.model_copy(update={"content": content})
+                if message_changed
+                else message
+            )
+        return (
+            await handler(request.override(messages=messages))
+            if changed
+            else await handler(request)
+        )
+
+
+def _before_current_run_activity(request: Any) -> bool:
+    """Allow cross-provider fallback only on the first model call of this turn."""
+
+    messages = tuple(getattr(request, "messages", ()) or ())
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return True
+        if isinstance(message, AIMessage | ToolMessage):
+            return False
+    return True
 
 
 _RUN_SCHEMA = """
@@ -382,7 +480,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     dynamic_generation INTEGER NOT NULL DEFAULT 0,
     dynamic_digest TEXT NOT NULL DEFAULT '',
     request_text TEXT NOT NULL DEFAULT '',
-    file_ids_json TEXT NOT NULL DEFAULT '[]'
+    file_ids_json TEXT NOT NULL DEFAULT '[]',
+    inference_json TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -408,6 +507,19 @@ CREATE TABLE IF NOT EXISTS agent_threads (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, thread_id)
+)
+"""
+
+_THREAD_INFERENCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS thread_inference_preferences (
+    tenant_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    selection_json TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, thread_id),
+    FOREIGN KEY (tenant_id, thread_id)
+        REFERENCES agent_threads(tenant_id, thread_id) ON DELETE CASCADE
 )
 """
 
@@ -482,6 +594,8 @@ class DeepAgentService:
         run_observer: AgentRunObserver | None = None,
         attachment_resolver: AgentAttachmentResolver | None = None,
         provider_fallback_models: Sequence[Any] = (),
+        inference_service: InferenceService | None = None,
+        graph_cache_limit: int = 48,
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
@@ -506,6 +620,8 @@ class DeepAgentService:
         self._run_observer = run_observer
         self._attachment_resolver = attachment_resolver
         self._provider_fallback_models = tuple(provider_fallback_models)
+        self._inference = inference_service
+        self._graph_cache_limit = max(8, int(graph_cache_limit))
         self._checkpoint_conn: aiosqlite.Connection | None = None
         self._store_cm: Any | None = None
         self._checkpointer: AsyncSqliteSaver | None = None
@@ -513,7 +629,7 @@ class DeepAgentService:
         self._runs_db: aiosqlite.Connection | None = None
         self._run_event_lock = asyncio.Lock()
         self._graphs: dict[str, Any] = {}
-        self._spec_graphs: dict[tuple[str, str, int, str, int, str], Any] = {}
+        self._spec_graphs: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
         self._checkpoint_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._pending_resume_tasks: set[asyncio.Task[None]] = set()
         self._pending_resume_ids: set[str] = set()
@@ -556,6 +672,7 @@ class DeepAgentService:
         await self._runs_db.execute(_RUN_SCHEMA)
         await self._runs_db.execute(_RUN_EVENT_SCHEMA)
         await self._runs_db.execute(_THREAD_SCHEMA)
+        await self._runs_db.execute(_THREAD_INFERENCE_SCHEMA)
         schema_cursor = await self._runs_db.execute("PRAGMA table_info(agent_runs)")
         columns = {str(row[1]) for row in await schema_cursor.fetchall()}
         await schema_cursor.close()
@@ -574,6 +691,7 @@ class DeepAgentService:
             ("dynamic_digest", "TEXT NOT NULL DEFAULT ''"),
             ("request_text", "TEXT NOT NULL DEFAULT ''"),
             ("file_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("inference_json", "TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in columns:
                 await self._runs_db.execute(
@@ -585,6 +703,15 @@ class DeepAgentService:
             ON agent_runs (tenant_id, idempotency_key)
             WHERE idempotency_key IS NOT NULL
             """
+        )
+        default_plan_json = self._default_inference_plan().model_dump_json()
+        await self._runs_db.execute(
+            """
+            UPDATE agent_runs
+            SET inference_json = ?
+            WHERE inference_json IS NULL OR inference_json = ''
+            """,
+            (default_plan_json,),
         )
         await self._runs_db.execute(
             """
@@ -683,6 +810,7 @@ class DeepAgentService:
         run_id = new_short_id("run", suffix_chars=10)
         checkpoint_thread_id = self._checkpoint_thread_id(request.context)
         dynamic = self._dynamic_snapshot(request.context.tenant_id)
+        inference_plan = await self._resolve_inference_plan(request.context)
         persisted_run_id = await self._insert_run(
             run_id,
             checkpoint_thread_id,
@@ -693,11 +821,17 @@ class DeepAgentService:
             request_digest=self._request_digest(request),
             dynamic_generation=dynamic.generation,
             dynamic_digest=self._dynamic_digest(dynamic),
+            inference_plan=inference_plan,
         )
+        if persisted_run_id != run_id:
+            existing = await self.get_run(persisted_run_id)
+            if existing is not None and existing.inference_plan is not None:
+                inference_plan = existing.inference_plan
         return _PreparedRun(
             run_id=persisted_run_id,
             checkpoint_thread_id=checkpoint_thread_id,
             created=persisted_run_id == run_id,
+            inference_plan=inference_plan,
         )
 
     async def _stream_prepared(
@@ -725,6 +859,7 @@ class DeepAgentService:
                     checkpoint_thread_id=prepared.checkpoint_thread_id,
                     graph_input=graph_input,
                     resumed=False,
+                    inference_plan=prepared.inference_plan,
                 ):
                     yield event
         finally:
@@ -836,8 +971,17 @@ class DeepAgentService:
             current_dynamic = await self._verified_dynamic_snapshot(run_id, current.context)
             if self._dynamic_binding(current_dynamic) != self._dynamic_binding(dynamic):
                 raise AgentRunCapabilityConflictError(_PUBLIC_CAPABILITY_CHANGED_MESSAGE)
-            graph = self._graph_for_context(current.context, dynamic=current_dynamic)
-            config = self._run_config(current.context, checkpoint_thread_id)
+            inference_plan = current.inference_plan or self._default_inference_plan()
+            graph = self._graph_for_context(
+                current.context,
+                dynamic=current_dynamic,
+                inference_plan=inference_plan,
+            )
+            config = self._run_config(
+                current.context,
+                checkpoint_thread_id,
+                inference_plan=inference_plan,
+            )
             graph_input, handled = await self._resume_input_from_checkpoint(
                 run_id=run_id,
                 snapshot=current,
@@ -855,6 +999,7 @@ class DeepAgentService:
                 checkpoint_thread_id=checkpoint_thread_id,
                 graph_input=graph_input,
                 resumed=True,
+                inference_plan=inference_plan,
             ):
                 yield event
 
@@ -1451,8 +1596,6 @@ class DeepAgentService:
             )
             for event in await event_cursor.fetchall():
                 event_type = str(event["event_type"])
-                if event_type == "run.started":
-                    continue
                 try:
                     data = json.loads(str(event["data_json"] or "{}"))
                 except ValueError:
@@ -1530,6 +1673,141 @@ class DeepAgentService:
         await cursor.close()
         return self._thread_row(row) if row is not None else None
 
+    async def get_thread_inference(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        self._require_started()
+        db = self._require_runs_db()
+        thread = await db.execute(
+            "SELECT 1 FROM agent_threads WHERE tenant_id = ? AND thread_id = ?",
+            (tenant_id, thread_id),
+        )
+        exists = await thread.fetchone()
+        await thread.close()
+        if exists is None:
+            return None
+        cursor = await db.execute(
+            """
+            SELECT revision, selection_json
+            FROM thread_inference_preferences
+            WHERE tenant_id = ? AND thread_id = ?
+            """,
+            (tenant_id, thread_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        revision = int(row["revision"] or 0) if row is not None else 0
+        raw_selection = str(row["selection_json"] or "") if row is not None else ""
+        selection = (
+            InferenceSelection.model_validate_json(raw_selection) if raw_selection.strip() else None
+        )
+        effective = selection or self._default_inference_plan().primary
+        return {
+            "revision": revision,
+            "selection": selection.model_dump(mode="json") if selection is not None else None,
+            "effective": effective.model_dump(mode="json"),
+        }
+
+    async def update_thread_inference(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        expected_revision: int,
+        selection: InferenceSelection | None,
+    ) -> dict[str, Any] | None:
+        self._require_started()
+        if selection is not None and self._inference is not None:
+            selection = await self._inference.validate_selection(tenant_id, selection)
+        elif selection is not None and selection.provider != "api":
+            raise InferenceUnavailableError("Codex inference is unavailable")
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                thread = await db.execute(
+                    "SELECT 1 FROM agent_threads WHERE tenant_id = ? AND thread_id = ?",
+                    (tenant_id, thread_id),
+                )
+                exists = await thread.fetchone()
+                await thread.close()
+                if exists is None:
+                    await db.rollback()
+                    return None
+                cursor = await db.execute(
+                    """
+                    SELECT revision FROM thread_inference_preferences
+                    WHERE tenant_id = ? AND thread_id = ?
+                    """,
+                    (tenant_id, thread_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                revision = int(row["revision"] or 0) if row is not None else 0
+                if revision != int(expected_revision):
+                    await db.rollback()
+                    raise InferenceConflictError("thread inference preference changed")
+                next_revision = revision + 1
+                await db.execute(
+                    """
+                    INSERT INTO thread_inference_preferences (
+                        tenant_id, thread_id, revision, selection_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (tenant_id, thread_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        selection_json = excluded.selection_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        tenant_id,
+                        thread_id,
+                        next_revision,
+                        selection.model_dump_json() if selection is not None else None,
+                        utc_now_iso(),
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                with suppress(Exception):
+                    await db.rollback()
+                raise
+        return await self.get_thread_inference(tenant_id=tenant_id, thread_id=thread_id)
+
+    async def codex_preference_count(self, tenant_id: str) -> int:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM thread_inference_preferences
+            WHERE tenant_id = ?
+              AND json_extract(selection_json, '$.provider') = 'codex'
+            """,
+            (tenant_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row[0] or 0) if row is not None else 0
+
+    async def reset_codex_preferences(self, tenant_id: str) -> int:
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            cursor = await db.execute(
+                """
+                UPDATE thread_inference_preferences
+                SET revision = revision + 1, selection_json = NULL, updated_at = ?
+                WHERE tenant_id = ?
+                  AND json_extract(selection_json, '$.provider') = 'codex'
+                """,
+                (utc_now_iso(), tenant_id),
+            )
+            changed = cursor.rowcount
+            await cursor.close()
+            await db.commit()
+        return max(0, int(changed))
+
     def _build_graphs(self) -> dict[str, Any]:
         assert self._checkpointer is not None
         assert self._store is not None
@@ -1588,8 +1866,12 @@ class DeepAgentService:
         context: AgentRunContext,
         *,
         dynamic: DynamicToolSnapshot | None = None,
+        inference_plan: ResolvedInferencePlan | None = None,
     ) -> Any:
+        active_plan = inference_plan or self._default_inference_plan()
         if self._agent_specs is None:
+            if active_plan.primary != self._default_inference_plan().primary:
+                raise RuntimeError("per-thread inference requires revisioned AgentSpecs")
             graph = self._graphs.get(str(context.run_kind))
             if graph is None:
                 raise RuntimeError("the requested agent profile is unavailable")
@@ -1599,6 +1881,7 @@ class DeepAgentService:
         if spec is None:
             raise RuntimeError("the requested AgentSpec revision does not exist")
         self._validate_context_spec(context, spec)
+        active_plan = self._effective_spec_plan(spec, active_plan)
         active_dynamic = dynamic or self._dynamic_snapshot(spec.tenant_id)
         key = (
             spec.tenant_id,
@@ -1607,11 +1890,18 @@ class DeepAgentService:
             spec.content_digest,
             active_dynamic.generation,
             self._dynamic_digest(active_dynamic),
+            *self._inference_cache_key(spec.tenant_id, active_plan),
         )
         graph = self._spec_graphs.get(key)
         if graph is None:
-            graph = self._compile_spec_graph(spec, dynamic=active_dynamic)
-            self._spec_graphs[key] = graph
+            graph = self._compile_spec_graph(
+                spec,
+                dynamic=active_dynamic,
+                inference_plan=active_plan,
+            )
+            self._cache_spec_graph(key, graph)
+        else:
+            self._spec_graphs.move_to_end(key)
         return graph
 
     def _compile_spec_graph(
@@ -1619,6 +1909,7 @@ class DeepAgentService:
         spec: AgentSpec,
         *,
         dynamic: DynamicToolSnapshot | None = None,
+        inference_plan: ResolvedInferencePlan | None = None,
     ) -> Any:
         assert self._checkpointer is not None
         assert self._store is not None
@@ -1666,17 +1957,22 @@ class DeepAgentService:
                 )
             )
 
+        active_plan = self._effective_spec_plan(
+            spec,
+            inference_plan or self._default_inference_plan(),
+        )
+        resolved_model = self._model_for_spec(spec, active_plan)
         middleware: list[Any] = [
             ModelCallLimitMiddleware(
                 run_limit=spec.max_model_calls,
                 exit_behavior="error",
             )
         ]
-        middleware.extend(self._provider_fallback_middleware())
+        middleware.extend(self._middleware_for_plan(active_plan, resolved_model))
         if denied:
             middleware.append(_DenyToolsMiddleware(frozenset(denied)))
         kwargs: dict[str, Any] = {
-            "model": self._resolve_spec_model(spec.model_alias),
+            "model": resolved_model.model,
             "name": f"opentulpa_{spec.id}_r{spec.revision}",
             "tools": tools,
             "system_prompt": self._prompt_for_spec(spec),
@@ -1703,6 +1999,135 @@ class DeepAgentService:
             return []
         return [_ProviderFallbackMiddleware(self._provider_fallback_models)]
 
+    def _middleware_for_plan(
+        self,
+        plan: ResolvedInferencePlan,
+        resolved: ResolvedModel,
+    ) -> list[AgentMiddleware]:
+        middleware: list[AgentMiddleware] = [_InferenceMessageMiddleware(plan.primary.provider)]
+        if plan.primary.provider == "api":
+            middleware.extend(self._provider_fallback_middleware())
+            return middleware
+        if plan.primary.fallback_to_api:
+            api_primary = self._provided_model or self._build_model()
+            middleware.append(
+                _ProviderFallbackMiddleware(
+                    (api_primary, *self._provider_fallback_models),
+                    eligible=is_codex_transient,
+                    allow_request=_before_current_run_activity,
+                )
+            )
+        middleware.append(_CodexAuthRetryMiddleware(resolved))
+        return middleware
+
+    def _model_for_spec(
+        self,
+        spec: AgentSpec,
+        plan: ResolvedInferencePlan,
+    ) -> ResolvedModel:
+        if spec.model_alias != "default":
+            return ResolvedModel(model=self._resolve_spec_model(spec.model_alias))
+        if plan.primary.provider == "codex":
+            if self._inference is None:
+                raise RuntimeError("Codex inference is unavailable")
+            return self._inference.resolve_model(spec.tenant_id, plan.primary)
+        if (
+            plan.primary.model == self._model_name
+            and plan.primary.reasoning_effort == self._reasoning_effort
+        ):
+            return ResolvedModel(model=self._provided_model or self._build_model())
+        return ResolvedModel(
+            model=build_openrouter_chat_model(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                model_name=plan.primary.model,
+                reasoning_effort=plan.primary.reasoning_effort,
+                max_completion_tokens=self._max_completion_tokens,
+            )
+        )
+
+    def _default_inference_plan(self) -> ResolvedInferencePlan:
+        selection = (
+            self._inference.default_selection
+            if self._inference is not None
+            else InferenceSelection(
+                provider="api",
+                model=self._model_name,
+                reasoning_effort=self._reasoning_effort,
+            )
+        )
+        return ResolvedInferencePlan.resolve(selection, preference_revision=0)
+
+    async def _resolve_inference_plan(
+        self,
+        context: AgentRunContext,
+    ) -> ResolvedInferencePlan:
+        default = self._default_inference_plan()
+        if context.trust_class != "owner" or context.run_kind != AgentRunKind.OWNER.value:
+            return default
+        if self._agent_specs is not None:
+            spec = self._agent_specs.get_revision(context.agent_spec)
+            if spec is not None and spec.model_alias != "default":
+                return self._effective_spec_plan(spec, default)
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT revision, selection_json
+            FROM thread_inference_preferences
+            WHERE tenant_id = ? AND thread_id = ?
+            """,
+            (context.tenant_id, context.thread_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None or not str(row["selection_json"] or "").strip():
+            return default
+        selection = InferenceSelection.model_validate_json(str(row["selection_json"]))
+        return ResolvedInferencePlan.resolve(
+            selection,
+            preference_revision=int(row["revision"] or 0),
+        )
+
+    def _effective_spec_plan(
+        self,
+        spec: AgentSpec,
+        plan: ResolvedInferencePlan,
+    ) -> ResolvedInferencePlan:
+        if spec.model_alias == "default":
+            return plan
+        return ResolvedInferencePlan.resolve(
+            InferenceSelection(
+                provider="api",
+                model=spec.model_alias,
+                reasoning_effort=self._reasoning_effort,
+            ),
+            preference_revision=plan.preference_revision,
+        )
+
+    def _inference_cache_key(
+        self,
+        tenant_id: str,
+        plan: ResolvedInferencePlan,
+    ) -> tuple[Any, ...]:
+        credential_revision = (
+            self._inference.credential_revision(tenant_id)
+            if self._inference is not None and plan.primary.provider == "codex"
+            else 0
+        )
+        return (
+            plan.primary.provider,
+            plan.primary.model,
+            plan.primary.reasoning_effort,
+            plan.primary.fallback_to_api,
+            credential_revision,
+        )
+
+    def _cache_spec_graph(self, key: tuple[Any, ...], graph: Any) -> None:
+        self._spec_graphs[key] = graph
+        self._spec_graphs.move_to_end(key)
+        while len(self._spec_graphs) > self._graph_cache_limit:
+            self._spec_graphs.popitem(last=False)
+
     def preflight_agent_spec(self, spec: AgentSpec) -> None:
         """Compile an exact revision before its active pointer can change."""
 
@@ -1725,14 +2150,19 @@ class DeepAgentService:
             spec.content_digest,
             dynamic.generation,
             self._dynamic_digest(dynamic),
+            *self._inference_cache_key(spec.tenant_id, self._default_inference_plan()),
         )
         if key in self._spec_graphs:
             return
         try:
-            graph = self._compile_spec_graph(spec, dynamic=dynamic)
+            graph = self._compile_spec_graph(
+                spec,
+                dynamic=dynamic,
+                inference_plan=self._default_inference_plan(),
+            )
         except (RuntimeError, TypeError, ValueError) as exc:
             raise ValueError("the AgentSpec cannot compile in the active runtime") from exc
-        self._spec_graphs[key] = graph
+        self._cache_spec_graph(key, graph)
 
     def _resolve_spec_model(self, alias: str) -> Any:
         if self._model_resolver is not None:
@@ -2081,6 +2511,7 @@ class DeepAgentService:
         checkpoint_thread_id: str,
         graph_input: Any,
         resumed: bool,
+        inference_plan: ResolvedInferencePlan,
     ) -> AsyncIterator[AgentRunEvent]:
         final_parts: list[str] = []
         pending_ai_chunk: AIMessageChunk | None = None
@@ -2088,6 +2519,11 @@ class DeepAgentService:
         started_data: dict[str, Any] = {
             "thread_id": context.thread_id,
             "resumed": resumed,
+            "provider": inference_plan.primary.provider,
+            "model": inference_plan.primary.model,
+            "reasoning_effort": inference_plan.primary.reasoning_effort,
+            "inference_plan_digest": inference_plan.digest,
+            "preference_revision": inference_plan.preference_revision,
         }
         if not resumed:
             started_data["input_summary"] = _trace_input_summary(graph_input)
@@ -2099,14 +2535,22 @@ class DeepAgentService:
         if started_event is None:
             return
         yield started_event
-        trace_context = self._trace_context(context, graph_input)
+        trace_context = self._trace_context(context, graph_input, inference_plan=inference_plan)
         failure_phase = "trace_setup"
         try:
             with trace_context:
-                config = self._run_config(context, checkpoint_thread_id)
+                config = self._run_config(
+                    context,
+                    checkpoint_thread_id,
+                    inference_plan=inference_plan,
+                )
                 failure_phase = "capability_resolution"
                 dynamic = await self._verified_dynamic_snapshot(run_id, context)
-                graph = self._graph_for_context(context, dynamic=dynamic)
+                graph = self._graph_for_context(
+                    context,
+                    dynamic=dynamic,
+                    inference_plan=inference_plan,
+                )
                 runtime_limit = self._runtime_limit_for_context(context)
                 failure_phase = "agent_loop"
                 async with asyncio.timeout(runtime_limit):
@@ -2246,7 +2690,13 @@ class DeepAgentService:
             await self._observe_run(run_id)
             yield event
 
-    def _run_config(self, context: AgentRunContext, checkpoint_thread_id: str) -> dict[str, Any]:
+    def _run_config(
+        self,
+        context: AgentRunContext,
+        checkpoint_thread_id: str,
+        *,
+        inference_plan: ResolvedInferencePlan | None = None,
+    ) -> dict[str, Any]:
         callbacks: list[Any] = []
         tracer = self._langfuse_tracer
         if tracer is not None and hasattr(tracer, "build_callbacks"):
@@ -2254,7 +2704,11 @@ class DeepAgentService:
                 user_id=context.tenant_id,
                 trace_id=context.correlation_id,
                 session_id=context.thread_id,
-                metadata={"run_kind": str(context.run_kind), "channel": str(context.channel)},
+                metadata={
+                    "run_kind": str(context.run_kind),
+                    "channel": str(context.channel),
+                    **self._inference_trace_metadata(inference_plan),
+                },
                 tags=["deepagents", str(context.run_kind)],
             )
         return {
@@ -2266,6 +2720,7 @@ class DeepAgentService:
                 "correlation_id": context.correlation_id,
                 "run_kind": str(context.run_kind),
                 "channel": str(context.channel),
+                **self._inference_trace_metadata(inference_plan),
             },
         }
 
@@ -2275,7 +2730,13 @@ class DeepAgentService:
         spec = self._agent_specs.get_revision(context.agent_spec)
         return float(spec.max_runtime_seconds) if spec is not None else None
 
-    def _trace_context(self, context: AgentRunContext, graph_input: Any) -> Any:
+    def _trace_context(
+        self,
+        context: AgentRunContext,
+        graph_input: Any,
+        *,
+        inference_plan: ResolvedInferencePlan | None = None,
+    ) -> Any:
         tracer = self._langfuse_tracer
         if tracer is None or not hasattr(tracer, "trace_context"):
             return nullcontext()
@@ -2285,9 +2746,27 @@ class DeepAgentService:
             user_id=context.tenant_id,
             session_id=context.thread_id,
             input=graph_input,
-            metadata={"channel": str(context.channel), "actor_id": context.actor_id},
+            metadata={
+                "channel": str(context.channel),
+                "actor_id": context.actor_id,
+                **self._inference_trace_metadata(inference_plan),
+            },
             tags=["deepagents", str(context.run_kind)],
         )
+
+    @staticmethod
+    def _inference_trace_metadata(
+        plan: ResolvedInferencePlan | None,
+    ) -> dict[str, Any]:
+        if plan is None:
+            return {}
+        return {
+            "inference_provider": plan.primary.provider,
+            "inference_model": plan.primary.model,
+            "reasoning_effort": plan.primary.reasoning_effort,
+            "inference_plan_digest": plan.digest,
+            "preference_revision": plan.preference_revision,
+        }
 
     @staticmethod
     def _message_events(message: Any) -> list[tuple[AgentRunEventType, dict[str, Any], str]]:
@@ -2529,6 +3008,7 @@ class DeepAgentService:
         request_digest: str = "",
         dynamic_generation: int = 0,
         dynamic_digest: str = "",
+        inference_plan: ResolvedInferencePlan | None = None,
     ) -> str:
         db = self._require_runs_db()
         now = utc_now_iso()
@@ -2600,9 +3080,9 @@ class DeepAgentService:
                         channel, run_kind, origin_json, agent_spec_id, agent_spec_revision,
                         trust_class, correlation_id, idempotency_key, status, created_at,
                         updated_at, request_digest, dynamic_generation, dynamic_digest,
-                        request_text, file_ids_json
+                        request_text, file_ids_json, inference_json
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -2626,6 +3106,7 @@ class DeepAgentService:
                         dynamic_digest,
                         request_text,
                         json.dumps(list(file_ids), ensure_ascii=False),
+                        (inference_plan or self._default_inference_plan()).model_dump_json(),
                     ),
                 )
                 await db.commit()
@@ -3100,6 +3581,11 @@ class DeepAgentService:
             approvals=approvals,
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            inference_plan=(
+                ResolvedInferencePlan.model_validate_json(str(row["inference_json"]))
+                if str(row["inference_json"] or "").strip()
+                else None
+            ),
         )
 
     @staticmethod

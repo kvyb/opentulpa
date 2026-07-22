@@ -7,14 +7,26 @@ import {
   type Selection,
   type TextareaRenderable,
 } from "@opentui/core"
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Index, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer } from "@opentui/solid"
 import { spawn } from "node:child_process"
 import { basename } from "node:path"
 import { droppedFiles } from "./attachments.js"
 import { ApiError, OpenTulpaApi } from "./api.js"
 import { compactJson, emptyTurn, reduceEvent, toolLabel, turnsFromTimeline } from "./state.js"
-import type { AgentEvent, Approval, ClientConfig, ThreadSummary, ToolCall, Turn } from "./types.js"
+import type {
+  AgentEvent,
+  Approval,
+  ClientConfig,
+  CodexDeviceLogin,
+  InferenceModel,
+  InferencePreference,
+  InferenceProvider,
+  InferenceSelection,
+  ThreadSummary,
+  ToolCall,
+  Turn,
+} from "./types.js"
 
 const COLORS = {
   bg: "#000000",
@@ -58,6 +70,50 @@ const MARKDOWN_STYLE = SyntaxStyle.fromStyles({
   "markup.link.url": { fg: COLORS.blue, underline: true },
 })
 
+type PickerItem = {
+  id: string
+  label: string
+  detail: string
+  select: () => void
+}
+
+type PickerState = {
+  title: string
+  hint: string
+  items: PickerItem[]
+}
+
+export type SlashCommand = {
+  value: string
+  description: string
+  acceptsArgument?: boolean
+}
+
+export const SLASH_COMMANDS: readonly SlashCommand[] = [
+  { value: "/new", description: "Start a new session" },
+  { value: "/sessions", description: "Browse previous sessions" },
+  { value: "/session", description: "Open a session by name or number", acceptsArgument: true },
+  { value: "/model", description: "Choose the provider and model" },
+  { value: "/reasoning", description: "Choose the reasoning effort" },
+  { value: "/login codex", description: "Connect a ChatGPT Codex subscription" },
+  { value: "/logout codex", description: "Disconnect the Codex subscription" },
+  { value: "/regenerate", description: "Regenerate the latest response" },
+  { value: "/attach", description: "Attach a local file", acceptsArgument: true },
+  { value: "/tools", description: "Expand or collapse tool history" },
+  { value: "/logs", description: "Show recent server logs" },
+  { value: "/cancel", description: "Cancel the active run" },
+  { value: "/help", description: "Show command help" },
+  { value: "/quit", description: "Exit OpenTulpa" },
+]
+
+export function filterSlashCommands(query: string): SlashCommand[] {
+  const normalized = query.trim().toLocaleLowerCase()
+  if (!normalized) return [...SLASH_COMMANDS]
+  return SLASH_COMMANDS.filter((item) =>
+    `${item.value.slice(1)} ${item.description}`.toLocaleLowerCase().includes(normalized),
+  )
+}
+
 export function App(props: { config: ClientConfig; onConnectionChange: (threadId: string) => void }) {
   const renderer = useRenderer()
   const api = new OpenTulpaApi(props.config)
@@ -80,6 +136,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   const [copiedUntil, setCopiedUntil] = createSignal(0)
   const [terminalWidth, setTerminalWidth] = createSignal(renderer.width)
   const [expandedToolsGroup, setExpandedToolsGroup] = createSignal("")
+  const [inference, setInference] = createSignal<InferencePreference>()
+  const [picker, setPicker] = createSignal<PickerState>()
+  const [pickerQuery, setPickerQuery] = createSignal("")
+  const [pickerIndex, setPickerIndex] = createSignal(0)
+  const [codexLogin, setCodexLogin] = createSignal<CodexDeviceLogin>()
+  const [slashIndex, setSlashIndex] = createSignal(0)
+  const [dismissedSlash, setDismissedSlash] = createSignal("")
   const approvalNotifications = new Map<string, number>()
   let notificationCursor = 0
   let alive = true
@@ -92,6 +155,28 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       ? threads().filter((item) => `${item.title} ${item.preview}`.toLocaleLowerCase().includes(query))
       : threads()
   })
+  const filteredPicker = createMemo(() => {
+    const value = picker()
+    const query = pickerQuery().trim().toLocaleLowerCase()
+    if (!value) return []
+    return query
+      ? value.items.filter((item) => `${item.label} ${item.detail}`.toLocaleLowerCase().includes(query))
+      : value.items
+  })
+  const modalOpen = createMemo(() => sessionDialog() || !!picker() || !!codexLogin())
+  const slashCommands = createMemo(() => {
+    const value = draft()
+    if (
+      !value.startsWith("/")
+      || /\s/.test(value.slice(1))
+      || value === dismissedSlash()
+      || modalOpen()
+      || pendingApproval()
+      || editApproval()
+      || busy()
+    ) return []
+    return filterSlashCommands(value.slice(1))
+  })
 
   const refreshThreads = async () => {
     const values = await api.threads()
@@ -103,9 +188,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     setSessionDialog(false)
     setError("")
     setStatus("Loading session")
-    const timeline = await api.timeline(threadId)
+    const [timeline, preference] = await Promise.all([
+      api.timeline(threadId),
+      api.threadInference(threadId),
+    ])
     let restored = turnsFromTimeline(timeline.entries)
     setThread(timeline.thread)
+    setInference(preference)
     props.onConnectionChange(threadId)
     const active = ["running", "interrupted", "resume_pending"].includes(timeline.thread.status)
     if (active && timeline.thread.last_run_id) {
@@ -199,6 +288,18 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     }
   }
 
+  const selectSlashCommand = (item: SlashCommand) => {
+    setDismissedSlash(item.value)
+    if (item.acceptsArgument) {
+      const value = `${item.value} `
+      setDraft(value)
+      composer?.setText(value)
+      composer?.focus()
+      return
+    }
+    void send(item.value)
+  }
+
   useKeyboard((key) => {
     if (key.ctrl && key.name === "d") renderer.destroy()
     if (key.ctrl && key.name === "n") {
@@ -224,8 +325,39 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       key.preventDefault()
       return
     }
+    if (codexLogin()) {
+      if (key.name === "escape") void closeCodexLogin()
+      key.preventDefault()
+      return
+    }
+    if (picker()) {
+      if (key.name === "escape") setPicker(undefined)
+      else if (key.name === "down") {
+        setPickerIndex((value) => Math.min(filteredPicker().length - 1, value + 1))
+      } else if (key.name === "up") {
+        setPickerIndex((value) => Math.max(0, value - 1))
+      } else if (key.name === "return") {
+        filteredPicker()[pickerIndex()]?.select()
+      } else return
+      key.preventDefault()
+      return
+    }
+    const availableSlashCommands = slashCommands()
+    if (availableSlashCommands.length) {
+      if (key.name === "escape") setDismissedSlash(draft())
+      else if (key.name === "down") {
+        setSlashIndex((value) => Math.min(availableSlashCommands.length - 1, value + 1))
+      } else if (key.name === "up") {
+        setSlashIndex((value) => Math.max(0, value - 1))
+      } else if (key.name === "return") {
+        const selected = availableSlashCommands[slashIndex()]
+        if (selected) selectSlashCommand(selected)
+      } else return
+      key.preventDefault()
+      return
+    }
     const approval = pendingApproval()
-    if (approval && !busy() && !sessionDialog()) {
+    if (approval && !busy() && !modalOpen()) {
       const decision = key.name === "a" ? "approve" : key.name === "e" ? "edit" : key.name === "r" ? "reject" : undefined
       if (decision && approval.allowed_decisions.includes(decision)) {
         void decide(approval, decision)
@@ -288,7 +420,12 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       return
     }
     if (text.startsWith("/") && text !== "/regenerate") {
-      if (await command(text)) clearComposer()
+      try {
+        if (await command(text)) clearComposer()
+      } catch (cause) {
+        setStatus("Failed")
+        setError(message(cause))
+      }
       return
     }
     const selected = thread()
@@ -340,11 +477,186 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     }
   }
 
+  const applyInferenceSelection = async (selection: InferenceSelection | null) => {
+    const selectedThread = thread()
+    const current = inference()
+    if (!selectedThread || !current || busy()) return
+    setPicker(undefined)
+    setError("")
+    setStatus("Updating model")
+    try {
+      const updated = await api.updateThreadInference(
+        selectedThread.thread_id,
+        current.revision,
+        selection,
+      )
+      setInference(updated)
+      setStatus("Ready")
+    } catch (cause) {
+      setStatus("Failed")
+      setError(message(cause))
+      try {
+        setInference(await api.threadInference(selectedThread.thread_id))
+      } catch {}
+    }
+  }
+
+  const chooseModel = async (
+    provider?: InferenceProvider,
+    requestedModel?: string,
+    fallbackToApi = false,
+  ) => {
+    const current = inference()
+    if (!current) return
+    const targetProvider = provider ?? current.effective.provider
+    const statusValue = await api.inferenceStatus()
+    if (targetProvider === "codex" && !statusValue.codex.connected) {
+      await startCodexLogin()
+      return
+    }
+    const models = await api.inferenceModels(targetProvider)
+    if (requestedModel) {
+      const selected = models.find((item) => item.id === requestedModel)
+      if (!selected && targetProvider === "codex") {
+        throw new ApiError(`${requestedModel} is not available from ${targetProvider}.`)
+      }
+      await applyInferenceSelection({
+        provider: targetProvider,
+        model: selected?.id ?? requestedModel,
+        reasoning_effort: selected?.default_reasoning_effort ?? null,
+        fallback_to_api: targetProvider === "codex" && fallbackToApi,
+      })
+      return
+    }
+    let visibleModels: InferenceModel[] = models
+    if (provider === undefined) {
+      const apiModels = targetProvider === "api" ? models : await api.inferenceModels("api")
+      const codexModels = statusValue.codex.connected
+        ? targetProvider === "codex" ? models : await api.inferenceModels("codex")
+        : []
+      visibleModels = [...apiModels, ...codexModels]
+    }
+    const items: PickerItem[] = [
+      {
+        id: "default",
+        label: "Server default",
+        detail: `${statusValue.api_default.model} · ${statusValue.api_default.reasoning_effort ?? "provider default"}`,
+        select: () => void applyInferenceSelection(null),
+      },
+      ...visibleModels.map((model) => ({
+        id: `${model.provider}:${model.id}`,
+        label: model.id,
+        detail: `${model.provider}${model.reasoning_efforts.length ? ` · ${model.reasoning_efforts.join(" / ")}` : ""}`,
+        select: () => void applyInferenceSelection({
+          provider: model.provider,
+          model: model.id,
+          reasoning_effort: model.default_reasoning_effort,
+          fallback_to_api: false,
+        }),
+      })),
+    ]
+    if (provider === undefined && !statusValue.codex.connected) {
+      items.push({
+        id: "connect-codex",
+        label: "Connect ChatGPT Codex",
+        detail: "Use a ChatGPT subscription for this conversation",
+        select: () => void startCodexLogin(),
+      })
+    }
+    setPicker({ title: provider ? `${targetProvider === "codex" ? "Codex" : "API"} models` : "Models", hint: "Search providers and models", items })
+    setPickerQuery("")
+    setPickerIndex(0)
+  }
+
+  const chooseReasoning = async (requested?: string) => {
+    const current = inference()
+    if (!current) return
+    const selection = current.effective
+    const models = await api.inferenceModels(selection.provider)
+    const model = models.find((item) => item.id === selection.model)
+    const efforts = model?.reasoning_efforts ?? []
+    const apply = (effort: string | null) => void applyInferenceSelection({
+      ...selection,
+      reasoning_effort: effort,
+    })
+    if (requested !== undefined) {
+      const effort = requested === "default" ? null : requested
+      if (effort && efforts.length && !efforts.includes(effort)) {
+        throw new ApiError(`${effort} is not supported by ${selection.model}.`)
+      }
+      apply(effort)
+      return
+    }
+    const items: PickerItem[] = [
+      { id: "default", label: "Provider default", detail: "Do not force an effort", select: () => apply(null) },
+      ...efforts.map((effort) => ({
+        id: effort,
+        label: effort,
+        detail: effort === selection.reasoning_effort ? "Current" : selection.model,
+        select: () => apply(effort),
+      })),
+    ]
+    setPicker({ title: `Reasoning · ${selection.model}`, hint: "Search efforts", items })
+    setPickerQuery("")
+    setPickerIndex(0)
+  }
+
+  const startCodexLogin = async () => {
+    setPicker(undefined)
+    setError("")
+    setStatus("Starting Codex login")
+    try {
+      const login = await api.startCodexLogin()
+      setCodexLogin(login)
+      setStatus("Codex login")
+      void pollCodexLogin(login.login_id)
+    } catch (cause) {
+      setStatus("Failed")
+      setError(message(cause))
+    }
+  }
+
+  const pollCodexLogin = async (loginId: string) => {
+    while (codexLogin()?.login_id === loginId && codexLogin()?.status === "pending") {
+      await Bun.sleep(Math.max(1000, (codexLogin()?.interval_seconds ?? 2) * 1000))
+      try {
+        const next = await api.codexLogin(loginId)
+        if (codexLogin()?.login_id !== loginId) return
+        setCodexLogin(next)
+        if (next.status === "authorized") {
+          setStatus("Ready")
+          await Bun.sleep(500)
+          setCodexLogin(undefined)
+          await chooseModel("codex")
+          return
+        }
+        if (next.status !== "pending") {
+          setStatus("Failed")
+          return
+        }
+      } catch (cause) {
+        setError(message(cause))
+        return
+      }
+    }
+  }
+
+  const closeCodexLogin = async () => {
+    const login = codexLogin()
+    setCodexLogin(undefined)
+    if (login?.status === "pending") {
+      try {
+        await api.cancelCodexLogin(login.login_id)
+      } catch {}
+    }
+    setStatus("Ready")
+  }
+
   const command = async (input: string): Promise<boolean> => {
     const [name, ...parts] = input.split(/\s+/)
     if (name === "/quit") renderer.destroy()
     else if (name === "/help") {
-      setError("/new [name]  /sessions  /session name  /regenerate  /attach path  /cancel  /logs  /quit")
+      setError("/new  /sessions  /model  /reasoning  /login codex  /logout codex  /regenerate  /attach  /cancel  /quit")
     } else if (name === "/sessions") {
       setSessionDialog(true)
       setSessionQuery("")
@@ -365,6 +677,24 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     } else if (name === "/tool" || name === "/tools") {
       const groupId = lastToolGroupId(activeTurn())
       setExpandedToolsGroup((value) => value === groupId ? "" : groupId)
+    } else if (name === "/model") {
+      if (parts[0] === "default") await applyInferenceSelection(null)
+      else {
+        const explicitProvider = parts[0] === "api" || parts[0] === "codex" ? parts.shift() as InferenceProvider : undefined
+        const model = parts.shift()
+        const fallback = parts.includes("fallback") || parts.includes("--fallback")
+        await chooseModel(explicitProvider, model, fallback)
+      }
+    } else if (name === "/reasoning") await chooseReasoning(parts[0])
+    else if (name === "/login" && parts[0] === "codex") await startCodexLogin()
+    else if (name === "/logout" && parts[0] === "codex") {
+      try {
+        const result = await api.logoutCodex(parts.includes("confirm"))
+        if (result.reset_threads && thread()) setInference(await api.threadInference(thread()!.thread_id))
+        setError(result.disconnected ? "Codex signed out." : "Codex was not connected.")
+      } catch (cause) {
+        setError(`${message(cause)} Use /logout codex confirm to reset Codex conversations.`)
+      }
     } else if (name === "/cancel") await cancelActive()
     else if (name === "/logs") {
       const logs = await api.logs()
@@ -492,18 +822,15 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
               <text fg={COLORS.muted}>Tell me what you want to build, connect, automate, or improve.</text>
             </box>
           </Show>
-          <For each={turns()}>
-            {(turn) => (
-              <TurnView
-                turn={turn}
-                active={busy() && turn.runId === activeTurn()?.runId}
-                spinner={SPINNER[spinner()]}
-                now={clock()}
-                expandedToolsGroup={expandedToolsGroup()}
-                onToggleTools={(groupId) => setExpandedToolsGroup((value) => value === groupId ? "" : groupId)}
-              />
-            )}
-          </For>
+          <TurnList
+            turns={turns()}
+            busy={busy()}
+            activeRunId={activeTurn()?.runId ?? ""}
+            spinner={SPINNER[spinner()]}
+            now={clock()}
+            expandedToolsGroup={expandedToolsGroup()}
+            onToggleTools={(groupId) => setExpandedToolsGroup((value) => value === groupId ? "" : groupId)}
+          />
         </scrollbox>
         <Show when={error()}>
           <box flexShrink={0} maxHeight={4} overflow="hidden" paddingLeft={2} paddingRight={2}>
@@ -512,6 +839,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
         </Show>
         <Show when={!editApproval() ? pendingApproval() : undefined}>
           {(approval) => <ApprovalView approval={approval()} onDecision={decide} />}
+        </Show>
+        <Show when={slashCommands().length}>
+          <SlashCommandPalette
+            items={slashCommands()}
+            selected={slashIndex()}
+            onSelect={selectSlashCommand}
+          />
         </Show>
         <Show when={attachments().length}>
           <box flexShrink={0} flexDirection="row" flexWrap="wrap" gap={1}>
@@ -543,7 +877,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
               <box flexGrow={1}>
                 <textarea
                   ref={(value) => (composer = value)}
-                  focused={!sessionDialog()}
+                  focused={!modalOpen()}
                   minHeight={1}
                   maxHeight={10}
                   wrapMode="word"
@@ -557,7 +891,10 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
                     { name: "return", action: "submit" },
                     { name: "return", shift: true, action: "newline" },
                   ]}
-                  onContentChange={() => setDraft(composer?.plainText ?? "")}
+                  onContentChange={() => {
+                    setDraft(composer?.plainText ?? "")
+                    setSlashIndex(0)
+                  }}
                   onSubmit={() => void send(draft())}
                   onPaste={(event) => {
                     const value = decodePasteBytes(event.bytes)
@@ -574,6 +911,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
             width={terminalWidth()}
             onNewSession={() => void createSession()}
             onSessions={() => { setSessionDialog(true); setSessionQuery(""); setSessionIndex(0) }}
+            inference={inference()?.effective}
           />
         </box>
       </box>
@@ -587,6 +925,33 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
           onNew={() => void createSession()}
           onClose={() => setSessionDialog(false)}
         />
+      </Show>
+      <Show when={picker()}>
+        {(value) => (
+          <PickerDialog
+            state={value()}
+            items={filteredPicker()}
+            selected={pickerIndex()}
+            query={pickerQuery()}
+            onQuery={(query) => { setPickerQuery(query); setPickerIndex(0) }}
+            onClose={() => setPicker(undefined)}
+          />
+        )}
+      </Show>
+      <Show when={codexLogin()}>
+        {(login) => (
+          <CodexLoginDialog
+            login={login()}
+            onOpen={() => openExternal(login().verification_url)}
+            onCopy={() => {
+              renderer.copyToClipboardOSC52(login().user_code)
+              void copyToHostClipboard(login().user_code)
+              setCopiedUntil(Date.now() + 1400)
+            }}
+            onClose={() => void closeCodexLogin()}
+            onRetry={() => void startCodexLogin()}
+          />
+        )}
       </Show>
     </box>
   )
@@ -610,6 +975,36 @@ export function HeaderBar(props: { title: string; status: string; width: number 
         <text flexShrink={0} fg={COLORS.dim}>{props.status.toLocaleLowerCase()}</text>
       </Show>
     </box>
+  )
+}
+
+export function TurnList(props: {
+  turns: Turn[]
+  busy: boolean
+  activeRunId: string
+  spinner: string
+  now: number
+  expandedToolsGroup: string
+  onToggleTools: (groupId: string) => void
+}) {
+  const view = (turn: () => Turn) => (
+    <TurnView
+      turn={turn()}
+      active={props.busy && turn().runId === props.activeRunId}
+      spinner={props.spinner}
+      now={props.now}
+      expandedToolsGroup={props.expandedToolsGroup}
+      onToggleTools={props.onToggleTools}
+    />
+  )
+  return (
+    <Index each={props.turns}>
+      {(turn) => (
+        <Show when={turn().runId} keyed fallback={view(turn)}>
+          {(_runId) => view(turn)}
+        </Show>
+      )}
+    </Index>
   )
 }
 
@@ -651,13 +1046,18 @@ export function TurnView(props: {
         </box>
       </Show>
       <Show when={props.turn.assistant || props.turn.tools.length || props.turn.status === "running"}>
-        <For each={groups()}>
-          {(group) => {
-            if (group.type === "assistant") {
+        <Index each={groups()}>
+          {(group, index) => {
+            if (group().type === "assistant") {
+              const assistantText = () => {
+                const value = group()
+                return value.type === "assistant" ? value.text : ""
+              }
               return (
                 <box paddingLeft={3} marginTop={1} flexShrink={0}>
                   <markdown
-                    content={group.text}
+                    id={`assistant-${props.turn.runId}-${index}`}
+                    content={assistantText()}
                     syntaxStyle={MARKDOWN_STYLE}
                     streaming
                     internalBlockMode="top-level"
@@ -667,19 +1067,23 @@ export function TurnView(props: {
                 </box>
               )
             }
-            const groupId = toolGroupId(props.turn.runId, group.id)
+            const toolGroup = () => {
+              const value = group()
+              return value.type === "tools" ? value : { type: "tools" as const, id: "", tools: [] }
+            }
+            const groupId = () => toolGroupId(props.turn.runId, toolGroup().id)
             return (
               <ToolActivity
-                tools={group.tools}
+                tools={toolGroup().tools}
                 running={props.active && props.turn.status === "running"}
                 spinner={props.spinner}
                 now={props.now}
-                expanded={props.expandedToolsGroup === groupId}
-                onToggle={() => props.onToggleTools(groupId)}
+                expanded={props.expandedToolsGroup === groupId()}
+                onToggle={() => props.onToggleTools(groupId())}
               />
             )
           }}
-        </For>
+        </Index>
         <Show when={waiting()}>
           <box paddingLeft={3} marginTop={1} flexDirection="row" gap={1} flexShrink={0}>
             <text fg={COLORS.blue}>{props.spinner}</text>
@@ -851,6 +1255,46 @@ export function ApprovalView(props: { approval: Approval; onDecision: (approval:
   )
 }
 
+export function SlashCommandPalette(props: {
+  items: SlashCommand[]
+  selected: number
+  onSelect: (item: SlashCommand) => void
+}) {
+  return (
+    <box
+      flexShrink={0}
+      height={Math.min(17, props.items.length + 2)}
+      border={["left"]}
+      customBorderChars={SPLIT}
+      borderColor={COLORS.blue}
+      backgroundColor={COLORS.panel}
+      paddingLeft={1}
+      paddingRight={1}
+      flexDirection="column"
+    >
+      <text fg={COLORS.text} attributes={TextAttributes.BOLD}>
+        Commands <span style={{ fg: COLORS.dim }}>up/down select · enter run · esc close</span>
+      </text>
+      <For each={props.items}>
+        {(item, index) => (
+          <box
+            height={1}
+            flexShrink={0}
+            flexDirection="row"
+            backgroundColor={index() === props.selected ? COLORS.selected : COLORS.panel}
+            onMouseUp={() => props.onSelect(item)}
+          >
+            <text width={16} flexShrink={0} fg={index() === props.selected ? COLORS.blue : COLORS.muted} wrapMode="none" truncate>
+              {index() === props.selected ? "> " : "  "}{item.value}
+            </text>
+            <text flexGrow={1} fg={COLORS.dim} wrapMode="none" truncate>{item.description}</text>
+          </box>
+        )}
+      </For>
+    </box>
+  )
+}
+
 export function StatusBar(props: {
   busy: boolean
   uploading: boolean
@@ -858,6 +1302,7 @@ export function StatusBar(props: {
   width: number
   onNewSession?: () => void
   onSessions?: () => void
+  inference?: InferenceSelection
 }) {
   const label = createMemo(() => {
     const state = props.uploading ? "Uploading attachments" : props.status
@@ -875,6 +1320,17 @@ export function StatusBar(props: {
       >
         {label()}
       </text>
+      <Show when={props.inference && props.width >= 58}>
+        <text
+          flexShrink={1}
+          maxWidth={Math.max(18, Math.floor(props.width * 0.45))}
+          fg={COLORS.dim}
+          wrapMode="none"
+          truncate
+        >
+          {props.inference!.provider} · {props.inference!.model} · {props.inference!.reasoning_effort ?? "default"}
+        </text>
+      </Show>
       <Show when={props.width >= 40}>
         <text flexShrink={0} fg={COLORS.dim} onMouseUp={props.onNewSession}>ctrl+n new</text>
       </Show>
@@ -903,6 +1359,116 @@ function CopyFlash(props: { width: number }) {
       backgroundColor={COLORS.selected}
     >
       <text fg={COLORS.text}>Copied to clipboard</text>
+    </box>
+  )
+}
+
+function PickerDialog(props: {
+  state: PickerState
+  items: PickerItem[]
+  selected: number
+  query: string
+  onQuery: (value: string) => void
+  onClose: () => void
+}) {
+  return (
+    <box
+      position="absolute"
+      zIndex={120}
+      left="12%"
+      top="12%"
+      width="76%"
+      height="70%"
+      backgroundColor={COLORS.panel}
+      border
+      borderColor={COLORS.dim}
+      padding={1}
+      flexDirection="column"
+      gap={1}
+    >
+      <box flexDirection="row" justifyContent="space-between">
+        <text fg={COLORS.text} attributes={TextAttributes.BOLD}>{props.state.title}</text>
+        <text fg={COLORS.muted} onMouseUp={props.onClose}>esc</text>
+      </box>
+      <box backgroundColor={COLORS.raised} paddingLeft={1} paddingRight={1}>
+        <input
+          focused
+          value={props.query}
+          placeholder={props.state.hint}
+          placeholderColor={COLORS.muted}
+          textColor={COLORS.text}
+          backgroundColor={COLORS.raised}
+          onInput={props.onQuery}
+        />
+      </box>
+      <scrollbox flexGrow={1}>
+        <For each={props.items}>
+          {(item, index) => (
+            <box
+              backgroundColor={index() === props.selected ? COLORS.selected : COLORS.panel}
+              paddingLeft={1}
+              paddingRight={1}
+              paddingTop={1}
+              paddingBottom={1}
+              onMouseUp={item.select}
+              flexDirection="column"
+            >
+              <text fg={index() === props.selected ? COLORS.text : COLORS.muted}>
+                {index() === props.selected ? "> " : "  "}{item.label}
+              </text>
+              <text fg={COLORS.dim}>  {item.detail}</text>
+            </box>
+          )}
+        </For>
+      </scrollbox>
+      <text fg={COLORS.dim}>up/down navigate  enter select  esc close</text>
+    </box>
+  )
+}
+
+function CodexLoginDialog(props: {
+  login: CodexDeviceLogin
+  onOpen: () => void
+  onCopy: () => void
+  onClose: () => void
+  onRetry: () => void
+}) {
+  const pending = () => props.login.status === "pending"
+  return (
+    <box
+      position="absolute"
+      zIndex={140}
+      left="16%"
+      top="18%"
+      width="68%"
+      backgroundColor={COLORS.panel}
+      border
+      borderColor={pending() ? COLORS.blue : props.login.status === "authorized" ? COLORS.green : COLORS.red}
+      padding={2}
+      flexDirection="column"
+      gap={1}
+    >
+      <text fg={COLORS.text} attributes={TextAttributes.BOLD}>Connect ChatGPT Codex</text>
+      <Show when={pending()} fallback={
+        <text fg={props.login.status === "authorized" ? COLORS.green : COLORS.red}>
+          {props.login.status === "authorized" ? "Connected" : "Login expired or failed"}
+        </text>
+      }>
+        <text fg={COLORS.muted}>Open the sign-in page, then enter this one-time code.</text>
+        <text fg={COLORS.blue} attributes={TextAttributes.UNDERLINE} onMouseUp={props.onOpen}>
+          {props.login.verification_url}
+        </text>
+        <box backgroundColor={COLORS.raised} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} onMouseUp={props.onCopy}>
+          <text fg={COLORS.text} attributes={TextAttributes.BOLD}>{props.login.user_code}  <span style={{ fg: COLORS.muted }}>click to copy</span></text>
+        </box>
+        <text fg={COLORS.muted}>Waiting for authorization...</text>
+      </Show>
+      <box flexDirection="row" gap={2} marginTop={1}>
+        <Show when={!pending() && props.login.status !== "authorized"}>
+          <text fg={COLORS.blue} onMouseUp={props.onRetry}>Retry</text>
+        </Show>
+        <text fg={COLORS.muted} onMouseUp={props.onClose}>{pending() ? "Cancel" : "Close"}</text>
+      </box>
     </box>
   )
 }
@@ -1085,6 +1651,19 @@ async function copyToHostClipboard(text: string): Promise<void> {
   for (const [command, argumentsValue] of candidates) {
     if (await pipeToCommand(command, argumentsValue, text)) return
   }
+}
+
+function openExternal(url: string): void {
+  try {
+    const target = new URL(url)
+    if (target.protocol !== "https:" || !["auth.openai.com", "chatgpt.com"].includes(target.hostname)) return
+  } catch {
+    return
+  }
+  const command = process.platform === "darwin" ? "open" : process.platform === "linux" ? "xdg-open" : ""
+  if (!command) return
+  const child = spawn(command, [url], { detached: true, stdio: "ignore" })
+  child.unref()
 }
 
 function pipeToCommand(command: string, argumentsValue: string[], text: string): Promise<boolean> {

@@ -198,6 +198,11 @@ def _public_snapshot(snapshot: AgentRunSnapshot) -> dict[str, Any]:
         ],
         "created_at": snapshot.created_at,
         "updated_at": snapshot.updated_at,
+        "inference": (
+            snapshot.inference_plan.model_dump(mode="json")
+            if snapshot.inference_plan is not None
+            else None
+        ),
     }
 
 

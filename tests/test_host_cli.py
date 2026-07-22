@@ -213,11 +213,17 @@ def test_source_checkout_prefers_its_built_tui_over_an_installed_copy(
     local_binary.parent.mkdir(parents=True)
     local_binary.write_text("local", encoding="utf-8")
     local_binary.chmod(0o700)
+    (local_binary.parent / "manifest.json").write_text(
+        '{"protocol_version":2,"source_digest":"source-digest"}',
+        encoding="utf-8",
+    )
     installed_binary = tmp_path / "bin" / "opentulpa-tui"
     installed_binary.parent.mkdir()
     installed_binary.write_text("installed", encoding="utf-8")
     installed_binary.chmod(0o700)
     monkeypatch.setattr(cli, "__file__", str(module))
     monkeypatch.setattr(cli.shutil, "which", lambda _: str(installed_binary))
+    monkeypatch.setattr(cli, "_tui_source_digest", lambda _: "source-digest")
+    monkeypatch.setattr(cli, "_tui_protocol", lambda _: "2")
 
     assert cli._ensure_tui_binary() == local_binary  # noqa: SLF001

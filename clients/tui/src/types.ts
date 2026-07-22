@@ -75,3 +75,44 @@ export type TimelineEntry = {
   sequence?: number
   data?: Record<string, unknown>
 }
+
+export type InferenceProvider = "api" | "codex"
+
+export type InferenceSelection = {
+  provider: InferenceProvider
+  model: string
+  reasoning_effort: string | null
+  fallback_to_api: boolean
+}
+
+export type InferencePreference = {
+  revision: number
+  selection: InferenceSelection | null
+  effective: InferenceSelection
+}
+
+export type InferenceModel = {
+  provider: InferenceProvider
+  id: string
+  reasoning_efforts: string[]
+  default_reasoning_effort: string | null
+}
+
+export type InferenceStatus = {
+  api_default: InferenceSelection
+  codex: {
+    connected: boolean
+    credential_revision: number
+    experimental: boolean
+  }
+}
+
+export type CodexDeviceLogin = {
+  login_id: string
+  status: "pending" | "authorized" | "expired" | "failed"
+  verification_url: string
+  user_code: string
+  interval_seconds: number
+  expires_at: string
+  error: string | null
+}

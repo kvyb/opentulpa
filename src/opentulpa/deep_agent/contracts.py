@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from opentulpa.inference.models import ResolvedInferencePlan
 from opentulpa.tooling.contract import AgentRunContext
 
 AgentRunStatus = Literal[
@@ -104,3 +105,4 @@ class AgentRunSnapshot:
     approvals: tuple[AgentApproval, ...] = ()
     created_at: str = ""
     updated_at: str = ""
+    inference_plan: ResolvedInferencePlan | None = None

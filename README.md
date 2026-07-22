@@ -72,7 +72,15 @@ OpenTUI client with streamed Markdown, a visible activity spinner, compact expan
 tool calls, drag-and-drop attachments, server-backed sessions, and clickable
 **Approve**, **Edit**, and **Reject** controls. Telegram uses the same Agent API with a
 scoped credential. Use `ctrl+p` or `/sessions` to reopen the same durable Deep Agents
-threads from another client.
+threads from another client. Type `/` in the composer to search and select commands.
+
+The API key remains the zero-friction default. Inside any owner conversation, `/model`
+and `/reasoning` select that thread's next-run model without restarting OpenTulpa.
+`/login codex` optionally connects a ChatGPT Codex subscription through device login;
+the rotating OAuth credential is encrypted on the server and never shared with an
+existing Codex CLI login. Codex has no implicit cross-provider fallback. Use
+`/model codex MODEL fallback` only when you explicitly want transient Codex failures to
+fall back to the configured Kimi-to-GLM API chain.
 
 For example, from the terminal client you can write:
 
@@ -131,6 +139,8 @@ All owner interfaces use the same V2 surfaces:
 | `GET /v2/agent/threads` | List tenant-owned conversations |
 | `GET /v2/agent/threads/{thread_id}/timeline` | Replay messages, tools, artifacts, and approvals |
 | `PATCH /v2/agent/threads/{thread_id}` | Rename or archive a conversation |
+| `GET/PATCH /v2/agent/threads/{thread_id}/inference` | Read or change that conversation's model |
+| `/v2/inference` | Discover models and manage optional Codex device authentication |
 | `POST /v2/agent/runs` | Start an owner run and stream normalized SSE events |
 | `GET /v2/agent/runs/{run_id}` | Read tenant-scoped status and pending approvals |
 | `POST /v2/agent/runs/{run_id}/resume` | Approve, edit, or reject an interrupted run |
@@ -228,6 +238,9 @@ Choose **Run here**, enter the model API key once, and the CLI starts the privat
 and opens the native TUI. A source checkout builds and caches the platform client on the
 first run; CI also produces macOS and Linux platform archives. Later, just run
 `opentulpa` again.
+
+In the TUI, use `/model`, `/reasoning`, or `/login codex`. Remote connections change the
+remote thread; no Codex environment variable, callback server, or extra process is used.
 
 ```bash
 # Remote server

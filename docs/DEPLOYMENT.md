@@ -135,7 +135,9 @@ release egress is the only declared runtime network path. Interactive tenant and
 shells use outbound bridge networking by default so the owner agent can fetch dependencies,
 inspect public repositories, and run networked experiments. They still receive no host or
 service credentials. Apply stricter destination controls at the OCI host or egress proxy
-when the deployment requires them.
+when the deployment requires them. Optional ChatGPT Codex subscription inference needs
+outbound HTTPS to `auth.openai.com` for device login and refresh, and `chatgpt.com` for
+model discovery and inference. It adds no inbound callback and no deployment secret.
 
 ### 3. Install reviewed images
 

@@ -70,6 +70,21 @@ for subsequent model calls. OpenTulpa filters stream chunks marked
 `lc_source=summarization`, so internal summary text is traced and checkpointed but is
 never rendered as the assistant's answer.
 
+## Inference Selection
+
+Owner threads may override the configured API model with a revisioned API or Codex
+selection. The service resolves and persists an immutable inference plan before a run
+starts; approval resume and restart recovery reuse that exact plan. Graphs are compiled
+and bounded-cached by AgentSpec, dynamic tools, provider, model, reasoning effort, and
+Codex credential revision, so Deep Agents delegation and summarization use the same
+model as the main turn. Routine, intake, and explicit non-default AgentSpec model aliases
+ignore owner-thread preferences.
+
+Codex uses the pinned private LangChain adapter directly, not a Codex or Hermes process.
+OAuth credentials and device sessions are encrypted with the host key. A 401 forces one
+serialized refresh and retry. Cross-provider fallback is off unless the thread explicitly
+enables it, and is then limited to transient failures before output or tool activity.
+
 ## Fixed Kernel
 
 Normal `serve` deployments have a small stable host process. It owns first-run claim,

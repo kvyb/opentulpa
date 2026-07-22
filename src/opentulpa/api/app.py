@@ -22,6 +22,7 @@ from opentulpa.api.routes.v2_capabilities import register_v2_capability_routes
 from opentulpa.api.routes.v2_control_plane import register_v2_control_plane_routes
 from opentulpa.api.routes.v2_evolution import register_v2_evolution_routes
 from opentulpa.api.routes.v2_files import FileVaultPort, register_v2_file_routes
+from opentulpa.api.routes.v2_inference import register_v2_inference_routes
 from opentulpa.api.routes.v2_intake import register_v2_intake_routes
 from opentulpa.api.routes.v2_integrations import (
     IntegrationPort,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from opentulpa.api.routes.v2_evolution import EvolutionService
     from opentulpa.capabilities.service import CapabilityControlService
     from opentulpa.deep_agent.service import DeepAgentService
+    from opentulpa.inference.service import InferenceService
     from opentulpa.intake.drafts.service import IntakeDraftService
     from opentulpa.intake.poller import IntakePollDispatcher
     from opentulpa.intake.service import IntakeWorkflowService
@@ -195,6 +197,7 @@ def create_app(
     idempotency_store: IdempotencyStore | None = None,
     release_control_service: ReleaseControlService | None = None,
     notification_service: NotificationService | None = None,
+    inference_service: InferenceService | None = None,
     max_file_upload_bytes: int = 45_000_000,
 ) -> FastAPI:
     """Create the public V2 API without constructing product or runtime services."""
@@ -276,6 +279,7 @@ def create_app(
     app.state.trigger_dispatcher = trigger_dispatcher
     app.state.release_control = release_control_service
     app.state.notification_service = notification_service
+    app.state.inference_service = inference_service
 
     if release_control_service is not None:
         register_release_control_plane(app, release_control_service)
@@ -288,6 +292,12 @@ def create_app(
         resolve_principal=resolve_principal,
         resolve_agent_spec=resolve_agent_spec,
         secret_ingress=secret_ingress,
+    )
+    register_v2_inference_routes(
+        app,
+        get_inference=lambda: inference_service,
+        get_threads=lambda: agent_service,
+        resolve_principal=resolve_principal,
     )
     register_v2_evolution_routes(
         app,

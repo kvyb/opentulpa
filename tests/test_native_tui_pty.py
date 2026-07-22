@@ -49,6 +49,55 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/v2/agent/threads/thread-new/timeline":
             self._json({"thread": NEW_THREAD, "entries": [], "next_cursor": None})
             return
+        if path == "/v2/inference":
+            self._json(
+                {
+                    "api_default": {
+                        "provider": "api",
+                        "model": "moonshotai/kimi-k3",
+                        "reasoning_effort": None,
+                        "fallback_to_api": False,
+                    },
+                    "codex": {
+                        "connected": False,
+                        "credential_revision": 0,
+                        "experimental": True,
+                    },
+                }
+            )
+            return
+        if path == "/v2/inference/models":
+            self._json(
+                {
+                    "provider": "api",
+                    "models": [
+                        {
+                            "provider": "api",
+                            "id": "moonshotai/kimi-k3",
+                            "reasoning_efforts": ["low", "medium", "high"],
+                            "default_reasoning_effort": "low",
+                        }
+                    ],
+                }
+            )
+            return
+        if path in {
+            "/v2/agent/threads/thread-smoke/inference",
+            "/v2/agent/threads/thread-new/inference",
+        }:
+            self._json(
+                {
+                    "revision": 0,
+                    "selection": None,
+                    "effective": {
+                        "provider": "api",
+                        "model": "moonshotai/kimi-k3",
+                        "reasoning_effort": None,
+                        "fallback_to_api": False,
+                    },
+                }
+            )
+            return
         if path == "/v2/notifications":
             time.sleep(0.1)
             self._json({"notifications": [], "next_after_id": 0})
@@ -145,6 +194,16 @@ def _run_smoke(binary: Path) -> None:
 
         output = _read_until(master, b"ready")
         assert os.waitpid(pid, os.WNOHANG) == (0, 0)
+        os.write(master, b"/mo")
+        time.sleep(0.1)
+        command_output = _read_until(master, b"Choose the provider and model")
+        assert b"/model" in command_output
+        os.write(master, b"\r")
+        model_output = _read_until(master, b"Server default")
+        if b"moonshotai/kimi-k3" not in model_output:
+            model_output += _read_until(master, b"moonshotai/kimi-k3")
+        assert b"moonshotai/kimi-k3" in model_output
+        os.write(master, b"\x1b")
         os.write(master, b"\x0e")
         assert THREAD_CREATED.wait(timeout=3), "ctrl+n did not create a new session"
         os.kill(pid, signal.SIGKILL)

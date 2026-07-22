@@ -42,4 +42,47 @@ describe("V2 event transport", () => {
     expect(request?.headers.get("last-event-id")).toBe("2")
     expect(request?.headers.get("authorization")).toBe("Bearer owner")
   })
+
+  test("updates only the current thread inference preference", async () => {
+    let request: Request | undefined
+    globalThis.fetch = (async (input, init) => {
+      request = new Request(input, init)
+      return Response.json({
+        revision: 3,
+        selection: {
+          provider: "codex",
+          model: "gpt-test",
+          reasoning_effort: "high",
+          fallback_to_api: false,
+        },
+        effective: {
+          provider: "codex",
+          model: "gpt-test",
+          reasoning_effort: "high",
+          fallback_to_api: false,
+        },
+      })
+    }) as typeof fetch
+    const api = new OpenTulpaApi({ url: "https://tulpa.test", token: "owner", thread_id: "thread-1" })
+
+    const result = await api.updateThreadInference("thread-1", 2, {
+      provider: "codex",
+      model: "gpt-test",
+      reasoning_effort: "high",
+      fallback_to_api: false,
+    })
+
+    expect(result.revision).toBe(3)
+    expect(request?.url).toBe("https://tulpa.test/v2/agent/threads/thread-1/inference")
+    expect(request?.method).toBe("PATCH")
+    expect(await request?.json()).toEqual({
+      expected_revision: 2,
+      selection: {
+        provider: "codex",
+        model: "gpt-test",
+        reasoning_effort: "high",
+        fallback_to_api: false,
+      },
+    })
+  })
 })

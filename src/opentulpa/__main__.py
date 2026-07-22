@@ -66,6 +66,7 @@ from opentulpa.deep_agent.sandbox import TenantContainerPolicy, TenantExecutionP
 from opentulpa.deep_agent.service import DeepAgentService, build_openrouter_chat_model
 from opentulpa.evolution.sandbox import resolve_local_oci_image
 from opentulpa.files.analysis import FileAnalysisService
+from opentulpa.inference.service import InferenceService
 from opentulpa.intake.activation import IntakeWorkflowActivator
 from opentulpa.intake.drafts.service import IntakeDraftService
 from opentulpa.intake.drafts.store import IntakeDraftStore
@@ -773,9 +774,10 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             trigger_spec_store,
             validate_activation=validate_trigger_spec_activation,
         )
+        host_cipher = load_or_create_host_cipher(data_root)
         secret_vault_store = SecretVault(
             deepagents_root / "secrets.db",
-            cipher=load_or_create_host_cipher(data_root),
+            cipher=host_cipher,
         )
         secret_vault = SecretVaultService(secret_vault_store)
         secret_ingress = SecretIngressService(secret_vault)
@@ -827,6 +829,15 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 provider_order=settings.llm_provider_order.get(fallback_model_name, ()),
             )
             for fallback_model_name in fallback_model_names
+        )
+        inference = InferenceService(
+            db_path=deepagents_root / "inference.db",
+            cipher=host_cipher,
+            api_key=api_key,
+            api_base_url=settings.openai_compatible_base_url,
+            api_default_model=settings.llm_model,
+            api_reasoning_effort=settings.llm_reasoning_effort,
+            api_fallback_models=fallback_model_names,
         )
         model_aliases = {
             "default": settings.llm_model,
@@ -1113,6 +1124,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             execution_provider=sandbox_execution,
             attachment_resolver=file_vault,
             provider_fallback_models=provider_fallback_models,
+            inference_service=inference,
         )
         deferred_agent.bind(agent_service)
 
@@ -1184,6 +1196,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             idempotency_store=idempotency,
             release_control_service=release_control,
             notification_service=notifications,
+            inference_service=inference,
         )
         app.state.owner_tenant_id = owner_tenant_id
         app.state.product_application = product_application

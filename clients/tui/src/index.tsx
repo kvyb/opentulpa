@@ -7,7 +7,12 @@ import type { ClientConfig } from "./types.js"
 if (!process.env.OPENTUI_FORCE_UNICODE) process.env.OPENTUI_FORCE_WCWIDTH = "1"
 
 if (process.argv.includes("--version")) {
-  console.log("opentulpa-tui 0.1.0")
+  console.log("opentulpa-tui 0.2.0")
+  process.exit(0)
+}
+
+if (process.argv.includes("--protocol-version")) {
+  console.log("2")
   process.exit(0)
 }
 

@@ -5,10 +5,13 @@ import { createSignal } from "solid-js"
 import {
   ApprovalView,
   HeaderBar,
+  SlashCommandPalette,
   StatusBar,
   ToolActivity,
+  TurnList,
   TurnView,
   elapsed,
+  filterSlashCommands,
   installSelectionClipboard,
   waitingLabel,
 } from "../src/app.js"
@@ -41,6 +44,41 @@ const tools: ToolCall[] = [
     startedAt: "2026-01-01T00:00:02Z",
   },
 ]
+
+describe("slash command palette", () => {
+  test("filters commands by command and description", () => {
+    expect(filterSlashCommands("mo").map((item) => item.value)).toContain("/model")
+    expect(filterSlashCommands("subscription").map((item) => item.value)).toEqual([
+      "/login codex",
+      "/logout codex",
+    ])
+  })
+
+  for (const width of [40, 80]) {
+    test(`renders compact selectable commands at ${width} columns`, async () => {
+      const selected: string[] = []
+      const items = filterSlashCommands("model")
+      const setup = await testRender(
+        () => (
+          <SlashCommandPalette
+            items={items}
+            selected={0}
+            onSelect={(item) => selected.push(item.value)}
+          />
+        ),
+        { width, height: 8 },
+      )
+      await setup.renderOnce()
+      const lines = setup.captureCharFrame().split("\n")
+      expect(lines.every((line) => line.length <= width)).toBe(true)
+      expect(lines.join("\n")).toContain("/model")
+      const y = lines.findIndex((line) => line.includes("/model"))
+      await setup.mockMouse.click(3, y)
+      expect(selected).toEqual(["/model"])
+      setup.renderer.destroy()
+    })
+  }
+})
 
 describe("tool activity rendering", () => {
   for (const width of [60, 120]) {
@@ -184,6 +222,39 @@ describe("terminal chrome", () => {
     setup.renderer.destroy()
   })
 
+  test("keeps one markdown renderable mounted while response text streams", async () => {
+    let turn = emptyTurn("run-stream", "Hello")
+    turn = reduceEvent(turn, {
+      type: "message.delta",
+      run_id: "run-stream",
+      sequence: 1,
+      timestamp: "2026-01-01T00:00:00Z",
+      data: { text: "First" },
+    })
+    const [current, setCurrent] = createSignal([turn])
+    const setup = await testRender(
+      () => <TurnList turns={current()} busy activeRunId="run-stream" spinner="⬒" now={Date.parse(turn.startedAt) + 400} expandedToolsGroup="" onToggleTools={() => {}} />,
+      { width: 80, height: 14 },
+    )
+    await setup.waitForFrame((value) => value.includes("First"))
+    const markdown = setup.renderer.root.findDescendantById("assistant-run-stream-0")
+    expect(markdown).toBeDefined()
+
+    turn = reduceEvent(turn, {
+      type: "message.delta",
+      run_id: "run-stream",
+      sequence: 2,
+      timestamp: "2026-01-01T00:00:01Z",
+      data: { text: " second token" },
+    })
+    setCurrent([turn])
+    await setup.waitForFrame((value) => value.includes("First second token"))
+
+    expect(setup.renderer.root.findDescendantById("assistant-run-stream-0")).toBe(markdown)
+    await Bun.sleep(500)
+    setup.renderer.destroy()
+  })
+
   test("copies highlighted text as soon as selection finishes", async () => {
     const copied: string[] = []
     const setup = await testRender(
@@ -216,6 +287,12 @@ describe("terminal chrome", () => {
               uploading={false}
               status="Working"
               width={width}
+              inference={{
+                provider: "codex",
+                model: "a-very-long-model-identifier-that-must-be-truncated-cleanly",
+                reasoning_effort: "high",
+                fallback_to_api: false,
+              }}
             />
           </box>
         ),
@@ -229,6 +306,7 @@ describe("terminal chrome", () => {
       expect(lines.join("\n")).not.toContain("http")
       expect(lines.join("\n").includes("ctrl+n new")).toBe(width >= 40)
       expect(lines.join("\n").includes("ctrl+p sessions")).toBe(width >= 64)
+      expect(lines.join("\n").includes("codex")).toBe(width >= 58)
       setup.renderer.destroy()
     })
   }
