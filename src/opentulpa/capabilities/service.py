@@ -1532,6 +1532,12 @@ class CapabilityControlService:
             self._tool_host is None
         ):
             raise CapabilityRuntimeUnavailableError("an MCP capability tool host is not configured")
+        runtime_config = dict(config)
+        if self._config_defaults is not None:
+            # Host runtime bindings, such as the current Agent API endpoint, must
+            # never be restored from stale or tenant-controlled configuration.
+            runtime_config.update(self._config_defaults(tenant_id, manifest))
+        _validate_config(manifest.config_schema, runtime_config)
         try:
             requirements = _secret_requirements(manifest)
             secrets: Mapping[str, str] = {}
@@ -1561,7 +1567,7 @@ class CapabilityControlService:
                 instance_id=instance_id,
                 manifest=manifest,
                 tenant_id=tenant_id,
-                config=config,
+                config=runtime_config,
                 secrets=secrets,
             )
             if self._tool_host is not None and publish_tools:
@@ -1582,7 +1588,7 @@ class CapabilityControlService:
                         previous_instance_id=replace_instance_id,
                         instance_id=instance_id,
                         manifest=manifest,
-                        config=config,
+                        config=runtime_config,
                         secrets=secrets,
                         worker_endpoints=endpoint_map,
                         worker_endpoint_headers=endpoint_headers,
@@ -1594,7 +1600,7 @@ class CapabilityControlService:
                         tenant_id=tenant_id,
                         instance_id=instance_id,
                         manifest=manifest,
-                        config=config,
+                        config=runtime_config,
                         secrets=secrets,
                         worker_endpoints=endpoint_map,
                         worker_endpoint_headers=endpoint_headers,

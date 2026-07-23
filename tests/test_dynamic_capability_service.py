@@ -169,7 +169,10 @@ def _manifest(revision: int, *, worker: bool = False) -> CapabilityManifest:
         else (),
         config_schema={
             "type": "object",
-            "properties": {"mode": {"type": "string", "enum": ["safe"]}},
+            "properties": {
+                "mode": {"type": "string", "enum": ["safe"]},
+                "agent_api_url": {"type": "string", "minLength": 1},
+            },
             "additionalProperties": False,
         },
         eval_commands=(EvalCommand(argv=("pytest", "-q")),),
@@ -497,6 +500,65 @@ async def test_start_restores_persisted_workers_and_shutdown_stops_them(
     assert restored_secrets.revoked == [
         ("tenant-a", restored_secrets.calls[0]["instance_id"])
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_overrides_stale_persisted_runtime_binding(tmp_path: Path) -> None:
+    evaluator = _Evaluator()
+    store = CapabilityRevisionStore(tmp_path / "capabilities.sqlite3")
+    initial = CapabilityControlService(
+        revisions=store,
+        evaluator=evaluator,
+        workers=CapabilityWorkerManager(_Host()),
+        secret_resolver=_Secrets(),
+        bundled=(),
+        config_defaults=lambda _tenant, _manifest: {
+            "agent_api_url": "http://127.0.0.1:31001"
+        },
+    )
+    initial.save(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        manifest=_manifest(1, worker=True),
+        expected_latest_revision=None,
+    )
+    await initial.test(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        capability_name="example",
+        revision=1,
+    )
+    active = await initial.activate(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        capability_name="example",
+        revision=1,
+        expected_generation=None,
+        secret_handles={"CAPABILITY_TOKEN": "token-handle"},
+    )
+    assert active.config["agent_api_url"] == "http://127.0.0.1:31001"
+
+    restored_host = _Host()
+    restored = CapabilityControlService(
+        revisions=store,
+        evaluator=evaluator,
+        workers=CapabilityWorkerManager(restored_host),
+        secret_resolver=_Secrets(),
+        bundled=(),
+        config_defaults=lambda _tenant, _manifest: {
+            "agent_api_url": "http://127.0.0.1:32002"
+        },
+    )
+    await restored.start()
+
+    assert dict(restored_host.launches[0].config)["agent_api_url"] == (
+        "http://127.0.0.1:32002"
+    )
+    assert store.active(
+        namespace="tenant-a",
+        capability_name="example",
+    ).config["agent_api_url"] == "http://127.0.0.1:31001"
+    await restored.shutdown()
 
 
 @pytest.mark.asyncio
