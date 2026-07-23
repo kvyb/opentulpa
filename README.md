@@ -80,4 +80,229 @@ OpenTUI client with streamed Markdown, a visible activity spinner, compact expan
 tool calls, drag-and-drop attachments, server-backed sessions, and clickable
 **Approve**, **Edit**, and **Reject** controls. Telegram uses the same Agent API with a
 scoped credential. Use `ctrl+p` or `/sessions` to reopen the same durable Deep Agents
-threads from another client. Type `/` in the composer to search
+threads from another client. Type `/` in the composer to search and select commands.
+
+The API key remains the zero-friction default. Inside any owner conversation, `/model`,
+`/reasoning`, and `/speed` select that thread's next-run inference settings without
+restarting OpenTulpa.
+`/login codex` optionally connects a ChatGPT Codex subscription through device login;
+the rotating OAuth credential is encrypted on the server and never shared with an
+existing Codex CLI login. Codex has no implicit cross-provider fallback. Use
+`/model codex MODEL fallback` only when you explicitly want transient Codex failures to
+fall back to the configured Kimi-to-GLM API chain.
+
+For example, from the terminal client you can write:
+
+> Enable Telegram for this OpenTulpa. Here is my BotFather token: [redacted]
+
+Recognized credentials are encrypted before the message reaches a checkpoint; the
+model sees an opaque `secret:[redacted] handle. OpenTulpa can test the bundled Telegram
+capability, ask for activation approval, and start its worker. Pair the first Telegram
+account with `/start <code>`; by default the one-time code is the last eight characters
+of the bot token. A later request to change Telegram behavior becomes a source
+candidate and managed release rather than an in-place edit.
+
+Other credentials work the same way. Paste `SERVICE_API_KEY=[redacted] in an authenticated
+owner chat, or use `<secret [redacted] for multiline
+material. OpenTulpa persists only the encrypted value and an opaque handle. For example,
+paste `COMPOSIO_API_KEY=[redacted], then ask it to connect GitHub; it hot-loads the key and
+returns the tenant-owned OAuth link without a restart.
+
+In managed OCI mode the stable bootstrap derives the active release image and runs that
+worker rootless with only private capability `/state`; product `/workspace`, source,
+databases, host credentials, and the container socket are never mounted. Generation
+handover stops the old poller first and restores it if the new generation fails. Direct
+development mode keeps reviewed subprocess workers. The bundled Docker and Railway host
+can replace and roll back its Deep Agents child without a container socket.
+
+The stable setup host imports `TELEGRAM_BOT_TOKEN` into the encrypted capability vault
+and starts only the long-poll worker. Explicit direct `server` mode retains the webhook
+adapter for development and blocks dynamic Telegram so two consumers cannot use one
+bot.
+
+Browser automation, Composio, document parsers, and Crawl4AI are optional adapters,
+not agent-runtime dependencies. The core installs and starts without them:
+
+```bash
+uv sync --no-dev                         # lean core and API
+uv sync --no-dev --extra browser         # Browser Use Cloud SDK and Playwright CDP client
+uv sync --no-dev --extra integrations    # Composio
+uv sync --no-dev --extra documents       # PDF, workbook, and encoding helpers
+uv sync --no-dev --extra research        # Crawl4AI extraction
+uv sync --no-dev --extra bundled         # all optional bundled adapters
+```
+
+`start.sh` keeps the lean core by default. Set `OPENTULPA_EXTRAS=bundled` (or a
+comma-separated subset such as `integrations,documents`) to retain those adapters
+across installs and bake the same extras into a managed runtime image.
+
+With `BROWSER_USE_API_KEY`, explicit browser tools use a tenant-scoped Browser Use
+Cloud session. The Playwright package is only the CDP control client; Chromium and its
+target network run in Browser Use Cloud isolation. OpenTulpa has no host-browser
+fallback. It requires explicit destination domains and rejects direct private or
+link-local targets, but it cannot DNS-pin Chromium inside the vendor environment.
+`content_fetch` has a bounded built-in HTML
+extractor and uses Crawl4AI only when the research extra is present.
+When the configured model endpoint is OpenRouter, `web_search` uses OpenRouter's
+model-agnostic web plugin with the same API key and returns only grounded URL-cited
+results; no separate search-provider key is required. `EXA_API_KEY` remains an
+optional direct-provider override.
+
+## Runs, Notifications, And Approvals
+
+All owner interfaces use the same V2 surfaces:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v2/agent/threads` | Create a durable server-backed conversation |
+| `GET /v2/agent/threads` | List tenant-owned conversations |
+| `GET /v2/agent/threads/{thread_id}/timeline` | Replay messages, tools, artifacts, and approvals |
+| `PATCH /v2/agent/threads/{thread_id}` | Rename or archive a conversation |
+| `GET/PATCH /v2/agent/threads/{thread_id}/inference` | Read or change that conversation's model |
+| `/v2/inference` | Discover models and manage optional Codex device authentication |
+| `POST /v2/agent/runs` | Start an owner run and stream normalized SSE events |
+| `GET /v2/agent/runs/{run_id}` | Read tenant-scoped status and pending approvals |
+| `POST /v2/agent/runs/{run_id}/resume` | Approve, edit, or reject an interrupted run |
+| `GET /v2/notifications` | Long-poll durable background and approval notifications |
+| `POST /v2/notifications/{id}/ack` | Acknowledge one notification for this interface |
+| `/v2/agent-specs` | Revisioned model, tools, memory, workspace, and instruction policy |
+| `/v2/trigger-specs` | Revisioned time, interval, or authenticated-event triggers |
+| `/v2/schedules` | Simple reminder and agent-job projection over trigger specs |
+| `/v2/capabilities` | Test and activate release-bundled capability revisions |
+| `/v2/evolution` | Inspect release lineage and export evaluated contribution patches |
+
+Run streaming is normalized to `run.started`, `message.delta`, `tool.started`,
+`tool.completed`, `approval.required`, `artifact.ready`, `run.completed`, and
+`run.failed`. Each event has a run ID, monotonic sequence, and timestamp. The durable
+notification stream carries schedule results, pending approvals, candidate results,
+activation failures, and rollback outcomes back to the TUI and Telegram after restarts.
+
+Tool arguments never contain tenant IDs, credentials, filesystem roots, or ownership
+identifiers. The registry in `opentulpa.tooling` generates LangChain tools, approval
+policy, audit metadata, JSON Schema, and the committed
+[tool contract](docs/tool-contract.md).
+
+## AgentSpecs And Triggers
+
+An `AgentSpec` is an immutable behavioral revision: model alias, instructions, tool
+allowlist, memory scope, workspace scope, delegation, and runtime budgets. Secrets
+remain behind explicit tools and capability manifests rather than entering an agent
+configuration. Owner, routine, and intake are seed specs, not separate runtimes.
+
+A `TriggerSpec` selects an exact `AgentSpec` revision and adds a source, instruction,
+and delivery rule. Sources can be one-off time, cron with an IANA timezone, interval,
+or an authenticated event. APScheduler and the durable dispatcher only submit runs;
+they never auto-approve an interrupted action.
+
+The simpler `/v2/schedules` and schedule tools project:
+
+```text
+At | Cron -> Reminder | AgentJob -> routine AgentSpec -> owner notification
+```
+
+Use full AgentSpec and TriggerSpec revisions when a background process needs another
+model, a narrower tool set, isolated memory, different instructions, or an external
+event source.
+
+## Self-Improvement
+
+On Docker, Railway, and managed installations, the owner agent controls one isolated
+source checkout backed by persistent Git lineage:
+
+- `source_shell` creates or resumes it and can inspect, edit, test, and experiment with
+  any OpenTulpa source using ordinary shell commands;
+- `source_status` shows the current checkout and bounded diff without changing it;
+- `trace_list` and `trace_get` expose the agent's own redacted durable execution traces;
+- `source_release` requests one native chat approval, runs fixed checks, builds the exact
+  source commit, and queues safe activation;
+- `source_rollback` restores the previous healthy release with owner approval.
+
+The source shell cannot see production data, credentials, the serving checkout,
+bootstrap state, deployment controls, or a container socket. It is unprivileged,
+resource-bounded, and has outbound network access without gaining access to host
+secrets. The agent may change core runtime, API, integrations, interfaces, tools,
+prompts, schedules, or add new code. The stable bootstrap and its release recipe remain
+outside the mutable release.
+
+Evaluation and release building are bound to the source commit, dependency lock hash,
+evaluator fingerprint, and artifact digest. The candidate's Dockerfile is not used.
+Dependency-lock changes still require an administrator-built runtime base.
+
+Failures remain in the lineage with a sanitized cause. The originating owner thread
+and notification stream receive completion or failure. After a successful cutover,
+the new release uses the same persistent checkpoints, memory, skills, notification
+store, and workspace, so it can explain what happened. If the new release fails during
+activation or probation, the immutable bootstrap automatically restores the previous
+release and reports the rollback. Only release-coupled capability worker state is
+restored; messages, checkpoints, files, memories, bookings, schedules, and other
+product data written during probation are preserved. Self-updates therefore must not
+perform irreversible product-data migrations.
+
+Rollback restores code, the serving process, and release-coupled capability state. It
+cannot retract an external message, purchase, authorization change, or other provider
+effect already emitted while a candidate was serving probation traffic. Changes near
+external effects must be rehearsed with fake sinks and continue to rely on tool approval
+and idempotency; image rollback is not a transaction over the outside world.
+
+## Start
+
+```bash
+git clone https://github.com/kvyb/opentulpa.git
+cd opentulpa
+./install.sh
+opentulpa
+```
+
+Choose **Run here**, enter the model API key once, and the CLI starts the private server
+and opens the native TUI. A source checkout builds and caches the platform client on the
+first run; CI also produces macOS and Linux platform archives. Later, just run
+`opentulpa` again.
+
+In the TUI, use `/model`, `/reasoning`, `/speed`, or `/login codex`. Remote
+connections change the remote thread; no Codex environment variable, callback server,
+or extra process is used.
+
+```bash
+# Remote server
+opentulpa server --public-url https://tulpa.example
+
+# Local machine
+opentulpa connect https://tulpa.example
+```
+
+Paste the one-time pairing code printed by the server. See
+[Deployment](docs/DEPLOYMENT.md) for Docker, Railway, managed self-improvement, and
+non-interactive configuration.
+
+### Managed self-improving mode
+
+Set at least:
+
+```env
+OPENAI_COMPATIBLE_API_KEY=[redacted]
+OPENTULPA_OWNER_TOKEN=[redacted]
+EVOLUTION_ENABLED=true
+OPENTULPA_RECOVERY_TOKEN=[redacted]
+OPENTULPA_INGRESS_TOKEN=[redacted]
+OPENTULPA_RELEASE_BASE_IMAGE=opentulpa-runtime-base:0.1.0
+OPENTULPA_RELEASE_EGRESS_NETWORK=opentulpa-release-egress
+OPENTULPA_RELEASE_WORKSPACE=/absolute/persistent/opentulpa-release-data
+```
+
+The egress network must be created and restricted by the administrator. Then:
+
+```bash
+./start.sh install managed   # builds runtime, evaluator, and tenant sandbox images
+./start.sh doctor managed    # checks Git, OCI, images, network, and writable state
+./start.sh run managed       # starts only, without reinstalling
+# or: ./start.sh managed     # install, then start
+```
+
+The immutable gateway remains on the public host/port and proxies to the active
+release. The release gets a persistent `/workspace`; it never receives the source
+checkout, bootstrap database, `.env`, container socket, or sandbox image authority.
+Tenant commands cross a private, lease-bound endpoint and the stable host derives the
+tenant root and launches the exact locally resolved reviewed image. See
+[Deployment](docs/DEPLOYMENT.md) for the complete host contract.
+
+Use `opentul
