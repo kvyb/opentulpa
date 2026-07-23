@@ -103,9 +103,9 @@ class Settings(BaseSettings):
         description="Revisioned intake workflow drafts migrated from setup sessions.",
     )
     agent_max_completion_tokens: int = Field(
-        default=4096,
+        default=40_000,
         ge=128,
-        le=32768,
+        le=131_072,
         description="Maximum model completion tokens per agent turn.",
     )
     sandbox_container_cli: str = Field(

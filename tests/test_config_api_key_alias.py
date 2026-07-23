@@ -165,10 +165,10 @@ def test_settings_loads_runtime_defaults_from_yaml(monkeypatch, tmp_path: Path) 
     assert settings.business_knowledge_oracle_model == "oracle-from-yaml"
 
 
-def test_settings_accepts_deep_agent_completion_limit() -> None:
-    settings = Settings(agent_max_completion_tokens=32_768)
+def test_settings_uses_40k_deep_agent_completion_limit() -> None:
+    settings = Settings()
 
-    assert settings.agent_max_completion_tokens == 32_768
+    assert settings.agent_max_completion_tokens == 40_000
 
 
 def test_settings_accepts_trusted_model_alias_map() -> None:

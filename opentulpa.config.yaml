@@ -23,7 +23,7 @@ evolution_sandbox_image: opentulpa-evolution:0.1.0
 evolution_evaluator_image: opentulpa-evolution:0.1.0
 
 # Deep Agent and sandbox limits
-agent_max_completion_tokens: 4096
+agent_max_completion_tokens: 40000
 sandbox_container_cli: docker
 sandbox_image: opentulpa-tenant-sandbox:0.1.0
 sandbox_cpu_limit: "1"
