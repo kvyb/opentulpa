@@ -199,41 +199,89 @@ export class OpenTulpaApi {
   }
 
   private async *stream(path: string, init: RequestInit = {}): AsyncGenerator<AgentEvent> {
-    let response: Response
-    try {
-      response = await fetch(`${this.config.url}${path}`, this.withHeaders(init))
-    } catch {
-      throw new ApiError("The OpenTulpa event stream disconnected.")
-    }
-    if (!response.ok) throw await this.error(response)
-    if (!response.body) throw new ApiError("OpenTulpa returned an empty event stream.")
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ""
+    let runId = ""
+    let sequence = 0
+    let reconnectAttempts = 0
     while (true) {
-      const chunk = await reader.read()
-      buffer += decoder.decode(chunk.value, { stream: !chunk.done }).replaceAll("\r\n", "\n")
-      let boundary = buffer.indexOf("\n\n")
-      while (boundary >= 0) {
-        const frame = buffer.slice(0, boundary)
-        buffer = buffer.slice(boundary + 2)
-        const data = frame
+      let response: Response
+      try {
+        response = await fetch(`${this.config.url}${path}`, this.withHeaders(init))
+      } catch {
+        if (!runId || reconnectAttempts >= 6) {
+          throw new ApiError("The OpenTulpa event stream disconnected.")
+        }
+        reconnectAttempts += 1
+        await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, reconnectAttempts * 500)))
+        continue
+      }
+      if (!response.ok) throw await this.error(response)
+      if (!response.body) throw new ApiError("OpenTulpa returned an empty event stream.")
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let terminal = false
+      let disconnected = false
+      try {
+        while (true) {
+          const chunk = await reader.read()
+          buffer += decoder.decode(chunk.value, { stream: !chunk.done }).replaceAll("\r\n", "\n")
+          let boundary = buffer.indexOf("\n\n")
+          while (boundary >= 0) {
+            const frame = buffer.slice(0, boundary)
+            buffer = buffer.slice(boundary + 2)
+            const data = frame
+              .split("\n")
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trimStart())
+              .join("\n")
+            if (data) {
+              const event = this.event(data)
+              runId = event.run_id
+              if (event.sequence > sequence) {
+                sequence = event.sequence
+                reconnectAttempts = 0
+              }
+              terminal = ["run.completed", "run.failed", "approval.required"].includes(event.type)
+              yield event
+            }
+            boundary = buffer.indexOf("\n\n")
+          }
+          if (chunk.done) break
+        }
+      } catch {
+        disconnected = true
+      }
+      if (!disconnected && buffer.trim()) {
+        const data = buffer
           .split("\n")
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trimStart())
           .join("\n")
-        if (data) yield this.event(data)
-        boundary = buffer.indexOf("\n\n")
+        if (data) {
+          const event = this.event(data)
+          runId = event.run_id
+          if (event.sequence > sequence) {
+            sequence = event.sequence
+            reconnectAttempts = 0
+          }
+          terminal = ["run.completed", "run.failed", "approval.required"].includes(event.type)
+          yield event
+        }
       }
-      if (chunk.done) break
-    }
-    if (buffer.trim()) {
-      const data = buffer
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n")
-      if (data) yield this.event(data)
+      if (terminal || !runId) {
+        if (disconnected && !runId) {
+          throw new ApiError("The OpenTulpa event stream disconnected.")
+        }
+        return
+      }
+      if (reconnectAttempts >= 6) {
+        throw new ApiError("The OpenTulpa event stream disconnected.")
+      }
+      reconnectAttempts += 1
+      path = `/v2/agent/runs/${encodeURIComponent(runId)}/events?after_sequence=${sequence}`
+      init = { headers: { "Last-Event-ID": String(sequence) } }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, reconnectAttempts * 500)))
     }
   }
 

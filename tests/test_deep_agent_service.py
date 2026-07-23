@@ -1263,27 +1263,35 @@ async def test_streaming_content_rejection_also_uses_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_closing_stream_marks_running_run_cancelled(tmp_path: Path) -> None:
+async def test_closing_stream_does_not_cancel_detached_run(tmp_path: Path) -> None:
     service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
     await service.start()
+    graph = _SerializedGraph()
+    service._graphs["owner"] = graph  # noqa: SLF001
     events = cast(
         AsyncGenerator[Any, None],
         service.stream(AgentRunRequest(context=_context(), text="Hi")),
     )
     try:
         started = await anext(events)
+        await asyncio.wait_for(graph.first_entered.wait(), timeout=1)
         await events.aclose()
-        snapshot = await service.get_run(started.run_id)
-        replayed = [event async for event in service.events(started.run_id)]
+        disconnected = await service.get_run(started.run_id)
+        graph.release_first.set()
+        replayed = [
+            event
+            async for event in service.events(started.run_id, after_sequence=started.sequence)
+        ]
+        completed = await service.get_run(started.run_id)
     finally:
+        graph.release_first.set()
         await service.shutdown()
 
     assert started.type == "run.started"
-    assert snapshot is not None
-    assert snapshot.status == "cancelled"
-    assert snapshot.error == "The agent run was cancelled before completion."
-    assert [event.type for event in replayed] == ["run.started", "run.failed"]
-    assert replayed[-1].data["code"] == "agent_run_cancelled"
+    assert disconnected is not None and disconnected.status == "running"
+    assert completed is not None and completed.status == "completed"
+    assert replayed[-1].type == "run.completed"
+    assert replayed[-1].data == {"text": "response-1"}
 
 
 @pytest.mark.asyncio
@@ -1421,7 +1429,7 @@ async def test_run_idempotency_rejects_changed_request_identity_or_payload(
 
 
 @pytest.mark.asyncio
-async def test_task_cancellation_is_persisted_and_propagated(tmp_path: Path) -> None:
+async def test_stream_consumer_cancellation_requires_explicit_run_cancel(tmp_path: Path) -> None:
     service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
     await service.start()
     graph = _BlockingGraph()
@@ -1441,13 +1449,14 @@ async def test_task_cancellation_is_persisted_and_propagated(tmp_path: Path) -> 
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
-        snapshot = await service.get_run(started.run_id)
+        disconnected = await service.get_run(started.run_id)
         await events.aclose()
+        cancelled = await service.cancel(started.run_id)
     finally:
         await service.shutdown()
 
-    assert snapshot is not None
-    assert snapshot.status == "cancelled"
+    assert disconnected is not None and disconnected.status == "running"
+    assert cancelled.status == "cancelled"
 
 
 @pytest.mark.asyncio

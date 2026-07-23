@@ -43,6 +43,58 @@ describe("V2 event transport", () => {
     expect(request?.headers.get("authorization")).toBe("Bearer owner")
   })
 
+  test("reconnects a dropped run stream from the last durable sequence", async () => {
+    const encoder = new TextEncoder()
+    const requests: Request[] = []
+    globalThis.fetch = (async (input, init) => {
+      requests.push(new Request(input, init))
+      if (requests.length === 1) {
+        let reads = 0
+        return new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (reads === 0) {
+                reads += 1
+                controller.enqueue(
+                  encoder.encode(
+                    'id: 1\ndata: {"type":"run.started","run_id":"run-1","sequence":1,' +
+                      '"timestamp":"2026-01-01T00:00:00Z","data":{}}\n\n',
+                  ),
+                )
+                return
+              }
+              controller.error(new Error("socket closed"))
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      return new Response(
+        'id: 2\ndata: {"type":"run.completed","run_id":"run-1","sequence":2,' +
+          '"timestamp":"2026-01-01T00:00:01Z","data":{"text":"done"}}\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )
+    }) as typeof fetch
+
+    const api = new OpenTulpaApi({
+      url: "https://tulpa.test",
+      token: "owner",
+      thread_id: "thread-1",
+    })
+    const events = []
+    for await (const event of api.run("thread-1", "work", [])) events.push(event)
+
+    expect(events.map((event) => [event.sequence, event.type])).toEqual([
+      [1, "run.started"],
+      [2, "run.completed"],
+    ])
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.url).toBe(
+      "https://tulpa.test/v2/agent/runs/run-1/events?after_sequence=1",
+    )
+    expect(requests[1]?.headers.get("last-event-id")).toBe("1")
+  })
+
   test("updates only the current thread inference preference", async () => {
     let request: Request | undefined
     globalThis.fetch = (async (input, init) => {

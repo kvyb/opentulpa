@@ -628,6 +628,10 @@ class DeepAgentService:
         self._store: AsyncSqliteStore | None = None
         self._runs_db: aiosqlite.Connection | None = None
         self._run_event_lock = asyncio.Lock()
+        self._run_event_conditions: WeakValueDictionary[str, asyncio.Condition] = (
+            WeakValueDictionary()
+        )
+        self._active_run_tasks: dict[str, asyncio.Task[None]] = {}
         self._graphs: dict[str, Any] = {}
         self._spec_graphs: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
         self._checkpoint_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -757,6 +761,12 @@ class DeepAgentService:
         await self._recover_pending_resumes()
 
     async def shutdown(self) -> None:
+        active_tasks = tuple(self._active_run_tasks.values())
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        self._active_run_tasks.clear()
         recovery_tasks = tuple(self._pending_resume_tasks)
         for task in recovery_tasks:
             task.cancel()
@@ -794,7 +804,9 @@ class DeepAgentService:
 
         self._require_started()
         prepared = await self._prepare_run(request)
-        return self._stream_prepared(request, prepared)
+        if prepared.created:
+            self._schedule_run(request, prepared)
+        return self.events(prepared.run_id)
 
     async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
         events = await self.open_stream(request)
@@ -834,15 +846,28 @@ class DeepAgentService:
             inference_plan=inference_plan,
         )
 
-    async def _stream_prepared(
+    def _schedule_run(
         self,
         request: AgentRunRequest,
         prepared: _PreparedRun,
-    ) -> AsyncIterator[AgentRunEvent]:
-        if not prepared.created:
-            async for event in self.events(prepared.run_id):
-                yield event
+    ) -> None:
+        current = self._active_run_tasks.get(prepared.run_id)
+        if current is not None and not current.done():
             return
+        task = asyncio.create_task(
+            self._run_prepared(request, prepared),
+            name=f"opentulpa-agent-run:{prepared.run_id}",
+        )
+        self._active_run_tasks[prepared.run_id] = task
+        task.add_done_callback(
+            lambda completed: self._run_task_done(prepared.run_id, completed)
+        )
+
+    async def _run_prepared(
+        self,
+        request: AgentRunRequest,
+        prepared: _PreparedRun,
+    ) -> None:
         graph_input = {
             "messages": [
                 {
@@ -853,7 +878,7 @@ class DeepAgentService:
         }
         try:
             async with self._checkpoint_lock(prepared.checkpoint_thread_id):
-                async for event in self._stream_graph(
+                async for _ in self._stream_graph(
                     run_id=prepared.run_id,
                     context=request.context,
                     checkpoint_thread_id=prepared.checkpoint_thread_id,
@@ -861,9 +886,26 @@ class DeepAgentService:
                     resumed=False,
                     inference_plan=prepared.inference_plan,
                 ):
-                    yield event
+                    pass
         finally:
             await self._finalize_abandoned_run(prepared.run_id)
+
+    def _run_task_done(
+        self,
+        run_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        if self._active_run_tasks.get(run_id) is task:
+            self._active_run_tasks.pop(run_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Detached Deep Agent run stopped: run_id=%s error_type=%s",
+                run_id,
+                type(error).__name__,
+            )
 
     async def open_resume(
         self,
@@ -1375,28 +1417,40 @@ class DeepAgentService:
         *,
         after_sequence: int = 0,
     ) -> AsyncIterator[AgentRunEvent]:
-        """Replay the durable, redacted event stream after a client cursor."""
+        """Replay durable events, then follow a live run without owning its execution."""
 
-        db = self._require_runs_db()
-        cursor = await db.execute(
-            """
-            SELECT sequence, event_type, timestamp, data_json
-            FROM agent_run_events
-            WHERE run_id = ? AND sequence > ?
-            ORDER BY sequence ASC
-            """,
-            (run_id, max(0, int(after_sequence))),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        for row in rows:
-            yield AgentRunEvent(
-                type=cast(AgentRunEventType, str(row["event_type"])),
-                run_id=run_id,
-                sequence=int(row["sequence"]),
-                timestamp=str(row["timestamp"]),
-                data=dict(json.loads(str(row["data_json"]))),
-            )
+        sequence = max(0, int(after_sequence))
+        condition = self._run_event_condition(run_id)
+        while True:
+            async with condition:
+                async with self._run_event_lock:
+                    db = self._require_runs_db()
+                    cursor = await db.execute(
+                        """
+                        SELECT sequence, event_type, timestamp, data_json
+                        FROM agent_run_events
+                        WHERE run_id = ? AND sequence > ?
+                        ORDER BY sequence ASC
+                        """,
+                        (run_id, sequence),
+                    )
+                    rows = await cursor.fetchall()
+                    await cursor.close()
+                    status = await self._run_status(run_id) if not rows else ""
+                if not rows:
+                    if status not in {"running", "resume_pending"}:
+                        return
+                    await condition.wait()
+                    continue
+            for row in rows:
+                sequence = int(row["sequence"])
+                yield AgentRunEvent(
+                    type=cast(AgentRunEventType, str(row["event_type"])),
+                    run_id=run_id,
+                    sequence=sequence,
+                    timestamp=str(row["timestamp"]),
+                    data=dict(json.loads(str(row["data_json"]))),
+                )
 
     def _checkpoint_lock(self, checkpoint_thread_id: str) -> asyncio.Lock:
         lock = self._checkpoint_locks.get(checkpoint_thread_id)
@@ -1405,16 +1459,33 @@ class DeepAgentService:
             self._checkpoint_locks[checkpoint_thread_id] = lock
         return lock
 
+    def _run_event_condition(self, run_id: str) -> asyncio.Condition:
+        condition = self._run_event_conditions.get(run_id)
+        if condition is None:
+            condition = asyncio.Condition()
+            self._run_event_conditions[run_id] = condition
+        return condition
+
+    async def _notify_run_event(self, run_id: str) -> None:
+        condition = self._run_event_condition(run_id)
+        async with condition:
+            condition.notify_all()
+
     async def cancel(self, run_id: str) -> AgentRunSnapshot:
         snapshot = await self.get_run(run_id)
         if snapshot is None:
             raise KeyError(f"agent run not found: {run_id}")
         if snapshot.status in {"completed", "failed", "cancelled"}:
             return snapshot
-        await self._cancel_with_event(
-            run_id,
-            allowed_statuses={"running", "interrupted", "resume_pending"},
-        )
+        task = self._active_run_tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if await self._run_status(run_id) not in _TERMINAL_RUN_STATUSES:
+            await self._cancel_with_event(
+                run_id,
+                allowed_statuses={"running", "interrupted", "resume_pending"},
+            )
         updated = await self.get_run(run_id)
         assert updated is not None
         return updated
@@ -3413,13 +3484,15 @@ class DeepAgentService:
                 with suppress(Exception):
                     await db.rollback()
                 raise
-        return AgentRunEvent(
+        event = AgentRunEvent(
             type=event_type,
             run_id=run_id,
             sequence=sequence,
             timestamp=timestamp,
             data=safe_data,
         )
+        await self._notify_run_event(run_id)
+        return event
 
     async def _observe_run(self, run_id: str) -> None:
         observer = self._run_observer
@@ -3504,13 +3577,15 @@ class DeepAgentService:
             except BaseException:
                 await db.rollback()
                 raise
-        return AgentRunEvent(
+        event = AgentRunEvent(
             type=type,
             run_id=run_id,
             sequence=sequence,
             timestamp=timestamp,
             data=safe_data,
         )
+        await self._notify_run_event(run_id)
+        return event
 
     async def _run_status(self, run_id: str) -> str:
         db = self._require_runs_db()
