@@ -354,6 +354,42 @@ def test_deepagents_context_budget_preserves_stricter_model_profiles() -> None:
         "tool_calling": True,
     }
 
+    codex = _ToolCapableTextModel(responses=["ok"])
+    codex_budgeted = _with_deepagents_context_budget(codex, provider="codex")
+
+    assert codex_budgeted is codex
+    assert codex_budgeted.profile == {"max_input_tokens": 300_000}
+    assert compute_summarization_defaults(codex_budgeted) == {
+        "trigger": ("fraction", 0.85),
+        "keep": ("fraction", 0.1),
+        "truncate_args_settings": {
+            "trigger": ("fraction", 0.85),
+            "keep": ("fraction", 0.1),
+        },
+    }
+
+    smaller_codex = _ToolCapableTextModel(
+        responses=["ok"],
+        profile={"max_input_tokens": 200_000, "tool_calling": True},
+    )
+    _with_deepagents_context_budget(smaller_codex, provider="codex")
+
+    assert smaller_codex.profile == {
+        "max_input_tokens": 200_000,
+        "tool_calling": True,
+    }
+
+    larger_codex = _ToolCapableTextModel(
+        responses=["ok"],
+        profile={"max_input_tokens": 400_000, "tool_calling": True},
+    )
+    _with_deepagents_context_budget(larger_codex, provider="codex")
+
+    assert larger_codex.profile == {
+        "max_input_tokens": 300_000,
+        "tool_calling": True,
+    }
+
 
 @pytest.mark.parametrize("kind", ["navigate", "wait"])
 def test_browser_policy_auto_approves_non_submitting_actions(kind: str) -> None:

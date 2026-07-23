@@ -68,7 +68,11 @@ from opentulpa.deep_agent.sandbox import (
 )
 from opentulpa.inference.codex import is_transient as is_codex_transient
 from opentulpa.inference.codex import is_unauthorized as is_codex_unauthorized
-from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
+from opentulpa.inference.models import (
+    InferenceProvider,
+    InferenceSelection,
+    ResolvedInferencePlan,
+)
 from opentulpa.inference.service import (
     InferenceConflictError,
     InferenceService,
@@ -98,7 +102,8 @@ _PUBLIC_PROVIDER_REJECTION_MESSAGE = (
 _PUBLIC_PROVIDER_FAILURE_MESSAGE = (
     "No configured model provider could complete this request. Try again later."
 )
-_DEEPAGENTS_CONTEXT_BUDGET_TOKENS = 50_000
+_DEEPAGENTS_API_CONTEXT_BUDGET_TOKENS = 50_000
+_DEEPAGENTS_CODEX_CONTEXT_BUDGET_TOKENS = 300_000
 _REGENERATE_COMMAND = "/regenerate"
 _REGENERATE_INSTRUCTION = """Regenerate your latest attempted response to the immediately preceding
 owner request. Produce a fresh answer rather than discussing this command or merely repeating the
@@ -570,17 +575,26 @@ def build_openrouter_chat_model(
     )
 
 
-def _with_deepagents_context_budget(model: Any) -> Any:
-    """Give Deep Agents a lean working-context budget without changing providers."""
+def _with_deepagents_context_budget(
+    model: Any,
+    *,
+    provider: InferenceProvider = "api",
+) -> Any:
+    """Give Deep Agents the selected provider's working-context budget."""
 
     if not isinstance(model, BaseChatModel):
         return model
+    budget = (
+        _DEEPAGENTS_CODEX_CONTEXT_BUDGET_TOKENS
+        if provider == "codex"
+        else _DEEPAGENTS_API_CONTEXT_BUDGET_TOKENS
+    )
     profile = cast("ModelProfile", dict(model.profile or {}))
     advertised_limit = profile.get("max_input_tokens")
     if type(advertised_limit) is int and advertised_limit > 0:
-        effective_limit = min(advertised_limit, _DEEPAGENTS_CONTEXT_BUDGET_TOKENS)
+        effective_limit = min(advertised_limit, budget)
     else:
-        effective_limit = _DEEPAGENTS_CONTEXT_BUDGET_TOKENS
+        effective_limit = budget
     if advertised_limit == effective_limit:
         return model
     profile["max_input_tokens"] = effective_limit
@@ -1909,7 +1923,8 @@ class DeepAgentService:
         assert self._checkpointer is not None
         assert self._store is not None
         model = _with_deepagents_context_budget(
-            self._provided_model or self._build_model()
+            self._provided_model or self._build_model(),
+            provider="api",
         )
         interrupt_on = self._interrupt_on()
         owner_tools = [tool for tool in self._tools if tool.name in _OWNER_PRODUCT_TOOL_NAMES]
@@ -2061,7 +2076,10 @@ class DeepAgentService:
             inference_plan or self._default_inference_plan(),
         )
         resolved_model = self._model_for_spec(spec, active_plan)
-        model = _with_deepagents_context_budget(resolved_model.model)
+        model = _with_deepagents_context_budget(
+            resolved_model.model,
+            provider=active_plan.primary.provider,
+        )
         middleware: list[Any] = [
             ModelCallLimitMiddleware(
                 run_limit=spec.max_model_calls,
