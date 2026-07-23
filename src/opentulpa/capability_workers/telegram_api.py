@@ -182,13 +182,43 @@ class TelegramBotAPI:
         chat_id: int,
         text: str,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> list[int]:
         chunks = _text_chunks(text)
+        message_ids: list[int] = []
         for index, chunk in enumerate(chunks):
             payload: dict[str, Any] = {"chat_id": int(chat_id), "text": chunk}
             if index == 0 and reply_markup is not None:
                 payload["reply_markup"] = reply_markup
-            await self._post("sendMessage", payload, timeout=30)
+            result = await self._post("sendMessage", payload, timeout=30)
+            if isinstance(result, dict):
+                message_id = _positive_int(result.get("message_id"))
+                if message_id is not None:
+                    message_ids.append(message_id)
+        return message_ids
+
+    async def send_chat_action(self, *, chat_id: int, action: str = "typing") -> None:
+        await self._post(
+            "sendChatAction",
+            {"chat_id": int(chat_id), "action": str(action or "typing")[:20]},
+            timeout=10,
+        )
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": int(chat_id),
+            "message_id": int(message_id),
+            "text": str(text or "")[:4_000] or "…",
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        await self._post("editMessageText", payload, timeout=30)
 
     async def answer_callback_query(
         self,

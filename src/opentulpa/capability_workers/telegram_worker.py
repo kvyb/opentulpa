@@ -27,6 +27,7 @@ from opentulpa.capability_workers.telegram_api import (
     TelegramAPIError,
     TelegramAttachment,
     TelegramBotAPI,
+    _text_chunks,
     extract_attachments,
 )
 
@@ -36,6 +37,10 @@ _DECISIONS = ("approve", "edit", "reject")
 _EDIT_ARGUMENT_LIMIT_BYTES = 8 * 1024
 _EDIT_ARGUMENT_MAX_DEPTH = 8
 _EDIT_ARGUMENT_MAX_NODES = 512
+_STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.9
+_STREAM_TYPING_REFRESH_SECONDS = 4.0
+_STREAM_PREVIEW_CHARS = 3_500
+
 _HIDDEN_EDIT_ARGUMENTS = {
     "actor_id",
     "channel",
@@ -119,6 +124,17 @@ class TelegramTransport(Protocol):
         chat_id: int,
         text: str,
         reply_markup: dict[str, Any] | None = None,
+    ) -> list[int]: ...
+
+    async def send_chat_action(self, *, chat_id: int, action: str = "typing") -> None: ...
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
     ) -> None: ...
 
     async def answer_callback_query(
@@ -130,6 +146,127 @@ class TelegramTransport(Protocol):
     ) -> None: ...
 
     async def download_attachment(self, attachment: TelegramAttachment) -> bytes: ...
+
+
+class _TelegramResponseStreamer:
+    """Render Agent API deltas into one throttled Telegram message stream."""
+
+    def __init__(self, *, telegram: TelegramTransport, chat_id: int) -> None:
+        self._telegram = telegram
+        self._chat_id = chat_id
+        self._message_id: int | None = None
+        self._rendered = ""
+        self._last_edit = 0.0
+        self._last_typing = 0.0
+        self._typing_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        await self._send_typing(force=True)
+        self._typing_task = asyncio.create_task(
+            self._typing_loop(),
+            name=f"opentulpa-telegram-typing:{self._chat_id}",
+        )
+
+    async def close(self) -> None:
+        task = self._typing_task
+        self._typing_task = None
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def update(self, text: str) -> None:
+        preview = _stream_preview(text)
+        if not preview:
+            return
+        await self._send_typing()
+        now = asyncio.get_running_loop().time()
+        if self._message_id is None:
+            await self._send_initial(preview)
+            return
+        if preview == self._rendered:
+            return
+        if now - self._last_edit < _STREAM_EDIT_MIN_INTERVAL_SECONDS:
+            return
+        try:
+            await self._telegram.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=self._message_id,
+                text=preview,
+            )
+        except TelegramAPIError:
+            self._message_id = None
+            await self._send_initial(preview)
+            return
+        self._rendered = preview
+        self._last_edit = now
+
+    async def finish(self, text: str) -> None:
+        chunks = _text_chunks(text)
+        if self._message_id is None:
+            await self._telegram.send_message(chat_id=self._chat_id, text=text)
+            return
+        if len(chunks) == 1:
+            if chunks[0] != self._rendered:
+                await self._telegram.edit_message_text(
+                    chat_id=self._chat_id,
+                    message_id=self._message_id,
+                    text=chunks[0],
+                )
+                self._rendered = chunks[0]
+            return
+        await self._telegram.edit_message_text(
+            chat_id=self._chat_id,
+            message_id=self._message_id,
+            text=chunks[0],
+        )
+        self._rendered = chunks[0]
+        for chunk in chunks[1:]:
+            await self._telegram.send_message(chat_id=self._chat_id, text=chunk)
+
+    async def status(self, text: str) -> None:
+        if self._message_id is None:
+            return
+        resolved = str(text or "").strip()[:1_000]
+        if not resolved or resolved == self._rendered:
+            return
+        await self._telegram.edit_message_text(
+            chat_id=self._chat_id,
+            message_id=self._message_id,
+            text=resolved,
+        )
+        self._rendered = resolved
+
+    async def _send_initial(self, preview: str) -> None:
+        message_ids = await self._telegram.send_message(
+            chat_id=self._chat_id,
+            text=preview,
+        )
+        if message_ids:
+            self._message_id = message_ids[0]
+            self._rendered = preview
+            self._last_edit = asyncio.get_running_loop().time()
+
+    async def _send_typing(self, *, force: bool = False) -> None:
+        now = asyncio.get_running_loop().time()
+        if not force and now - self._last_typing < _STREAM_TYPING_REFRESH_SECONDS:
+            return
+        with suppress(TelegramAPIError):
+            await self._telegram.send_chat_action(chat_id=self._chat_id, action="typing")
+            self._last_typing = now
+
+    async def _typing_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_STREAM_TYPING_REFRESH_SECONDS)
+            await self._send_typing(force=True)
+
+
+def _stream_preview(text: str) -> str:
+    resolved = str(text or "").strip()
+    if len(resolved) <= _STREAM_PREVIEW_CHARS:
+        return resolved
+    return "…\n" + resolved[-(_STREAM_PREVIEW_CHARS - 2):]
 
 
 class TelegramInterfaceWorker:
@@ -609,15 +746,64 @@ class TelegramInterfaceWorker:
         run_id = initial_run_id
         sequence = max(0, initial_sequence)
         accumulated = initial_text[-200_000:]
-        async for event in events:
-            if run_id and event.run_id != run_id:
-                raise AgentAPIError("Agent API changed run identifiers mid-stream.")
-            if event.sequence <= sequence:
-                continue
-            run_id = event.run_id
-            if event.type == "message.delta":
-                accumulated = (accumulated + str(event.data.get("text") or ""))[-200_000:]
-            if event.settles_stream:
+        streamer = _TelegramResponseStreamer(telegram=self._telegram, chat_id=chat_id)
+        await streamer.start()
+        try:
+            async for event in events:
+                if run_id and event.run_id != run_id:
+                    raise AgentAPIError("Agent API changed run identifiers mid-stream.")
+                if event.sequence <= sequence:
+                    continue
+                run_id = event.run_id
+                if event.type == "message.delta":
+                    accumulated = (accumulated + str(event.data.get("text") or ""))[-200_000:]
+                    await streamer.update(accumulated)
+                if event.settles_stream:
+                    self._state.save_pending_run(
+                        source_event_id=source_event_id,
+                        update_id=update_id,
+                        run_id=run_id,
+                        chat_id=chat_id,
+                        sequence=sequence,
+                        accumulated_text=accumulated,
+                    )
+                    if event.type == "run.completed":
+                        final_text = str(event.data.get("text") or "").strip() or accumulated.strip()
+                        await streamer.finish(final_text or "The run completed without a message.")
+                        self._complete(
+                            update_id=update_id,
+                            source_event_id=source_event_id,
+                            consumed_approval_token=consumed_approval_token,
+                        )
+                        return "completed"
+                    if event.type == "run.failed":
+                        failure = str(event.data.get("message") or "Agent run failed.").strip()
+                        await streamer.finish((failure or "Agent run failed.")[:2_000])
+                        self._complete(
+                            update_id=update_id,
+                            source_event_id=source_event_id,
+                            consumed_approval_token=consumed_approval_token,
+                        )
+                        return "failed"
+                    approval_token = self._record_approval(
+                        event=event,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                    )
+                    consume = (
+                        consumed_approval_token
+                        if consumed_approval_token != approval_token
+                        else None
+                    )
+                    await streamer.status("Approval required.")
+                    self._complete(
+                        update_id=update_id,
+                        source_event_id=source_event_id,
+                        consumed_approval_token=consume,
+                    )
+                    await self._deliver_approval(approval_token)
+                    return "approval"
+                sequence = event.sequence
                 self._state.save_pending_run(
                     source_event_id=source_event_id,
                     update_id=update_id,
@@ -626,57 +812,9 @@ class TelegramInterfaceWorker:
                     sequence=sequence,
                     accumulated_text=accumulated,
                 )
-                if event.type == "run.completed":
-                    final_text = str(event.data.get("text") or "").strip() or accumulated.strip()
-                    await self._telegram.send_message(
-                        chat_id=chat_id,
-                        text=final_text or "The run completed without a message.",
-                    )
-                    self._complete(
-                        update_id=update_id,
-                        source_event_id=source_event_id,
-                        consumed_approval_token=consumed_approval_token,
-                    )
-                    return "completed"
-                if event.type == "run.failed":
-                    failure = str(event.data.get("message") or "Agent run failed.").strip()
-                    await self._telegram.send_message(
-                        chat_id=chat_id,
-                        text=(failure or "Agent run failed.")[:2_000],
-                    )
-                    self._complete(
-                        update_id=update_id,
-                        source_event_id=source_event_id,
-                        consumed_approval_token=consumed_approval_token,
-                    )
-                    return "failed"
-                approval_token = self._record_approval(
-                    event=event,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                )
-                consume = (
-                    consumed_approval_token
-                    if consumed_approval_token != approval_token
-                    else None
-                )
-                self._complete(
-                    update_id=update_id,
-                    source_event_id=source_event_id,
-                    consumed_approval_token=consume,
-                )
-                await self._deliver_approval(approval_token)
-                return "approval"
-            sequence = event.sequence
-            self._state.save_pending_run(
-                source_event_id=source_event_id,
-                update_id=update_id,
-                run_id=run_id,
-                chat_id=chat_id,
-                sequence=sequence,
-                accumulated_text=accumulated,
-            )
-        raise AgentAPIError("Agent API event stream ended before a durable terminal event.")
+            raise AgentAPIError("Agent API event stream ended before a durable terminal event.")
+        finally:
+            await streamer.close()
 
     def _record_approval(self, *, event: AgentEvent, chat_id: int, user_id: int) -> str:
         approval_id = str(event.data.get("approval_id") or "").strip()

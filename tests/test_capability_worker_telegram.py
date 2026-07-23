@@ -43,6 +43,8 @@ class _Telegram:
         self.messages: list[dict[str, Any]] = []
         self.callbacks: list[dict[str, Any]] = []
         self.downloads: list[TelegramAttachment] = []
+        self.actions: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []
         self.webhook_deletes = 0
 
     async def delete_webhook(self) -> None:
@@ -61,9 +63,30 @@ class _Telegram:
         chat_id: int,
         text: str,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> list[int]:
         self.messages.append(
             {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+        )
+        return [len(self.messages)]
+
+    async def send_chat_action(self, *, chat_id: int, action: str = "typing") -> None:
+        self.actions.append({"chat_id": chat_id, "action": action})
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": reply_markup,
+            }
         )
 
     async def answer_callback_query(
@@ -222,6 +245,70 @@ async def test_one_time_pairing_then_routes_only_owner_messages(tmp_path: Path) 
 
     await worker.poll_once()
     assert len(agent.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_message_deltas_stream_by_editing_one_telegram_message(
+    tmp_path: Path,
+) -> None:
+    telegram = _Telegram([_message(4, text="hello")])
+    agent = _Agent()
+    agent.start_events = [
+        _event("run.started", 1, {}),
+        _event("message.delta", 2, {"text": "he"}),
+        _event("message.delta", 3, {"text": "llo"}),
+        _event("run.completed", 4, {"text": "hello"}),
+    ]
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    assert telegram.actions == [{"chat_id": 9, "action": "typing"}]
+    assert [item["text"] for item in telegram.messages] == ["he"]
+    assert telegram.edits == [
+        {"chat_id": 9, "message_id": 1, "text": "hello", "reply_markup": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_typing_indicator_refreshes_while_agent_has_no_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SlowAgent(_Agent):
+        async def start_run(self, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            self.starts.append(kwargs)
+            yield _event("run.started", 1, {})
+            await asyncio.sleep(0.035)
+            yield _event("run.completed", 2, {"text": "done"})
+
+    monkeypatch.setattr(
+        "opentulpa.capability_workers.telegram_worker._STREAM_TYPING_REFRESH_SECONDS",
+        0.01,
+    )
+    telegram = _Telegram([_message(4, text="hello")])
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=_SlowAgent(),
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    assert len(telegram.actions) >= 3
+    assert telegram.messages[-1]["text"] == "done"
 
 
 @pytest.mark.asyncio
