@@ -46,6 +46,42 @@ class _Match:
     pattern: _CredentialPattern
 
 
+_NAMED_SECRET_BLOCK_RE = re.compile(
+    r"""<secret\s+name=["'](?P<name>[A-Za-z][A-Za-z0-9_-]{0,63})["']\s*>"""
+    r"(?P<value>.*?)"
+    r"</secret\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_NAMED_SECRET_ASSIGNMENT_RE = re.compile(
+    r"""(?<![A-Za-z0-9_])"""
+    r"(?P<name>[A-Za-z][A-Za-z0-9_]{0,63}"
+    r"(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL))"
+    r"""\s*[:=]\s*"""
+    r"""(?P<quote>["']?)(?P<value>[^\s"'`]+)(?P=quote)""",
+    flags=re.IGNORECASE,
+)
+_NAMED_SECRET_SCOPES: dict[str, tuple[str, ...]] = {
+    "composio_api_key": ("composio.manage", "composio.invoke"),
+    "github_token": ("github.read", "github.write"),
+    "gh_token": ("github.read", "github.write"),
+    "browser_use_api_key": ("browser.manage",),
+}
+_PLACEHOLDER_VALUES = frozenset(
+    {
+        "changeme",
+        "example",
+        "none",
+        "null",
+        "replace-me",
+        "replace_me",
+        "secret",
+        "token",
+        "your-key",
+        "your_key",
+    }
+)
+
+
 _PATTERNS: tuple[_CredentialPattern, ...] = (
     _CredentialPattern(
         kind="telegram",
@@ -154,7 +190,8 @@ class SecretIngressService:
         )
 
     def _matches(self, text: str) -> list[_Match]:
-        matches = [
+        named_matches = self._named_matches(text)
+        pattern_matches = [
             _Match(
                 start=match.start("value"),
                 end=match.end("value"),
@@ -164,7 +201,15 @@ class SecretIngressService:
             for pattern in self._patterns
             for match in pattern.expression.finditer(text)
         ]
-        matches.sort(key=lambda item: (item.start, item.end))
+        # Explicitly named credentials win over generic token-shape detection.
+        matches = named_matches + pattern_matches
+        matches.sort(
+            key=lambda item: (
+                item.start,
+                0 if item in named_matches else 1,
+                -(item.end - item.start),
+            )
+        )
         accepted: list[_Match] = []
         previous_end = -1
         for match in matches:
@@ -173,6 +218,61 @@ class SecretIngressService:
             accepted.append(match)
             previous_end = match.end
         return accepted
+
+    @staticmethod
+    def _named_matches(text: str) -> list[_Match]:
+        matches: list[_Match] = []
+        occupied: list[tuple[int, int]] = []
+        for expression, block in (
+            (_NAMED_SECRET_BLOCK_RE, True),
+            (_NAMED_SECRET_ASSIGNMENT_RE, False),
+        ):
+            for match in expression.finditer(text):
+                start, end = match.span() if block else match.span("value")
+                if any(start < used_end and end > used_start for used_start, used_end in occupied):
+                    continue
+                plaintext = match.group("value")
+                if block:
+                    plaintext = plaintext.strip("\r\n")
+                normalized_name = SecretIngressService._normalize_name(match.group("name"))
+                if not SecretIngressService._is_secret_value(plaintext):
+                    continue
+                occupied.append((start, end))
+                matches.append(
+                    _Match(
+                        start=start,
+                        end=end,
+                        plaintext=plaintext,
+                        pattern=_CredentialPattern(
+                            kind=f"named:{normalized_name}",
+                            handle_id=normalized_name,
+                            name=normalized_name,
+                            scopes=_NAMED_SECRET_SCOPES.get(
+                                normalized_name,
+                                ("credential.use",),
+                            ),
+                            expression=expression,
+                        ),
+                    )
+                )
+        return matches
+
+    @staticmethod
+    def _normalize_name(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower())
+        normalized = re.sub(r"[_-]{2,}", "_", normalized).strip("_-")
+        if not normalized or not normalized[0].isalpha():
+            raise ValueError("secret name is invalid")
+        return normalized[:64]
+
+    @staticmethod
+    def _is_secret_value(value: str) -> bool:
+        clean = str(value or "").strip()
+        return (
+            8 <= len(clean.encode("utf-8")) <= 1_048_576
+            and clean.casefold() not in _PLACEHOLDER_VALUES
+            and not clean.startswith("secret://")
+        )
 
 
 __all__ = [

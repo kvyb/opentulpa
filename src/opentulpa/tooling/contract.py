@@ -482,7 +482,7 @@ def render_tool_contract_markdown() -> str:
         "- `execution=job` returns `status=accepted` and a durable `job_id`.",
         "- Every service validates tenant ownership; errors are sanitized before entering `ToolResult`.",
         "- `intake_draft_prepare` returns a hash-bound one-time `confirmation_handle`; only `intake_draft_activate` accepts it.",
-        "- Secret tools expose handle metadata and revocation only. Plaintext credentials enter through authenticated pre-checkpoint ingress, never through model-visible tool arguments or results.",
+        "- Secret tools expose handle metadata and revocation only. Plaintext credentials enter through authenticated pre-checkpoint ingress, never through model-visible tool arguments or results. `NAME_API_KEY=<value>` and `NAME_TOKEN=<value>` create named handles; `<secret name=\"NAME\">...</secret>` supports arbitrary multiline credentials. Trusted adapters and declared capability bindings redeem only the scope they require.",
         "- Capability activation accepts config plus opaque secret-handle bindings only, requires an exact passing test attestation, and is always owner-approved.",
         "- `trace_list` is newest-first; pass the last returned `run_id` as `before_run_id` to read the next page.",
         "",

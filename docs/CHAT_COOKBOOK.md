@@ -196,6 +196,9 @@ into approval.
 
 ### Connect a provider
 
+> Here is my Composio project key: `COMPOSIO_API_KEY=<value>`. Store it, then connect
+> GitHub and give me the OAuth URL.
+
 > Connect my Google account through the configured integration provider. Show the OAuth
 > URL, bind the returned account to this tenant, and do not invoke a write action yet.
 
@@ -204,8 +207,9 @@ into approval.
 > Find the latest qualified lead, draft a follow-up in my tone, and show it to me. Do
 > not send until I approve the exact external action.
 
-Composio is optional. Provider accounts remain tenant-owned, external writes require
-idempotency, and unclassified actions require approval.
+Composio is optional. Its key is encrypted before the model sees the message and is
+hot-loaded without restarting the runtime. Provider accounts remain tenant-owned,
+external writes require idempotency, and unclassified actions require approval.
 
 ## Intake
 

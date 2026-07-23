@@ -96,6 +96,12 @@ account with `/start <code>`; by default the one-time code is the last eight cha
 of the bot token. A later request to change Telegram behavior becomes a source
 candidate and managed release rather than an in-place edit.
 
+Other credentials work the same way. Paste `SERVICE_API_KEY=<value>` in an authenticated
+owner chat, or use `<secret name="SERVICE_CREDENTIAL">...</secret>` for multiline
+material. OpenTulpa persists only the encrypted value and an opaque handle. For example,
+paste `COMPOSIO_API_KEY=<value>`, then ask it to connect GitHub; it hot-loads the key and
+returns the tenant-owned OAuth link without a restart.
+
 In managed OCI mode the stable bootstrap derives the active release image and runs that
 worker rootless with only private capability `/state`; product `/workspace`, source,
 databases, host credentials, and the container socket are never mounted. Generation

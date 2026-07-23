@@ -8,6 +8,11 @@ def test_owner_prompt_uses_authenticated_chat_for_secret_ingress() -> None:
     assert "use its handle ID in capability tools" in OWNER_PROMPT
     assert "earlier conversation message" in OWNER_PROMPT
     assert "is obsolete and must be corrected" in OWNER_PROMPT
+    assert "`SERVICE_API_KEY=<value>`" in OWNER_PROMPT
+    assert '`<secret name="SERVICE_CREDENTIAL">...</secret>`' in OWNER_PROMPT
+    assert "`COMPOSIO_API_KEY=<value>`" in OWNER_PROMPT
+    assert "hot-loaded by the trusted integration adapter" in OWNER_PROMPT
+    assert "use integration_connect to return the provider's OAuth URL" in OWNER_PROMPT
 
 
 def test_owner_prompt_persists_and_prioritizes_the_owner_persona() -> None:

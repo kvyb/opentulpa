@@ -114,6 +114,7 @@ from opentulpa.persistence.tenant_namespace import tenant_namespace_label
 from opentulpa.schedules.service import ScheduleService
 from opentulpa.secrets import (
     SecretIngressService,
+    SecretState,
     SecretVault,
     SecretVaultService,
     VaultCapabilitySecretResolver,
@@ -865,9 +866,44 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             project_root=project_root,
             settings=settings,
         )
+        telegram_state = TelegramStateStore(data_root / "telegram_state.json")
+        owner_tenant_id = _resolve_owner_tenant_id(settings, profiles, telegram_state)
+        composio_vault_cache: dict[str, Any] = {"revision": None, "value": ""}
+
+        def composio_api_key_from_vault() -> str:
+            handle = secret_vault_store.get_handle(
+                tenant_id=owner_tenant_id,
+                secret_id="composio_api_key",
+            )
+            if (
+                handle is None
+                or handle.state is not SecretState.ACTIVE
+                or "composio.manage" not in handle.scopes
+            ):
+                composio_vault_cache.update(revision=None, value="")
+                return ""
+            if composio_vault_cache["revision"] == handle.revision:
+                return str(composio_vault_cache["value"])
+            grant = secret_vault_store.issue_grant(
+                tenant_id=owner_tenant_id,
+                secret_id=handle.id,
+                capability_id="integration_composio",
+                scopes=("composio.manage",),
+                ttl_seconds=60,
+            )
+            material = secret_vault_store.redeem_grant(
+                token=grant.token,
+                capability_id="integration_composio",
+                scope="composio.manage",
+            )
+            value = material.value.get_secret_value()
+            composio_vault_cache.update(revision=handle.revision, value=value)
+            return value
+
         raw_composio = ComposioService(
             api_key=str(settings.composio_api_key or ""),
             default_callback_url=settings.composio_default_callback_url,
+            api_key_provider=composio_api_key_from_vault,
         )
         tenant_composio = TenantComposioService(
             provider=raw_composio,
@@ -875,8 +911,6 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         )
         intake_composio = TenantComposioIntakePort(provider=raw_composio)
 
-        telegram_state = TelegramStateStore(data_root / "telegram_state.json")
-        owner_tenant_id = _resolve_owner_tenant_id(settings, profiles, telegram_state)
         seed_default_agent_spec_refs(
             agent_spec_store,
             tenant_id=owner_tenant_id,

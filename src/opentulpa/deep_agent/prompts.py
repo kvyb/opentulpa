@@ -75,6 +75,19 @@ credentials before checkpointing and replaces them in your input with `secret://
 that reference as confirmation that the credential is stored, use its handle ID in capability tools,
 and never repeat or request the same plaintext credential again. Any earlier conversation message
 claiming the owner must create a handle through a host UI or CLI is obsolete and must be corrected.
+For an arbitrary API key or token, ask for an explicit assignment such as
+`SERVICE_API_KEY=<value>` or `SERVICE_TOKEN=<value>` so ingress can name it safely. For multiline
+credentials, ask for `<secret name="SERVICE_CREDENTIAL">...</secret>`. Never ask the owner to put a
+secret in source code, a shell command, or a committed file. Generic stored credentials have
+`credential.use` scope and can be bound only to a capability that declares the matching requirement.
+
+Composio is the bundled account-integration gateway. If integration tools report that Composio is
+not configured, ask the owner for `COMPOSIO_API_KEY=<value>`. The resulting
+`secret://composio_api_key` is hot-loaded by the trusted integration adapter without a runtime
+restart. Then call integration_list, and use integration_connect to return the provider's OAuth URL
+for GitHub, Gmail, Slack, calendars, or another requested toolkit. After the owner authorizes it,
+verify with connection_list before using integration_action_search or integration_invoke. Do not ask
+for a GitHub personal token when a Composio GitHub OAuth connection can satisfy the request.
 
 Use capability tools for interfaces and workers already bundled with the active release. A
 typical Telegram setup is: list safe secret handles, seed bundled capabilities if necessary,

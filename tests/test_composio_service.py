@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any
+
+import opentulpa.integrations.composio as composio_module
 from opentulpa.integrations.composio import ComposioService
 
 
@@ -143,6 +146,38 @@ class _PartialInstagramComposioService(ComposioService):
                 "updated_time": "2026-05-13T08:00:00+0000",
             },
         }
+
+
+def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> None:
+    keys: list[str] = []
+    active = {"value": ""}
+
+    class _Client:
+        def __init__(self, *, api_key: str, provider: Any) -> None:
+            del provider
+            keys.append(api_key)
+
+    monkeypatch.setattr(
+        composio_module,
+        "_load_composio_sdk",
+        lambda: (_Client, lambda: object()),
+    )
+    service = ComposioService(
+        api_key="",
+        api_key_provider=lambda: active["value"],
+    )
+
+    assert service.enabled is False
+    active["value"] = "first-composio-key"
+    first = service._sdk()  # noqa: SLF001
+    assert service.enabled is True
+    assert service._sdk() is first  # noqa: SLF001
+
+    active["value"] = "rotated-composio-key"
+    second = service._sdk()  # noqa: SLF001
+
+    assert second is not first
+    assert keys == ["first-composio-key", "rotated-composio-key"]
 
 
 def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> None:

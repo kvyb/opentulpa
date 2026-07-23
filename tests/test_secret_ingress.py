@@ -148,3 +148,84 @@ def test_ingress_does_not_restore_a_revoked_handle(tmp_path: Path) -> None:
     assert result.handles[0].id == "api_token_replacement_2"
     assert vault.get_handle(tenant_id="tenant-a", secret_id="api_token") == revoked
     _assert_absent_from_database(vault, first, replacement)
+
+
+def test_ingress_stores_arbitrary_named_credentials_before_model_input(
+    tmp_path: Path,
+) -> None:
+    ingress, vault = _ingress(tmp_path)
+    composio = "ak_live_composio_abcdefghijklmnopqrstuvwxyz"
+    github = "github_pat_11AA22BB33CC44DD55EE66FF"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=(
+            f"Configure COMPOSIO_API_KEY={composio} and "
+            f'GITHUB_TOKEN="{github}" for me.'
+        ),
+    )
+
+    assert result.text == (
+        "Configure COMPOSIO_API_KEY=secret://composio_api_key and "
+        'GITHUB_TOKEN="secret://github_token" for me.'
+    )
+    assert [handle.id for handle in result.handles] == [
+        "composio_api_key",
+        "github_token",
+    ]
+    composio_handle = vault.get_handle(
+        tenant_id="tenant-a",
+        secret_id="composio_api_key",
+    )
+    github_handle = vault.get_handle(tenant_id="tenant-a", secret_id="github_token")
+    assert composio_handle is not None
+    assert composio_handle.scopes == ("composio.manage", "composio.invoke")
+    assert github_handle is not None
+    assert github_handle.scopes == ("github.read", "github.write")
+    _assert_absent_from_database(vault, composio, github)
+
+
+def test_ingress_supports_named_multiline_secret_blocks(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "not-a-real-private-key-for-tests\n"
+        "-----END PRIVATE KEY-----"
+    )
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=(
+            "Store this:\n"
+            '<secret name="DEPLOY_PRIVATE_KEY">\n'
+            f"{private_key}\n"
+            "</secret>\n"
+            "Use it for the deployment capability."
+        ),
+    )
+
+    assert result.text == (
+        "Store this:\n"
+        "secret://deploy_private_key\n"
+        "Use it for the deployment capability."
+    )
+    assert result.handles[0].id == "deploy_private_key"
+    assert result.handles[0].scopes == ("credential.use",)
+    _assert_absent_from_database(vault, private_key)
+
+
+def test_ingress_ignores_named_placeholders(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+
+    text = "COMPOSIO_API_KEY=changeme"
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=text,
+    )
+
+    assert result.text == text
+    assert result.handles == ()
+    assert vault.get_handle(tenant_id="tenant-a", secret_id="composio_api_key") is None

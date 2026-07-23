@@ -331,7 +331,7 @@ Install only what the deployment uses:
 | Extra | Adds | Runtime behavior |
 |---|---|---|
 | `browser` | Browser Use Cloud SDK, Playwright CDP client | Hosted Chromium with required `BROWSER_USE_API_KEY`; no host-browser fallback |
-| `integrations` | Composio SDK and LangChain provider | Tenant-owned SaaS connections when `COMPOSIO_API_KEY` is set |
+| `integrations` | Composio SDK and LangChain provider | Tenant-owned SaaS connections after an environment key or encrypted owner-chat key is configured |
 | `documents` | PDF, workbook, and encoding parsers | Additional file-analysis formats |
 | `research` | Crawl4AI | Richer content extraction; bounded built-in extraction remains available without it |
 | `bundled` | All of the above | Convenience image for a full adapter set |
@@ -347,6 +347,9 @@ BROWSER_USE_API_KEY=...  # required when browser tools are enabled
 COMPOSIO_API_KEY=...     # optional SaaS integration provider
 ```
 
+The environment variables remain suitable for unattended bootstrap. An authenticated
+owner may instead send `COMPOSIO_API_KEY=<value>` in chat; credential ingress stores it
+as `secret://composio_api_key`, and the trusted adapter hot-loads it without restarting.
 No optional adapter receives credentials through model-visible arguments. Browser and
 Composio actions with unknown or risky effects require persisted owner approval.
 Browser navigation requires explicit allowed domains and rejects direct private and

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any, cast
 
 from opentulpa.core.public_urls import build_public_composio_callback_url
@@ -159,7 +162,10 @@ class ComposioService:
 
     api_key: str
     default_callback_url: str | None = None
+    api_key_provider: Callable[[], str] | None = field(default=None, repr=False)
     _client: Any | None = field(default=None, init=False, repr=False)
+    _client_key_digest: str | None = field(default=None, init=False, repr=False)
+    _client_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.api_key = str(self.api_key or "").strip()
@@ -167,7 +173,7 @@ class ComposioService:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(self._resolved_api_key())
 
     def _resolved_callback_url(self, callback_url: str | None = None) -> str | None:
         explicit = str(callback_url or "").strip()
@@ -188,19 +194,35 @@ class ComposioService:
             "resolved_callback_url": resolved_callback,
         }
 
-    def _require_enabled(self) -> None:
-        if not self.enabled:
+    def _resolved_api_key(self) -> str:
+        with self._client_lock:
+            if self.api_key_provider is not None:
+                try:
+                    provided = str(self.api_key_provider() or "").strip()
+                except Exception:
+                    provided = ""
+                if provided:
+                    return provided
+            return self.api_key
+
+    def _require_enabled(self) -> str:
+        api_key = self._resolved_api_key()
+        if not api_key:
             raise RuntimeError("Composio is not configured")
+        return api_key
 
     def _sdk(self) -> Any:
-        self._require_enabled()
-        if self._client is None:
-            composio_client, langchain_provider = _load_composio_sdk()
-            self._client = composio_client(
-                api_key=self.api_key,
-                provider=langchain_provider(),
-            )
-        return self._client
+        with self._client_lock:
+            api_key = self._require_enabled()
+            key_digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+            if self._client is None or self._client_key_digest != key_digest:
+                composio_client, langchain_provider = _load_composio_sdk()
+                self._client = composio_client(
+                    api_key=api_key,
+                    provider=langchain_provider(),
+                )
+                self._client_key_digest = key_digest
+            return self._client
 
     def _session(
         self,
