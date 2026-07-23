@@ -456,6 +456,33 @@ class JobCancelArguments(RequiredIdempotencyArguments):
     job_id: str = Field(min_length=1, max_length=300)
 
 
+class RepositoryOpenArguments(ToolArguments):
+    repository_url: AnyHttpUrl
+    base_ref: str = Field(default="main", min_length=1, max_length=300)
+    branch: str | None = Field(default=None, min_length=1, max_length=250)
+    provider: Literal["auto", "local", "daytona"] = "auto"
+
+
+class RepositoryListArguments(ToolArguments):
+    include_closed: bool = False
+
+
+class RepositoryStatusArguments(ToolArguments):
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class RepositoryCloseArguments(ToolArguments):
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class RepositoryPublishPullRequestArguments(RequiredIdempotencyArguments):
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=200)
+    expected_head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(default="", max_length=20_000)
+    draft: bool = True
+
+
 class SourceStatusArguments(ToolArguments):
     pass
 
@@ -559,6 +586,11 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "job_events": JobEventsArguments,
         "job_artifacts": JobArtifactsArguments,
         "job_cancel": JobCancelArguments,
+        "repository_open": RepositoryOpenArguments,
+        "repository_list": RepositoryListArguments,
+        "repository_status": RepositoryStatusArguments,
+        "repository_close": RepositoryCloseArguments,
+        "repository_publish_pr": RepositoryPublishPullRequestArguments,
         "source_status": SourceStatusArguments,
         "source_shell": SourceShellArguments,
         "source_release": SourceReleaseArguments,

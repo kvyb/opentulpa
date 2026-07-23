@@ -18,6 +18,8 @@ dependencies = [
     "apscheduler>=3.10",
     "pydantic-settings>=2.0",
     "deepagents==0.6.12",
+    "daytona==0.200.1",
+    "langchain-daytona==0.0.7",
     "cryptography>=45",
     "langfuse>=3.0.0",
     "langchain-mcp-adapters>=0.1.0",

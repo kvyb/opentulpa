@@ -345,11 +345,14 @@ uv sync --no-dev --extra browser
 ```env
 BROWSER_USE_API_KEY=...  # required when browser tools are enabled
 COMPOSIO_API_KEY=...     # optional SaaS integration provider
+DAYTONA_API_KEY=...      # optional durable hosted repository sandboxes
+GITHUB_TOKEN=...         # optional private checkout and pull-request publishing
 ```
 
 The environment variables remain suitable for unattended bootstrap. An authenticated
 owner may instead send `COMPOSIO_API_KEY=<value>` in chat; credential ingress stores it
 as `secret://composio_api_key`, and the trusted adapter hot-loads it without restarting.
+The same ingress accepts `DAYTONA_API_KEY=<value>` and `GITHUB_TOKEN=<value>`.
 No optional adapter receives credentials through model-visible arguments. Browser and
 Composio actions with unknown or risky effects require persisted owner approval.
 Browser navigation requires explicit allowed domains and rejects direct private and
@@ -380,6 +383,9 @@ For Railway, configure:
 
 Without an owner token, read the one-time pairing code from the first startup log and
 claim the deployment at `/_host`. Configure Telegram there; polling needs no webhook.
+For repository work on Railway or another host without a local OCI engine, paste a Daytona
+API key in owner chat once. Repository workspaces then persist independently of the
+OpenTulpa process and resume by their stored provider ID after a restart.
 
 The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize
 and start both interfaces directly:

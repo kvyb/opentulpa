@@ -31,6 +31,7 @@ import type {
   InferencePreference,
   InferenceProvider,
   InferenceSelection,
+  RepositoryWorkspace,
   ThreadSummary,
   ToolCall,
   Turn,
@@ -104,6 +105,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { value: "/model", description: "Choose the provider and model" },
   { value: "/reasoning", description: "Choose the reasoning effort" },
   { value: "/speed", description: "Choose normal or fast Codex inference" },
+  { value: "/repo", description: "Open or inspect a repository workspace", acceptsArgument: true },
+  { value: "/repos", description: "List repository workspaces" },
   { value: "/login codex", description: "Connect a ChatGPT Codex subscription" },
   { value: "/logout codex", description: "Disconnect the Codex subscription" },
   { value: "/regenerate", description: "Regenerate the latest response" },
@@ -146,6 +149,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   const [terminalWidth, setTerminalWidth] = createSignal(renderer.width)
   const [expandedToolsGroup, setExpandedToolsGroup] = createSignal("")
   const [inference, setInference] = createSignal<InferencePreference>()
+  const [repository, setRepository] = createSignal<RepositoryWorkspace>()
   const [picker, setPicker] = createSignal<PickerState>()
   const [pickerQuery, setPickerQuery] = createSignal("")
   const [pickerIndex, setPickerIndex] = createSignal(0)
@@ -193,17 +197,28 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     return values
   }
 
+  const refreshRepository = async () => {
+    const selected = thread()
+    if (!selected) {
+      setRepository(undefined)
+      return
+    }
+    setRepository((await api.activeRepository(selected.thread_id)) ?? undefined)
+  }
+
   const loadThread = async (threadId: string) => {
     setSessionDialog(false)
     setError("")
     setStatus("Loading session")
-    const [timeline, preference] = await Promise.all([
+    const [timeline, preference, activeRepository] = await Promise.all([
       api.timeline(threadId),
       api.threadInference(threadId),
+      api.activeRepository(threadId),
     ])
     let restored = turnsFromTimeline(timeline.entries)
     setThread(timeline.thread)
     setInference(preference)
+    setRepository(activeRepository ?? undefined)
     props.onConnectionChange(threadId)
     const active = ["running", "interrupted", "resume_pending"].includes(timeline.thread.status)
     if (active && timeline.thread.last_run_id) {
@@ -412,6 +427,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
         }
       }
       await refreshThreads()
+      await refreshRepository()
       return true
     } catch (cause) {
       setError(message(cause))
@@ -478,6 +494,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
         setBusy(false)
         setStatus(current.status === "failed" ? "Failed" : current.status === "approval" ? "Approval required" : "Ready")
         await refreshThreads()
+        await refreshRepository()
       }
     } catch (cause) {
       setBusy(false)
@@ -719,7 +736,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     const [name, ...parts] = input.split(/\s+/)
     if (name === "/quit") renderer.destroy()
     else if (name === "/help") {
-      setError("/new  /sessions  /model  /reasoning  /speed  /login codex  /logout codex  /regenerate  /attach  /cancel  /quit")
+      setError("/new  /sessions  /model  /reasoning  /speed  /repo  /repos  /login codex  /logout codex  /regenerate  /attach  /cancel  /quit")
     } else if (name === "/sessions") {
       setSessionDialog(true)
       setSessionQuery("")
@@ -750,6 +767,49 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       }
     } else if (name === "/reasoning") await chooseReasoning(parts[0])
     else if (name === "/speed") await chooseSpeed(parts[0])
+    else if (name === "/repo") {
+      const selectedThread = thread()
+      if (!selectedThread) return true
+      if (parts[0] === "close") {
+        const active = repository()
+        if (!active) setError("No repository workspace is active.")
+        else {
+          await api.closeRepository(selectedThread.thread_id, active.id)
+          setRepository(undefined)
+          setError("Repository workspace stopped.")
+        }
+      } else if (parts[0] === "status" || !parts.length) {
+        const active = repository()
+        if (!active) setError("No repository is active. Use /repo open https://github.com/owner/repo")
+        else {
+          const current = await api.repositoryStatus(selectedThread.thread_id, active.id)
+          setRepository(current)
+          setError(`${current.repository_url.replace(/\.git$/, "")} · ${current.branch} · ${current.clean ? "clean" : `${current.changes.length} changed`} · ${current.commits_ahead} commits ahead`)
+        }
+      } else {
+        const values = parts[0] === "open" ? parts.slice(1) : parts
+        const repositoryUrl = values[0]
+        if (!repositoryUrl) setError("Usage: /repo open https://github.com/owner/repo [base]")
+        else {
+          setStatus("Opening repository")
+          const opened = await api.openRepository(
+            selectedThread.thread_id,
+            repositoryUrl,
+            values[1] ?? "main",
+          )
+          setRepository(opened)
+          setStatus("Ready")
+          setError(`Repository ready: ${opened.branch}`)
+        }
+      }
+    } else if (name === "/repos") {
+      const workspaces = await api.repositories()
+      setError(
+        workspaces.length
+          ? workspaces.map((item) => `${item.status} · ${item.branch} · ${item.repository_url.replace(/\.git$/, "")}`).join("\n")
+          : "No repository workspaces.",
+      )
+    }
     else if (name === "/login" && parts[0] === "codex") await startCodexLogin()
     else if (name === "/logout" && parts[0] === "codex") {
       try {
@@ -1006,6 +1066,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
             onNewSession={() => void createSession()}
             onSessions={() => { setSessionDialog(true); setSessionQuery(""); setSessionIndex(0) }}
             inference={inference()?.effective}
+            repository={repository()}
           />
         </box>
       </box>
@@ -1409,6 +1470,7 @@ export function StatusBar(props: {
   onNewSession?: () => void
   onSessions?: () => void
   inference?: InferenceSelection
+  repository?: RepositoryWorkspace
 }) {
   const label = createMemo(() => {
     const state = props.uploading ? "Uploading attachments" : props.status
@@ -1435,6 +1497,17 @@ export function StatusBar(props: {
           truncate
         >
           {props.inference!.provider} · {props.inference!.model} · {props.inference!.reasoning_effort ?? "default"} · {props.inference!.service_tier === "priority" ? "fast" : props.inference!.service_tier ?? "normal"}
+        </text>
+      </Show>
+      <Show when={props.repository && props.width >= 76}>
+        <text
+          flexShrink={1}
+          maxWidth={Math.max(16, Math.floor(props.width * 0.24))}
+          fg={COLORS.dim}
+          wrapMode="none"
+          truncate
+        >
+          repo · {props.repository!.branch}
         </text>
       </Show>
       <Show when={props.width >= 40}>
@@ -1659,6 +1732,11 @@ const TOOL_ACTIONS: Record<string, string> = {
   browser_stop: "Stopping browser",
   integration_action_search: "Searching integration actions",
   integration_invoke: "Calling integration",
+  repository_open: "Opening repository",
+  repository_list: "Listing repositories",
+  repository_status: "Checking repository",
+  repository_close: "Stopping repository",
+  repository_publish_pr: "Publishing pull request",
   job_get: "Checking job",
   job_events: "Reading job events",
   job_artifacts: "Reading job artifacts",

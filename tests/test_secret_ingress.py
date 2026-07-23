@@ -155,6 +155,7 @@ def test_ingress_stores_arbitrary_named_credentials_before_model_input(
 ) -> None:
     ingress, vault = _ingress(tmp_path)
     composio = "ak_live_composio_abcdefghijklmnopqrstuvwxyz"
+    daytona = "dtn_live_abcdefghijklmnopqrstuvwxyz012345"
     github = "github_pat_11AA22BB33CC44DD55EE66FF"
 
     result = ingress.ingest(
@@ -162,16 +163,19 @@ def test_ingress_stores_arbitrary_named_credentials_before_model_input(
         actor_id="owner-a",
         text=(
             f"Configure COMPOSIO_API_KEY={composio} and "
+            f"DAYTONA_API_KEY={daytona} and "
             f'GITHUB_TOKEN="{github}" for me.'
         ),
     )
 
     assert result.text == (
         "Configure COMPOSIO_API_KEY=secret://composio_api_key and "
+        "DAYTONA_API_KEY=secret://daytona_api_key and "
         'GITHUB_TOKEN="secret://github_token" for me.'
     )
     assert [handle.id for handle in result.handles] == [
         "composio_api_key",
+        "daytona_api_key",
         "github_token",
     ]
     composio_handle = vault.get_handle(
@@ -179,11 +183,14 @@ def test_ingress_stores_arbitrary_named_credentials_before_model_input(
         secret_id="composio_api_key",
     )
     github_handle = vault.get_handle(tenant_id="tenant-a", secret_id="github_token")
+    daytona_handle = vault.get_handle(tenant_id="tenant-a", secret_id="daytona_api_key")
     assert composio_handle is not None
     assert composio_handle.scopes == ("composio.manage", "composio.invoke")
+    assert daytona_handle is not None
+    assert daytona_handle.scopes == ("daytona.manage",)
     assert github_handle is not None
     assert github_handle.scopes == ("github.read", "github.write")
-    _assert_absent_from_database(vault, composio, github)
+    _assert_absent_from_database(vault, composio, daytona, github)
 
 
 def test_ingress_supports_named_multiline_secret_blocks(tmp_path: Path) -> None:

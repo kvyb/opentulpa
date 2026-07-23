@@ -62,7 +62,11 @@ from opentulpa.core.config import (
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
-from opentulpa.deep_agent.sandbox import TenantContainerPolicy, TenantExecutionProvider
+from opentulpa.deep_agent.sandbox import (
+    TenantContainerPolicy,
+    TenantExecutionProvider,
+    TenantSandboxBackend,
+)
 from opentulpa.deep_agent.service import DeepAgentService, build_openrouter_chat_model
 from opentulpa.evolution.sandbox import resolve_local_oci_image
 from opentulpa.files.analysis import FileAnalysisService
@@ -111,6 +115,14 @@ from opentulpa.notifications import (
 )
 from opentulpa.persistence.idempotency import IdempotencyStore
 from opentulpa.persistence.tenant_namespace import tenant_namespace_label
+from opentulpa.repositories.providers import (
+    DaytonaRepositoryProvider,
+    LocalRepositoryProvider,
+    RepositoryProviderRegistry,
+)
+from opentulpa.repositories.routing import RepositoryRoutingSandbox
+from opentulpa.repositories.service import RepositoryWorkspaceService
+from opentulpa.repositories.store import RepositoryWorkspaceStore
 from opentulpa.schedules.service import ScheduleService
 from opentulpa.secrets import (
     SecretIngressService,
@@ -870,6 +882,121 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         owner_tenant_id = _resolve_owner_tenant_id(settings, profiles, telegram_state)
         composio_vault_cache: dict[str, Any] = {"revision": None, "value": ""}
 
+        def resolve_vault_secret(
+            tenant_id: str,
+            secret_ids: tuple[str, ...],
+            *,
+            capability_id: str,
+            scope: str,
+        ) -> str | None:
+            for secret_id in secret_ids:
+                handle = secret_vault_store.get_handle(
+                    tenant_id=tenant_id,
+                    secret_id=secret_id,
+                )
+                if (
+                    handle is None
+                    or handle.state is not SecretState.ACTIVE
+                    or scope not in handle.scopes
+                ):
+                    continue
+                grant = secret_vault_store.issue_grant(
+                    tenant_id=tenant_id,
+                    secret_id=handle.id,
+                    capability_id=capability_id,
+                    scopes=(scope,),
+                    ttl_seconds=60,
+                )
+                material = secret_vault_store.redeem_grant(
+                    token=grant.token,
+                    capability_id=capability_id,
+                    scope=scope,
+                )
+                return material.value.get_secret_value()
+            return None
+
+        def repository_daytona_token(tenant_id: str, scope: str) -> str | None:
+            value = str(os.environ.get("DAYTONA_API_KEY") or "").strip()
+            if value:
+                return value
+            return resolve_vault_secret(
+                tenant_id,
+                ("daytona_api_key",),
+                capability_id="repository_daytona",
+                scope=scope,
+            )
+
+        def repository_github_token(tenant_id: str, scope: str) -> str | None:
+            value = str(
+                os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+            ).strip()
+            if value:
+                return value
+            return resolve_vault_secret(
+                tenant_id,
+                ("github_token", "gh_token"),
+                capability_id="repository_github",
+                scope=scope,
+            )
+
+        repository_policy = TenantContainerPolicy(
+            image=sandbox_image,
+            cpu_limit=settings.sandbox_cpu_limit,
+            memory_limit=settings.sandbox_memory_limit,
+            pid_limit=settings.sandbox_pid_limit,
+            timeout_seconds=max(600, settings.sandbox_timeout_seconds),
+            max_output_bytes=settings.sandbox_max_output_bytes,
+            network_enabled=True,
+        )
+        repository_store = RepositoryWorkspaceStore(
+            deepagents_root / "repository_workspaces.db"
+        )
+        repository_providers = RepositoryProviderRegistry(
+            providers=[
+                DaytonaRepositoryProvider(
+                    token_resolver=repository_daytona_token,
+                    api_url=settings.repository_sandbox_api_url,
+                    target=settings.repository_sandbox_target,
+                    snapshot=settings.repository_sandbox_snapshot,
+                ),
+                LocalRepositoryProvider(
+                    root=deepagents_root / "repository_workspaces",
+                    policy=repository_policy,
+                    container_cli=settings.sandbox_container_cli,
+                ),
+            ],
+            default=settings.repository_sandbox_provider,
+        )
+        repositories = RepositoryWorkspaceService(
+            store=repository_store,
+            providers=repository_providers,
+            github_token_resolver=repository_github_token,
+        )
+        fallback_execution = TenantSandboxBackend(
+            workspaces_root=_resolve_path(project_root, settings.deepagents_workspaces_root),
+            policy=repository_policy,
+            container_cli=settings.sandbox_container_cli,
+            persistent_execution_workspace=True,
+            execution_provider=sandbox_execution,
+        )
+        execution_backend = RepositoryRoutingSandbox(
+            repositories=repositories,
+            fallback=fallback_execution,
+            route_files=False,
+        )
+        fallback_workspace = TenantSandboxBackend(
+            workspaces_root=_resolve_path(project_root, settings.deepagents_workspaces_root),
+            policy=repository_policy,
+            container_cli=settings.sandbox_container_cli,
+            persistent_files=True,
+            execution_provider=sandbox_execution,
+        )
+        workspace_backend = RepositoryRoutingSandbox(
+            repositories=repositories,
+            fallback=fallback_workspace,
+            route_files=True,
+        )
+
         def composio_api_key_from_vault() -> str:
             handle = secret_vault_store.get_handle(
                 tenant_id=owner_tenant_id,
@@ -1115,6 +1242,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             schedules=schedule_port,
             jobs=JobProductPort(jobs),
             idempotency=idempotency,
+            repositories=repositories,
             evolution=evolution,
             traces=deferred_agent,
             agent_specs=agent_specs,
@@ -1156,6 +1284,8 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             ),
             container_cli=settings.sandbox_container_cli,
             execution_provider=sandbox_execution,
+            execution_backend=execution_backend,
+            workspace_backend=workspace_backend,
             attachment_resolver=file_vault,
             provider_fallback_models=provider_fallback_models,
             inference_service=inference,
@@ -1231,6 +1361,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             release_control_service=release_control,
             notification_service=notifications,
             inference_service=inference,
+            repository_service=repositories,
         )
         app.state.owner_tenant_id = owner_tenant_id
         app.state.product_application = product_application

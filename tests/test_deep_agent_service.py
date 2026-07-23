@@ -30,6 +30,7 @@ from opentulpa.deep_agent.contracts import (
     AgentRunCheckpointConflictError,
     AgentRunIdempotencyConflictError,
 )
+from opentulpa.deep_agent.sandbox import TenantSandboxBackend
 from opentulpa.deep_agent.service import (
     _browser_action_requires_approval,
     _ProviderFallbackMiddleware,
@@ -536,6 +537,8 @@ def _service(
     agent_specs: AgentSpecStore | None = None,
     dynamic_tools: TenantDynamicToolRegistry | None = None,
     attachment_resolver: Any | None = None,
+    execution_backend: Any | None = None,
+    workspace_backend: Any | None = None,
 ) -> DeepAgentService:
     return DeepAgentService(
         api_key="",
@@ -552,7 +555,27 @@ def _service(
         agent_specs=agent_specs,
         dynamic_tools=dynamic_tools,
         attachment_resolver=attachment_resolver,
+        execution_backend=execution_backend,
+        workspace_backend=workspace_backend,
     )
+
+
+def test_owner_uses_one_workspace_backend_for_shell_and_files(tmp_path: Path) -> None:
+    workspace = TenantSandboxBackend(
+        workspaces_root=tmp_path / "workspace",
+        persistent_files=True,
+    )
+    service = _service(
+        tmp_path,
+        _ToolCapableTextModel(responses=["unused"]),
+        execution_backend=workspace,
+        workspace_backend=workspace,
+    )
+
+    backend = service._owner_backend()  # noqa: SLF001
+
+    assert backend.default is workspace
+    assert backend.routes["/workspace/"] is workspace
 
 
 @pytest.mark.asyncio

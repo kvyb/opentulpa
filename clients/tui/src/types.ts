@@ -125,3 +125,19 @@ export type CodexDeviceLogin = {
   expires_at: string
   error: string | null
 }
+
+export type RepositoryWorkspace = {
+  id: string
+  repository_url: string
+  provider: "local" | "daytona"
+  base_ref: string
+  base_sha: string | null
+  branch: string
+  head_sha: string | null
+  status: "creating" | "ready" | "stopped" | "failed" | "published"
+  last_error: string | null
+  pull_request_url: string | null
+  created_at: string
+  updated_at: string
+  last_used_at: string
+}

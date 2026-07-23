@@ -62,6 +62,7 @@ _NAMED_SECRET_ASSIGNMENT_RE = re.compile(
 )
 _NAMED_SECRET_SCOPES: dict[str, tuple[str, ...]] = {
     "composio_api_key": ("composio.manage", "composio.invoke"),
+    "daytona_api_key": ("daytona.manage",),
     "github_token": ("github.read", "github.write"),
     "gh_token": ("github.read", "github.write"),
     "browser_use_api_key": ("browser.manage",),

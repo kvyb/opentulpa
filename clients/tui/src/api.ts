@@ -7,6 +7,7 @@ import type {
   InferenceProvider,
   InferenceSelection,
   InferenceStatus,
+  RepositoryWorkspace,
   ThreadSummary,
   TimelineEntry,
 } from "./types.js"
@@ -109,6 +110,60 @@ export class OpenTulpaApi {
     return this.json(`/v2/inference/codex/credential?reset_threads=${resetThreads}`, {
       method: "DELETE",
     })
+  }
+
+  async repositories(includeClosed = false): Promise<RepositoryWorkspace[]> {
+    const result = await this.json<{ workspaces: RepositoryWorkspace[] }>(
+      `/v2/repositories/workspaces?include_closed=${includeClosed}`,
+    )
+    return result.workspaces
+  }
+
+  async activeRepository(threadId: string): Promise<RepositoryWorkspace | null> {
+    try {
+      return await this.json(
+        `/v2/repositories/workspaces/active?thread_id=${encodeURIComponent(threadId)}`,
+      )
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) return null
+      throw cause
+    }
+  }
+
+  async openRepository(
+    threadId: string,
+    repositoryUrl: string,
+    baseRef = "main",
+  ): Promise<RepositoryWorkspace> {
+    return this.json("/v2/repositories/workspaces", {
+      method: "POST",
+      body: JSON.stringify({
+        thread_id: threadId,
+        repository_url: repositoryUrl,
+        base_ref: baseRef,
+        provider: "auto",
+      }),
+    })
+  }
+
+  async repositoryStatus(
+    threadId: string,
+    workspaceId: string,
+  ): Promise<RepositoryWorkspace & {
+    clean: boolean
+    changes: string[]
+    commits_ahead: number
+  }> {
+    return this.json(
+      `/v2/repositories/workspaces/${encodeURIComponent(workspaceId)}?thread_id=${encodeURIComponent(threadId)}`,
+    )
+  }
+
+  async closeRepository(threadId: string, workspaceId: string): Promise<RepositoryWorkspace> {
+    return this.json(
+      `/v2/repositories/workspaces/${encodeURIComponent(workspaceId)}?thread_id=${encodeURIComponent(threadId)}`,
+      { method: "DELETE" },
+    )
   }
 
   run(threadId: string, text: string, fileIds: string[]): AsyncGenerator<AgentEvent> {

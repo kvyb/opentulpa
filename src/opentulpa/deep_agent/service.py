@@ -626,6 +626,8 @@ class DeepAgentService:
         container_policy: TenantContainerPolicy | None = None,
         container_cli: str = "docker",
         execution_provider: TenantExecutionProvider | None = None,
+        execution_backend: Any | None = None,
+        workspace_backend: Any | None = None,
         run_observer: AgentRunObserver | None = None,
         attachment_resolver: AgentAttachmentResolver | None = None,
         provider_fallback_models: Sequence[Any] = (),
@@ -652,6 +654,8 @@ class DeepAgentService:
         self._container_policy = container_policy or TenantContainerPolicy()
         self._container_cli = str(container_cli or "docker").strip() or "docker"
         self._execution_provider = execution_provider
+        self._execution_backend = execution_backend
+        self._workspace_backend = workspace_backend
         self._run_observer = run_observer
         self._attachment_resolver = attachment_resolver
         self._provider_fallback_models = tuple(provider_fallback_models)
@@ -2444,20 +2448,24 @@ class DeepAgentService:
         routes: dict[str, Any] = {}
         uses_store = spec.memory_scope != "none"
         if spec.workspace_scope == "read_write":
-            default = TenantSandboxBackend(
-                workspaces_root=self._workspaces_root,
-                policy=self._container_policy,
-                container_cli=self._container_cli,
-                persistent_execution_workspace=True,
-                execution_provider=self._execution_provider,
-            )
-            routes["/workspace/"] = TenantSandboxBackend(
-                workspaces_root=self._workspaces_root,
-                policy=self._container_policy,
-                container_cli=self._container_cli,
-                persistent_files=True,
-                execution_provider=self._execution_provider,
-            )
+            if self._workspace_backend is not None and spec.runtime_profile == "owner":
+                default = self._execution_backend or self._workspace_backend
+                routes["/workspace/"] = self._workspace_backend
+            else:
+                default = TenantSandboxBackend(
+                    workspaces_root=self._workspaces_root,
+                    policy=self._container_policy,
+                    container_cli=self._container_cli,
+                    persistent_execution_workspace=True,
+                    execution_provider=self._execution_provider,
+                )
+                routes["/workspace/"] = TenantSandboxBackend(
+                    workspaces_root=self._workspaces_root,
+                    policy=self._container_policy,
+                    container_cli=self._container_cli,
+                    persistent_files=True,
+                    execution_provider=self._execution_provider,
+                )
         elif spec.workspace_scope == "read_only":
             routes["/workspace/"] = TenantSandboxBackend(
                 workspaces_root=self._workspaces_root,
@@ -2570,14 +2578,26 @@ class DeepAgentService:
         )
 
     def _owner_backend(self) -> CompositeBackend:
-        return CompositeBackend(
-            default=TenantSandboxBackend(
+        workspace = self._workspace_backend
+        if workspace is None:
+            workspace = TenantSandboxBackend(
+                workspaces_root=self._workspaces_root,
+                policy=self._container_policy,
+                container_cli=self._container_cli,
+                persistent_files=True,
+                execution_provider=self._execution_provider,
+            )
+        execution = self._execution_backend
+        if execution is None:
+            execution = TenantSandboxBackend(
                 workspaces_root=self._workspaces_root,
                 policy=self._container_policy,
                 container_cli=self._container_cli,
                 persistent_execution_workspace=True,
                 execution_provider=self._execution_provider,
-            ),
+            )
+        return CompositeBackend(
+            default=execution,
             routes={
                 "/memories/": StoreBackend(
                     store=self._store,
@@ -2587,13 +2607,7 @@ class DeepAgentService:
                     store=self._store,
                     namespace=lambda rt: tenant_store_namespace(rt.context.tenant_id, "skills"),
                 ),
-                "/workspace/": TenantSandboxBackend(
-                    workspaces_root=self._workspaces_root,
-                    policy=self._container_policy,
-                    container_cli=self._container_cli,
-                    persistent_files=True,
-                    execution_provider=self._execution_provider,
-                ),
+                "/workspace/": workspace,
             },
         )
 

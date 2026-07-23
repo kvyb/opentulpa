@@ -30,6 +30,7 @@ from opentulpa.api.routes.v2_integrations import (
 )
 from opentulpa.api.routes.v2_notifications import register_v2_notification_routes
 from opentulpa.api.routes.v2_principal import V2Principal
+from opentulpa.api.routes.v2_repositories import register_v2_repository_routes
 from opentulpa.api.routes.v2_schedules import register_v2_schedule_routes
 from opentulpa.bootstrap.release_control import (
     ReleaseControlService,
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from opentulpa.jobs.service import JobService
     from opentulpa.notifications import NotificationService
     from opentulpa.persistence.idempotency import IdempotencyStore
+    from opentulpa.repositories.service import RepositoryWorkspaceService
     from opentulpa.schedules.service import ScheduleService
     from opentulpa.secrets import SecretIngressHook, SecretVaultService
     from opentulpa.specs import AgentSpecRef, AgentSpecService, TriggerSpecService
@@ -198,6 +200,7 @@ def create_app(
     release_control_service: ReleaseControlService | None = None,
     notification_service: NotificationService | None = None,
     inference_service: InferenceService | None = None,
+    repository_service: RepositoryWorkspaceService | None = None,
     max_file_upload_bytes: int = 45_000_000,
 ) -> FastAPI:
     """Create the public V2 API without constructing product or runtime services."""
@@ -280,6 +283,7 @@ def create_app(
     app.state.release_control = release_control_service
     app.state.notification_service = notification_service
     app.state.inference_service = inference_service
+    app.state.repository_service = repository_service
 
     if release_control_service is not None:
         register_release_control_plane(app, release_control_service)
@@ -297,6 +301,11 @@ def create_app(
         app,
         get_inference=lambda: inference_service,
         get_threads=lambda: agent_service,
+        resolve_principal=resolve_principal,
+    )
+    register_v2_repository_routes(
+        app,
+        get_repositories=lambda: repository_service,
         resolve_principal=resolve_principal,
     )
     register_v2_evolution_routes(

@@ -95,6 +95,11 @@ The registry below is the complete model-visible product surface. Deep Agents bu
 | `job_events` | `jobs` | `read` | `auto` | `none` | `sync` | 30s |
 | `job_artifacts` | `jobs` | `read` | `auto` | `none` | `sync` | 30s |
 | `job_cancel` | `jobs` | `delete` | `always` | `required` | `sync` | 30s |
+| `repository_open` | `repositories` | `create` | `auto` | `derived` | `sync` | 300s |
+| `repository_list` | `repositories` | `read` | `auto` | `none` | `sync` | 30s |
+| `repository_status` | `repositories` | `read` | `auto` | `none` | `sync` | 120s |
+| `repository_close` | `repositories` | `update` | `auto` | `derived` | `sync` | 120s |
+| `repository_publish_pr` | `repositories` | `authorize` | `always` | `required` | `sync` | 600s |
 | `source_status` | `evolution` | `read` | `auto` | `none` | `sync` | 30s |
 | `source_shell` | `evolution` | `execute` | `auto` | `none` | `sync` | 660s |
 | `source_release` | `evolution` | `authorize` | `always` | `required` | `sync` | 1800s |

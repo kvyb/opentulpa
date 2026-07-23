@@ -18,6 +18,7 @@ from typing import Any, Protocol, cast
 from pydantic import BaseModel
 
 from opentulpa.integrations.web_search import WebSearchProviderError
+from opentulpa.repositories.service import RepositoryWorkspaceError
 from opentulpa.schedules.models import ScheduleWrite
 from opentulpa.secrets.models import SecretHandle
 from opentulpa.specs.models import AgentSpecWrite, TriggerSpec, TriggerSpecWrite
@@ -40,6 +41,7 @@ _INTERNAL_KEYS = frozenset(
         "internal_path",
         "local_path",
         "profile_dir",
+        "provider_workspace_id",
         "request_headers",
         "response_headers",
         "raw_response",
@@ -410,6 +412,49 @@ class JobPort(Protocol):
     def cancel(self, *, tenant_id: str, job_id: str, idempotency_key: str) -> Any: ...
 
 
+class RepositoryPort(Protocol):
+    async def open(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        repository_url: str,
+        base_ref: str,
+        branch: str | None,
+        provider: str | None,
+    ) -> Any: ...
+
+    async def list(self, *, tenant_id: str, include_closed: bool) -> Any: ...
+
+    async def status(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        workspace_id: str | None,
+    ) -> Any: ...
+
+    async def close(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        workspace_id: str | None,
+    ) -> Any: ...
+
+    async def publish(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        workspace_id: str | None,
+        expected_head_sha: str,
+        title: str,
+        body: str,
+        draft: bool,
+    ) -> Any: ...
+
+
 class EvolutionPort(Protocol):
     async def source_status(
         self,
@@ -673,6 +718,7 @@ class ProductToolApplication:
         schedules: SchedulePort,
         jobs: JobPort,
         idempotency: IdempotencyPort,
+        repositories: RepositoryPort | None = None,
         evolution: EvolutionPort | None = None,
         traces: TracePort | None = None,
         evolution_owner_tenant_id: str | None = None,
@@ -693,6 +739,7 @@ class ProductToolApplication:
         self._schedules = schedules
         self._jobs = jobs
         self._idempotency = idempotency
+        self._repositories = repositories
         self._evolution = evolution
         self._traces = traces
         self._evolution_owner_tenant_id = str(evolution_owner_tenant_id or "").strip()
@@ -701,6 +748,14 @@ class ProductToolApplication:
         self._secret_handles = secret_handles
         self._capabilities = capabilities
         self._on_trigger_spec_changed = on_trigger_spec_changed
+
+    def _require_repositories(self, invocation: ProductToolInvocation) -> RepositoryPort:
+        if invocation.context.run_kind != "owner" or self._repositories is None:
+            raise ProductToolApplicationError(
+                "capability_unavailable",
+                "Repository workspaces are unavailable in this deployment.",
+            )
+        return self._repositories
 
     def _require_evolution(self, invocation: ProductToolInvocation) -> EvolutionPort:
         if (
@@ -795,6 +850,12 @@ class ProductToolApplication:
             raise ProductToolApplicationError(
                 "invalid_request",
                 "The request is invalid or conflicts with the current resource revision.",
+            ) from exc
+        except RepositoryWorkspaceError as exc:
+            raise ProductToolApplicationError(
+                "repository_workspace_error",
+                str(exc)[:500],
+                retryable="unavailable" in type(exc).__name__.casefold(),
             ) from exc
         except Exception as exc:
             name = type(exc).__name__.lower()
@@ -1810,6 +1871,70 @@ class ProductToolApplication:
                 tenant_id=invocation.context.tenant_id,
                 job_id=job_id,
                 idempotency_key=self._required_key(invocation),
+            ),
+        )
+
+    async def repository_open(self, invocation: ProductToolInvocation) -> ProductToolOutput:
+        repositories = self._require_repositories(invocation)
+        return await self._idempotent_output(
+            invocation,
+            lambda: repositories.open(
+                tenant_id=invocation.context.tenant_id,
+                thread_id=invocation.context.thread_id,
+                repository_url=str(invocation.arguments["repository_url"]),
+                base_ref=str(invocation.arguments["base_ref"]),
+                branch=cast("str | None", invocation.arguments.get("branch")),
+                provider=cast("str | None", invocation.arguments.get("provider")),
+            ),
+        )
+
+    async def repository_list(self, invocation: ProductToolInvocation) -> ProductToolOutput:
+        repositories = self._require_repositories(invocation)
+        return await self._output(
+            invocation,
+            lambda: repositories.list(
+                tenant_id=invocation.context.tenant_id,
+                include_closed=bool(invocation.arguments["include_closed"]),
+            ),
+        )
+
+    async def repository_status(self, invocation: ProductToolInvocation) -> ProductToolOutput:
+        repositories = self._require_repositories(invocation)
+        return await self._output(
+            invocation,
+            lambda: repositories.status(
+                tenant_id=invocation.context.tenant_id,
+                thread_id=invocation.context.thread_id,
+                workspace_id=cast("str | None", invocation.arguments.get("workspace_id")),
+            ),
+        )
+
+    async def repository_close(self, invocation: ProductToolInvocation) -> ProductToolOutput:
+        repositories = self._require_repositories(invocation)
+        return await self._idempotent_output(
+            invocation,
+            lambda: repositories.close(
+                tenant_id=invocation.context.tenant_id,
+                thread_id=invocation.context.thread_id,
+                workspace_id=cast("str | None", invocation.arguments.get("workspace_id")),
+            ),
+        )
+
+    async def repository_publish_pr(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput:
+        repositories = self._require_repositories(invocation)
+        return await self._idempotent_output(
+            invocation,
+            lambda: repositories.publish(
+                tenant_id=invocation.context.tenant_id,
+                thread_id=invocation.context.thread_id,
+                workspace_id=cast("str | None", invocation.arguments.get("workspace_id")),
+                expected_head_sha=str(invocation.arguments["expected_head_sha"]),
+                title=str(invocation.arguments["title"]),
+                body=str(invocation.arguments["body"]),
+                draft=bool(invocation.arguments["draft"]),
             ),
         )
 

@@ -128,6 +128,32 @@ class Settings(BaseSettings):
     sandbox_pid_limit: int = Field(default=128, ge=16, le=4096)
     sandbox_timeout_seconds: int = Field(default=60, ge=1, le=3600)
     sandbox_max_output_bytes: int = Field(default=512_000, ge=1024, le=10_000_000)
+    repository_sandbox_provider: str = Field(
+        default="auto",
+        description=(
+            "Repository workspace provider: auto uses Daytona when configured and local OCI "
+            "otherwise; daytona and local require that provider explicitly."
+        ),
+    )
+    repository_sandbox_snapshot: str | None = Field(
+        default=None,
+        description="Optional Daytona snapshot containing the repository development toolchain.",
+    )
+    repository_sandbox_target: str | None = Field(
+        default=None,
+        description="Optional Daytona target identifier.",
+    )
+    repository_sandbox_api_url: str = Field(
+        default="https://app.daytona.io/api",
+        description="Daytona API URL used for hosted repository workspaces.",
+    )
+    @field_validator("repository_sandbox_provider")
+    @classmethod
+    def validate_repository_sandbox_provider(cls, value: str) -> str:
+        provider = str(value or "").strip().casefold()
+        if provider not in {"auto", "daytona", "local"}:
+            raise ValueError("repository_sandbox_provider must be auto, daytona, or local")
+        return provider
     # Telegram
     telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")
     telegram_allowed_usernames: str | None = Field(

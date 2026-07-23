@@ -77,6 +77,11 @@ EXPECTED_OPERATIONS = {
     "job_events",
     "job_artifacts",
     "job_cancel",
+    "repository_open",
+    "repository_list",
+    "repository_status",
+    "repository_close",
+    "repository_publish_pr",
     "source_status",
     "source_shell",
     "source_release",
@@ -89,7 +94,7 @@ EXPECTED_OPERATIONS = {
 def test_registry_is_complete_unique_and_versioned() -> None:
     names = [spec.name for spec in TOOL_SPECS]
 
-    assert len(names) == 61
+    assert len(names) == 66
     assert len(names) == len(set(names))
     assert set(names) == EXPECTED_OPERATIONS
     assert set(TOOL_SPEC_BY_NAME) == EXPECTED_OPERATIONS
@@ -202,7 +207,7 @@ def test_machine_contract_contains_types_and_exact_registry() -> None:
     schema = tool_contract_json_schema()
 
     assert document["contract_version"] == CONTRACT_VERSION
-    assert len(document["operations"]) == 61
+    assert len(document["operations"]) == 66
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["x-opentulpa-contract-version"] == CONTRACT_VERSION
     assert schema["x-opentulpa-operations"] == document["operations"]

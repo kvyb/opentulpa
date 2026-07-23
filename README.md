@@ -102,6 +102,16 @@ material. OpenTulpa persists only the encrypted value and an opaque handle. For 
 paste `COMPOSIO_API_KEY=<value>`, then ask it to connect GitHub; it hot-loads the key and
 returns the tenant-owned OAuth link without a restart.
 
+For repository contributions, ask OpenTulpa to open a GitHub URL. It creates an isolated
+checkout for that conversation, edits complete files with Deep Agents' native filesystem
+and shell tools, runs tests, and commits on a branch. `repository_publish_pr` approves only
+the repository, branch, exact commit SHA, and PR metadata; the trusted publisher pushes the
+existing commit, so source files never pass through model output or integration arguments.
+Local installs use the bundled OCI sandbox. On Railway or another container host, paste
+`DAYTONA_API_KEY=<value>` once for durable hosted workspaces and
+`GITHUB_TOKEN=<fine-grained-token>` once for private checkout and PR publishing. `/repo`
+opens or inspects a workspace in the TUI, and `/repos` lists them.
+
 In managed OCI mode the stable bootstrap derives the active release image and runs that
 worker rootless with only private capability `/state`; product `/workspace`, source,
 databases, host credentials, and the container socket are never mounted. Generation
@@ -163,6 +173,7 @@ All owner interfaces use the same V2 surfaces:
 | `/v2/trigger-specs` | Revisioned time, interval, or authenticated-event triggers |
 | `/v2/schedules` | Simple reminder and agent-job projection over trigger specs |
 | `/v2/capabilities` | Test and activate release-bundled capability revisions |
+| `/v2/repositories/workspaces` | Create, resume, inspect, stop, and publish isolated Git workspaces |
 | `/v2/evolution` | Inspect release lineage and export evaluated contribution patches |
 
 Run streaming is normalized to `run.started`, `message.delta`, `tool.started`,
