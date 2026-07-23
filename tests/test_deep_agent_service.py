@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from deepagents.middleware.summarization import compute_summarization_defaults
 from langchain_core.language_models.fake_chat_models import (
     FakeListChatModel,
     FakeMessagesListChatModel,
@@ -32,6 +33,7 @@ from opentulpa.deep_agent.contracts import (
 from opentulpa.deep_agent.service import (
     _browser_action_requires_approval,
     _ProviderFallbackMiddleware,
+    _with_deepagents_context_budget,
     build_openrouter_chat_model,
 )
 from opentulpa.specs import AgentSpecRef, AgentSpecStore, AgentSpecWrite, OriginRef
@@ -323,6 +325,34 @@ def test_openrouter_model_restricts_provider_order_before_model_fallback() -> No
     finally:
         model.client.sdk_configuration.client.close()
         asyncio.run(model.client.sdk_configuration.async_client.aclose())
+
+
+def test_deepagents_context_budget_preserves_stricter_model_profiles() -> None:
+    unknown = _ToolCapableTextModel(responses=["ok"])
+    budgeted = _with_deepagents_context_budget(unknown)
+
+    assert budgeted is unknown
+    assert budgeted.profile == {"max_input_tokens": 50_000}
+    assert compute_summarization_defaults(budgeted) == {
+        "trigger": ("fraction", 0.85),
+        "keep": ("fraction", 0.1),
+        "truncate_args_settings": {
+            "trigger": ("fraction", 0.85),
+            "keep": ("fraction", 0.1),
+        },
+    }
+
+    smaller = _ToolCapableTextModel(
+        responses=["ok"],
+        profile={"max_input_tokens": 32_000, "tool_calling": True},
+    )
+    unchanged = _with_deepagents_context_budget(smaller)
+
+    assert unchanged is smaller
+    assert unchanged.profile == {
+        "max_input_tokens": 32_000,
+        "tool_calling": True,
+    }
 
 
 @pytest.mark.parametrize("kind", ["navigate", "wait"])

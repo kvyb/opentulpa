@@ -146,7 +146,8 @@ def test_factory_passes_exact_product_profiles_to_deepagents_api(
         return str(kwargs["name"])
 
     monkeypatch.setattr(service_module, "create_deep_agent", capture_create_deep_agent)
-    service = _service(tmp_path, object(), tools=_registered_tools())
+    provided_model = _ToolCapableModel(responses=[AIMessage(content="ok")])
+    service = _service(tmp_path, provided_model, tools=_registered_tools())
     checkpointer = object()
     store = object()
     service._checkpointer = cast("Any", checkpointer)
@@ -175,6 +176,11 @@ def test_factory_passes_exact_product_profiles_to_deepagents_api(
     assert "skills" not in routine
     assert "memory" not in routine
     assert intake["response_format"] is IntakeDecision
+    assert provided_model.profile == {"max_input_tokens": 50_000}
+    assert all(
+        call["model"].profile["max_input_tokens"] == 50_000
+        for call in calls.values()
+    )
 
     owner_backend = owner["backend"]
     assert isinstance(owner_backend, CompositeBackend)
