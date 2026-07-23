@@ -69,6 +69,9 @@ describe("V2 event transport", () => {
           { status: 200, headers: { "content-type": "text/event-stream" } },
         )
       }
+      if (requests.length === 2) {
+        return new Response("runtime is switching", { status: 503 })
+      }
       return new Response(
         'id: 2\ndata: {"type":"run.completed","run_id":"run-1","sequence":2,' +
           '"timestamp":"2026-01-01T00:00:01Z","data":{"text":"done"}}\n\n',
@@ -88,11 +91,45 @@ describe("V2 event transport", () => {
       [1, "run.started"],
       [2, "run.completed"],
     ])
-    expect(requests).toHaveLength(2)
+    expect(requests).toHaveLength(3)
     expect(requests[1]?.url).toBe(
       "https://tulpa.test/v2/agent/runs/run-1/events?after_sequence=1",
     )
     expect(requests[1]?.headers.get("last-event-id")).toBe("1")
+    expect(requests[2]?.url).toBe(
+      "https://tulpa.test/v2/agent/runs/run-1/events?after_sequence=1",
+    )
+  })
+
+  test("replays a known approval run when cutover happens before its first event", async () => {
+    const requests: Request[] = []
+    globalThis.fetch = (async (input, init) => {
+      requests.push(new Request(input, init))
+      if (requests.length === 1) {
+        return new Response("runtime is switching", { status: 503 })
+      }
+      return new Response(
+        'id: 8\ndata: {"type":"run.completed","run_id":"run-1","sequence":8,' +
+          '"timestamp":"2026-01-01T00:00:01Z","data":{"text":"active"}}\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )
+    }) as typeof fetch
+
+    const api = new OpenTulpaApi({
+      url: "https://tulpa.test",
+      token: "owner",
+      thread_id: "thread-1",
+    })
+    const events = []
+    for await (const event of api.resume("run-1", "approval-1", "approve")) events.push(event)
+
+    expect(events.map((event) => [event.sequence, event.type])).toEqual([[8, "run.completed"]])
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.url).toBe("https://tulpa.test/v2/agent/runs/run-1/resume")
+    expect(requests[1]?.url).toBe(
+      "https://tulpa.test/v2/agent/runs/run-1/events?after_sequence=0",
+    )
+    expect(requests[1]?.headers.get("last-event-id")).toBe("0")
   })
 
   test("updates only the current thread inference preference", async () => {

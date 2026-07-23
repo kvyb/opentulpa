@@ -637,6 +637,7 @@ class DeepAgentService:
         self._checkpoint_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._pending_resume_tasks: set[asyncio.Task[None]] = set()
         self._pending_resume_ids: set[str] = set()
+        self._shutting_down = False
 
     @property
     def model_name(self) -> str:
@@ -656,6 +657,7 @@ class DeepAgentService:
     async def start(self, *, recover_pending_resumes: bool = True) -> None:
         if self.started:
             return
+        self._shutting_down = False
         for path in (self._checkpoint_db_path, self._store_db_path, self._runs_db_path):
             path.parent.mkdir(parents=True, exist_ok=True)
         self._workspaces_root.mkdir(parents=True, exist_ok=True)
@@ -761,6 +763,7 @@ class DeepAgentService:
         await self._recover_pending_resumes()
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         active_tasks = tuple(self._active_run_tasks.values())
         for task in active_tasks:
             task.cancel()
@@ -851,6 +854,8 @@ class DeepAgentService:
         request: AgentRunRequest,
         prepared: _PreparedRun,
     ) -> None:
+        if self._shutting_down:
+            return
         current = self._active_run_tasks.get(prepared.run_id)
         if current is not None and not current.done():
             return
@@ -3274,7 +3279,7 @@ class DeepAgentService:
             self._schedule_pending_resume(run_id)
 
     def _schedule_pending_resume(self, run_id: str) -> None:
-        if run_id in self._pending_resume_ids or self._runs_db is None:
+        if self._shutting_down or run_id in self._pending_resume_ids or self._runs_db is None:
             return
         task = asyncio.create_task(
             self._recover_pending_resume(run_id),

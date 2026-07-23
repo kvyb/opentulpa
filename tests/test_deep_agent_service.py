@@ -1728,6 +1728,107 @@ async def test_claimed_approval_resume_recovers_after_process_restart(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_approved_source_release_hands_off_to_restarted_runtime(
+    tmp_path: Path,
+) -> None:
+    release_started = asyncio.Event()
+    release_responses: dict[str, dict[str, str]] = {}
+    release_calls: list[str] = []
+
+    @tool("source_release")
+    async def source_release(
+        idempotency_key: str,
+        expected_candidate_id: str,
+        expected_diff_sha256: str,
+        message: str,
+    ) -> dict[str, str]:
+        """Activate an exact, owner-approved source candidate."""
+
+        del expected_diff_sha256, message
+        existing = release_responses.get(idempotency_key)
+        if existing is not None:
+            return existing
+        result = {
+            "candidate_id": expected_candidate_id,
+            "status": "queued",
+        }
+        release_responses[idempotency_key] = result
+        release_calls.append(idempotency_key)
+        release_started.set()
+        await asyncio.Event().wait()
+        return result
+
+    digest = "a" * 64
+    model = _ToolCapableMessageModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "source_release",
+                        "args": {
+                            "idempotency_key": "release-key-1",
+                            "expected_candidate_id": "candidate-1",
+                            "expected_diff_sha256": digest,
+                            "message": "Deploy the tested source",
+                        },
+                        "id": "call-release",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The new source release is active."),
+        ]
+    )
+    first = _service(tmp_path, model, tools=[source_release])
+    await first.start()
+    interrupted_events = [
+        event
+        async for event in first.stream(
+            AgentRunRequest(context=_context(), text="Release the tested change")
+        )
+    ]
+    run_id = interrupted_events[0].run_id
+    interrupted = await first.get_run(run_id)
+    assert interrupted is not None and interrupted.status == "interrupted"
+    await first.open_resume(
+        run_id,
+        ApprovalDecision(
+            approval_id=interrupted.approvals[0].id,
+            decision="approve",
+        ),
+    )
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    await first.shutdown()
+
+    second = _service(tmp_path, model, tools=[source_release])
+    await second.start()
+    try:
+        for _ in range(200):
+            completed = await second.get_run(run_id)
+            if completed is not None and completed.status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                break
+            await asyncio.sleep(0.01)
+        replayed = [event async for event in second.events(run_id)]
+    finally:
+        await second.shutdown()
+
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.final_text == "The new source release is active."
+    assert replayed[-1].type == "run.completed"
+    assert (
+        sum(event.type == "run.started" and event.data.get("resumed") is True for event in replayed)
+        == 2
+    )
+    assert release_calls == ["release-key-1"]
+
+
+@pytest.mark.asyncio
 async def test_restart_defers_dynamic_resume_until_exact_capability_is_restored(
     tmp_path: Path,
 ) -> None:

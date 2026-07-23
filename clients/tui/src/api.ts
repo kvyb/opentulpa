@@ -123,6 +123,8 @@ export class OpenTulpaApi {
     return this.stream(
       `/v2/agent/runs/${encodeURIComponent(runId)}/events?after_sequence=${Math.max(0, afterSequence)}`,
       { headers: { "Last-Event-ID": String(Math.max(0, afterSequence)) } },
+      runId,
+      Math.max(0, afterSequence),
     )
   }
 
@@ -132,14 +134,18 @@ export class OpenTulpaApi {
     decision: "approve" | "edit" | "reject",
     editedArguments?: Record<string, unknown>,
   ): AsyncGenerator<AgentEvent> {
-    return this.stream(`/v2/agent/runs/${encodeURIComponent(runId)}/resume`, {
-      method: "POST",
-      body: JSON.stringify({
-        approval_id: approvalId,
-        decision,
-        edited_arguments: decision === "edit" ? editedArguments : null,
-      }),
-    })
+    return this.stream(
+      `/v2/agent/runs/${encodeURIComponent(runId)}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          approval_id: approvalId,
+          decision,
+          edited_arguments: decision === "edit" ? editedArguments : null,
+        }),
+      },
+      runId,
+    )
   }
 
   async cancel(runId: string): Promise<void> {
@@ -198,24 +204,44 @@ export class OpenTulpaApi {
     }
   }
 
-  private async *stream(path: string, init: RequestInit = {}): AsyncGenerator<AgentEvent> {
-    let runId = ""
-    let sequence = 0
+  private async *stream(
+    path: string,
+    init: RequestInit = {},
+    knownRunId = "",
+    knownSequence = 0,
+  ): AsyncGenerator<AgentEvent> {
+    let runId = knownRunId
+    let sequence = knownSequence
     let reconnectAttempts = 0
+    const maxReconnectAttempts = 30
+    const reconnect = async (): Promise<boolean> => {
+      if (!runId || reconnectAttempts >= maxReconnectAttempts) return false
+      reconnectAttempts += 1
+      path = `/v2/agent/runs/${encodeURIComponent(runId)}/events?after_sequence=${sequence}`
+      init = { headers: { "Last-Event-ID": String(sequence) } }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(4_000, reconnectAttempts * 500)),
+      )
+      return true
+    }
     while (true) {
       let response: Response
       try {
         response = await fetch(`${this.config.url}${path}`, this.withHeaders(init))
       } catch {
-        if (!runId || reconnectAttempts >= 6) {
+        if (!(await reconnect())) {
           throw new ApiError("The OpenTulpa event stream disconnected.")
         }
-        reconnectAttempts += 1
-        await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, reconnectAttempts * 500)))
         continue
       }
-      if (!response.ok) throw await this.error(response)
-      if (!response.body) throw new ApiError("OpenTulpa returned an empty event stream.")
+      if (!response.ok) {
+        if ([502, 503, 504].includes(response.status) && (await reconnect())) continue
+        throw await this.error(response)
+      }
+      if (!response.body) {
+        if (await reconnect()) continue
+        throw new ApiError("OpenTulpa returned an empty event stream.")
+      }
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -275,13 +301,9 @@ export class OpenTulpaApi {
         }
         return
       }
-      if (reconnectAttempts >= 6) {
+      if (!(await reconnect())) {
         throw new ApiError("The OpenTulpa event stream disconnected.")
       }
-      reconnectAttempts += 1
-      path = `/v2/agent/runs/${encodeURIComponent(runId)}/events?after_sequence=${sequence}`
-      init = { headers: { "Last-Event-ID": String(sequence) } }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, reconnectAttempts * 500)))
     }
   }
 
