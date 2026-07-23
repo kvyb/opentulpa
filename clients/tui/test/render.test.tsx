@@ -400,4 +400,41 @@ describe("terminal chrome", () => {
     expect(frame).toContain("Reject")
     setup.renderer.destroy()
   })
+
+  test("large external writes keep decisions visible without rendering file contents", async () => {
+    const approval: Approval = {
+      approval_id: "approval-large",
+      tool_name: "integration_invoke",
+      description: "Tool execution requires approval",
+      arguments: {
+        action_name: "GITHUB_COMMIT_MULTIPLE_FILES",
+        parameters: {
+          owner: "kvyb",
+          repo: "opentulpa",
+          branch: "readme/beautify-hero",
+          base_branch: "main",
+          upserts: [
+            { path: "docs/assets/opentulpa-hero.svg", content: `<svg>${"x".repeat(50_000)}</svg>` },
+            { path: "README.md", content: "![OpenTulpa](docs/assets/opentulpa-hero.svg)" },
+          ],
+        },
+      },
+      allowed_decisions: ["approve", "edit", "reject"],
+      run_id: "run-large",
+    }
+    const setup = await testRender(
+      () => <ApprovalView approval={approval} onDecision={() => {}} />,
+      { width: 100, height: 10 },
+    )
+    await setup.renderOnce()
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("GITHUB_COMMIT_MULTIPLE_FILES")
+    expect(frame).toContain("kvyb/opentulpa")
+    expect(frame).toContain("2 files")
+    expect(frame).toContain("Approve")
+    expect(frame).toContain("Edit")
+    expect(frame).toContain("Reject")
+    expect(frame).not.toContain("<svg>")
+    setup.renderer.destroy()
+  })
 })

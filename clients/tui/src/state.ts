@@ -190,6 +190,57 @@ export function compactJson(value: unknown, limit = 500): string {
   return rendered.length <= limit ? rendered : `${rendered.slice(0, limit - 3)}...`
 }
 
+export function approvalSummary(approval: Approval): string[] {
+  const args = approval.arguments
+  const parameters = isRecord(args.parameters) ? args.parameters : args
+  const lines: string[] = []
+  const action = shortText(args.action_name)
+  if (action) lines.push(`Action: ${action}`)
+
+  const owner = shortText(parameters.owner)
+  const repo = shortText(parameters.repo)
+  const branch = shortText(parameters.branch)
+  const baseBranch = shortText(parameters.base_branch)
+  const repository = owner && repo ? `${owner}/${repo}` : repo
+  const target = [
+    repository,
+    branch ? `${branch}${baseBranch ? ` <- ${baseBranch}` : ""}` : "",
+  ].filter(Boolean).join(" · ")
+  if (target) lines.push(`Target: ${target}`)
+
+  const paths = [
+    ...pathsFrom(parameters.upserts),
+    ...pathsFrom(parameters.deletes),
+  ]
+  if (paths.length) {
+    const visible = paths.slice(0, 3)
+    const remaining = paths.length - visible.length
+    lines.push(
+      `${paths.length} ${paths.length === 1 ? "file" : "files"}: ${visible.join(", ")}${remaining ? ` +${remaining}` : ""}`,
+    )
+  }
+
+  const message = shortText(parameters.message)
+  if (message && lines.length < 3) lines.push(`Message: ${message}`)
+  return lines.slice(0, 3)
+}
+
+function pathsFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (typeof item === "string") return [shortText(item)].filter(Boolean)
+    if (!isRecord(item)) return []
+    const path = shortText(item.path)
+    return path ? [path] : []
+  })
+}
+
+function shortText(value: unknown, limit = 120): string {
+  if (typeof value !== "string") return ""
+  const text = value.trim().replaceAll(/\s+/g, " ")
+  return text.length <= limit ? text : `${text.slice(0, limit - 3)}...`
+}
+
 export function toolLabel(tool: ToolCall): string {
   const name = tool.name.replaceAll("_", " ")
   if (!tool.arguments || typeof tool.arguments !== "object" || Array.isArray(tool.arguments)) return name

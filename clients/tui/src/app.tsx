@@ -14,6 +14,7 @@ import { basename } from "node:path"
 import { droppedFiles } from "./attachments.js"
 import { ApiError, OpenTulpaApi } from "./api.js"
 import {
+  approvalSummary,
   compactJson,
   consumeApproval,
   emptyTurn,
@@ -1315,9 +1316,12 @@ function ToolDetails(props: { tool: ToolCall }) {
 }
 
 export function ApprovalView(props: { approval: Approval; onDecision: (approval: Approval, decision: "approve" | "edit" | "reject") => void }) {
+  const summary = createMemo(() => approvalSummary(props.approval))
   return (
     <box
       flexShrink={0}
+      maxHeight={10}
+      overflow="hidden"
       border={["left"]}
       customBorderChars={SPLIT}
       borderColor={COLORS.amber}
@@ -1329,9 +1333,18 @@ export function ApprovalView(props: { approval: Approval; onDecision: (approval:
       flexDirection="column"
     >
       <text fg={COLORS.amber} attributes={TextAttributes.BOLD}>Approval required</text>
-      <text fg={COLORS.text} wrapMode="word">{props.approval.tool_name.replaceAll("_", " ")}</text>
-      <Show when={props.approval.description}>
-        <text fg={COLORS.muted} wrapMode="word">{props.approval.description}</text>
+      <text fg={COLORS.text} wrapMode="none" truncate>{props.approval.tool_name.replaceAll("_", " ")}</text>
+      <Show
+        when={summary().length}
+        fallback={(
+          <Show when={props.approval.description}>
+            <text fg={COLORS.muted} wrapMode="none" truncate>{props.approval.description}</text>
+          </Show>
+        )}
+      >
+        <For each={summary()}>
+          {(line) => <text fg={COLORS.muted} wrapMode="none" truncate>{line}</text>}
+        </For>
       </Show>
       <box flexDirection="row" gap={1} marginTop={1}>
         <Show when={props.approval.allowed_decisions.includes("approve")}>
