@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { emptyTurn, reduceEvent, turnsFromTimeline } from "../src/state.js"
+import { consumeApproval, emptyTurn, reduceEvent, turnsFromTimeline } from "../src/state.js"
 import type { AgentEvent } from "../src/types.js"
 
 function event(sequence: number, type: string, data: Record<string, unknown>): AgentEvent {
@@ -110,5 +110,70 @@ describe("run event reducer", () => {
     expect(turn.tools[0].callId).toBe("execute_1")
     expect(turn.tools[0].completedAt).toBeTruthy()
     expect(turn.status).toBe("completed")
+  })
+
+  test("replaces a consumed approval when a resumed run interrupts again", () => {
+    let turn = emptyTurn("run-1")
+    turn = reduceEvent(turn, event(1, "approval.required", {
+      approval_id: "approval-1",
+      tool_name: "capability_activate",
+      allowed_decisions: ["approve", "edit", "reject"],
+    }))
+    turn = consumeApproval(turn, "approval-1")
+
+    expect(turn.approvals).toEqual([])
+    expect(turn.status).toBe("running")
+
+    turn = reduceEvent(turn, event(2, "run.started", { resumed: true }))
+    turn = reduceEvent(turn, event(3, "approval.required", {
+      approval_id: "approval-2",
+      tool_name: "capability_activate",
+      allowed_decisions: ["approve", "edit", "reject"],
+    }))
+
+    expect(turn.approvals.map((approval) => approval.approval_id)).toEqual(["approval-2"])
+    expect(turn.status).toBe("approval")
+  })
+
+  test("timeline replay drops an earlier consumed approval after resume", () => {
+    const turns = turnsFromTimeline([
+      {
+        id: "a1",
+        type: "event",
+        event_type: "approval.required",
+        sequence: 1,
+        run_id: "run-1",
+        timestamp: "1",
+        data: {
+          approval_id: "approval-1",
+          tool_name: "first",
+          allowed_decisions: ["approve"],
+        },
+      },
+      {
+        id: "resume",
+        type: "event",
+        event_type: "run.started",
+        sequence: 2,
+        run_id: "run-1",
+        timestamp: "2",
+        data: { resumed: true },
+      },
+      {
+        id: "a2",
+        type: "event",
+        event_type: "approval.required",
+        sequence: 3,
+        run_id: "run-1",
+        timestamp: "3",
+        data: {
+          approval_id: "approval-2",
+          tool_name: "second",
+          allowed_decisions: ["approve"],
+        },
+      },
+    ])
+
+    expect(turns[0]?.approvals.map((approval) => approval.approval_id)).toEqual(["approval-2"])
   })
 })

@@ -28,7 +28,10 @@ export function reduceEvent(turn: Turn, event: AgentEvent): Turn {
     approvals: [...turn.approvals],
     artifacts: [...turn.artifacts],
   }
-  if (event.type === "run.started") next.status = "running"
+  if (event.type === "run.started") {
+    next.status = "running"
+    next.approvals = []
+  }
   if (event.type === "message.delta") {
     const text = typeof event.data.text === "string" ? event.data.text : ""
     next.assistant += text
@@ -91,9 +94,20 @@ export function reduceEvent(turn: Turn, event: AgentEvent): Turn {
   if (event.type === "run.failed") {
     next.status = "failed"
     next.error = String(event.data.message ?? "The agent run could not be completed.")
+    next.approvals = []
     next.tools = finishTools(next.tools, event.timestamp)
   }
   return next
+}
+
+export function consumeApproval(turn: Turn, approvalId: string): Turn {
+  const approvals = turn.approvals.filter((item) => item.approval_id !== approvalId)
+  if (approvals.length === turn.approvals.length) return turn
+  return {
+    ...turn,
+    approvals,
+    status: approvals.length ? "approval" : "running",
+  }
 }
 
 export function turnsFromTimeline(entries: TimelineEntry[]): Turn[] {

@@ -13,7 +13,14 @@ import { spawn } from "node:child_process"
 import { basename } from "node:path"
 import { droppedFiles } from "./attachments.js"
 import { ApiError, OpenTulpaApi } from "./api.js"
-import { compactJson, emptyTurn, reduceEvent, toolLabel, turnsFromTimeline } from "./state.js"
+import {
+  compactJson,
+  consumeApproval,
+  emptyTurn,
+  reduceEvent,
+  toolLabel,
+  turnsFromTimeline,
+} from "./state.js"
 import type {
   AgentEvent,
   Approval,
@@ -149,7 +156,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   let alive = true
 
   const activeTurn = createMemo(() => turns().at(-1))
-  const pendingApproval = createMemo(() => activeTurn()?.approvals[0])
+  const pendingApproval = createMemo(() => activeTurn()?.approvals.at(-1))
   const filteredThreads = createMemo(() => {
     const query = sessionQuery().trim().toLocaleLowerCase()
     return query
@@ -408,7 +415,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     } catch (cause) {
       setError(message(cause))
       setBusy(false)
-      setStatus("Disconnected")
+      setStatus(cause instanceof ApiError && cause.status ? "Failed" : "Disconnected")
       return false
     }
   }
@@ -790,7 +797,9 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   }
 
   const decide = async (approval: Approval, decision: "approve" | "edit" | "reject") => {
+    if (busy()) return
     if (decision === "edit") {
+      consumeVisibleApproval(approval)
       setEditApproval(approval)
       const value = compactJson(approval.arguments, 20_000)
       setDraft(value)
@@ -800,10 +809,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       }, 0)
       return
     }
+    consumeVisibleApproval(approval)
     setBusy(true)
     setStatus(decision === "approve" ? "Approving" : "Rejecting")
     if (await consume(api.resume(approval.run_id, approval.approval_id, decision), approval.run_id)) {
       await acknowledgeApproval(approval.approval_id)
+    } else {
+      await recoverCurrentThread()
     }
   }
 
@@ -821,6 +833,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     }
     setEditApproval(undefined)
     clearComposer()
+    consumeVisibleApproval(approval)
     setBusy(true)
     setStatus("Applying edited action")
     if (
@@ -830,6 +843,30 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       )
     ) {
       await acknowledgeApproval(approval.approval_id)
+    } else {
+      await recoverCurrentThread()
+    }
+  }
+
+  const consumeVisibleApproval = (approval: Approval) => {
+    setTurns((current) =>
+      current.map((turn) =>
+        turn.runId === approval.run_id
+          ? consumeApproval(turn, approval.approval_id)
+          : turn,
+      ),
+    )
+  }
+
+  const recoverCurrentThread = async () => {
+    const current = thread()
+    if (!current) return
+    try {
+      await loadThread(current.thread_id)
+    } catch (cause) {
+      setError(message(cause))
+      setBusy(false)
+      setStatus(cause instanceof ApiError && cause.status ? "Failed" : "Disconnected")
     }
   }
 
