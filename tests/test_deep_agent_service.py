@@ -121,6 +121,58 @@ class _ProviderUnavailableGraph:
         raise ValueError("OpenRouter API returned an error: no endpoints available")
 
 
+class _CodexOverloadedGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        if False:
+            yield {}
+        raise RuntimeError("Our servers are currently overloaded. Please try again later.")
+
+
+class _ToolErrorThenCodexOverloadedGraph:
+    async def astream(self, graph_input: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        del graph_input, kwargs
+        yield {
+            "type": "messages",
+            "data": (
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "repository_publish_pr",
+                            "args": {},
+                            "id": "call-publish",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                {},
+            ),
+        }
+        yield {
+            "type": "messages",
+            "data": (
+                ToolMessage(
+                    name="repository_publish_pr",
+                    tool_call_id="call-publish",
+                    content=json.dumps(
+                        {
+                            "status": "error",
+                            "data": None,
+                            "error": {
+                                "code": "repository_workspace_error",
+                                "message": "GitHub publishing is not configured.",
+                                "retryable": False,
+                            },
+                        }
+                    ),
+                ),
+                {},
+            ),
+        }
+        raise RuntimeError("Our servers are currently overloaded. Please try again later.")
+
+
 class _MiddlewareRequest:
     def __init__(self, model: Any) -> None:
         self.model = model
@@ -1254,6 +1306,53 @@ async def test_exhausted_provider_routes_have_specific_public_failure(tmp_path: 
         "No configured model provider could complete this request. Try again later."
     )
     assert events[-1].data["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_codex_overload_has_specific_retryable_public_failure(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _CodexOverloadedGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(AgentRunRequest(context=_context(), text="Hi"))
+        ]
+    finally:
+        await service.shutdown()
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].data["code"] == "model_provider_failed"
+    assert events[-1].data["message"] == (
+        "No configured model provider could complete this request. Try again later."
+    )
+    assert events[-1].data["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_preserves_latest_actionable_tool_error(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    service._graphs["owner"] = _ToolErrorThenCodexOverloadedGraph()  # noqa: SLF001
+    try:
+        events = [
+            event
+            async for event in service.stream(AgentRunRequest(context=_context(), text="Publish"))
+        ]
+        snapshot = await service.get_run(events[0].run_id)
+    finally:
+        await service.shutdown()
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].data["last_tool_error"] == {
+        "tool_name": "repository_publish_pr",
+        "message": "GitHub publishing is not configured.",
+    }
+    assert events[-1].data["message"].endswith(
+        "The last operation also failed: GitHub publishing is not configured."
+    )
+    assert snapshot is not None
+    assert snapshot.error == events[-1].data["message"]
 
 
 @pytest.mark.asyncio

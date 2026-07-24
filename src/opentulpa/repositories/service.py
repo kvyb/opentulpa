@@ -388,7 +388,8 @@ class RepositoryWorkspaceService:
             token = self._github_token_resolver(tenant_id, "github.write")
             if not token:
                 raise RepositoryPublishError(
-                    "GitHub publishing is not configured; paste GITHUB_TOKEN=<token>"
+                    "GitHub publishing is not configured. Paste a fine-grained "
+                    "GITHUB_TOKEN assignment in owner chat."
                 )
             await asyncio.to_thread(provider.push, workspace, github_token=token)
             pull_request_url = await asyncio.to_thread(

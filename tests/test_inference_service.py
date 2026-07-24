@@ -10,7 +10,15 @@ from typing import Any
 import httpx
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGenerationChunk
+from langchain_openai.chat_models.codex import _ChatOpenAICodex
 from pydantic import BaseModel
 
 from opentulpa.deep_agent.contracts import AgentRunRequest
@@ -482,6 +490,68 @@ def test_pinned_langchain_codex_adapter_contract(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_retries_transient_stream_before_first_chunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InferenceCredentialStore(tmp_path / "inference.db", cipher=_cipher())
+    provider = CodexTokenProvider(tenant_id="tenant-1", store=store)
+    model = build_codex_model(
+        model="gpt-test",
+        reasoning_effort="high",
+        token_provider=provider,
+    )
+    calls = 0
+    sleeps: list[float] = []
+
+    async def stream(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("Our servers are currently overloaded. Please try again later.")
+        yield ChatGenerationChunk(message=AIMessageChunk(content="recovered"))
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(_ChatOpenAICodex, "_astream", stream)
+    monkeypatch.setattr("opentulpa.inference.codex.asyncio.sleep", sleep)
+
+    chunks = [chunk async for chunk in model._astream([])]  # noqa: SLF001
+
+    assert calls == 2
+    assert sleeps == [0.5]
+    assert [chunk.text for chunk in chunks] == ["recovered"]
+
+
+def test_codex_does_not_retry_stream_after_first_chunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InferenceCredentialStore(tmp_path / "inference.db", cipher=_cipher())
+    provider = CodexTokenProvider(tenant_id="tenant-1", store=store)
+    model = build_codex_model(
+        model="gpt-test",
+        reasoning_effort="high",
+        token_provider=provider,
+    )
+    calls = 0
+
+    def stream(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        yield ChatGenerationChunk(message=AIMessageChunk(content="visible"))
+        raise RuntimeError("Our servers are currently overloaded. Please try again later.")
+
+    monkeypatch.setattr(_ChatOpenAICodex, "_stream", stream)
+
+    with pytest.raises(RuntimeError, match="overloaded"):
+        list(model._stream([]))  # noqa: SLF001
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_codex_401_refreshes_once_and_transient_fallback_stops_after_activity() -> None:
     class Provider:
         refreshes = 0
@@ -563,6 +633,10 @@ async def test_codex_401_refreshes_once_and_transient_fallback_stops_after_activ
         wrapped.__cause__ = cause
     assert is_transient(wrapped) is True
     assert is_transient(CodexProviderError("rate limited", status_code=429)) is True
+    assert (
+        is_transient(RuntimeError("Our servers are currently overloaded. Please try again later."))
+        is True
+    )
     assert is_transient(UnauthorizedError()) is False
 
 

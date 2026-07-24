@@ -274,7 +274,7 @@ def _failure_diagnostic(error: BaseException, *, phase: str) -> dict[str, str]:
 def _public_run_failure(error: BaseException) -> tuple[str, str, bool]:
     if _is_provider_rejection(error):
         return "model_provider_rejected", _PUBLIC_PROVIDER_REJECTION_MESSAGE, False
-    if _is_provider_fallback_error(error):
+    if _is_model_provider_failure(error):
         return "model_provider_failed", _PUBLIC_PROVIDER_FAILURE_MESSAGE, True
     return "agent_run_failed", _PUBLIC_RUN_FAILURE_MESSAGE, False
 
@@ -299,6 +299,10 @@ def _is_provider_fallback_error(error: BaseException) -> bool:
     return "openrouter api returned an error" in message or (
         "openrouter api returned a response with no choices" in message
     )
+
+
+def _is_model_provider_failure(error: BaseException) -> bool:
+    return _is_provider_fallback_error(error) or is_codex_transient(error)
 
 
 def _browser_action_requires_approval(request: Any) -> bool:
@@ -2812,7 +2816,7 @@ class DeepAgentService:
                 yield event
         except Exception as exc:
             final_text = "".join(final_parts).strip()
-            if _is_provider_fallback_error(exc) and final_text:
+            if _is_model_provider_failure(exc) and final_text:
                 logger.warning(
                     "Model provider failed after emitting output; preserving response: "
                     "run_id=%s",
@@ -2834,23 +2838,74 @@ class DeepAgentService:
                 return
             logger.exception("Deep Agent run failed: run_id=%s", run_id)
             failure_code, failure_message, retryable = _public_run_failure(exc)
+            last_tool_error = (
+                await self._latest_tool_error(run_id)
+                if failure_code == "model_provider_failed"
+                else None
+            )
+            if last_tool_error is not None:
+                failure_message = (
+                    f"{failure_message} The last operation also failed: "
+                    f"{last_tool_error['message']}"
+                )
+            failure_event_data: dict[str, Any] = {
+                "code": failure_code,
+                "message": failure_message,
+                "retryable": retryable,
+                "diagnostic": _failure_diagnostic(exc, phase=failure_phase),
+            }
+            if last_tool_error is not None:
+                failure_event_data["last_tool_error"] = last_tool_error
             event = await self._transition_with_event(
                 run_id,
                 allowed_statuses={"running", "resume_pending"},
                 status="failed",
                 event_type="run.failed",
-                event_data={
-                    "code": failure_code,
-                    "message": failure_message,
-                    "retryable": retryable,
-                    "diagnostic": _failure_diagnostic(exc, phase=failure_phase),
-                },
+                event_data=failure_event_data,
                 error=failure_message,
             )
             if event is None:
                 return
             await self._observe_run(run_id)
             yield event
+
+    async def _latest_tool_error(self, run_id: str) -> dict[str, str] | None:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT data_json
+            FROM agent_run_events
+            WHERE run_id = ? AND event_type = 'tool.completed'
+            ORDER BY sequence DESC
+            LIMIT 1
+            """,
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        try:
+            data = json.loads(str(row["data_json"] or "{}"))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        result = data.get("result")
+        raw_error: Any = data.get("error") if data.get("ok") is False else None
+        if isinstance(result, dict) and result.get("status") == "error":
+            raw_error = result.get("error")
+        if isinstance(raw_error, dict):
+            message = str(raw_error.get("message") or "").strip()
+        else:
+            message = str(raw_error or "").strip()
+        if not message:
+            return None
+        safe_message = str(redact_for_langfuse(message))[:600]
+        return {
+            "tool_name": str(data.get("name") or "tool")[:200],
+            "message": safe_message,
+        }
 
     def _run_config(
         self,

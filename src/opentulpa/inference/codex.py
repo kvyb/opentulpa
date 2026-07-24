@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
 
 import httpx
 import openai
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai.chat_models.codex import _ChatOpenAICodex
 from langchain_openai.chatgpt_oauth import (
     CHATGPT_CLIENT_ID,
@@ -24,6 +28,9 @@ from langchain_openai.chatgpt_oauth import (
 from opentulpa.inference.store import CodexCredential, InferenceCredentialStore
 
 CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
+_INITIAL_STREAM_ATTEMPTS = 3
+_INITIAL_STREAM_RETRY_SECONDS = 0.5
+logger = logging.getLogger(__name__)
 
 
 class CodexAuthenticationError(RuntimeError):
@@ -129,6 +136,46 @@ class CodexTokenProvider:
         )
 
 
+class _RetryingChatOpenAICodex(_ChatOpenAICodex):
+    """Retry transient Codex streams only before any chunk can reach the client."""
+
+    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        for attempt in range(_INITIAL_STREAM_ATTEMPTS):
+            emitted = False
+            try:
+                for chunk in super()._stream(*args, **kwargs):
+                    emitted = True
+                    yield chunk
+                return
+            except Exception as exc:
+                if emitted or not is_transient(exc) or attempt == _INITIAL_STREAM_ATTEMPTS - 1:
+                    raise
+                logger.warning(
+                    "Codex stream failed before its first chunk; retrying attempt %d of %d",
+                    attempt + 2,
+                    _INITIAL_STREAM_ATTEMPTS,
+                )
+                time.sleep(_INITIAL_STREAM_RETRY_SECONDS * (2**attempt))
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+        for attempt in range(_INITIAL_STREAM_ATTEMPTS):
+            emitted = False
+            try:
+                async for chunk in super()._astream(*args, **kwargs):
+                    emitted = True
+                    yield chunk
+                return
+            except Exception as exc:
+                if emitted or not is_transient(exc) or attempt == _INITIAL_STREAM_ATTEMPTS - 1:
+                    raise
+                logger.warning(
+                    "Codex stream failed before its first chunk; retrying attempt %d of %d",
+                    attempt + 2,
+                    _INITIAL_STREAM_ATTEMPTS,
+                )
+                await asyncio.sleep(_INITIAL_STREAM_RETRY_SECONDS * (2**attempt))
+
+
 def build_codex_model(
     *,
     model: str,
@@ -140,7 +187,7 @@ def build_codex_model(
     reasoning = (
         {"effort": reasoning_effort, "summary": "auto"} if reasoning_effort else {"summary": "auto"}
     )
-    return _ChatOpenAICodex(
+    return _RetryingChatOpenAICodex(
         model=model,
         token_provider=token_provider,
         originator="opentulpa",
@@ -181,6 +228,22 @@ def is_transient(error: BaseException) -> bool:
             status = int(getattr(response, "status_code", 0) or 0)
         if status == 429 or 500 <= status < 600:
             return True
+        message = str(current or "").casefold()
+        if (
+            "server" in message
+            and ("overload" in message or "temporarily unavailable" in message)
+        ) or "try again later" in message:
+            return True
+        body = getattr(current, "body", None)
+        if isinstance(body, dict):
+            code = str(body.get("code") or body.get("type") or "").casefold()
+            if code in {
+                "overloaded",
+                "overloaded_error",
+                "rate_limit_exceeded",
+                "server_error",
+            }:
+                return True
         current = current.__cause__ or current.__context__
     return False
 
