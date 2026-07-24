@@ -8,9 +8,19 @@ from typing import Any
 
 import httpx
 
+from opentulpa.telegram_formatting import (
+    prepare_text_and_mode,
+    prepare_text_chunks_and_mode,
+    telegram_html_to_plain,
+)
+
 
 class TelegramAPIError(RuntimeError):
     """Sanitized Telegram transport error that never contains the bot token."""
+
+    def __init__(self, message: str, *, invalid_markup: bool = False) -> None:
+        super().__init__(message)
+        self.invalid_markup = invalid_markup
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,13 +145,23 @@ class TelegramBotAPI:
         except httpx.HTTPError as exc:
             raise TelegramAPIError(f"Telegram {method} transport failed.") from exc
         if not response.is_success:
-            raise TelegramAPIError(f"Telegram {method} returned HTTP {response.status_code}.")
+            try:
+                error_data = response.json()
+            except ValueError:
+                error_data = None
+            raise TelegramAPIError(
+                f"Telegram {method} returned HTTP {response.status_code}.",
+                invalid_markup=_is_invalid_markup_error(error_data),
+            )
         try:
             data = response.json()
         except ValueError as exc:
             raise TelegramAPIError(f"Telegram {method} returned invalid JSON.") from exc
         if not isinstance(data, dict) or data.get("ok") is not True:
-            raise TelegramAPIError(f"Telegram {method} rejected the request.")
+            raise TelegramAPIError(
+                f"Telegram {method} rejected the request.",
+                invalid_markup=_is_invalid_markup_error(data),
+            )
         return data.get("result")
 
     async def get_me(self) -> dict[str, Any]:
@@ -183,13 +203,25 @@ class TelegramBotAPI:
         text: str,
         reply_markup: dict[str, Any] | None = None,
     ) -> list[int]:
-        chunks = _text_chunks(text)
+        chunks, parse_mode = prepare_text_chunks_and_mode(text, "HTML")
+        if not chunks:
+            chunks = ["The operation completed without a message."]
+            parse_mode = "HTML"
         message_ids: list[int] = []
         for index, chunk in enumerate(chunks):
             payload: dict[str, Any] = {"chat_id": int(chat_id), "text": chunk}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
             if index == 0 and reply_markup is not None:
                 payload["reply_markup"] = reply_markup
-            result = await self._post("sendMessage", payload, timeout=30)
+            try:
+                result = await self._post("sendMessage", payload, timeout=30)
+            except TelegramAPIError as exc:
+                if not exc.invalid_markup:
+                    raise
+                payload.pop("parse_mode", None)
+                payload["text"] = telegram_html_to_plain(chunk)[:4_000] or "…"
+                result = await self._post("sendMessage", payload, timeout=30)
             if isinstance(result, dict):
                 message_id = _positive_int(result.get("message_id"))
                 if message_id is not None:
@@ -211,14 +243,24 @@ class TelegramBotAPI:
         text: str,
         reply_markup: dict[str, Any] | None = None,
     ) -> None:
+        final_text, parse_mode = prepare_text_and_mode(text, "HTML")
         payload: dict[str, Any] = {
             "chat_id": int(chat_id),
             "message_id": int(message_id),
-            "text": str(text or "")[:4_000] or "…",
+            "text": final_text or "…",
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        await self._post("editMessageText", payload, timeout=30)
+        try:
+            await self._post("editMessageText", payload, timeout=30)
+        except TelegramAPIError as exc:
+            if not exc.invalid_markup:
+                raise
+            payload.pop("parse_mode", None)
+            payload["text"] = telegram_html_to_plain(final_text)[:4_000] or "…"
+            await self._post("editMessageText", payload, timeout=30)
 
     async def answer_callback_query(
         self,
@@ -295,6 +337,13 @@ def _text_chunks(text: str, *, limit: int = 4_000) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def _is_invalid_markup_error(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    description = str(data.get("description") or "").lower()
+    return "can't parse entities" in description or "unsupported start tag" in description
 
 
 __all__ = [

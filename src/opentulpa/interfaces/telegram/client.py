@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from opentulpa.interfaces.telegram.formatter import (
+from opentulpa.telegram_formatting import (
     prepare_text_and_mode,
     prepare_text_chunks_and_mode,
 )

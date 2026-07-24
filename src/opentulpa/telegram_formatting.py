@@ -1,9 +1,9 @@
-"""Telegram text formatting helpers."""
+"""Shared Telegram text formatting helpers."""
 
 from __future__ import annotations
 
 import re
-from html import escape
+from html import escape, unescape
 
 TELEGRAM_TEXT_CHAR_LIMIT = 3800
 
@@ -98,6 +98,12 @@ def markdownish_to_html(text: str) -> str:
         working = working.replace(f"%%LINK_{idx}%%", html_link)
 
     return working
+
+
+def telegram_html_to_plain(text: str) -> str:
+    """Remove the safe HTML tags emitted by ``markdownish_to_html``."""
+
+    return unescape(re.sub(r"<[^>]+>", "", str(text or "")))
 
 
 def split_text_for_telegram(text: str, *, max_chars: int = TELEGRAM_TEXT_CHAR_LIMIT) -> list[str]:

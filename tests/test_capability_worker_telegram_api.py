@@ -55,6 +55,68 @@ async def test_bot_api_explicitly_disables_webhook_without_dropping_updates() ->
 
 
 @pytest.mark.asyncio
+async def test_bot_api_renders_markdown_as_telegram_html() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/sendMessage"):
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 12}})
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramBotAPI(token="private-token", client=http)
+
+    assert await client.send_message(
+        chat_id=7,
+        text="**Title**\n\n- Item",
+    ) == [12]
+    await client.edit_message_text(
+        chat_id=7,
+        message_id=12,
+        text="## Update\n`code`",
+    )
+
+    sent = json.loads(requests[0].content)
+    assert sent["parse_mode"] == "HTML"
+    assert sent["text"] == "<b>Title</b>\n\n• Item"
+    edited = json.loads(requests[1].content)
+    assert edited["parse_mode"] == "HTML"
+    assert edited["text"] == "<b>Update</b>\n<code>code</code>"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bot_api_falls_back_to_plain_text_only_for_invalid_markup() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "description": "Bad Request: can't parse entities",
+                },
+            )
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 12}})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramBotAPI(token="private-token", client=http)
+
+    assert await client.send_message(chat_id=7, text="**Title**") == [12]
+
+    formatted = json.loads(requests[0].content)
+    assert formatted["parse_mode"] == "HTML"
+    assert formatted["text"] == "<b>Title</b>"
+    fallback = json.loads(requests[1].content)
+    assert "parse_mode" not in fallback
+    assert fallback["text"] == "Title"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bot_api_long_poll_sorts_updates_and_never_exposes_token_in_error() -> None:
     requests: list[httpx.Request] = []
 

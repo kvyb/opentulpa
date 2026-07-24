@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from opentulpa.interfaces.telegram.formatter import (
+from opentulpa.telegram_formatting import (
     TELEGRAM_TEXT_CHAR_LIMIT,
     prepare_text_and_mode,
     prepare_text_chunks_and_mode,
