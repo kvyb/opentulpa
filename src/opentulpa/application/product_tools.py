@@ -18,6 +18,7 @@ from typing import Any, Protocol, cast
 from pydantic import BaseModel
 
 from opentulpa.integrations.web_search import WebSearchProviderError
+from opentulpa.repositories.providers import RepositorySandboxError
 from opentulpa.repositories.service import RepositoryWorkspaceError
 from opentulpa.schedules.models import ScheduleWrite
 from opentulpa.secrets.models import SecretHandle
@@ -851,7 +852,7 @@ class ProductToolApplication:
                 "invalid_request",
                 "The request is invalid or conflicts with the current resource revision.",
             ) from exc
-        except RepositoryWorkspaceError as exc:
+        except (RepositoryWorkspaceError, RepositorySandboxError) as exc:
             raise ProductToolApplicationError(
                 "repository_workspace_error",
                 str(exc)[:500],

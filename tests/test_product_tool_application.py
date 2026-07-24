@@ -11,6 +11,7 @@ from opentulpa.application.product_tools import ProductToolApplication
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.persistence.idempotency import IdempotencyStore
+from opentulpa.repositories.providers import RepositorySandboxUnavailableError
 from opentulpa.specs import AgentSpecRef, OriginRef
 from opentulpa.tooling.adapters import (
     ProductToolApplicationError,
@@ -127,6 +128,34 @@ async def test_web_search_provider_failure_is_a_sanitized_retryable_tool_error()
 
     assert error.value.code == "web_search_failed"
     assert error.value.public_message == "Web search returned no grounded sources."
+    assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_repository_provider_failure_preserves_actionable_public_message() -> None:
+    repositories = _Port(
+        open=RepositorySandboxUnavailableError(
+            "no repository sandbox is configured; paste DAYTONA_API_KEY=<key>"
+        )
+    )
+    application, _ = _application(repositories=repositories)
+
+    with pytest.raises(ProductToolApplicationError) as error:
+        await application.repository_open(
+            _invocation(
+                "repository_open",
+                {
+                    "repository_url": "https://github.com/acme/project",
+                    "base_ref": "main",
+                    "provider": "auto",
+                },
+            )
+        )
+
+    assert error.value.code == "repository_workspace_error"
+    assert error.value.public_message == (
+        "no repository sandbox is configured; paste DAYTONA_API_KEY=<key>"
+    )
     assert error.value.retryable is True
 
 
