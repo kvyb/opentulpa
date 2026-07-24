@@ -107,10 +107,11 @@ checkout for that conversation, edits complete files with Deep Agents' native fi
 and shell tools, runs tests, and commits on a branch. `repository_publish_pr` approves only
 the repository, branch, exact commit SHA, and PR metadata; the trusted publisher pushes the
 existing commit, so source files never pass through model output or integration arguments.
-Local installs use the bundled OCI sandbox. On Railway or another container host, paste
-`DAYTONA_API_KEY=<value>` once for durable hosted workspaces and
-`GITHUB_TOKEN=<fine-grained-token>` once for private checkout and PR publishing. `/repo`
-opens or inspects a workspace in the TUI, and `/repos` lists them.
+It works without sandbox credentials: local machines use the bundled OCI boundary and compatible
+Linux hosts such as Railway use a serialized unprivileged process sandbox. Paste
+`GITHUB_TOKEN=<fine-grained-token>` only for private checkout or PR publishing. Daytona remains an
+optional hosted provider for stronger isolation or workspaces that outlive the OpenTulpa volume.
+`/repo` opens or inspects a workspace in the TUI, and `/repos` lists them.
 
 In managed OCI mode the stable bootstrap derives the active release image and runs that
 worker rootless with only private capability `/state`; product `/workspace`, source,
@@ -133,6 +134,7 @@ uv sync --no-dev --extra browser         # Browser Use Cloud SDK and Playwright 
 uv sync --no-dev --extra integrations    # Composio
 uv sync --no-dev --extra documents       # PDF, workbook, and encoding helpers
 uv sync --no-dev --extra research        # Crawl4AI extraction
+uv sync --no-dev --extra hosted-sandbox  # optional Daytona provider
 uv sync --no-dev --extra bundled         # all optional bundled adapters
 ```
 

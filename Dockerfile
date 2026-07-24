@@ -25,7 +25,7 @@ RUN mkdir -p /app/tulpa_stuff \
     && set -- \
     && for extra in ${extras}; do \
          case "${extra}" in \
-           browser|integrations|documents|research|bundled) ;; \
+           browser|integrations|documents|research|hosted-sandbox|bundled) ;; \
            *) printf '%s\n' "unsupported OPENTULPA_EXTRAS value: ${extra}" >&2; exit 2 ;; \
          esac; \
          set -- "$@" --extra "${extra}"; \

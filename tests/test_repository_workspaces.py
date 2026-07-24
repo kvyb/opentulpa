@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,14 +22,19 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from opentulpa.api.routes.v2_repositories import register_v2_repository_routes
+from opentulpa.deep_agent.sandbox import TenantContainerPolicy
 from opentulpa.repositories.models import (
     RepositoryProvider,
     RepositoryWorkspace,
     RepositoryWorkspaceStatus,
+    utc_now,
 )
 from opentulpa.repositories.providers import (
+    DaytonaRepositoryProvider,
+    LocalRepositoryProvider,
     RepositoryProviderRegistry,
     RepositoryRootedBackend,
+    RepositorySandboxUnavailableError,
 )
 from opentulpa.repositories.routing import RepositoryRoutingSandbox
 from opentulpa.repositories.service import (
@@ -147,6 +155,10 @@ class FakeProvider:
         self.pushed.append((workspace.id, github_token))
 
 
+class FakeLocalProvider(FakeProvider):
+    name = RepositoryProvider.LOCAL
+
+
 def _service(tmp_path: Any) -> tuple[RepositoryWorkspaceService, FakeProvider]:
     provider = FakeProvider()
     service = RepositoryWorkspaceService(
@@ -160,6 +172,23 @@ def _service(tmp_path: Any) -> tuple[RepositoryWorkspaceService, FakeProvider]:
         "https://github.com/acme/project/pull/7"
     )
     return service, provider
+
+
+def _workspace() -> RepositoryWorkspace:
+    timestamp = utc_now()
+    return RepositoryWorkspace(
+        id="repo-process-test",
+        tenant_id="tenant-1",
+        repository_url="https://github.com/acme/project.git",
+        provider=RepositoryProvider.LOCAL,
+        provider_workspace_id="repo-process-test",
+        base_ref="main",
+        branch="opentulpa/change",
+        status=RepositoryWorkspaceStatus.READY,
+        created_at=timestamp,
+        updated_at=timestamp,
+        last_used_at=timestamp,
+    )
 
 
 @pytest.mark.asyncio
@@ -308,6 +337,130 @@ def test_rooted_backend_maps_workspace_paths_without_rewriting_content() -> None
     assert delegate.commands == ["cd /workspace/repo && (git status)"]
     with pytest.raises(ValueError, match="traversal"):
         backend.read("/workspace/../secrets")
+
+
+def test_auto_provider_prefers_zero_config_local_sandbox() -> None:
+    local = FakeLocalProvider()
+    hosted = FakeProvider()
+    registry = RepositoryProviderRegistry(providers=[hosted, local])
+
+    assert registry.select(tenant_id="tenant-1", requested="auto") is local
+
+
+def test_hosted_provider_fails_cleanly_when_optional_adapter_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "opentulpa.repositories.providers.importlib.util.find_spec",
+        lambda _: None,
+    )
+    provider = DaytonaRepositoryProvider(
+        token_resolver=lambda tenant_id, scope: "configured",
+        api_url="https://app.daytona.io/api",
+        target=None,
+        snapshot=None,
+    )
+
+    assert provider.available("tenant-1") is False
+    with pytest.raises(RepositorySandboxUnavailableError, match="hosted-sandbox extra"):
+        provider.backend(_workspace())
+
+
+def test_local_provider_uses_process_sandbox_without_oci(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = tmp_path / "workspaces" / "repo-process-test" / "repo"
+    checkout.mkdir(parents=True)
+
+    class ProcessBackend(FakeBackend):
+        @staticmethod
+        def supported() -> bool:
+            return True
+
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__()
+            self.root = str(kwargs["workspace"])
+
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            del timeout
+            self.commands.append(command)
+            return ExecuteResponse(
+                output=f"{self.root}/README.md\n",
+                exit_code=0,
+            )
+
+    monkeypatch.setattr(
+        "opentulpa.repositories.providers.CandidateProcessBackend",
+        ProcessBackend,
+    )
+    monkeypatch.setattr("opentulpa.repositories.providers.shutil.which", lambda _: None)
+    provider = LocalRepositoryProvider(
+        root=tmp_path / "workspaces",
+        policy=TenantContainerPolicy(network_enabled=True, timeout_seconds=600),
+        container_cli="missing-oci",
+    )
+
+    assert provider.available("tenant-1") is True
+    backend = provider.backend(_workspace())
+    result = backend.execute("pwd")
+
+    assert result.output == "/workspace/README.md\n"
+
+
+@pytest.mark.skipif(
+    os.name != "posix"
+    or not hasattr(os, "geteuid")
+    or os.geteuid() != 0
+    or shutil.which("setpriv") is None
+    or shutil.which("prlimit") is None,
+    reason="Linux root process isolation is required",
+)
+def test_process_repository_backend_runs_git_without_host_credentials(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root = tmp_path / "private"
+    checkout = private_root / "workspaces" / "repo-process-test" / "repo"
+    checkout.mkdir(parents=True)
+    private_root.chmod(0o700)
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    (checkout / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=OpenTulpa",
+            "-c",
+            "user.email=opentulpa@localhost",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    monkeypatch.setenv("OPENTULPA_SMOKE_SECRET", "must-not-leak")
+    provider = LocalRepositoryProvider(
+        root=private_root / "workspaces",
+        policy=TenantContainerPolicy(network_enabled=True, timeout_seconds=600),
+        container_cli="missing-oci",
+    )
+
+    result = provider.backend(_workspace()).execute(
+        "printf 'after\\n' > README.md && "
+        "git add README.md && "
+        "git -c user.name=OpenTulpa -c user.email=opentulpa@localhost "
+        "commit -qm update && "
+        "printf '%s|%s' \"$(id -u)\" \"${OPENTULPA_SMOKE_SECRET-unset}\""
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "65532|unset"
+    assert (checkout / "README.md").read_text(encoding="utf-8") == "after\n"
+    assert private_root.stat().st_mode & 0o777 == 0o700
 
 
 def test_runtime_router_uses_active_thread_workspace(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import shlex
 import shutil
@@ -31,6 +32,7 @@ from deepagents.backends.protocol import (
 )
 
 from opentulpa.deep_agent.sandbox import TenantContainerPolicy
+from opentulpa.evolution.sandbox import CandidateProcessBackend, CandidateSandboxPolicy
 from opentulpa.repositories.models import RepositoryProvider, RepositoryWorkspace
 
 SecretResolver = Callable[[str, str], str | None]
@@ -81,11 +83,15 @@ class RepositoryRootedBackend(SandboxBackendProtocol):
         *,
         delegate: SandboxBackendProtocol,
         file_root: str,
-        execution_root: str,
+        execution_root: str | None,
+        output_root: str | None = None,
     ) -> None:
         self._delegate = delegate
         self._file_root = file_root.rstrip("/") or "/"
-        self._execution_root = execution_root.rstrip("/") or "/"
+        self._execution_root = (
+            None if execution_root is None else execution_root.rstrip("/") or "/"
+        )
+        self._output_root = str(output_root or "").rstrip("/")
 
     @property
     def id(self) -> str:
@@ -115,12 +121,31 @@ class RepositoryRootedBackend(SandboxBackendProtocol):
         )
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        wrapped = f"cd {shlex.quote(self._execution_root)} && ({command})"
-        return self._delegate.execute(wrapped, timeout=timeout)
+        wrapped = (
+            command
+            if self._execution_root is None
+            else f"cd {shlex.quote(self._execution_root)} && ({command})"
+        )
+        return self._public_execute_response(self._delegate.execute(wrapped, timeout=timeout))
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        wrapped = f"cd {shlex.quote(self._execution_root)} && ({command})"
-        return await self._delegate.aexecute(wrapped, timeout=timeout)
+        wrapped = (
+            command
+            if self._execution_root is None
+            else f"cd {shlex.quote(self._execution_root)} && ({command})"
+        )
+        return self._public_execute_response(
+            await self._delegate.aexecute(wrapped, timeout=timeout)
+        )
+
+    def _public_execute_response(self, response: ExecuteResponse) -> ExecuteResponse:
+        if not self._output_root:
+            return response
+        return ExecuteResponse(
+            output=response.output.replace(self._output_root, "/workspace"),
+            exit_code=response.exit_code,
+            truncated=response.truncated,
+        )
 
     def ls(self, path: str) -> LsResult:
         result = self._delegate.ls(self._path(path))
@@ -400,11 +425,16 @@ class LocalRepositoryProvider:
 
     def available(self, tenant_id: str) -> bool:
         del tenant_id
-        return shutil.which(self._container_cli) is not None
+        return (
+            CandidateProcessBackend.supported()
+            or shutil.which(self._container_cli) is not None
+        )
 
     def create(self, workspace: RepositoryWorkspace, *, github_token: str | None) -> str:
         if not self.available(workspace.tenant_id):
-            raise RepositorySandboxUnavailableError("local OCI runtime is unavailable")
+            raise RepositorySandboxUnavailableError(
+                "local repository isolation is unavailable"
+            )
         checkout = self._checkout(workspace)
         if checkout.exists():
             raise RepositorySandboxError("repository workspace already exists")
@@ -450,17 +480,48 @@ class LocalRepositoryProvider:
         with self._lock:
             backend = self._backends.get(workspace.id)
             if backend is None:
-                raw = LocalRepositoryBackend(
-                    workspace_id=workspace.id,
-                    root=checkout,
-                    policy=self._policy,
-                    container_cli=self._container_cli,
-                )
-                backend = RepositoryRootedBackend(
-                    delegate=raw,
-                    file_root="/",
-                    execution_root="/workspace",
-                )
+                if CandidateProcessBackend.supported():
+                    raw: SandboxBackendProtocol = CandidateProcessBackend(
+                        workspace=checkout,
+                        allowed_root=self._root,
+                        policy=CandidateSandboxPolicy(
+                            image=self._policy.image,
+                            cpu_limit=self._policy.cpu_limit,
+                            memory_limit=self._policy.memory_limit,
+                            pid_limit=self._policy.pid_limit,
+                            timeout_seconds=self._policy.timeout_seconds,
+                            max_output_bytes=self._policy.max_output_bytes,
+                            max_file_bytes=max(
+                                256 * 1024 * 1024,
+                                self._policy.max_file_bytes,
+                            ),
+                            max_total_bytes=2 * 1024 * 1024 * 1024,
+                            max_entries=max(
+                                200_000,
+                                self._policy.max_workspace_entries,
+                            ),
+                            network_enabled=True,
+                            allow_internal_symlinks=True,
+                        ),
+                    )
+                    backend = RepositoryRootedBackend(
+                        delegate=raw,
+                        file_root="/",
+                        execution_root=None,
+                        output_root=str(checkout),
+                    )
+                else:
+                    raw = LocalRepositoryBackend(
+                        workspace_id=workspace.id,
+                        root=checkout,
+                        policy=self._policy,
+                        container_cli=self._container_cli,
+                    )
+                    backend = RepositoryRootedBackend(
+                        delegate=raw,
+                        file_root="/",
+                        execution_root="/workspace",
+                    )
                 self._backends[workspace.id] = backend
             return backend
 
@@ -510,6 +571,20 @@ class DaytonaRepositoryProvider:
         self._backends: dict[str, tuple[str, RepositoryRootedBackend]] = {}
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _dependencies_available() -> bool:
+        return (
+            importlib.util.find_spec("daytona") is not None
+            and importlib.util.find_spec("langchain_daytona") is not None
+        )
+
+    def _require_dependencies(self) -> None:
+        if not self._dependencies_available():
+            raise RepositorySandboxUnavailableError(
+                "hosted repository sandbox adapter is not installed; "
+                "enable the hosted-sandbox extra"
+            )
+
     def _token(self, tenant_id: str) -> str:
         token = self._token_resolver(tenant_id, "daytona.manage")
         if not token:
@@ -519,6 +594,7 @@ class DaytonaRepositoryProvider:
         return token
 
     def _client(self, tenant_id: str) -> tuple[Any, str]:
+        self._require_dependencies()
         from daytona import Daytona, DaytonaConfig
 
         token = self._token(tenant_id)
@@ -535,9 +611,13 @@ class DaytonaRepositoryProvider:
         )
 
     def available(self, tenant_id: str) -> bool:
-        return bool(self._token_resolver(tenant_id, "daytona.manage"))
+        return (
+            bool(self._token_resolver(tenant_id, "daytona.manage"))
+            and self._dependencies_available()
+        )
 
     def create(self, workspace: RepositoryWorkspace, *, github_token: str | None) -> str:
+        self._require_dependencies()
         from daytona import CreateSandboxFromSnapshotParams
 
         client, _ = self._client(workspace.tenant_id)
@@ -572,6 +652,7 @@ class DaytonaRepositoryProvider:
         return str(sandbox.id)
 
     def backend(self, workspace: RepositoryWorkspace) -> SandboxBackendProtocol:
+        self._require_dependencies()
         from langchain_daytona import DaytonaSandbox  # type: ignore[import-untyped]
 
         provider_id = str(workspace.provider_workspace_id or "")
@@ -658,13 +739,13 @@ class RepositoryProviderRegistry:
                     f"{choice} repository sandbox is unavailable"
                 )
             return provider
-        for name in (RepositoryProvider.DAYTONA, RepositoryProvider.LOCAL):
+        for name in (RepositoryProvider.LOCAL, RepositoryProvider.DAYTONA):
             provider = self._providers.get(name)
             if provider is not None and provider.available(tenant_id):
                 return provider
         raise RepositorySandboxUnavailableError(
-            "no repository sandbox is configured; paste DAYTONA_API_KEY=<key> "
-            "or install a local OCI runtime"
+            "this host cannot provide local repository isolation; "
+            "install a rootless OCI runtime or configure Daytona"
         )
 
     def for_workspace(self, workspace: RepositoryWorkspace) -> RepositorySandboxProvider:

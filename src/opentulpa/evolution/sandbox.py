@@ -10,6 +10,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 from contextlib import suppress
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from opentulpa.evolution.process import run_bounded_process
 _IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}\Z")
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RESOURCE_RE = re.compile(r"[1-9][0-9]*(?:\.[0-9]+)?(?:[kmgt]i?|b)?\Z", re.I)
+_PROCESS_SANDBOX_EXECUTION_LOCK = threading.RLock()
 
 
 def _force_remove_container(container_cli: str, container_name: str) -> None:
@@ -125,6 +127,7 @@ class CandidateSandboxPolicy:
     max_total_bytes: int = 256 * 1024 * 1024
     max_entries: int = 50_000
     network_enabled: bool = False
+    allow_internal_symlinks: bool = False
 
     def __post_init__(self) -> None:
         if not _IMAGE_RE.fullmatch(self.image):
@@ -220,7 +223,19 @@ class CandidateContainerBackend(LocalShellBackend):
                 path = Path(directory) / name
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
-                    raise RuntimeError("candidate workspace contains a symbolic link")
+                    if not self._policy.allow_internal_symlinks:
+                        raise RuntimeError("candidate workspace contains a symbolic link")
+                    try:
+                        target = path.resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        raise RuntimeError(
+                            "candidate workspace contains an invalid symbolic link"
+                        ) from None
+                    if not self._is_relative_to(target, self._workspace):
+                        raise RuntimeError(
+                            "candidate workspace symbolic link escaped the workspace"
+                        )
+                    continue
                 if stat.S_ISREG(metadata.st_mode):
                     if metadata.st_nlink != 1:
                         raise RuntimeError("candidate workspace contains a hard link")
@@ -236,7 +251,12 @@ class CandidateContainerBackend(LocalShellBackend):
         backup = self._workspace.parent / f".{self._workspace.name}.recovery-{uuid4().hex}"
         root_mode = stat.S_IMODE(self._workspace.stat().st_mode)
         try:
-            shutil.copytree(self._workspace, backup, copy_function=shutil.copy2)
+            shutil.copytree(
+                self._workspace,
+                backup,
+                copy_function=shutil.copy2,
+                symlinks=self._policy.allow_internal_symlinks,
+            )
             backup.chmod(0o700)
         except OSError:
             shutil.rmtree(backup, ignore_errors=True)
@@ -261,6 +281,7 @@ class CandidateContainerBackend(LocalShellBackend):
                 self._workspace,
                 dirs_exist_ok=True,
                 copy_function=shutil.copy2,
+                symlinks=self._policy.allow_internal_symlinks,
             )
             self._workspace.chmod(root_mode)
             self._compromised = False
@@ -492,7 +513,17 @@ class CandidateContainerBackend(LocalShellBackend):
 
 
 class CandidateProcessBackend(CandidateContainerBackend):
-    """Railway source sandbox using a credential-less, unprivileged host process."""
+    """Credential-less sandbox using one serialized, unprivileged host process."""
+
+    @staticmethod
+    def supported() -> bool:
+        return (
+            os.name == "posix"
+            and hasattr(os, "geteuid")
+            and os.geteuid() == 0
+            and shutil.which("setpriv") is not None
+            and shutil.which("prlimit") is not None
+        )
 
     def __init__(
         self,
@@ -519,6 +550,10 @@ class CandidateProcessBackend(CandidateContainerBackend):
             policy=policy,
             container_cli="process",
         )
+        # Every process sandbox uses the same unprivileged identity. Serializing
+        # execution prevents one workspace from being readable while another is
+        # temporarily owned by that identity.
+        self._lock = _PROCESS_SANDBOX_EXECUTION_LOCK
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         safe_command = str(command or "").strip()
@@ -549,6 +584,8 @@ class CandidateProcessBackend(CandidateContainerBackend):
         with self._lock:
             backup: Path | None = None
             backup_mode = 0o700
+            private_runtime: Path | None = None
+            traversal_modes: list[tuple[Path, int]] = []
             monitor_stop = threading.Event()
             workspace_invalid = threading.Event()
             monitor: threading.Thread | None = None
@@ -563,6 +600,9 @@ class CandidateProcessBackend(CandidateContainerBackend):
 
             try:
                 self._validate_tree()
+                traversal_modes = self._grant_workspace_traversal()
+                private_runtime = Path(tempfile.mkdtemp(prefix="opentulpa-process-"))
+                os.chown(private_runtime, self._process_uid, self._process_gid)
                 self._chown_workspace(self._process_uid, self._process_gid)
                 backup, backup_mode = self._recovery_copy()
                 monitor = threading.Thread(
@@ -575,10 +615,11 @@ class CandidateProcessBackend(CandidateContainerBackend):
                     argv,
                     cwd=self._workspace,
                     env={
-                        "HOME": "/tmp",
+                        "HOME": str(private_runtime),
                         "PATH": os.environ.get("PATH", os.defpath),
                         "PYTHONDONTWRITEBYTECODE": "1",
                         "PYTHONHASHSEED": "0",
+                        "TMPDIR": str(private_runtime),
                     },
                     timeout_seconds=effective_timeout,
                     max_output_bytes=self._policy.max_output_bytes,
@@ -621,8 +662,11 @@ class CandidateProcessBackend(CandidateContainerBackend):
                     monitor.join(timeout=5)
                 if backup is not None:
                     shutil.rmtree(backup, ignore_errors=True)
+                if private_runtime is not None:
+                    shutil.rmtree(private_runtime, ignore_errors=True)
                 with suppress(OSError):
                     self._chown_workspace(0, 0)
+                self._restore_workspace_traversal(traversal_modes)
         return ExecuteResponse(
             output=completed.output.decode("utf-8", errors="replace"),
             exit_code=completed.returncode,
@@ -646,6 +690,27 @@ class CandidateProcessBackend(CandidateContainerBackend):
                     gid,
                     follow_symlinks=False,
                 )
+
+    def _grant_workspace_traversal(self) -> list[tuple[Path, int]]:
+        changed: list[tuple[Path, int]] = []
+        current = self._workspace.parent
+        try:
+            while current != current.parent:
+                mode = stat.S_IMODE(current.stat().st_mode)
+                if not mode & stat.S_IXOTH:
+                    changed.append((current, mode))
+                    current.chmod(mode | stat.S_IXOTH)
+                current = current.parent
+        except OSError:
+            self._restore_workspace_traversal(changed)
+            raise
+        return changed
+
+    @staticmethod
+    def _restore_workspace_traversal(changed: list[tuple[Path, int]]) -> None:
+        for path, mode in reversed(changed):
+            with suppress(OSError):
+                path.chmod(mode)
 
 
 def _resource_bytes(value: str) -> int:

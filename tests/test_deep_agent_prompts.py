@@ -38,4 +38,4 @@ def test_owner_prompt_rechecks_live_capability_state() -> None:
 def test_owner_prompt_never_uses_source_evolution_as_repository_fallback() -> None:
     assert "repository_open fails, report its exact public error and stop" in OWNER_PROMPT
     assert "Never use source tools, the active\nOpenTulpa source candidate" in OWNER_PROMPT
-    assert "`DAYTONA_API_KEY=<value>`" in OWNER_PROMPT
+    assert "Daytona is an optional explicit hosted\nprovider, not a prerequisite" in OWNER_PROMPT

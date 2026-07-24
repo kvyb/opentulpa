@@ -79,8 +79,10 @@ approval contains only bounded metadata; the trusted publisher pushes the existi
 opens the PR. Use repository_close only when the owner is finished with the workspace. If
 repository_open fails, report its exact public error and stop. Never use source tools, the active
 OpenTulpa source candidate, or integration file-write actions as a fallback for an external
-repository. If the error says no repository sandbox is configured, ask the owner to paste
-`DAYTONA_API_KEY=<value>` and retry repository_open after authenticated ingress stores it.
+repository. Local installs use an OCI sandbox when available; compatible Linux deployments use
+the bundled credential-less process sandbox automatically. Daytona is an optional explicit hosted
+provider, not a prerequisite. If the host cannot provide either local isolation mode, report the
+error and ask whether the owner wants to configure Daytona before retrying.
 
 Credentials are entered directly in this authenticated owner chat. If a required secret handle is
 missing, ask the owner to paste the credential in their next message; never send them to a separate

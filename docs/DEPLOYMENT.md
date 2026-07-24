@@ -35,8 +35,8 @@ require an explicit `OPENTULPA_OWNER_TOKEN` and persistent storage paths.
 
 The launcher installs only the lean core unless `OPENTULPA_EXTRAS` is set. Use
 `OPENTULPA_EXTRAS=bundled` or a comma-separated subset of `browser`, `integrations`,
-`documents`, and `research`; managed installation bakes the same selection into the
-reviewed runtime base.
+`documents`, `research`, and `hosted-sandbox`; managed installation bakes the same
+selection into the reviewed runtime base.
 
 Tenant shell tools need an isolated OCI engine because `TenantContainerBackend` never
 executes commands directly on the application host. Direct startup auto-detects
@@ -334,6 +334,7 @@ Install only what the deployment uses:
 | `integrations` | Composio SDK and LangChain provider | Tenant-owned SaaS connections after an environment key or encrypted owner-chat key is configured |
 | `documents` | PDF, workbook, and encoding parsers | Additional file-analysis formats |
 | `research` | Crawl4AI | Richer content extraction; bounded built-in extraction remains available without it |
+| `hosted-sandbox` | Daytona and its Deep Agents backend | Optional hosted repository workspaces; local repository isolation remains the default |
 | `bundled` | All of the above | Convenience image for a full adapter set |
 
 Examples:
@@ -345,7 +346,7 @@ uv sync --no-dev --extra browser
 ```env
 BROWSER_USE_API_KEY=...  # required when browser tools are enabled
 COMPOSIO_API_KEY=...     # optional SaaS integration provider
-DAYTONA_API_KEY=...      # optional durable hosted repository sandboxes
+DAYTONA_API_KEY=...      # optional hosted repository sandboxes
 GITHUB_TOKEN=...         # optional private checkout and pull-request publishing
 ```
 
@@ -383,9 +384,16 @@ For Railway, configure:
 
 Without an owner token, read the one-time pairing code from the first startup log and
 claim the deployment at `/_host`. Configure Telegram there; polling needs no webhook.
-For repository work on Railway or another host without a local OCI engine, paste a Daytona
-API key in owner chat once. Repository workspaces then persist independently of the
-OpenTulpa process and resume by their stored provider ID after a restart.
+Repository work requires no sandbox credential. Local machines use a rootless OCI engine when
+available. A compatible Linux container running as root with `setpriv` and `prlimit` uses the
+bundled unprivileged process backend automatically; commands receive no host environment or service
+credentials, run under fixed resource limits, and are serialized across workspaces. The checkout
+persists on the OpenTulpa volume. This process boundary is intended for a single-active-process,
+owner-operated deployment; choose the explicit `daytona` provider for stronger VM isolation,
+multi-replica operation, or a workspace lifecycle independent of the OpenTulpa volume.
+
+`GITHUB_TOKEN` is needed only for private checkout and publishing. Public repositories can be
+opened, edited, tested, and committed without it.
 
 The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize
 and start both interfaces directly:

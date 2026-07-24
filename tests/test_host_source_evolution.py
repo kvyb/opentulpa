@@ -19,7 +19,11 @@ from opentulpa.evolution.release_builder import (
     SourceOverlayBuildPolicy,
     TrustedSourceOverlayBuilder,
 )
-from opentulpa.evolution.sandbox import CandidateProcessBackend, CandidateSandboxPolicy
+from opentulpa.evolution.sandbox import (
+    CandidateContainerBackend,
+    CandidateProcessBackend,
+    CandidateSandboxPolicy,
+)
 from opentulpa.host.evolution import SourceOverlayReleaseActivator, seed_source_repository
 
 
@@ -172,6 +176,7 @@ def test_candidate_process_backend_drops_identity_and_has_no_host_environment(
     allowed = tmp_path / "worktrees"
     workspace = allowed / "candidate"
     workspace.mkdir(parents=True)
+    allowed.chmod(0o700)
     (workspace / "source.txt").write_text("before\n", encoding="utf-8")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "must-not-be-visible")
     backend = CandidateProcessBackend(
@@ -193,6 +198,32 @@ def test_candidate_process_backend_drops_identity_and_has_no_host_environment(
     assert (workspace / "source.txt").read_text(encoding="utf-8") == "after\n"
     assert workspace.stat().st_uid == 0
     assert (workspace / "source.txt").stat().st_uid == 0
+    assert allowed.stat().st_mode & 0o777 == 0o700
+
+
+def test_candidate_sandbox_allows_only_internal_symlinks_when_enabled(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "worktrees"
+    workspace = allowed / "candidate"
+    target = workspace / "packages" / "shared.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("shared\n", encoding="utf-8")
+    (workspace / "shared.txt").symlink_to("packages/shared.txt")
+
+    CandidateContainerBackend(
+        workspace=workspace,
+        allowed_root=allowed,
+        policy=CandidateSandboxPolicy(allow_internal_symlinks=True),
+    )
+
+    (workspace / "escaped.txt").symlink_to("/etc/hosts")
+    with pytest.raises(RuntimeError, match="escaped"):
+        CandidateContainerBackend(
+            workspace=workspace,
+            allowed_root=allowed,
+            policy=CandidateSandboxPolicy(allow_internal_symlinks=True),
+        )
 
 
 @pytest.mark.skipif(

@@ -96,7 +96,7 @@ configure_python_extras() {
   SELECTED_EXTRAS=()
   for item in ${raw}; do
     case "${item}" in
-      browser|integrations|documents|research|bundled) ;;
+      browser|integrations|documents|research|hosted-sandbox|bundled) ;;
       *) die "unsupported OPENTULPA_EXTRAS value: ${item}" ;;
     esac
     case " ${seen} " in
@@ -1176,6 +1176,21 @@ container_engine_is_safe_for_direct() {
   docker_uses_desktop_vm "${engine}"
 }
 
+process_repository_sandbox_available() {
+  [[ "$(uname -s)" == "Linux" ]] \
+    && [[ "$(id -u)" == "0" ]] \
+    && command -v setpriv >/dev/null 2>&1 \
+    && command -v prlimit >/dev/null 2>&1
+}
+
+warn_without_container_engine() {
+  if process_repository_sandbox_available; then
+    warn "no isolated OCI engine was found; general tenant shell commands are unavailable, but repository work will use the bundled unprivileged process sandbox."
+  else
+    warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
+  fi
+}
+
 configure_container_engine() {
   local runtime="$1" requested candidate
   requested="${OPENTULPA_CONTAINER_CLI:-}"
@@ -1203,7 +1218,8 @@ configure_container_engine() {
     if [[ "${runtime}" == "managed" && "${MODE}" != "doctor" ]]; then
       die "managed mode requires a running rootless Docker or Podman engine"
     fi
-    warn "${requested} is unavailable or lacks required isolation; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
+    warn "${requested} is unavailable or lacks required isolation."
+    warn_without_container_engine
     return 0
   fi
 
@@ -1228,7 +1244,7 @@ configure_container_engine() {
   if [[ "${runtime}" == "managed" && "${MODE}" != "doctor" ]]; then
     die "managed mode requires a running rootless Docker or Podman engine"
   fi
-  warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
+  warn_without_container_engine
 }
 
 run_doctor() {
