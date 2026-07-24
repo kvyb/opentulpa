@@ -5,6 +5,7 @@ export function emptyTurn(runId: string, user = "", startedAt = new Date().toISO
     runId,
     user,
     fileIds: [],
+    attachments: [],
     assistant: "",
     tools: [],
     parts: [],
@@ -125,6 +126,7 @@ export function turnsFromTimeline(entries: TimelineEntry[]): Turn[] {
     if (entry.type === "user") {
       turn.user = entry.text ?? ""
       turn.fileIds = entry.file_ids ?? []
+      turn.attachments = entry.attachments ?? []
       continue
     }
     if (entry.type === "assistant") {

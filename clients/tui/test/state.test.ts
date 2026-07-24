@@ -92,6 +92,32 @@ describe("run event reducer", () => {
     expect(turns[0]?.assistant).toBe("Hello")
   })
 
+  test("restores uploaded attachments from durable timeline entries", () => {
+    const turns = turnsFromTimeline([
+      {
+        id: "u",
+        type: "user",
+        run_id: "run-1",
+        timestamp: "1",
+        text: "What is in this image?",
+        file_ids: ["file-1"],
+        attachments: [
+          {
+            id: "file-1",
+            kind: "image",
+            original_filename: "screen.png",
+            mime_type: "image/png",
+            size_bytes: 2048,
+            available: true,
+          },
+        ],
+      },
+    ])
+
+    expect(turns[0]?.fileIds).toEqual(["file-1"])
+    expect(turns[0]?.attachments[0]?.original_filename).toBe("screen.png")
+  })
+
   test("ignores malformed tool fragments and leaves no active tool after completion", () => {
     let turn = emptyTurn("run-1")
     turn = reduceEvent(turn, event(1, "tool.started", {

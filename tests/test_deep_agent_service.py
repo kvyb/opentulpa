@@ -634,7 +634,24 @@ def test_owner_uses_one_workspace_backend_for_shell_and_files(tmp_path: Path) ->
 async def test_threads_project_sanitized_requests_events_and_tenant_ownership(
     tmp_path: Path,
 ) -> None:
-    service = _service(tmp_path, _ToolCapableTextModel(responses=["Hello from Tulpa"]))
+    resolver = _AttachmentResolver(
+        {
+            ("tenant-1", "file-1"): (
+                {
+                    "kind": "image",
+                    "original_filename": "screen.png",
+                    "mime_type": "image/png",
+                    "size_bytes": 9,
+                },
+                b"png-bytes",
+            )
+        }
+    )
+    service = _service(
+        tmp_path,
+        _ToolCapableTextModel(responses=["Hello from Tulpa"]),
+        attachment_resolver=resolver,
+    )
     await service.start()
     try:
         request = AgentRunRequest(
@@ -664,6 +681,16 @@ async def test_threads_project_sanitized_requests_events_and_tenant_ownership(
         "timestamp": result.created_at,
         "text": "Plan the launch",
         "file_ids": ["file-1"],
+        "attachments": [
+            {
+                "id": "file-1",
+                "kind": "image",
+                "original_filename": "screen.png",
+                "mime_type": "image/png",
+                "size_bytes": 9,
+                "available": True,
+            }
+        ],
     }
     assert timeline["entries"][-1]["type"] == "assistant"
     assert timeline["entries"][-1]["text"] == "Hello from Tulpa"

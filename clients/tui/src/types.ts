@@ -33,6 +33,15 @@ export type ToolCall = {
   completedAt?: string
 }
 
+export type FileAttachment = {
+  id: string
+  kind: string
+  original_filename: string
+  mime_type: string | null
+  size_bytes: number
+  available?: boolean
+}
+
 export type TurnPart =
   | { type: "assistant"; text: string }
   | { type: "tool"; callId: string }
@@ -41,6 +50,7 @@ export type Turn = {
   runId: string
   user: string
   fileIds: string[]
+  attachments: FileAttachment[]
   assistant: string
   tools: ToolCall[]
   parts: TurnPart[]
@@ -71,6 +81,7 @@ export type TimelineEntry = {
   timestamp: string
   text?: string
   file_ids?: string[]
+  attachments?: FileAttachment[]
   event_type?: string
   sequence?: number
   data?: Record<string, unknown>

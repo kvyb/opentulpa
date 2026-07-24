@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { OpenTulpaApi } from "../src/api.js"
 
 const originalFetch = globalThis.fetch
@@ -8,6 +11,44 @@ afterEach(() => {
 })
 
 describe("V2 event transport", () => {
+  test("returns durable attachment metadata after upload", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentulpa-tui-upload-"))
+    const path = join(directory, "screen.png")
+    await writeFile(path, "image")
+    let request: Request | undefined
+    globalThis.fetch = (async (input, init) => {
+      request = new Request(input, init)
+      return Response.json(
+        {
+          file: {
+            id: "file-1",
+            kind: "image",
+            original_filename: "screen.png",
+            mime_type: "image/png",
+            size_bytes: 5,
+          },
+        },
+        { status: 201 },
+      )
+    }) as typeof fetch
+    try {
+      const api = new OpenTulpaApi({
+        url: "https://tulpa.test",
+        token: "owner",
+        thread_id: "thread-1",
+      })
+
+      const attachment = await api.upload(path)
+
+      expect(attachment.original_filename).toBe("screen.png")
+      expect(request?.method).toBe("POST")
+      const form = await request?.formData()
+      expect((form?.get("upload") as File | null)?.name).toBe("screen.png")
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test("parses split SSE frames and sends the replay cursor", async () => {
     const encoder = new TextEncoder()
     const chunks = [

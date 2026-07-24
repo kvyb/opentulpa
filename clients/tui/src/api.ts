@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   ClientConfig,
   CodexDeviceLogin,
+  FileAttachment,
   InferenceModel,
   InferencePreference,
   InferenceProvider,
@@ -246,17 +247,17 @@ export class OpenTulpaApi {
     return this.json(`/v2/agent/runs/${encodeURIComponent(runId)}`)
   }
 
-  async upload(path: string): Promise<string> {
+  async upload(path: string): Promise<FileAttachment> {
     const file = Bun.file(path)
     const form = new FormData()
     form.set("kind", file.type.startsWith("image/") ? "image" : "document")
     form.set("upload", file, path.split(/[\\/]/).pop() ?? "attachment")
-    const result = await this.json<{ file: { id: string } }>("/v2/files", {
+    const result = await this.json<{ file: FileAttachment }>("/v2/files", {
       method: "POST",
       headers: { "Idempotency-Key": `tui-file:${crypto.randomUUID()}` },
       body: form,
     })
-    return result.file.id
+    return result.file
   }
 
   async logs(): Promise<Array<Record<string, unknown>>> {

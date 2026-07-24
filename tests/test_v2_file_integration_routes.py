@@ -184,6 +184,28 @@ def test_v2_file_upload_is_durable_idempotent_and_tenant_scoped(tmp_path: Path) 
     assert missing_result.json()["detail"] == "idempotent file result is no longer available"
 
 
+def test_v2_file_upload_infers_image_type_from_generic_multipart(
+    tmp_path: Path,
+) -> None:
+    client, vault = _file_client(tmp_path)
+    png = b"\x89PNG\r\n\x1a\n" + b"image-bytes"
+
+    created = client.post(
+        "/v2/files",
+        headers=_headers(idempotency_key="upload-image"),
+        data={"kind": "document"},
+        files={"upload": ("screen.png", png, "application/octet-stream")},
+    )
+
+    assert created.status_code == 201
+    public_file = created.json()["file"]
+    assert public_file["mime_type"] == "image/png"
+    assert public_file["kind"] == "image"
+    stored = vault.get_file("tenant-a", public_file["id"])
+    assert stored is not None
+    assert stored["mime_type"] == "image/png"
+
+
 def test_v2_file_delete_checks_ownership_and_removes_bytes(tmp_path: Path) -> None:
     client, vault = _file_client(tmp_path)
     own = _ingest(vault, "tenant-a", "own.txt", b"owner content")

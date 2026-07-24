@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -26,6 +27,29 @@ def _safe_filename(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
     safe = safe.strip("._") or "file.bin"
     return safe[:180]
+
+
+def _normalized_mime_type(
+    *,
+    filename: str,
+    mime_type: str | None,
+    raw_bytes: bytes,
+) -> str | None:
+    declared = str(mime_type or "").partition(";")[0].strip().lower()
+    if declared not in {"", "application/octet-stream", "binary/octet-stream"}:
+        return declared
+    if raw_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(raw_bytes) >= 12 and raw_bytes.startswith(b"RIFF") and raw_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if raw_bytes.startswith(b"%PDF-"):
+        return "application/pdf"
+    guessed, _encoding = mimetypes.guess_type(filename)
+    return str(guessed or "").strip().lower() or declared or None
 
 
 def _extract_docx_text(raw_bytes: bytes) -> str:
@@ -159,6 +183,16 @@ class FileVaultService:
             raise ValueError("customer_id is required")
         fid = new_short_id("file")
         safe_name = _safe_filename(original_filename or f"{kind}.bin")
+        resolved_mime_type = _normalized_mime_type(
+            filename=safe_name,
+            mime_type=mime_type,
+            raw_bytes=raw_bytes,
+        )
+        resolved_kind = str(kind or "file").strip() or "file"
+        if resolved_kind in {"document", "file"} and str(resolved_mime_type or "").startswith(
+            "image/"
+        ):
+            resolved_kind = "image"
         cid_dir = self.root_dir / re.sub(r"[^A-Za-z0-9._-]+", "_", cid)
         cid_dir.mkdir(parents=True, exist_ok=True)
         stored_name = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}_{fid}_{safe_name}"
@@ -168,12 +202,12 @@ class FileVaultService:
         text_excerpt = _extract_text_preview(
             raw_bytes=raw_bytes,
             filename=safe_name,
-            mime_type=mime_type,
+            mime_type=resolved_mime_type,
         )
         summary = _build_summary(
-            kind=kind,
+            kind=resolved_kind,
             filename=safe_name,
-            mime_type=mime_type,
+            mime_type=resolved_mime_type,
             caption=caption,
             text_excerpt=text_excerpt,
         )
@@ -191,10 +225,10 @@ class FileVaultService:
                     cid,
                     int(chat_id) if chat_id is not None else None,
                     str(telegram_file_id or "").strip() or None,
-                    str(kind or "file"),
+                    resolved_kind,
                     safe_name,
                     str(stored_path),
-                    str(mime_type).strip() if mime_type else None,
+                    resolved_mime_type,
                     int(len(raw_bytes)),
                     str(caption).strip() if caption else None,
                     summary,

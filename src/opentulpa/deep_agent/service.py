@@ -1720,7 +1720,12 @@ class DeepAgentService:
                 file_ids = json.loads(str(run["file_ids_json"] or "[]"))
             except ValueError:
                 file_ids = []
-            if request_text or file_ids:
+            safe_file_ids = (
+                [str(file_id) for file_id in file_ids if str(file_id).strip()]
+                if isinstance(file_ids, list)
+                else []
+            )
+            if request_text or safe_file_ids:
                 entries.append(
                     {
                         "id": f"{run_id}:user",
@@ -1728,7 +1733,11 @@ class DeepAgentService:
                         "run_id": run_id,
                         "timestamp": str(run["created_at"]),
                         "text": request_text,
-                        "file_ids": file_ids if isinstance(file_ids, list) else [],
+                        "file_ids": safe_file_ids,
+                        "attachments": self._timeline_attachments(
+                            tenant_id=tenant_id,
+                            file_ids=safe_file_ids,
+                        ),
                     }
                 )
             event_cursor = await db.execute(
@@ -1775,6 +1784,28 @@ class DeepAgentService:
             "entries": entries,
             "next_cursor": safe_cursor + safe_limit if has_more else None,
         }
+
+    def _timeline_attachments(
+        self,
+        *,
+        tenant_id: str,
+        file_ids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        resolver = self._attachment_resolver
+        attachments: list[dict[str, Any]] = []
+        for file_id in file_ids:
+            record = resolver.get_file(tenant_id, file_id) if resolver is not None else None
+            attachments.append(
+                {
+                    "id": file_id,
+                    "kind": str((record or {}).get("kind") or "file"),
+                    "original_filename": str((record or {}).get("original_filename") or file_id),
+                    "mime_type": (str((record or {}).get("mime_type") or "").strip() or None),
+                    "size_bytes": max(0, int((record or {}).get("size_bytes") or 0)),
+                    "available": record is not None,
+                }
+            )
+        return attachments
 
     async def update_thread(
         self,

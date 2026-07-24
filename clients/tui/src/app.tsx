@@ -27,6 +27,7 @@ import type {
   Approval,
   ClientConfig,
   CodexDeviceLogin,
+  FileAttachment,
   InferenceModel,
   InferencePreference,
   InferenceProvider,
@@ -510,8 +511,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     setError("")
     setUploading(input.attachments.length > 0)
     const fileIds: string[] = []
+    const uploadedAttachments: FileAttachment[] = []
     try {
-      for (const path of input.attachments) fileIds.push(await api.upload(path))
+      for (const path of input.attachments) {
+        const attachment = await api.upload(path)
+        fileIds.push(attachment.id)
+        uploadedAttachments.push(attachment)
+      }
     } catch (cause) {
       setUploading(false)
       restoreInput(input)
@@ -537,6 +543,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     }
     const pending = emptyTurn("", input.text)
     pending.fileIds = fileIds
+    pending.attachments = uploadedAttachments
     setTurns((current) => [...current, pending])
     setBusy(true)
     setStatus(mode === "steer" ? "Steering" : "Thinking")
@@ -1421,7 +1428,7 @@ export function TurnView(props: {
   })
   return (
     <box flexDirection="column" flexShrink={0}>
-      <Show when={props.turn.user}>
+      <Show when={props.turn.user || props.turn.attachments.length}>
         <box
           border={["left"]}
           customBorderChars={SPLIT}
@@ -1437,8 +1444,25 @@ export function TurnView(props: {
             paddingRight={1}
             backgroundColor={COLORS.panel}
             flexShrink={0}
+            flexDirection="column"
           >
-            <text fg={COLORS.text} wrapMode="word">{props.turn.user}</text>
+            <Show when={props.turn.user}>
+              <text fg={COLORS.text} wrapMode="word">{props.turn.user}</text>
+            </Show>
+            <For each={props.turn.attachments}>
+              {(attachment) => (
+                <box flexDirection="row" gap={1} marginTop={1}>
+                  <text flexShrink={0} fg={COLORS.blue}>attachment</text>
+                  <text flexGrow={1} fg={COLORS.text} wrapMode="none" truncate>
+                    {attachment.original_filename}
+                  </text>
+                  <text flexShrink={0} fg={COLORS.dim}>
+                    {attachment.mime_type ?? attachment.kind}
+                    {attachment.size_bytes ? `  ${fileSize(attachment.size_bytes)}` : ""}
+                  </text>
+                </box>
+              )}
+            </For>
           </box>
         </box>
       </Show>
@@ -1961,6 +1985,12 @@ function duration(tool: ToolCall): string {
   if (!tool.completedAt) return ""
   const elapsed = Date.parse(tool.completedAt) - Date.parse(tool.startedAt)
   return Number.isFinite(elapsed) && elapsed >= 0 ? `${(elapsed / 1000).toFixed(1)}s` : ""
+}
+
+function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 const TOOL_ACTIONS: Record<string, string> = {

@@ -216,6 +216,30 @@ describe("terminal chrome", () => {
     setup.renderer.destroy()
   })
 
+  test("renders submitted attachments inside chat history", async () => {
+    const turn = emptyTurn("run-attachment", "What is in this image?")
+    turn.attachments = [
+      {
+        id: "file-1",
+        kind: "image",
+        original_filename: "screen.png",
+        mime_type: "image/png",
+        size_bytes: 2048,
+        available: true,
+      },
+    ]
+    turn.status = "completed"
+    const setup = await testRender(
+      () => <TurnView turn={turn} active={false} spinner="⬒" now={Date.now()} expandedToolsGroup="" onToggleTools={() => {}} />,
+      { width: 80, height: 12 },
+    )
+    const frame = await setup.waitForFrame((value) => value.includes("screen.png"))
+    expect(frame).toContain("attachment")
+    expect(frame).toContain("image/png")
+    expect(frame).toContain("2.0 KB")
+    setup.renderer.destroy()
+  })
+
   test("renders assistant text and tools in event lineage order", async () => {
     let turn = emptyTurn("run-lineage", "Find the answer")
     turn = reduceEvent(turn, {
