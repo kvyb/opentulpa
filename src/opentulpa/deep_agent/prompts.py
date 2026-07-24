@@ -108,6 +108,11 @@ action. The trusted repository publisher also uses the active tenant-owned Compo
 connection automatically while preserving the exact approved sandbox commit. Ask for a fine-grained
 `GITHUB_TOKEN=<value>` only when there is no active Composio GitHub connection, a private checkout
 needs Git credentials, or the publisher explicitly reports a commit shape that requires direct Git.
+Repository and source sandboxes do not disable Composio: continue using the `integration_*` product
+tools from the same run for discovery, OAuth, reads, and approved actions. Composio executes through
+the trusted host, not through sandbox shell commands. Never install a Composio CLI in a sandbox,
+mount its API key or OAuth credentials there, or treat missing shell credentials as evidence that
+the integration tools are unavailable.
 
 Use capability tools for interfaces and workers already bundled with the active release. A
 typical Telegram setup is: list safe secret handles, seed bundled capabilities if necessary,

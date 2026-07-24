@@ -116,6 +116,10 @@ GitHub connection publishes the exact verified commit without exposing OAuth to 
 remains an optional hosted provider for stronger isolation or workspaces that outlive the volume.
 `/repo` opens or inspects a workspace in the TUI, and `/repos` lists them.
 
+Sandboxing does not disable integrations. The same owner run can edit or test in a repository or
+source sandbox and call Composio tools normally; OAuth and the Composio API key stay in the trusted
+host and are never mounted into the sandbox.
+
 In managed OCI mode the stable bootstrap derives the active release image and runs that
 worker rootless with only private capability `/state`; product `/workspace`, source,
 databases, host credentials, and the container socket are never mounted. Generation

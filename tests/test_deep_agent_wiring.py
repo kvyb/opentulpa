@@ -190,6 +190,17 @@ def test_factory_passes_exact_product_profiles_to_deepagents_api(
     assert isinstance(owner_backend.routes["/memories/"], StoreBackend)
     assert isinstance(owner_backend.routes["/skills/"], StoreBackend)
     assert isinstance(owner_backend.routes["/workspace/"], TenantSandboxBackend)
+    owner_tool_names = {tool.name for tool in owner["tools"]}
+    assert {
+        "connection_list",
+        "integration_action_search",
+        "integration_connect",
+        "integration_invoke",
+        "integration_list",
+        "repository_open",
+        "repository_publish_pr",
+        "source_shell",
+    } <= owner_tool_names
     assert isinstance(routine["backend"], StateBackend)
     assert isinstance(intake["backend"], StateBackend)
 

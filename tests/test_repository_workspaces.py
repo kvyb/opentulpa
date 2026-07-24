@@ -695,6 +695,7 @@ def test_process_repository_backend_runs_git_without_host_credentials(
         check=True,
     )
     monkeypatch.setenv("OPENTULPA_SMOKE_SECRET", "must-not-leak")
+    monkeypatch.setenv("COMPOSIO_API_KEY", "must-not-leak")
     provider = LocalRepositoryProvider(
         root=private_root / "workspaces",
         policy=TenantContainerPolicy(network_enabled=True, timeout_seconds=600),
@@ -706,11 +707,12 @@ def test_process_repository_backend_runs_git_without_host_credentials(
         "git add README.md && "
         "git -c user.name=OpenTulpa -c user.email=opentulpa@localhost "
         "commit -qm update && "
-        'printf \'%s|%s\' "$(id -u)" "${OPENTULPA_SMOKE_SECRET-unset}"'
+        'printf \'%s|%s|%s\' "$(id -u)" "${OPENTULPA_SMOKE_SECRET-unset}" '
+        '"${COMPOSIO_API_KEY-unset}"'
     )
 
     assert result.exit_code == 0
-    assert result.output == "65532|unset"
+    assert result.output == "65532|unset|unset"
     assert (checkout / "README.md").read_text(encoding="utf-8") == "after\n"
     assert private_root.stat().st_mode & 0o777 == 0o700
 

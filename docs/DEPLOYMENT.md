@@ -359,6 +359,9 @@ Composio actions with unknown or risky effects require persisted owner approval.
 Browser navigation requires explicit allowed domains and rejects direct private and
 link-local targets. Chromium and target-network access run inside Browser Use Cloud;
 OpenTulpa controls it over CDP and cannot DNS-pin the vendor browser's connections.
+Composio discovery, OAuth, and invocation remain host-side product tools while source or repository
+sandboxes are active. The sandbox receives only sanitized tool results; neither the Composio API key
+nor connected-account credentials are mounted or exported into sandbox processes.
 
 ## Docker Compose And Railway
 
