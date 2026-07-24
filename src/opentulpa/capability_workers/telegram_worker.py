@@ -40,6 +40,20 @@ _EDIT_ARGUMENT_MAX_NODES = 512
 _STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.9
 _STREAM_TYPING_REFRESH_SECONDS = 4.0
 _STREAM_PREVIEW_CHARS = 3_500
+_TOOL_PROGRESS_LABELS = {
+    "browser_act": "Using browser",
+    "browser_get": "Reading browser",
+    "browser_start": "Starting browser",
+    "content_fetch": "Reading a page",
+    "execute": "Running a command",
+    "integration_invoke": "Calling integration",
+    "repository_open": "Opening repository",
+    "repository_publish_pr": "Publishing changes",
+    "repository_status": "Checking repository",
+    "source_shell": "Inspecting source",
+    "task": "Delegating work",
+    "web_search": "Searching the web",
+}
 
 _HIDDEN_EDIT_ARGUMENTS = {
     "actor_id",
@@ -159,6 +173,9 @@ class _TelegramResponseStreamer:
         self._last_edit = 0.0
         self._last_typing = 0.0
         self._typing_task: asyncio.Task[None] | None = None
+        self._progress_text = ""
+        self._progress_label = ""
+        self._progress_started = 0.0
 
     async def start(self) -> None:
         await self._send_typing(force=True)
@@ -168,6 +185,7 @@ class _TelegramResponseStreamer:
         )
 
     async def close(self) -> None:
+        self._clear_progress()
         task = self._typing_task
         self._typing_task = None
         if task is None:
@@ -180,29 +198,28 @@ class _TelegramResponseStreamer:
         preview = _stream_preview(text)
         if not preview:
             return
+        was_progressing = bool(self._progress_label)
+        self._clear_progress()
         await self._send_typing()
         now = asyncio.get_running_loop().time()
-        if self._message_id is None:
-            await self._send_initial(preview)
-            return
         if preview == self._rendered:
             return
-        if now - self._last_edit < _STREAM_EDIT_MIN_INTERVAL_SECONDS:
+        if (
+            not was_progressing
+            and self._message_id is not None
+            and now - self._last_edit < _STREAM_EDIT_MIN_INTERVAL_SECONDS
+        ):
             return
-        try:
-            await self._telegram.edit_message_text(
-                chat_id=self._chat_id,
-                message_id=self._message_id,
-                text=preview,
-            )
-        except TelegramAPIError:
-            self._message_id = None
-            await self._send_initial(preview)
-            return
-        self._rendered = preview
-        self._last_edit = now
+        await self._replace(preview)
+
+    async def progress(self, text: str, label: str) -> None:
+        self._progress_text = text
+        self._progress_label = label
+        self._progress_started = asyncio.get_running_loop().time()
+        await self._render_progress()
 
     async def finish(self, text: str) -> None:
+        self._clear_progress()
         chunks = _text_chunks(text)
         if self._message_id is None:
             await self._telegram.send_message(chat_id=self._chat_id, text=text)
@@ -226,6 +243,7 @@ class _TelegramResponseStreamer:
             await self._telegram.send_message(chat_id=self._chat_id, text=chunk)
 
     async def status(self, text: str) -> None:
+        self._clear_progress()
         if self._message_id is None:
             return
         resolved = str(text or "").strip()[:1_000]
@@ -237,6 +255,40 @@ class _TelegramResponseStreamer:
             text=resolved,
         )
         self._rendered = resolved
+
+    async def _replace(self, preview: str) -> None:
+        if self._message_id is None:
+            await self._send_initial(preview)
+            return
+        if preview == self._rendered:
+            return
+        try:
+            await self._telegram.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=self._message_id,
+                text=preview,
+            )
+        except TelegramAPIError:
+            self._message_id = None
+            await self._send_initial(preview)
+            return
+        self._rendered = preview
+        self._last_edit = asyncio.get_running_loop().time()
+
+    async def _render_progress(self) -> None:
+        if not self._progress_label:
+            return
+        elapsed = _format_progress_elapsed(
+            asyncio.get_running_loop().time() - self._progress_started
+        )
+        status = f"Working: {self._progress_label} ({elapsed})..."
+        preview = _stream_preview(self._progress_text)
+        await self._replace(f"{preview}\n\n{status}" if preview else status)
+
+    def _clear_progress(self) -> None:
+        self._progress_text = ""
+        self._progress_label = ""
+        self._progress_started = 0.0
 
     async def _send_initial(self, preview: str) -> None:
         message_ids = await self._telegram.send_message(
@@ -260,6 +312,7 @@ class _TelegramResponseStreamer:
         while True:
             await asyncio.sleep(_STREAM_TYPING_REFRESH_SECONDS)
             await self._send_typing(force=True)
+            await self._render_progress()
 
 
 def _stream_preview(text: str) -> str:
@@ -267,6 +320,22 @@ def _stream_preview(text: str) -> str:
     if len(resolved) <= _STREAM_PREVIEW_CHARS:
         return resolved
     return "…\n" + resolved[-(_STREAM_PREVIEW_CHARS - 2):]
+
+
+def _format_progress_elapsed(seconds: float) -> str:
+    total_seconds = max(0, math.floor(seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    return f"{minutes}m {remaining_seconds:02d}s"
+
+
+def _tool_progress_label(tool_name: str) -> str:
+    normalized = str(tool_name or "").strip().lower()
+    if normalized in _TOOL_PROGRESS_LABELS:
+        return _TOOL_PROGRESS_LABELS[normalized]
+    readable = normalized.replace("_", " ").strip()
+    return readable.capitalize()[:80] if readable else "Using a tool"
 
 
 class TelegramInterfaceWorker:
@@ -758,6 +827,13 @@ class TelegramInterfaceWorker:
                 if event.type == "message.delta":
                     accumulated = (accumulated + str(event.data.get("text") or ""))[-200_000:]
                     await streamer.update(accumulated)
+                elif event.type == "tool.started":
+                    await streamer.progress(
+                        accumulated,
+                        _tool_progress_label(str(event.data.get("name") or "")),
+                    )
+                elif event.type == "tool.completed":
+                    await streamer.progress(accumulated, "Finishing response")
                 if event.settles_stream:
                     self._state.save_pending_run(
                         source_event_id=source_event_id,

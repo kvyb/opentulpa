@@ -279,6 +279,93 @@ async def test_message_deltas_stream_by_editing_one_telegram_message(
 
 
 @pytest.mark.asyncio
+async def test_tool_progress_flushes_throttled_text_and_finishes_cleanly(
+    tmp_path: Path,
+) -> None:
+    telegram = _Telegram([_message(4, text="hello")])
+    agent = _Agent()
+    agent.start_events = [
+        _event("run.started", 1, {}),
+        _event("message.delta", 2, {"text": "Good"}),
+        _event("message.delta", 3, {"text": " question."}),
+        _event("tool.started", 4, {"name": "task"}),
+        _event("tool.completed", 5, {"name": "task"}),
+        _event("run.completed", 6, {"text": "Finished."}),
+    ]
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    assert telegram.messages[0]["text"] == "Good"
+    assert telegram.edits[0]["text"] == (
+        "Good question.\n\nWorking: Delegating work (0s)..."
+    )
+    assert telegram.edits[1]["text"] == (
+        "Good question.\n\nWorking: Finishing response (0s)..."
+    )
+    assert telegram.edits[-1]["text"] == "Finished."
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_refreshes_during_a_silent_tool_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SlowToolAgent(_Agent):
+        async def start_run(self, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            self.starts.append(kwargs)
+            yield _event("run.started", 1, {})
+            yield _event("tool.started", 2, {"name": "web_search"})
+            await asyncio.sleep(0.035)
+            yield _event("run.completed", 3, {"text": "done"})
+
+    elapsed = 0
+
+    def _elapsed_label(_: float) -> str:
+        nonlocal elapsed
+        elapsed += 1
+        return f"{elapsed}s"
+
+    monkeypatch.setattr(
+        "opentulpa.capability_workers.telegram_worker._STREAM_TYPING_REFRESH_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "opentulpa.capability_workers.telegram_worker._format_progress_elapsed",
+        _elapsed_label,
+    )
+    telegram = _Telegram([_message(4, text="hello")])
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=_SlowToolAgent(),
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    progress = [
+        item["text"]
+        for item in [*telegram.messages, *telegram.edits]
+        if "Working: Searching the web" in item["text"]
+    ]
+    assert len(progress) >= 3
+    assert len(set(progress)) >= 3
+    assert telegram.edits[-1]["text"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_typing_indicator_refreshes_while_agent_has_no_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
