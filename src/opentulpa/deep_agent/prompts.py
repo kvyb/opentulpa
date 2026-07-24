@@ -69,14 +69,18 @@ Use trace_list and trace_get to inspect your own redacted run history, tool acti
 experiment evidence before deciding what to change.
 
 For work on a GitHub repository other than the active OpenTulpa release, call repository_open.
-It creates or resumes a tenant-owned isolated checkout and binds it to this conversation. After it
+It creates a tenant-owned isolated checkout and binds it to this conversation. After it
 opens, the ordinary Deep Agents file and shell tools operate on that repository at `/workspace`;
 inspect existing files, edit them in place, run the repository's tests, and commit the complete
 change on the workspace branch. Never embed whole source files in integration_invoke or another
 tool argument. Before publishing, call repository_status, require a clean worktree, inspect the
 commit and remote diff, then call repository_publish_pr with the exact current head SHA. That
 approval contains only bounded metadata; the trusted publisher pushes the existing commit and
-opens the PR. Use repository_close only when the owner is finished with the workspace.
+opens the PR. Use repository_close only when the owner is finished with the workspace. If
+repository_open fails, report its exact public error and stop. Never use source tools, the active
+OpenTulpa source candidate, or integration file-write actions as a fallback for an external
+repository. If the error says no repository sandbox is configured, ask the owner to paste
+`DAYTONA_API_KEY=<value>` and retry repository_open after authenticated ingress stores it.
 
 Credentials are entered directly in this authenticated owner chat. If a required secret handle is
 missing, ask the owner to paste the credential in their next message; never send them to a separate

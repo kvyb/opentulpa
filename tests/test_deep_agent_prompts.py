@@ -33,3 +33,9 @@ def test_owner_prompt_rechecks_live_capability_state() -> None:
     assert "call\nsource_status for source access" in OWNER_PROMPT
     assert "capability_list for bundled capabilities" in OWNER_PROMPT
     assert "Never reuse an\nearlier tool error" in OWNER_PROMPT
+
+
+def test_owner_prompt_never_uses_source_evolution_as_repository_fallback() -> None:
+    assert "repository_open fails, report its exact public error and stop" in OWNER_PROMPT
+    assert "Never use source tools, the active\nOpenTulpa source candidate" in OWNER_PROMPT
+    assert "`DAYTONA_API_KEY=<value>`" in OWNER_PROMPT
