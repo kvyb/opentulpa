@@ -1534,6 +1534,33 @@ class DeepAgentService:
         assert updated is not None
         return updated
 
+    async def cancel_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+    ) -> AgentRunSnapshot | None:
+        """Cancel the newest active run when an interface has not received its run ID yet."""
+
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT run_id
+            FROM agent_runs
+            WHERE tenant_id = ?
+              AND thread_id = ?
+              AND status IN ('running', 'interrupted', 'resume_pending')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (tenant_id, thread_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return await self.cancel(str(row["run_id"]))
+
     async def create_thread(
         self,
         *,

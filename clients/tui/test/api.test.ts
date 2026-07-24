@@ -132,6 +132,72 @@ describe("V2 event transport", () => {
     expect(requests[1]?.headers.get("last-event-id")).toBe("0")
   })
 
+  test("steers an active run through the continuation endpoint", async () => {
+    let request: Request | undefined
+    globalThis.fetch = (async (input, init) => {
+      request = new Request(input, init)
+      return new Response(
+        'id: 1\ndata: {"type":"run.completed","run_id":"run-2","sequence":1,' +
+          '"timestamp":"2026-01-01T00:00:01Z","data":{"text":"adjusted"}}\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )
+    }) as typeof fetch
+    const api = new OpenTulpaApi({
+      url: "https://tulpa.test",
+      token: "owner",
+      thread_id: "thread-1",
+    })
+
+    const events = []
+    for await (const event of api.steer("run-1", "Focus on tests", ["file-1"])) {
+      events.push(event)
+    }
+
+    expect(events.map((event) => event.run_id)).toEqual(["run-2"])
+    expect(request?.url).toBe("https://tulpa.test/v2/agent/runs/run-1/steer")
+    expect(request?.method).toBe("POST")
+    expect(await request?.json()).toEqual({
+      text: "Focus on tests",
+      file_ids: ["file-1"],
+    })
+  })
+
+  test("stops reading and does not reconnect after the stream is aborted", async () => {
+    const requests: Request[] = []
+    globalThis.fetch = (async (input, init) => {
+      const request = new Request(input, init)
+      requests.push(request)
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            request.signal.addEventListener(
+              "abort",
+              () => controller.error(new DOMException("aborted", "AbortError")),
+              { once: true },
+            )
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )
+    }) as typeof fetch
+    const api = new OpenTulpaApi({
+      url: "https://tulpa.test",
+      token: "owner",
+      thread_id: "thread-1",
+    })
+    const controller = new AbortController()
+    const consume = (async () => {
+      for await (const _event of api.run("thread-1", "work", [], controller.signal)) {}
+    })()
+
+    await Bun.sleep(10)
+    controller.abort()
+    await consume
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.signal.aborted).toBe(true)
+  })
+
   test("updates only the current thread inference preference", async () => {
     let request: Request | undefined
     globalThis.fetch = (async (input, init) => {

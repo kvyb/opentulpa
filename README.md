@@ -75,6 +75,8 @@ tool calls, drag-and-drop attachments, server-backed sessions, and clickable
 **Approve**, **Edit**, and **Reject** controls. Telegram uses the same Agent API with a
 scoped credential. Use `ctrl+p` or `/sessions` to reopen the same durable Deep Agents
 threads from another client. Type `/` in the composer to search and select commands.
+While a turn is running, `Esc` stops it, `Enter` queues the next message, and
+`Shift+Enter` steers the active turn. When idle, `Shift+Enter` inserts a newline.
 
 The API key remains the zero-friction default. Inside any owner conversation, `/model`,
 `/reasoning`, and `/speed` select that thread's next-run inference settings without

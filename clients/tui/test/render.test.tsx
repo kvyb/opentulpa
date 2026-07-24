@@ -13,6 +13,7 @@ import {
   elapsed,
   filterSlashCommands,
   installSelectionClipboard,
+  runningComposerAction,
   waitingLabel,
 } from "../src/app.js"
 import type { Approval, ToolCall } from "../src/types.js"
@@ -79,6 +80,15 @@ describe("slash command palette", () => {
       setup.renderer.destroy()
     })
   }
+})
+
+describe("running composer controls", () => {
+  test("maps escape, enter, and shift-enter to stop, queue, and steer", () => {
+    expect(runningComposerAction({ name: "escape" })).toBe("cancel")
+    expect(runningComposerAction({ name: "return" })).toBe("queue")
+    expect(runningComposerAction({ name: "return", shift: true })).toBe("steer")
+    expect(runningComposerAction({ name: "a" })).toBeUndefined()
+  })
 })
 
 describe("tool activity rendering", () => {

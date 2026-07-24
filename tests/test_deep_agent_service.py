@@ -1549,6 +1549,72 @@ async def test_stream_consumer_cancellation_requires_explicit_run_cancel(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cancel_thread_stops_the_owned_active_run_without_a_run_id(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    graph = _BlockingGraph()
+    service._graphs["owner"] = graph  # noqa: SLF001
+    events = cast(
+        AsyncGenerator[Any, None],
+        service.stream(AgentRunRequest(context=_context(), text="Hi")),
+    )
+    try:
+        started = await anext(events)
+        await asyncio.wait_for(graph.entered.wait(), timeout=1)
+        cancelled = await service.cancel_thread(
+            tenant_id=_context().tenant_id,
+            thread_id=_context().thread_id,
+        )
+        missing = await service.cancel_thread(
+            tenant_id="other-tenant",
+            thread_id=_context().thread_id,
+        )
+    finally:
+        await events.aclose()
+        await service.shutdown()
+
+    assert cancelled is not None
+    assert cancelled.run_id == started.run_id
+    assert cancelled.status == "cancelled"
+    assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_can_continue_immediately_on_the_same_checkpoint(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await service.start()
+    graph = _SerializedGraph()
+    service._graphs["owner"] = graph  # noqa: SLF001
+    first = cast(
+        AsyncGenerator[Any, None],
+        await service.open_stream(AgentRunRequest(context=_context(), text="Original")),
+    )
+    try:
+        started = await anext(first)
+        await asyncio.wait_for(graph.first_entered.wait(), timeout=1)
+        cancelled = await service.cancel(started.run_id)
+        steered = cast(
+            AsyncGenerator[Any, None],
+            await service.open_stream(
+                AgentRunRequest(context=_context(), text="Use this direction instead")
+            ),
+        )
+        steered_events = [event async for event in steered]
+    finally:
+        graph.release_first.set()
+        await first.aclose()
+        await service.shutdown()
+
+    assert cancelled.status == "cancelled"
+    assert steered_events[-1].type == "run.completed"
+    assert steered_events[-1].data == {"text": "response-2"}
+    assert graph.calls == 2
+    assert graph.max_active == 1
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_fence_rejects_overlap_until_prior_run_finishes(tmp_path: Path) -> None:
     service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
     await service.start()

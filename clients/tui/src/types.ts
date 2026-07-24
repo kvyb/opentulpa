@@ -47,7 +47,7 @@ export type Turn = {
   approvals: Approval[]
   artifacts: Record<string, unknown>[]
   error?: string
-  status: "idle" | "running" | "approval" | "completed" | "failed"
+  status: "idle" | "running" | "approval" | "completed" | "failed" | "cancelled"
   lastSequence: number
   startedAt: string
 }

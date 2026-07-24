@@ -135,6 +135,19 @@ describe("run event reducer", () => {
     expect(turn.status).toBe("approval")
   })
 
+  test("treats an explicit cancellation as terminal without a failure banner", () => {
+    const turn = reduceEvent(
+      emptyTurn("run-1", "Stop"),
+      event(1, "run.failed", {
+        code: "agent_run_cancelled",
+        message: "The agent run was cancelled before completion.",
+      }),
+    )
+
+    expect(turn.status).toBe("cancelled")
+    expect(turn.error).toBeUndefined()
+  })
+
   test("timeline replay drops an earlier consumed approval after resume", () => {
     const turns = turnsFromTimeline([
       {

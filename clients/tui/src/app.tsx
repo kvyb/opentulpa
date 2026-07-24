@@ -98,6 +98,21 @@ export type SlashCommand = {
   acceptsArgument?: boolean
 }
 
+type PendingInput = {
+  id: string
+  text: string
+  attachments: string[]
+}
+
+export function runningComposerAction(key: {
+  name: string
+  shift?: boolean
+}): "cancel" | "queue" | "steer" | undefined {
+  if (key.name === "escape") return "cancel"
+  if (key.name === "return") return key.shift ? "steer" : "queue"
+  return undefined
+}
+
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { value: "/new", description: "Start a new session" },
   { value: "/sessions", description: "Browse previous sessions" },
@@ -156,9 +171,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   const [codexLogin, setCodexLogin] = createSignal<CodexDeviceLogin>()
   const [slashIndex, setSlashIndex] = createSignal(0)
   const [dismissedSlash, setDismissedSlash] = createSignal("")
+  const [queuedInputs, setQueuedInputs] = createSignal<PendingInput[]>([])
   const approvalNotifications = new Map<string, number>()
   let notificationCursor = 0
   let alive = true
+  let activeStream: AbortController | undefined
+  let drainingQueue = false
+  let inputRevision = 0
 
   const activeTurn = createMemo(() => turns().at(-1))
   const pendingApproval = createMemo(() => activeTurn()?.approvals.at(-1))
@@ -234,7 +253,12 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       setTurns(restored)
       setBusy(true)
       setStatus("Reconnecting")
-      await consume(api.events(rebuilding.runId, 0), rebuilding.runId)
+      const controller = beginActiveStream()
+      await consume(
+        api.events(rebuilding.runId, 0, controller.signal),
+        rebuilding.runId,
+        controller,
+      )
     } else {
       setTurns(restored)
       setBusy(false)
@@ -281,6 +305,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
 
   onCleanup(() => {
     alive = false
+    activeStream?.abort()
   })
 
   const pollNotifications = async () => {
@@ -349,6 +374,20 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       key.preventDefault()
       return
     }
+    if (busy()) {
+      const action = runningComposerAction(key)
+      if (action === "cancel") {
+        void cancelActive()
+        key.preventDefault()
+        return
+      }
+      if (!modalOpen() && action === "queue") queueCurrentInput()
+      else if (!modalOpen() && action === "steer") void steerActive()
+      if (!modalOpen() && action) {
+        key.preventDefault()
+        return
+      }
+    }
     if (codexLogin()) {
       if (key.name === "escape") void closeCodexLogin()
       key.preventDefault()
@@ -406,9 +445,14 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     }
   })
 
-  const consume = async (events: AsyncGenerator<AgentEvent>, runId: string): Promise<boolean> => {
+  const consume = async (
+    events: AsyncGenerator<AgentEvent>,
+    runId: string,
+    controller?: AbortController,
+  ): Promise<boolean> => {
     try {
       for await (const event of events) {
+        if (controller?.signal.aborted) return false
         setTurns((current) =>
           current.map((turn) => (turn.runId === runId ? reduceEvent(turn, event) : turn)),
         )
@@ -430,16 +474,139 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       await refreshRepository()
       return true
     } catch (cause) {
+      if (controller?.signal.aborted) return false
       setError(message(cause))
       setBusy(false)
       setStatus(cause instanceof ApiError && cause.status ? "Failed" : "Disconnected")
       return false
+    } finally {
+      if (controller && activeStream === controller) activeStream = undefined
+    }
+  }
+
+  const beginActiveStream = () => {
+    activeStream?.abort()
+    const controller = new AbortController()
+    activeStream = controller
+    return controller
+  }
+
+  const restoreInput = (input: PendingInput) => {
+    setDraft(input.text)
+    setAttachments(input.attachments)
+    composer?.setText(input.text)
+    composer?.focus()
+  }
+
+  const executeInput = async (
+    input: PendingInput,
+    mode: "run" | "steer",
+    steeringRunId = "",
+    clearCurrentInput = false,
+  ): Promise<boolean> => {
+    const selected = thread()
+    if (!selected) return false
+    const revision = inputRevision
+    setError("")
+    setUploading(input.attachments.length > 0)
+    const fileIds: string[] = []
+    try {
+      for (const path of input.attachments) fileIds.push(await api.upload(path))
+    } catch (cause) {
+      setUploading(false)
+      restoreInput(input)
+      setError(`Attachment upload failed: ${message(cause)}`)
+      return false
+    }
+    setUploading(false)
+    if (revision !== inputRevision) return false
+    if (clearCurrentInput) {
+      clearComposer()
+      setAttachments([])
+    }
+    if (mode === "steer") {
+      activeStream?.abort()
+      activeStream = undefined
+      setTurns((current) =>
+        current.map((turn) =>
+          turn.runId === steeringRunId
+            ? { ...turn, status: "cancelled", error: undefined }
+            : turn,
+        ),
+      )
+    }
+    const pending = emptyTurn("", input.text)
+    pending.fileIds = fileIds
+    setTurns((current) => [...current, pending])
+    setBusy(true)
+    setStatus(mode === "steer" ? "Steering" : "Thinking")
+    const controller = beginActiveStream()
+    let terminalReached = false
+    try {
+      const stream = mode === "steer"
+        ? api.steer(steeringRunId, input.text, fileIds, controller.signal)
+        : api.run(selected.thread_id, input.text, fileIds, controller.signal)
+      const first = await stream.next()
+      if (controller.signal.aborted) return false
+      if (first.done) throw new ApiError("The agent run returned no events.")
+      pending.runId = first.value.run_id
+      let current = reduceEvent(pending, first.value)
+      setTurns((values) => [...values.slice(0, -1), current])
+      for await (const event of stream) {
+        if (controller.signal.aborted) return false
+        current = reduceEvent(current, event)
+        setTurns((values) => [...values.slice(0, -1), current])
+        if (event.type === "approval.required") {
+          setBusy(false)
+          setStatus("Approval required")
+        }
+      }
+      if (controller.signal.aborted) return false
+      if (current.status === "running") {
+        terminalReached = await consume(
+          api.events(current.runId, current.lastSequence, controller.signal),
+          current.runId,
+          controller,
+        )
+      } else {
+        terminalReached = true
+        if (activeStream === controller) activeStream = undefined
+        setBusy(false)
+        setStatus(
+          current.status === "failed"
+            ? "Failed"
+            : current.status === "approval"
+              ? "Approval required"
+              : current.status === "cancelled"
+                ? "Cancelled"
+                : "Ready",
+        )
+        await refreshThreads()
+        await refreshRepository()
+      }
+      return terminalReached
+    } catch (cause) {
+      if (controller.signal.aborted) return false
+      if (activeStream === controller) activeStream = undefined
+      setBusy(false)
+      setStatus("Failed")
+      setError(message(cause))
+      return false
+    } finally {
+      if (activeStream === controller && !busy()) activeStream = undefined
+      if (terminalReached && !controller.signal.aborted) {
+        queueMicrotask(() => void drainQueuedInput())
+      }
     }
   }
 
   const send = async (raw: string) => {
     const text = raw.trim()
-    if (!text || busy() || uploading()) return
+    if (!text || uploading()) return
+    if (busy()) {
+      queueCurrentInput()
+      return
+    }
     if (editApproval()) {
       await submitEditedApproval(text)
       return
@@ -453,54 +620,70 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       }
       return
     }
-    const selected = thread()
-    if (!selected) return
-    setError("")
-    setUploading(attachments().length > 0)
-    const fileIds: string[] = []
-    try {
-      for (const path of attachments()) fileIds.push(await api.upload(path))
-    } catch (cause) {
-      setUploading(false)
-      setError(`Attachment upload failed: ${message(cause)}`)
-      return
+    await executeInput(
+      {
+        id: crypto.randomUUID(),
+        text,
+        attachments: [...attachments()],
+      },
+      "run",
+      "",
+      true,
+    )
+  }
+
+  const queueCurrentInput = () => {
+    const text = draft().trim()
+    if (!text || uploading()) return
+    const input: PendingInput = {
+      id: crypto.randomUUID(),
+      text,
+      attachments: [...attachments()],
     }
-    setUploading(false)
-    const pending = emptyTurn("", text)
-    pending.fileIds = fileIds
-    setTurns((current) => [...current, pending])
+    setQueuedInputs((current) => [...current, input])
     clearComposer()
     setAttachments([])
-    setBusy(true)
-    setStatus("Thinking")
+    setStatus("Queued")
+  }
+
+  const drainQueuedInput = async () => {
+    if (
+      drainingQueue
+      || busy()
+      || uploading()
+      || pendingApproval()
+      || editApproval()
+    ) return
+    const next = queuedInputs()[0]
+    if (!next) return
+    drainingQueue = true
+    setQueuedInputs((current) => current.filter((item) => item.id !== next.id))
     try {
-      const stream = api.run(selected.thread_id, text, fileIds)
-      const first = await stream.next()
-      if (first.done) throw new ApiError("The agent run returned no events.")
-      pending.runId = first.value.run_id
-      let current = reduceEvent(pending, first.value)
-      setTurns((values) => [...values.slice(0, -1), current])
-      for await (const event of stream) {
-        current = reduceEvent(current, event)
-        setTurns((values) => [...values.slice(0, -1), current])
-        if (event.type === "approval.required") {
-          setBusy(false)
-          setStatus("Approval required")
-        }
-      }
-      if (current.status === "running") {
-        await consume(api.events(current.runId, current.lastSequence), current.runId)
-      } else {
-        setBusy(false)
-        setStatus(current.status === "failed" ? "Failed" : current.status === "approval" ? "Approval required" : "Ready")
-        await refreshThreads()
-        await refreshRepository()
-      }
-    } catch (cause) {
-      setBusy(false)
-      setStatus("Failed")
-      setError(message(cause))
+      await executeInput(next, "run")
+    } finally {
+      drainingQueue = false
+      queueMicrotask(() => void drainQueuedInput())
     }
+  }
+
+  const steerActive = async () => {
+    const text = draft().trim()
+    const current = activeTurn()
+    if (!text || !current || uploading()) return
+    if (!current.runId) {
+      setError("The run is still starting. Try steering again in a moment.")
+      return
+    }
+    await executeInput(
+      {
+        id: crypto.randomUUID(),
+        text,
+        attachments: [...attachments()],
+      },
+      "steer",
+      current.runId,
+      true,
+    )
   }
 
   const applyInferenceSelection = async (selection: InferenceSelection | null) => {
@@ -848,10 +1031,34 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   const cancelActive = async () => {
     const current = activeTurn()
     if (!current || !busy()) return
+    const selected = thread()
+    inputRevision += 1
+    activeStream?.abort()
+    activeStream = undefined
+    setTurns((values) =>
+      values.map((turn) =>
+        turn === current
+          ? { ...turn, status: "cancelled", error: undefined }
+          : turn,
+      ),
+    )
+    setBusy(false)
+    setStatus("Cancelled")
     try {
-      await api.cancel(current.runId)
-      setBusy(false)
-      setStatus("Cancelled")
+      if (current.runId) await api.cancel(current.runId)
+      else if (selected) {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            await api.cancelThread(selected.thread_id)
+            break
+          } catch (cause) {
+            if (!(cause instanceof ApiError) || cause.status !== 404) throw cause
+            if (attempt < 2) await Bun.sleep(100)
+          }
+        }
+      }
+      await refreshThreads()
+      queueMicrotask(() => void drainQueuedInput())
     } catch (cause) {
       setError(message(cause))
     }
@@ -873,7 +1080,20 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     consumeVisibleApproval(approval)
     setBusy(true)
     setStatus(decision === "approve" ? "Approving" : "Rejecting")
-    if (await consume(api.resume(approval.run_id, approval.approval_id, decision), approval.run_id)) {
+    const controller = beginActiveStream()
+    const completed = await consume(
+      api.resume(
+        approval.run_id,
+        approval.approval_id,
+        decision,
+        undefined,
+        controller.signal,
+      ),
+      approval.run_id,
+      controller,
+    )
+    if (controller.signal.aborted) return
+    if (completed) {
       await acknowledgeApproval(approval.approval_id)
     } else {
       await recoverCurrentThread()
@@ -897,12 +1117,20 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     consumeVisibleApproval(approval)
     setBusy(true)
     setStatus("Applying edited action")
-    if (
-      await consume(
-        api.resume(approval.run_id, approval.approval_id, "edit", argumentsValue),
+    const controller = beginActiveStream()
+    const completed = await consume(
+      api.resume(
         approval.run_id,
-      )
-    ) {
+        approval.approval_id,
+        "edit",
+        argumentsValue,
+        controller.signal,
+      ),
+      approval.run_id,
+      controller,
+    )
+    if (controller.signal.aborted) return
+    if (completed) {
       await acknowledgeApproval(approval.approval_id)
     } else {
       await recoverCurrentThread()
@@ -1001,6 +1229,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
             onSelect={selectSlashCommand}
           />
         </Show>
+        <Show when={queuedInputs().length}>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2}>
+            <text fg={COLORS.amber} wrapMode="none" truncate>
+              {queuedInputs().length} queued · {queuedInputs()[0]?.text}
+            </text>
+          </box>
+        </Show>
         <Show when={attachments().length}>
           <box flexShrink={0} flexDirection="row" flexWrap="wrap" gap={1}>
             <For each={attachments()}>
@@ -1035,7 +1270,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
                   minHeight={1}
                   maxHeight={10}
                   wrapMode="word"
-                  placeholder={editApproval() ? "Edit the JSON arguments, then press Enter" : "Ask OpenTulpa anything"}
+                  placeholder={
+                    editApproval()
+                      ? "Edit the JSON arguments, then press Enter"
+                      : busy()
+                        ? "Enter queues · Shift+Enter steers · Esc stops"
+                        : "Ask OpenTulpa anything"
+                  }
                   placeholderColor={COLORS.muted}
                   textColor={COLORS.text}
                   focusedTextColor={COLORS.text}
@@ -1062,6 +1303,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
             busy={busy()}
             uploading={uploading()}
             status={status()}
+            queuedCount={queuedInputs().length}
             width={terminalWidth()}
             onNewSession={() => void createSession()}
             onSessions={() => { setSessionDialog(true); setSessionQuery(""); setSessionIndex(0) }}
@@ -1466,6 +1708,7 @@ export function StatusBar(props: {
   busy: boolean
   uploading: boolean
   status: string
+  queuedCount?: number
   width: number
   onNewSession?: () => void
   onSessions?: () => void
@@ -1474,7 +1717,10 @@ export function StatusBar(props: {
 }) {
   const label = createMemo(() => {
     const state = props.uploading ? "Uploading attachments" : props.status
-    if (props.busy) return props.uploading ? state : ""
+    if (props.busy) {
+      if (props.uploading) return state
+      return props.queuedCount ? `${props.queuedCount} queued` : ""
+    }
     if (["Failed", "Disconnected", "Cancelled", "Approval required"].includes(state)) return state
     return ""
   })
@@ -1517,7 +1763,9 @@ export function StatusBar(props: {
         <text flexShrink={0} fg={COLORS.dim} onMouseUp={props.onSessions}>ctrl+p sessions</text>
       </Show>
       <Show when={props.width >= 92}>
-        <text flexShrink={0} fg={COLORS.dim}>shift+enter newline</text>
+        <text flexShrink={0} fg={COLORS.dim}>
+          {props.busy ? "esc stop · enter queue · shift+enter steer" : "shift+enter newline"}
+        </text>
       </Show>
     </box>
   )

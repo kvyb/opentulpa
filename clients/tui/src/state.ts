@@ -92,8 +92,11 @@ export function reduceEvent(turn: Turn, event: AgentEvent): Turn {
     next.tools = finishTools(next.tools, event.timestamp)
   }
   if (event.type === "run.failed") {
-    next.status = "failed"
-    next.error = String(event.data.message ?? "The agent run could not be completed.")
+    const cancelled = event.data.code === "agent_run_cancelled"
+    next.status = cancelled ? "cancelled" : "failed"
+    next.error = cancelled
+      ? undefined
+      : String(event.data.message ?? "The agent run could not be completed.")
     next.approvals = []
     next.tools = finishTools(next.tools, event.timestamp)
   }

@@ -166,18 +166,45 @@ export class OpenTulpaApi {
     )
   }
 
-  run(threadId: string, text: string, fileIds: string[]): AsyncGenerator<AgentEvent> {
+  run(
+    threadId: string,
+    text: string,
+    fileIds: string[],
+    signal?: AbortSignal,
+  ): AsyncGenerator<AgentEvent> {
     return this.stream("/v2/agent/runs", {
       method: "POST",
       headers: { "Idempotency-Key": `tui-run:${crypto.randomUUID()}` },
       body: JSON.stringify({ thread_id: threadId, text, file_ids: fileIds }),
+      signal,
     })
   }
 
-  events(runId: string, afterSequence: number): AsyncGenerator<AgentEvent> {
+  steer(
+    runId: string,
+    text: string,
+    fileIds: string[],
+    signal?: AbortSignal,
+  ): AsyncGenerator<AgentEvent> {
+    return this.stream(`/v2/agent/runs/${encodeURIComponent(runId)}/steer`, {
+      method: "POST",
+      headers: { "Idempotency-Key": `tui-steer:${crypto.randomUUID()}` },
+      body: JSON.stringify({ text, file_ids: fileIds }),
+      signal,
+    })
+  }
+
+  events(
+    runId: string,
+    afterSequence: number,
+    signal?: AbortSignal,
+  ): AsyncGenerator<AgentEvent> {
     return this.stream(
       `/v2/agent/runs/${encodeURIComponent(runId)}/events?after_sequence=${Math.max(0, afterSequence)}`,
-      { headers: { "Last-Event-ID": String(Math.max(0, afterSequence)) } },
+      {
+        headers: { "Last-Event-ID": String(Math.max(0, afterSequence)) },
+        signal,
+      },
       runId,
       Math.max(0, afterSequence),
     )
@@ -188,6 +215,7 @@ export class OpenTulpaApi {
     approvalId: string,
     decision: "approve" | "edit" | "reject",
     editedArguments?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
     return this.stream(
       `/v2/agent/runs/${encodeURIComponent(runId)}/resume`,
@@ -198,6 +226,7 @@ export class OpenTulpaApi {
           decision,
           edited_arguments: decision === "edit" ? editedArguments : null,
         }),
+        signal,
       },
       runId,
     )
@@ -205,6 +234,12 @@ export class OpenTulpaApi {
 
   async cancel(runId: string): Promise<void> {
     await this.json(`/v2/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" })
+  }
+
+  async cancelThread(threadId: string): Promise<void> {
+    await this.json(`/v2/agent/threads/${encodeURIComponent(threadId)}/cancel`, {
+      method: "POST",
+    })
   }
 
   async runSnapshot(runId: string): Promise<Record<string, unknown>> {
@@ -268,22 +303,29 @@ export class OpenTulpaApi {
     let runId = knownRunId
     let sequence = knownSequence
     let reconnectAttempts = 0
+    const signal = init.signal ?? undefined
     const maxReconnectAttempts = 30
     const reconnect = async (): Promise<boolean> => {
-      if (!runId || reconnectAttempts >= maxReconnectAttempts) return false
+      if (signal?.aborted || !runId || reconnectAttempts >= maxReconnectAttempts) return false
       reconnectAttempts += 1
       path = `/v2/agent/runs/${encodeURIComponent(runId)}/events?after_sequence=${sequence}`
-      init = { headers: { "Last-Event-ID": String(sequence) } }
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(4_000, reconnectAttempts * 500)),
+      init = {
+        headers: { "Last-Event-ID": String(sequence) },
+        signal,
+      }
+      await waitForReconnect(
+        Math.min(4_000, reconnectAttempts * 500),
+        signal,
       )
-      return true
+      return !signal?.aborted
     }
     while (true) {
+      if (signal?.aborted) return
       let response: Response
       try {
         response = await fetch(`${this.config.url}${path}`, this.withHeaders(init))
       } catch {
+        if (signal?.aborted) return
         if (!(await reconnect())) {
           throw new ApiError("The OpenTulpa event stream disconnected.")
         }
@@ -331,8 +373,10 @@ export class OpenTulpaApi {
           if (chunk.done) break
         }
       } catch {
+        if (signal?.aborted) return
         disconnected = true
       }
+      if (signal?.aborted) return
       if (!disconnected && buffer.trim()) {
         const data = buffer
           .split("\n")
@@ -388,4 +432,18 @@ export class OpenTulpaApi {
     } catch {}
     return new ApiError(message, response.status)
   }
+}
+
+async function waitForReconnect(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(finish, milliseconds)
+    const abort = () => finish()
+    function finish() {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", abort)
+      resolve()
+    }
+    signal?.addEventListener("abort", abort, { once: true })
+  })
 }

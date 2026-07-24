@@ -6,6 +6,8 @@ no OpenCode runtime, SDK, provider, project, MCP, or agent code.
 
 Use `/repo open https://github.com/owner/repo` to bind an isolated repository checkout to
 the current session, `/repo status` to inspect it, and `/repos` to list workspaces.
+During a run, `Esc` stops immediately, `Enter` queues a follow-up, and `Shift+Enter`
+steers the active turn. When idle, `Shift+Enter` remains the multiline shortcut.
 
 ```sh
 bun install --frozen-lockfile

@@ -68,6 +68,13 @@ class AgentRunService(Protocol):
 
     async def cancel(self, run_id: str) -> AgentRunSnapshot: ...
 
+    async def cancel_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+    ) -> AgentRunSnapshot | None: ...
+
     async def create_thread(
         self, *, tenant_id: str, channel: str, title: str | None = None
     ) -> dict[str, Any]: ...
@@ -94,6 +101,16 @@ class AgentRunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     thread_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=200_000)
+    file_ids: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+
+
+class AgentRunSteerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     text: str = Field(min_length=1, max_length=200_000)
     file_ids: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
         default_factory=list,
@@ -263,6 +280,65 @@ def register_v2_agent_routes(
             trust_class="owner",
         )
 
+    def build_run_request(
+        *,
+        principal: ResolvedV2Principal,
+        request: Request,
+        thread_id: str,
+        text: str,
+        file_ids: list[str],
+        pinned_context: AgentRunContext | None = None,
+    ) -> AgentRunRequest:
+        binding = run_binding(principal)
+        sanitized_text = text
+        if secret_ingress is not None and binding.trust_class == "owner":
+            try:
+                sanitized_text = secret_ingress(
+                    tenant_id=principal.tenant_id,
+                    actor_id=principal.actor_id,
+                    text=text,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="credential ingress is unavailable",
+                ) from exc
+        origin = OriginRef(
+            interface=principal.interface,
+            source_id=principal.source_id,
+            conversation_id=principal.conversation_id,
+            message_id=principal.message_id,
+        )
+        context = (
+            pinned_context.model_copy(
+                update={
+                    "actor_id": principal.actor_id,
+                    "correlation_id": _correlation_id(request),
+                    "origin": origin,
+                }
+            )
+            if pinned_context is not None
+            else AgentRunContext(
+                tenant_id=principal.tenant_id,
+                actor_id=principal.actor_id,
+                thread_id=thread_id,
+                channel=principal.channel,
+                run_kind=binding.run_kind,
+                correlation_id=_correlation_id(request),
+                origin=origin,
+                agent_spec=binding.agent_spec,
+                trust_class=binding.trust_class,
+            )
+        )
+        return AgentRunRequest(
+            context=context,
+            text=sanitized_text,
+            file_ids=tuple(file_ids),
+            idempotency_key=(
+                str(request.headers.get("idempotency-key", "") or "").strip() or None
+            ),
+        )
+
     @app.post("/v2/agent/threads", status_code=201)
     async def create_agent_thread(
         body: AgentThreadCreateRequest,
@@ -341,46 +417,58 @@ def register_v2_agent_routes(
     ) -> StreamingResponse:
         principal = await resolve_v2_principal(request, resolve_principal)
         require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_SUBMIT.value)
-        binding = run_binding(principal)
-        sanitized_text = body.text
-        if secret_ingress is not None and binding.trust_class == "owner":
-            try:
-                sanitized_text = secret_ingress(
-                    tenant_id=principal.tenant_id,
-                    actor_id=principal.actor_id,
-                    text=body.text,
-                )
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="credential ingress is unavailable",
-                ) from exc
-        context = AgentRunContext(
-            tenant_id=principal.tenant_id,
-            actor_id=principal.actor_id,
+        run_request = build_run_request(
+            principal=principal,
+            request=request,
             thread_id=body.thread_id,
-            channel=principal.channel,
-            run_kind=binding.run_kind,
-            correlation_id=_correlation_id(request),
-            origin=OriginRef(
-                interface=principal.interface,
-                source_id=principal.source_id,
-                conversation_id=principal.conversation_id,
-                message_id=principal.message_id,
-            ),
-            agent_spec=binding.agent_spec,
-            trust_class=binding.trust_class,
-        )
-        run_request = AgentRunRequest(
-            context=context,
-            text=sanitized_text,
-            file_ids=tuple(body.file_ids),
-            idempotency_key=(
-                str(request.headers.get("idempotency-key", "") or "").strip() or None
-            ),
+            text=body.text,
+            file_ids=body.file_ids,
         )
         try:
             events = await service_or_503().open_stream(run_request)
+        except AgentRunIdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="idempotency key belongs to a different agent run request",
+            ) from exc
+        except AgentRunCheckpointConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="thread has an unresolved agent run",
+            ) from exc
+        return _streaming_response(events)
+
+    @app.post(
+        "/v2/agent/runs/{run_id}/steer",
+        response_class=StreamingResponse,
+        responses={200: {"content": {"text/event-stream": {}}}},
+    )
+    async def steer_agent_run(
+        run_id: str,
+        body: AgentRunSteerRequest,
+        request: Request,
+    ) -> StreamingResponse:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_SUBMIT.value)
+        service = service_or_503()
+        snapshot = await _owned_snapshot(
+            service,
+            run_id=run_id,
+            principal=principal,
+        )
+        if snapshot.status != "running":
+            raise HTTPException(status_code=409, detail="agent run is not active")
+        run_request = build_run_request(
+            principal=principal,
+            request=request,
+            thread_id=snapshot.context.thread_id,
+            text=body.text,
+            file_ids=body.file_ids,
+            pinned_context=snapshot.context,
+        )
+        await service.cancel(run_id)
+        try:
+            events = await service.open_stream(run_request)
         except AgentRunIdempotencyConflictError as exc:
             raise HTTPException(
                 status_code=409,
@@ -490,11 +578,24 @@ def register_v2_agent_routes(
         await _owned_snapshot(service, run_id=run_id, principal=principal)
         return _public_snapshot(await service.cancel(run_id))
 
+    @app.post("/v2/agent/threads/{thread_id}/cancel")
+    async def cancel_agent_thread(thread_id: str, request: Request) -> dict[str, Any]:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, "agent.runs.cancel")
+        snapshot = await service_or_503().cancel_thread(
+            tenant_id=principal.tenant_id,
+            thread_id=thread_id,
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="active agent run not found")
+        return _public_snapshot(snapshot)
+
 
 __all__ = [
     "AgentPrincipal",
     "AgentRunCreateRequest",
     "AgentRunResumeRequest",
+    "AgentRunSteerRequest",
     "AgentRunService",
     "register_v2_agent_routes",
 ]

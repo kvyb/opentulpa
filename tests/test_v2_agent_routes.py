@@ -94,6 +94,21 @@ class _FakeAgentService:
         self.snapshots[run_id] = cancelled
         return cancelled
 
+    async def cancel_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+    ) -> AgentRunSnapshot | None:
+        for snapshot in reversed(tuple(self.snapshots.values())):
+            if (
+                snapshot.context.tenant_id == tenant_id
+                and snapshot.context.thread_id == thread_id
+                and snapshot.status in {"running", "interrupted", "resume_pending"}
+            ):
+                return await self.cancel(snapshot.run_id)
+        return None
+
     async def create_thread(
         self, *, tenant_id: str, channel: str, title: str | None = None
     ) -> dict[str, Any]:
@@ -492,3 +507,70 @@ def test_replay_events_honors_cursor_and_cancel_is_tenant_scoped() -> None:
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
     assert service.cancelled == ["run_123"]
+
+
+def test_steer_cancels_active_run_and_continues_on_its_owned_thread() -> None:
+    service = _FakeAgentService(snapshots={"run_123": _snapshot(status="running")})
+    client, _ = _client(service)
+    headers = {
+        "x-tenant-id": "tenant-a",
+        "x-actor-id": "actor-9",
+        "x-correlation-id": "steer-1",
+        "idempotency-key": "steer-request-1",
+    }
+
+    response = client.post(
+        "/v2/agent/runs/run_123/steer",
+        headers=headers,
+        json={"text": "Focus on the failing test", "file_ids": ["file-2"]},
+    )
+
+    assert response.status_code == 200
+    assert service.cancelled == ["run_123"]
+    steered = service.requests[-1]
+    assert steered.text == "Focus on the failing test"
+    assert steered.file_ids == ("file-2",)
+    assert steered.idempotency_key == "steer-request-1"
+    assert steered.context.thread_id == "thread-1"
+    assert steered.context.actor_id == "actor-9"
+    assert steered.context.correlation_id == "steer-1"
+
+    wrong_tenant = client.post(
+        "/v2/agent/runs/run_123/steer",
+        headers={"x-tenant-id": "tenant-b", "x-actor-id": "actor-2"},
+        json={"text": "Take over", "file_ids": []},
+    )
+    assert wrong_tenant.status_code == 404
+
+
+def test_steer_rejects_a_run_that_is_no_longer_active() -> None:
+    service = _FakeAgentService(snapshots={"run_123": _snapshot(status="completed")})
+    client, _ = _client(service)
+
+    response = client.post(
+        "/v2/agent/runs/run_123/steer",
+        headers={"x-tenant-id": "tenant-a", "x-actor-id": "actor-1"},
+        json={"text": "Too late", "file_ids": []},
+    )
+
+    assert response.status_code == 409
+    assert service.cancelled == []
+    assert service.requests == []
+
+
+def test_cancel_thread_handles_a_run_before_the_client_has_its_id() -> None:
+    service = _FakeAgentService(snapshots={"run_123": _snapshot(status="running")})
+    client, _ = _client(service)
+
+    cancelled = client.post(
+        "/v2/agent/threads/thread-1/cancel",
+        headers={"x-tenant-id": "tenant-a", "x-actor-id": "actor-1"},
+    )
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert service.cancelled == ["run_123"]
+    assert client.post(
+        "/v2/agent/threads/thread-1/cancel",
+        headers={"x-tenant-id": "tenant-b", "x-actor-id": "actor-2"},
+    ).status_code == 404
