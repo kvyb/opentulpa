@@ -1,15 +1,17 @@
 <p align="center">
-  <img src="docs/assets/opentulpa-logo.png" alt="OpenTulpa" width="180"/>
+  <img src="docs/assets/opentulpa-hero.svg" alt="OpenTulpa — self-hosted agent operator" width="100%"/>
 </p>
-
-<h1 align="center">OpenTulpa</h1>
 
 <p align="center">
   <strong>A small, self-hosted Deep Agents operator that can inspect, edit, test, and safely replace its own code.</strong><br/>
   One Agent API, explicit tools, durable triggers, and a fixed rollback boundary.
 </p>
 
-## What It Is
+<p align="center">
+  <code>TUI</code> &middot; <code>Telegram</code> &middot; <code>Triggers</code> &rarr; one tenant-scoped <strong>Agent API</strong>
+</p>
+
+## What It Does
 
 OpenTulpa is one persistent agent with multiple replaceable ways to reach it. The local
 terminal client, Telegram worker, schedules, intake, browser automation, and future
@@ -29,6 +31,10 @@ middleware. OpenTulpa supplies the smaller product and safety boundary around it
 
 There is no custom LangGraph harness, model loop, tool gateway, prompt compactor, or
 legacy runtime facade.
+
+<p align="center">
+  <img src="docs/assets/opentulpa-conversation-insta.jpg" alt="An OpenTulpa owner conversation" width="720"/>
+</p>
 
 ## Fixed And Mutable
 
