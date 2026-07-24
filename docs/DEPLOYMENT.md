@@ -347,7 +347,7 @@ uv sync --no-dev --extra browser
 BROWSER_USE_API_KEY=...  # required when browser tools are enabled
 COMPOSIO_API_KEY=...     # optional SaaS integration provider
 DAYTONA_API_KEY=...      # optional hosted repository sandboxes
-GITHUB_TOKEN=...         # optional private checkout and pull-request publishing
+GITHUB_TOKEN=...         # optional private checkout or direct-Git publishing fallback
 ```
 
 The environment variables remain suitable for unattended bootstrap. An authenticated
@@ -392,8 +392,10 @@ persists on the OpenTulpa volume. This process boundary is intended for a single
 owner-operated deployment; choose the explicit `daytona` provider for stronger VM isolation,
 multi-replica operation, or a workspace lifecycle independent of the OpenTulpa volume.
 
-`GITHUB_TOKEN` is needed only for private checkout and publishing. Public repositories can be
-opened, edited, tested, and committed without it.
+An active tenant-owned Composio GitHub connection can publish a verified single-commit workspace
+through GitHub's Git Data API without exposing OAuth to the sandbox. `GITHUB_TOKEN` is needed only
+for private checkout or direct-Git fallback commit shapes. Public repositories can be opened,
+edited, tested, and committed without it.
 
 The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize
 and start both interfaces directly:

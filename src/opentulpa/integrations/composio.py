@@ -6,7 +6,7 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from opentulpa.core.public_urls import build_public_composio_callback_url
 from opentulpa.integrations.composio_google_sheets import GoogleSheetsComposioAdapter
@@ -81,7 +81,11 @@ def _is_invalid_instagram_reply_to_error(error: Any) -> bool:
     text = str(error or "").lower()
     if not text:
         return False
-    return "invalid message id" in text or "error_subcode\\\":2534002" in text or "error_subcode:2534002" in text
+    return (
+        "invalid message id" in text
+        or 'error_subcode\\":2534002' in text
+        or "error_subcode:2534002" in text
+    )
 
 
 def _blocked_instagram_send_result(
@@ -146,9 +150,10 @@ def _tool_result_data_with_preflight(
         payload["retry_reason"] = (
             "Meta rejected reply_to_message_id as invalid, so OpenTulpa retried as a plain DM."
         )
-    if not bool(result.get("successful", False)) and "outside of allowed window" in str(
-        result.get("error") or ""
-    ).lower():
+    if (
+        not bool(result.get("successful", False))
+        and "outside of allowed window" in str(result.get("error") or "").lower()
+    ):
         preflight["reply_window_status"] = "rejected_by_meta"
         preflight["reply_window_reason"] = (
             "Meta rejected the send on this verified thread as outside the allowed window."
@@ -326,16 +331,21 @@ class ComposioService:
         items: list[dict[str, Any]] = []
         for item in list(getattr(result, "items", []) or []):
             connection = getattr(item, "connection", None)
-            connected_account = getattr(connection, "connected_account", None) if connection else None
+            connected_account = (
+                getattr(connection, "connected_account", None) if connection else None
+            )
             auth_config = getattr(connection, "auth_config", None) if connection else None
             items.append(
                 {
                     "slug": str(getattr(item, "slug", "") or ""),
                     "name": str(getattr(item, "name", "") or ""),
                     "is_no_auth": bool(getattr(item, "is_no_auth", False)),
-                    "is_connected": bool(getattr(connection, "is_active", False)) if connection else False,
+                    "is_connected": bool(getattr(connection, "is_active", False))
+                    if connection
+                    else False,
                     "connected_account_id": str(getattr(connected_account, "id", "") or "") or None,
-                    "connected_account_status": str(getattr(connected_account, "status", "") or "") or None,
+                    "connected_account_status": str(getattr(connected_account, "status", "") or "")
+                    or None,
                     "auth_config_id": str(getattr(auth_config, "id", "") or "") or None,
                     "auth_mode": str(getattr(auth_config, "mode", "") or "") or None,
                 }
@@ -362,7 +372,10 @@ class ComposioService:
             statuses=_coerce_status_list(statuses) or None,
             limit=max(1, min(int(limit), 100)),
         )
-        items = [self._serialize_connected_account(item) for item in list(getattr(response, "items", []) or [])]
+        items = [
+            self._serialize_connected_account(item)
+            for item in list(getattr(response, "items", []) or [])
+        ]
         return {
             "ok": True,
             "customer_id": str(customer_id),
@@ -379,7 +392,9 @@ class ComposioService:
         if not safe_id:
             raise ValueError("connected_account_id is required")
         result = self._sdk().connected_accounts.disable(safe_id)
-        payload = self._serialize_connected_account(result) if result is not None else {"id": safe_id}
+        payload = (
+            self._serialize_connected_account(result) if result is not None else {"id": safe_id}
+        )
         payload["disabled"] = True
         return {
             "ok": True,
@@ -437,6 +452,31 @@ class ComposioService:
         return {
             "ok": True,
             "tool": self._serialize_tool_schema(tool),
+        }
+
+    def proxy_tool(
+        self,
+        *,
+        endpoint: str,
+        method: Literal["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"],
+        connected_account_id: str,
+        body: object | None = None,
+    ) -> dict[str, Any]:
+        safe_endpoint = str(endpoint or "").strip()
+        safe_connection_id = str(connected_account_id or "").strip()
+        if not safe_endpoint:
+            raise ValueError("endpoint is required")
+        if not safe_connection_id:
+            raise ValueError("connected_account_id is required")
+        response = self._sdk().tools.proxy(
+            endpoint=safe_endpoint,
+            method=method,
+            body=body,
+            connected_account_id=safe_connection_id,
+        )
+        return {
+            "status": int(getattr(response, "status", 0) or 0),
+            "data": getattr(response, "data", None),
         }
 
     def execute_tool(
@@ -515,7 +555,9 @@ class ComposioService:
         customer_id: str,
         text: str | None,
     ) -> tuple[dict[str, Any], bool]:
-        if not _should_retry_without_reply_to(tool_slug=tool_slug, result=result, arguments=arguments):
+        if not _should_retry_without_reply_to(
+            tool_slug=tool_slug, result=result, arguments=arguments
+        ):
             return result, False
         retry_arguments = dict(arguments)
         retry_arguments.pop("reply_to_message_id", None)

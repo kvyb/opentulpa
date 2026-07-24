@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import PurePosixPath
+from typing import Any, Literal, Protocol
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 from deepagents.backends.protocol import SandboxBackendProtocol
@@ -26,7 +32,30 @@ from opentulpa.repositories.store import RepositoryWorkspaceStore
 
 _GIT_REF_RE = re.compile(r"^(?![./])(?!.*(?:\.\.|//|@\{|\\))[\w./-]{1,250}(?<![./])$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_GIT_IDENTITY_RE = re.compile(r"^(.*) <([^<>]+)> ([0-9]+) ([+-][0-9]{4})$")
 _MAX_STATUS_LINES = 100
+_MAX_PUBLISH_FILES = 200
+_MAX_PUBLISH_BYTES = 50 * 1024 * 1024
+_StringList = list[str]
+_GitTreePayload = list[dict[str, Any]]
+
+
+class GitHubAPIProxy(Protocol):
+    def request(
+        self,
+        *,
+        tenant_id: str,
+        method: Literal["GET", "POST", "PATCH", "DELETE"],
+        endpoint: str,
+        body: object | None = None,
+    ) -> tuple[int, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _GitTreeEntry:
+    mode: str
+    type: str
+    sha: str
 
 
 class RepositoryWorkspaceError(RuntimeError):
@@ -54,11 +83,13 @@ class RepositoryWorkspaceService:
         store: RepositoryWorkspaceStore,
         providers: RepositoryProviderRegistry,
         github_token_resolver: Callable[[str, str], str | None],
+        github_api_proxy: GitHubAPIProxy | None = None,
         http_client_factory: Callable[[], httpx.Client] | None = None,
     ) -> None:
         self._store = store
         self._providers = providers
         self._github_token_resolver = github_token_resolver
+        self._github_api_proxy = github_api_proxy
         self._http_client_factory = http_client_factory or (
             lambda: httpx.Client(timeout=httpx.Timeout(30.0))
         )
@@ -365,9 +396,7 @@ class RepositoryWorkspaceService:
             ).strip()
             if current_branch != workspace.branch:
                 raise RepositoryPublishError("repository is not on the recorded workspace branch")
-            remote_url = (
-                await self._run(backend, "git remote get-url origin", timeout=60)
-            ).strip()
+            remote_url = (await self._run(backend, "git remote get-url origin", timeout=60)).strip()
             try:
                 normalized_remote, _, _ = self._normalize_repository_url(remote_url)
             except RepositoryWorkspaceError as exc:
@@ -386,20 +415,33 @@ class RepositoryWorkspaceService:
             if ancestor.exit_code != 0:
                 raise RepositoryPublishError("repository branch is not based on the recorded base")
             token = self._github_token_resolver(tenant_id, "github.write")
-            if not token:
-                raise RepositoryPublishError(
-                    "GitHub publishing is not configured. Paste a fine-grained "
-                    "GITHUB_TOKEN assignment in owner chat."
+            if token:
+                await asyncio.to_thread(provider.push, workspace, github_token=token)
+                pull_request_url = await asyncio.to_thread(
+                    self._open_pull_request,
+                    workspace,
+                    token=token,
+                    title=safe_title,
+                    body=safe_body,
+                    draft=bool(draft),
                 )
-            await asyncio.to_thread(provider.push, workspace, github_token=token)
-            pull_request_url = await asyncio.to_thread(
-                self._open_pull_request,
-                workspace,
-                token=token,
-                title=safe_title,
-                body=safe_body,
-                draft=bool(draft),
-            )
+                credential_source = "token"
+            elif self._github_api_proxy is not None:
+                pull_request_url = await self._publish_via_github_proxy(
+                    tenant_id=tenant_id,
+                    backend=backend,
+                    workspace=workspace,
+                    expected_head_sha=expected,
+                    title=safe_title,
+                    body=safe_body,
+                    draft=bool(draft),
+                )
+                credential_source = "composio"
+            else:
+                raise RepositoryPublishError(
+                    "GitHub publishing is not configured. Connect GitHub through "
+                    "Composio or paste a fine-grained GITHUB_TOKEN assignment."
+                )
             now = utc_now()
             workspace = workspace.model_copy(
                 update={
@@ -419,7 +461,402 @@ class RepositoryWorkspaceService:
                 "head_sha": head_sha,
                 "pull_request_url": pull_request_url,
                 "draft": bool(draft),
+                "credential_source": credential_source,
             }
+
+    async def _publish_via_github_proxy(
+        self,
+        *,
+        tenant_id: str,
+        backend: SandboxBackendProtocol,
+        workspace: RepositoryWorkspace,
+        expected_head_sha: str,
+        title: str,
+        body: str,
+        draft: bool,
+    ) -> str:
+        base_sha = str(workspace.base_sha or "").strip().casefold()
+        if not _SHA_RE.fullmatch(base_sha):
+            raise RepositoryPublishError("repository base commit is unavailable")
+        commit_count_raw = await self._run(
+            backend,
+            f"git rev-list --count {self._shell_quote(base_sha)}..HEAD",
+            timeout=60,
+        )
+        try:
+            commit_count = int(commit_count_raw.strip())
+        except ValueError as exc:
+            raise RepositoryPublishError("repository returned an invalid commit count") from exc
+        if commit_count != 1:
+            raise RepositoryPublishError(
+                "Composio publishing currently requires one verified commit; "
+                "squash the workspace branch and retry"
+            )
+
+        _, owner, repository = self._normalize_repository_url(workspace.repository_url)
+        prefix = f"/repos/{quote(owner, safe='')}/{quote(repository, safe='')}"
+        changed_paths = await self._changed_paths(
+            backend,
+            base_sha=base_sha,
+        )
+        base_tree_sha = await self._git_sha(
+            backend,
+            f"{base_sha}^{{tree}}",
+        )
+        head_tree_sha = await self._git_sha(backend, "HEAD^{tree}")
+        entries: _GitTreePayload = []
+        total_bytes = 0
+
+        for path in changed_paths:
+            current = await self._tree_entry(backend, ref="HEAD", path=path)
+            previous = await self._tree_entry(
+                backend,
+                ref=base_sha,
+                path=path,
+            )
+            if current is None:
+                if previous is not None:
+                    entries.append(
+                        {
+                            "path": path,
+                            "mode": previous.mode,
+                            "type": previous.type,
+                            "sha": None,
+                        }
+                    )
+                continue
+            if current.type == "commit":
+                entries.append(
+                    {
+                        "path": path,
+                        "mode": current.mode,
+                        "type": current.type,
+                        "sha": current.sha,
+                    }
+                )
+                continue
+            if current.type != "blob":
+                raise RepositoryPublishError("repository contains an unsupported Git object")
+            content = await self._blob_content(
+                backend,
+                path=path,
+                entry=current,
+            )
+            total_bytes += len(content)
+            if total_bytes > _MAX_PUBLISH_BYTES:
+                raise RepositoryPublishError("repository publish exceeds the byte limit")
+            blob_sha = self._git_blob_sha(content)
+            if blob_sha != current.sha:
+                raise RepositoryPublishError("repository file bytes changed during publishing")
+            status, payload = await self._github_proxy_request(
+                tenant_id=tenant_id,
+                method="POST",
+                endpoint=f"{prefix}/git/blobs",
+                body={
+                    "content": base64.b64encode(content).decode("ascii"),
+                    "encoding": "base64",
+                },
+            )
+            if status != 201 or self._response_sha(payload) != blob_sha:
+                raise RepositoryPublishError("GitHub did not preserve a repository blob")
+            entries.append(
+                {
+                    "path": path,
+                    "mode": current.mode,
+                    "type": current.type,
+                    "sha": blob_sha,
+                }
+            )
+
+        if head_tree_sha != base_tree_sha:
+            status, payload = await self._github_proxy_request(
+                tenant_id=tenant_id,
+                method="POST",
+                endpoint=f"{prefix}/git/trees",
+                body={"base_tree": base_tree_sha, "tree": entries},
+            )
+            if status != 201 or self._response_sha(payload) != head_tree_sha:
+                raise RepositoryPublishError("GitHub did not preserve the repository tree")
+
+        commit = await self._commit_payload(
+            backend,
+            expected_head_sha=expected_head_sha,
+            expected_tree_sha=head_tree_sha,
+            expected_parent_sha=base_sha,
+        )
+        status, payload = await self._github_proxy_request(
+            tenant_id=tenant_id,
+            method="POST",
+            endpoint=f"{prefix}/git/commits",
+            body=commit,
+        )
+        if status != 201 or self._response_sha(payload) != expected_head_sha:
+            raise RepositoryPublishError("GitHub did not preserve the approved commit")
+
+        branch_path = quote(workspace.branch, safe="/")
+        status, payload = await self._github_proxy_request(
+            tenant_id=tenant_id,
+            method="GET",
+            endpoint=f"{prefix}/git/ref/heads/{branch_path}",
+        )
+        if status == 404:
+            status, payload = await self._github_proxy_request(
+                tenant_id=tenant_id,
+                method="POST",
+                endpoint=f"{prefix}/git/refs",
+                body={
+                    "ref": f"refs/heads/{workspace.branch}",
+                    "sha": expected_head_sha,
+                },
+            )
+            remote_sha = (
+                str(payload.get("object", {}).get("sha") or "")
+                if isinstance(payload, dict) and isinstance(payload.get("object"), dict)
+                else ""
+            )
+            if status != 201 or remote_sha != expected_head_sha:
+                raise RepositoryPublishError("GitHub could not create the repository branch")
+        elif status == 200:
+            remote_sha = (
+                str(payload.get("object", {}).get("sha") or "")
+                if isinstance(payload, dict) and isinstance(payload.get("object"), dict)
+                else ""
+            )
+            if remote_sha != expected_head_sha:
+                raise RepositoryPublishError("GitHub branch already exists at a different commit")
+        else:
+            raise RepositoryPublishError("GitHub could not inspect the repository branch")
+
+        status, payload = await self._github_proxy_request(
+            tenant_id=tenant_id,
+            method="POST",
+            endpoint=f"{prefix}/pulls",
+            body={
+                "title": title,
+                "head": workspace.branch,
+                "base": workspace.base_ref,
+                "body": body,
+                "draft": draft,
+            },
+        )
+        if status == 422:
+            query = urlencode(
+                {
+                    "state": "open",
+                    "head": f"{owner}:{workspace.branch}",
+                    "base": workspace.base_ref,
+                }
+            )
+            status, payload = await self._github_proxy_request(
+                tenant_id=tenant_id,
+                method="GET",
+                endpoint=f"{prefix}/pulls?{query}",
+            )
+            if status == 200 and isinstance(payload, list) and payload:
+                payload = payload[0]
+            else:
+                raise RepositoryPublishError("GitHub could not create the pull request")
+        elif status != 201:
+            raise RepositoryPublishError("GitHub could not create the pull request")
+        url = str(payload.get("html_url") or "") if isinstance(payload, dict) else ""
+        if not url.startswith("https://github.com/"):
+            raise RepositoryPublishError("GitHub returned an invalid pull request response")
+        return url
+
+    async def _github_proxy_request(
+        self,
+        *,
+        tenant_id: str,
+        method: Literal["GET", "POST", "PATCH", "DELETE"],
+        endpoint: str,
+        body: object | None = None,
+    ) -> tuple[int, Any]:
+        if self._github_api_proxy is None:
+            raise RepositoryPublishError("Composio GitHub publishing is unavailable")
+        try:
+            return await asyncio.to_thread(
+                self._github_api_proxy.request,
+                tenant_id=tenant_id,
+                method=method,
+                endpoint=endpoint,
+                body=body,
+            )
+        except Exception as exc:
+            raise RepositoryPublishError(
+                "Composio GitHub publishing failed. Configure Composio, connect one "
+                "GitHub account, and retry"
+            ) from exc
+
+    @classmethod
+    async def _changed_paths(
+        cls,
+        backend: SandboxBackendProtocol,
+        *,
+        base_sha: str,
+    ) -> _StringList:
+        raw = await cls._git_binary_output(
+            backend,
+            f"git diff --no-renames --name-only -z {cls._shell_quote(base_sha)} HEAD",
+        )
+        if not raw:
+            return []
+        values = raw.removesuffix(b"\0").split(b"\0")
+        if len(values) > _MAX_PUBLISH_FILES:
+            raise RepositoryPublishError("repository publish has too many changed files")
+        paths: _StringList = []
+        for value in values:
+            try:
+                path = value.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise RepositoryPublishError("repository contains a non-UTF-8 path") from exc
+            parsed = PurePosixPath(path)
+            if not path or path.startswith("/") or ".." in parsed.parts or str(parsed) != path:
+                raise RepositoryPublishError("repository contains an unsafe path")
+            paths.append(path)
+        return paths
+
+    @classmethod
+    async def _tree_entry(
+        cls,
+        backend: SandboxBackendProtocol,
+        *,
+        ref: str,
+        path: str,
+    ) -> _GitTreeEntry | None:
+        raw = await cls._git_binary_output(
+            backend,
+            f"git ls-tree -z {cls._shell_quote(ref)} -- {cls._shell_quote(path)}",
+        )
+        if not raw:
+            return None
+        if raw.count(b"\0") != 1:
+            raise RepositoryPublishError("repository returned an invalid tree entry")
+        metadata, returned_path = raw.removesuffix(b"\0").split(b"\t", 1)
+        try:
+            mode, object_type, sha = metadata.decode("ascii").split(" ", 2)
+            decoded_path = returned_path.decode("utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RepositoryPublishError("repository returned an invalid tree entry") from exc
+        if (
+            decoded_path != path
+            or mode not in {"100644", "100755", "120000", "160000"}
+            or object_type not in {"blob", "commit"}
+            or not _SHA_RE.fullmatch(sha)
+        ):
+            raise RepositoryPublishError("repository returned an invalid tree entry")
+        return _GitTreeEntry(mode=mode, type=object_type, sha=sha)
+
+    @classmethod
+    async def _blob_content(
+        cls,
+        backend: SandboxBackendProtocol,
+        *,
+        path: str,
+        entry: _GitTreeEntry,
+    ) -> bytes:
+        if entry.mode == "120000":
+            return await cls._git_binary_output(
+                backend,
+                f"git cat-file blob {cls._shell_quote(entry.sha)}",
+            )
+        responses = await asyncio.to_thread(
+            backend.download_files,
+            [f"/workspace/{path}"],
+        )
+        if len(responses) != 1 or responses[0].error is not None:
+            raise RepositoryPublishError("repository file could not be read")
+        return bytes(responses[0].content or b"")
+
+    @classmethod
+    async def _commit_payload(
+        cls,
+        backend: SandboxBackendProtocol,
+        *,
+        expected_head_sha: str,
+        expected_tree_sha: str,
+        expected_parent_sha: str,
+    ) -> dict[str, Any]:
+        raw = await cls._git_binary_output(
+            backend,
+            f"git cat-file commit {cls._shell_quote(expected_head_sha)}",
+        )
+        try:
+            raw_headers, raw_message = raw.split(b"\n\n", 1)
+            lines = raw_headers.decode("utf-8", errors="strict").splitlines()
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RepositoryPublishError("repository commit is not supported") from exc
+        if any(line.startswith((" ", "\t")) for line in lines):
+            raise RepositoryPublishError("signed or extended commits require a direct GitHub token")
+        headers: dict[str, _StringList] = {}
+        for line in lines:
+            key, separator, value = line.partition(" ")
+            if not separator:
+                raise RepositoryPublishError("repository commit is not supported")
+            headers.setdefault(key, []).append(value)
+        if set(headers) != {"tree", "parent", "author", "committer"}:
+            raise RepositoryPublishError("signed or extended commits require a direct GitHub token")
+        if headers["tree"] != [expected_tree_sha] or headers["parent"] != [expected_parent_sha]:
+            raise RepositoryPublishError("repository commit lineage changed")
+        try:
+            message = raw_message.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RepositoryPublishError("non-UTF-8 commits require a direct GitHub token") from exc
+        return {
+            "message": message,
+            "tree": expected_tree_sha,
+            "parents": [expected_parent_sha],
+            "author": cls._git_identity_payload(headers["author"][0]),
+            "committer": cls._git_identity_payload(headers["committer"][0]),
+        }
+
+    @staticmethod
+    def _git_identity_payload(value: str) -> dict[str, str]:
+        match = _GIT_IDENTITY_RE.fullmatch(value)
+        if match is None:
+            raise RepositoryPublishError("repository commit identity is not supported")
+        name, email, raw_timestamp, raw_offset = match.groups()
+        sign = 1 if raw_offset[0] == "+" else -1
+        offset = timedelta(
+            hours=sign * int(raw_offset[1:3]),
+            minutes=sign * int(raw_offset[3:5]),
+        )
+        try:
+            date = datetime.fromtimestamp(
+                int(raw_timestamp),
+                tz=timezone(offset),
+            ).isoformat(timespec="seconds")
+        except (OverflowError, ValueError) as exc:
+            raise RepositoryPublishError("repository commit date is not supported") from exc
+        return {"name": name, "email": email, "date": date}
+
+    @classmethod
+    async def _git_binary_output(
+        cls,
+        backend: SandboxBackendProtocol,
+        command: str,
+    ) -> bytes:
+        response = await backend.aexecute(
+            f"{command} | base64 | tr -d '\\n'",
+            timeout=120,
+        )
+        if response.exit_code != 0 or response.truncated:
+            raise RepositoryPublishError("repository command output was incomplete")
+        try:
+            return base64.b64decode(response.output, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RepositoryPublishError("repository returned invalid binary data") from exc
+
+    @staticmethod
+    def _git_blob_sha(content: bytes) -> str:
+        prefix = f"blob {len(content)}\0".encode()
+        return hashlib.sha1(prefix + content, usedforsecurity=False).hexdigest()
+
+    @staticmethod
+    def _response_sha(payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        value = str(payload.get("sha") or "").strip().casefold()
+        return value if _SHA_RE.fullmatch(value) else ""
 
     def _open_pull_request(
         self,
@@ -486,7 +923,9 @@ class RepositoryWorkspaceService:
 
     @classmethod
     async def _git_sha(cls, backend: SandboxBackendProtocol, ref: str) -> str:
-        value = (await cls._run(backend, f"git rev-parse {cls._shell_quote(ref)}", timeout=60)).strip()
+        value = (
+            await cls._run(backend, f"git rev-parse {cls._shell_quote(ref)}", timeout=60)
+        ).strip()
         if not _SHA_RE.fullmatch(value):
             raise RepositoryWorkspaceError("repository returned an invalid commit")
         return value

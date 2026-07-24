@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import shutil
 import subprocess
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -159,6 +163,98 @@ class FakeLocalProvider(FakeProvider):
     name = RepositoryProvider.LOCAL
 
 
+class RealGitBackend(FakeBackend):
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        self.commands.append(command)
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return ExecuteResponse(output=result.stdout + result.stderr, exit_code=result.returncode)
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        responses: list[FileDownloadResponse] = []
+        for path in paths:
+            relative = path.removeprefix("/workspace/")
+            responses.append(
+                FileDownloadResponse(path=path, content=(self.root / relative).read_bytes())
+            )
+        return responses
+
+
+class ExistingRepositoryProvider(FakeProvider):
+    def __init__(self, backend: RealGitBackend) -> None:
+        super().__init__()
+        self.sandbox = backend
+
+
+class FakeGitHubProxy:
+    def __init__(self, *, head_tree_sha: str, corrupt_commit: bool = False) -> None:
+        self.head_tree_sha = head_tree_sha
+        self.corrupt_commit = corrupt_commit
+        self.calls: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _commit_sha(body: dict[str, Any]) -> str:
+        def identity(label: str) -> str:
+            value = body[label]
+            parsed = datetime.fromisoformat(value["date"])
+            return (
+                f"{label} {value['name']} <{value['email']}> "
+                f"{int(parsed.timestamp())} {parsed.strftime('%z')}"
+            )
+
+        raw = (
+            f"tree {body['tree']}\n"
+            f"parent {body['parents'][0]}\n"
+            f"{identity('author')}\n"
+            f"{identity('committer')}\n"
+            f"\n{body['message']}"
+        ).encode()
+        prefix = f"commit {len(raw)}\0".encode()
+        return hashlib.sha1(prefix + raw, usedforsecurity=False).hexdigest()
+
+    def request(
+        self,
+        *,
+        tenant_id: str,
+        method: str,
+        endpoint: str,
+        body: object | None = None,
+    ) -> tuple[int, Any]:
+        assert tenant_id == "tenant-1"
+        call = {"method": method, "endpoint": endpoint, "body": body}
+        self.calls.append(call)
+        if endpoint.endswith("/git/blobs"):
+            assert isinstance(body, dict)
+            content = base64.b64decode(str(body["content"]), validate=True)
+            prefix = f"blob {len(content)}\0".encode()
+            sha = hashlib.sha1(prefix + content, usedforsecurity=False).hexdigest()
+            return 201, {"sha": sha}
+        if endpoint.endswith("/git/trees"):
+            return 201, {"sha": self.head_tree_sha}
+        if endpoint.endswith("/git/commits"):
+            assert isinstance(body, dict)
+            sha = self._commit_sha(body)
+            return 201, {"sha": ("f" * 40 if self.corrupt_commit else sha)}
+        if "/git/ref/heads/" in endpoint:
+            return 404, {"message": "Not Found"}
+        if endpoint.endswith("/git/refs"):
+            assert isinstance(body, dict)
+            return 201, {"object": {"sha": body["sha"]}}
+        if endpoint.endswith("/pulls"):
+            return 201, {"html_url": "https://github.com/acme/project/pull/9"}
+        raise AssertionError(f"unexpected GitHub request: {method} {endpoint}")
+
+
 def _service(tmp_path: Any) -> tuple[RepositoryWorkspaceService, FakeProvider]:
     provider = FakeProvider()
     service = RepositoryWorkspaceService(
@@ -189,6 +285,113 @@ def _workspace() -> RepositoryWorkspace:
         updated_at=timestamp,
         last_used_at=timestamp,
     )
+
+
+def _composio_publish_service(
+    tmp_path: Path,
+    *,
+    corrupt_commit: bool = False,
+) -> tuple[
+    RepositoryWorkspaceService,
+    ExistingRepositoryProvider,
+    FakeGitHubProxy,
+    bytes,
+    str,
+]:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/acme/project.git"],
+        cwd=checkout,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "OpenTulpa"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "opentulpa@localhost"],
+        cwd=checkout,
+        check=True,
+    )
+    (checkout / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "base"],
+        cwd=checkout,
+        check=True,
+    )
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=checkout,
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["git", "checkout", "-qb", "opentulpa/change"],
+        cwd=checkout,
+        check=True,
+    )
+    complete_content = ("complete README line\n" * 1400).encode()
+    (checkout / "README.md").write_bytes(complete_content)
+    subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "docs: replace the complete README",
+        ],
+        cwd=checkout,
+        check=True,
+    )
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=checkout,
+        text=True,
+    ).strip()
+    head_tree_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=checkout,
+        text=True,
+    ).strip()
+
+    backend = RealGitBackend(checkout)
+    provider = ExistingRepositoryProvider(backend)
+    proxy = FakeGitHubProxy(
+        head_tree_sha=head_tree_sha,
+        corrupt_commit=corrupt_commit,
+    )
+    store = RepositoryWorkspaceStore(tmp_path / "repositories.db")
+    now = utc_now()
+    workspace = RepositoryWorkspace(
+        id="repo-composio",
+        tenant_id="tenant-1",
+        repository_url="https://github.com/acme/project.git",
+        provider=RepositoryProvider.DAYTONA,
+        provider_workspace_id="sandbox-composio",
+        base_ref="main",
+        branch="opentulpa/change",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        status=RepositoryWorkspaceStatus.READY,
+        created_at=now,
+        updated_at=now,
+        last_used_at=now,
+    )
+    store.create(workspace)
+    store.bind(
+        tenant_id="tenant-1",
+        thread_id="thread-1",
+        workspace_id=workspace.id,
+        bound_at=now,
+    )
+    service = RepositoryWorkspaceService(
+        store=store,
+        providers=RepositoryProviderRegistry(providers=[provider]),
+        github_token_resolver=lambda tenant_id, scope: None,
+        github_api_proxy=proxy,
+    )
+    return service, provider, proxy, complete_content, head_sha
 
 
 @pytest.mark.asyncio
@@ -230,6 +433,55 @@ async def test_workspace_open_binds_thread_and_publishes_exact_commit(tmp_path: 
     assert result["pull_request_url"] == "https://github.com/acme/project/pull/7"
     assert provider.pushed == [(workspace.id, "github-secret")]
     assert "github-secret" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_composio_publishes_complete_verified_commit_without_git_token(
+    tmp_path: Path,
+) -> None:
+    service, provider, proxy, complete_content, head_sha = _composio_publish_service(tmp_path)
+
+    result = await service.publish(
+        tenant_id="tenant-1",
+        thread_id="thread-1",
+        workspace_id=None,
+        expected_head_sha=head_sha,
+        title="Complete README",
+        body="The full file was tested in the repository workspace.",
+        draft=True,
+    )
+
+    blob_call = next(call for call in proxy.calls if call["endpoint"].endswith("/git/blobs"))
+    assert isinstance(blob_call["body"], dict)
+    assert base64.b64decode(blob_call["body"]["content"], validate=True) == complete_content
+    assert len(complete_content) > 16_000
+    assert result["head_sha"] == head_sha
+    assert result["credential_source"] == "composio"
+    assert result["pull_request_url"] == "https://github.com/acme/project/pull/9"
+    assert provider.pushed == []
+
+
+@pytest.mark.asyncio
+async def test_composio_publish_fails_before_branch_when_commit_sha_changes(
+    tmp_path: Path,
+) -> None:
+    service, _, proxy, _, head_sha = _composio_publish_service(
+        tmp_path,
+        corrupt_commit=True,
+    )
+
+    with pytest.raises(RepositoryPublishError, match="approved commit"):
+        await service.publish(
+            tenant_id="tenant-1",
+            thread_id="thread-1",
+            workspace_id=None,
+            expected_head_sha=head_sha,
+            title="Unsafe",
+            body="",
+            draft=True,
+        )
+
+    assert not any(call["endpoint"].endswith("/git/refs") for call in proxy.calls)
 
 
 @pytest.mark.asyncio
@@ -454,7 +706,7 @@ def test_process_repository_backend_runs_git_without_host_credentials(
         "git add README.md && "
         "git -c user.name=OpenTulpa -c user.email=opentulpa@localhost "
         "commit -qm update && "
-        "printf '%s|%s' \"$(id -u)\" \"${OPENTULPA_SMOKE_SECRET-unset}\""
+        'printf \'%s|%s\' "$(id -u)" "${OPENTULPA_SMOKE_SECRET-unset}"'
     )
 
     assert result.exit_code == 0
@@ -468,9 +720,7 @@ def test_runtime_router_uses_active_thread_workspace(monkeypatch: pytest.MonkeyP
     fallback = FakeBackend()
     repositories = SimpleNamespace(
         backend_for_thread=lambda **kwargs: (
-            active
-            if kwargs == {"tenant_id": "tenant-1", "thread_id": "thread-1"}
-            else None
+            active if kwargs == {"tenant_id": "tenant-1", "thread_id": "thread-1"} else None
         )
     )
     router = RepositoryRoutingSandbox(repositories=repositories, fallback=fallback)

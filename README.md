@@ -110,9 +110,10 @@ and shell tools, runs tests, and commits on a branch. `repository_publish_pr` ap
 the repository, branch, exact commit SHA, and PR metadata; the trusted publisher pushes the
 existing commit, so source files never pass through model output or integration arguments.
 It works without sandbox credentials: local machines use the bundled OCI boundary and compatible
-Linux hosts such as Railway use a serialized unprivileged process sandbox. Paste
-`GITHUB_TOKEN=<fine-grained-token>` only for private checkout or PR publishing. Daytona remains an
-optional hosted provider for stronger isolation or workspaces that outlive the OpenTulpa volume.
+Linux hosts such as Railway use a serialized unprivileged process sandbox. An active Composio
+GitHub connection publishes the exact verified commit without exposing OAuth to the sandbox. Paste
+`GITHUB_TOKEN=<fine-grained-token>` only for private checkout or unsupported commit shapes. Daytona
+remains an optional hosted provider for stronger isolation or workspaces that outlive the volume.
 `/repo` opens or inspects a workspace in the TUI, and `/repos` lists them.
 
 In managed OCI mode the stable bootstrap derives the active release image and runs that

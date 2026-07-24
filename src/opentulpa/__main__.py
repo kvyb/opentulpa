@@ -82,6 +82,7 @@ from opentulpa.integrations.browser_use_cloud import (
     BrowserUseCloudSessionProvider,
 )
 from opentulpa.integrations.composio import ComposioService
+from opentulpa.integrations.composio_github import ComposioGitHubAPIProxy
 from opentulpa.integrations.content_fetch import (
     ContentFetchService,
     default_content_extractor,
@@ -292,12 +293,8 @@ def _build_evolution_client(
     project_root: Path,
     settings: Settings,
 ) -> EvolutionClient | None:
-    base_url = str(
-        os.environ.get("OPENTULPA_BOOTSTRAP_EVOLUTION_URL", "") or ""
-    ).strip()
-    token = str(
-        os.environ.get("OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN", "") or ""
-    ).strip()
+    base_url = str(os.environ.get("OPENTULPA_BOOTSTRAP_EVOLUTION_URL", "") or "").strip()
+    token = str(os.environ.get("OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN", "") or "").strip()
     if not settings.evolution_enabled or (not base_url and not token):
         return None
     if not base_url or not token:
@@ -375,17 +372,11 @@ def _capability_worker_host(project_root: Path) -> CapabilityWorkerClient | Subp
         "yes",
         "on",
     }
-    worker_url = str(
-        os.environ.get("OPENTULPA_BOOTSTRAP_CAPABILITY_WORKER_URL") or ""
-    ).strip()
-    worker_token = str(
-        os.environ.get("OPENTULPA_BOOTSTRAP_CAPABILITY_WORKER_TOKEN") or ""
-    ).strip()
+    worker_url = str(os.environ.get("OPENTULPA_BOOTSTRAP_CAPABILITY_WORKER_URL") or "").strip()
+    worker_token = str(os.environ.get("OPENTULPA_BOOTSTRAP_CAPABILITY_WORKER_TOKEN") or "").strip()
     if managed and release_mode == "production":
         if not worker_url or not worker_token:
-            raise RuntimeError(
-                "managed production requires the stable capability worker service"
-            )
+            raise RuntimeError("managed production requires the stable capability worker service")
         try:
             lease_epoch = int(os.environ.get("OPENTULPA_LEASE_EPOCH") or "0")
         except ValueError as exc:
@@ -683,6 +674,8 @@ def _build_release_control_service(
         ingress_handler=handle_ingress,
         event_handler=handle_event,
     )
+
+
 def _auto_configure_telegram_webhook(
     settings: Settings,
     *,
@@ -874,6 +867,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 )
                 model_cache[model_name] = model
             return model
+
         evolution = _build_evolution_client(
             project_root=project_root,
             settings=settings,
@@ -927,9 +921,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             )
 
         def repository_github_token(tenant_id: str, scope: str) -> str | None:
-            value = str(
-                os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-            ).strip()
+            value = str(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
             if value:
                 return value
             return resolve_vault_secret(
@@ -938,64 +930,6 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 capability_id="repository_github",
                 scope=scope,
             )
-
-        repository_policy = TenantContainerPolicy(
-            image=sandbox_image,
-            cpu_limit=settings.sandbox_cpu_limit,
-            memory_limit=settings.sandbox_memory_limit,
-            pid_limit=settings.sandbox_pid_limit,
-            timeout_seconds=max(600, settings.sandbox_timeout_seconds),
-            max_output_bytes=settings.sandbox_max_output_bytes,
-            network_enabled=True,
-        )
-        repository_store = RepositoryWorkspaceStore(
-            deepagents_root / "repository_workspaces.db"
-        )
-        repository_providers = RepositoryProviderRegistry(
-            providers=[
-                DaytonaRepositoryProvider(
-                    token_resolver=repository_daytona_token,
-                    api_url=settings.repository_sandbox_api_url,
-                    target=settings.repository_sandbox_target,
-                    snapshot=settings.repository_sandbox_snapshot,
-                ),
-                LocalRepositoryProvider(
-                    root=deepagents_root / "repository_workspaces",
-                    policy=repository_policy,
-                    container_cli=settings.sandbox_container_cli,
-                ),
-            ],
-            default=settings.repository_sandbox_provider,
-        )
-        repositories = RepositoryWorkspaceService(
-            store=repository_store,
-            providers=repository_providers,
-            github_token_resolver=repository_github_token,
-        )
-        fallback_execution = TenantSandboxBackend(
-            workspaces_root=_resolve_path(project_root, settings.deepagents_workspaces_root),
-            policy=repository_policy,
-            container_cli=settings.sandbox_container_cli,
-            persistent_execution_workspace=True,
-            execution_provider=sandbox_execution,
-        )
-        execution_backend = RepositoryRoutingSandbox(
-            repositories=repositories,
-            fallback=fallback_execution,
-            route_files=False,
-        )
-        fallback_workspace = TenantSandboxBackend(
-            workspaces_root=_resolve_path(project_root, settings.deepagents_workspaces_root),
-            policy=repository_policy,
-            container_cli=settings.sandbox_container_cli,
-            persistent_files=True,
-            execution_provider=sandbox_execution,
-        )
-        workspace_backend = RepositoryRoutingSandbox(
-            repositories=repositories,
-            fallback=fallback_workspace,
-            route_files=True,
-        )
 
         def composio_api_key_from_vault() -> str:
             handle = secret_vault_store.get_handle(
@@ -1038,6 +972,63 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         )
         intake_composio = TenantComposioIntakePort(provider=raw_composio)
 
+        repository_policy = TenantContainerPolicy(
+            image=sandbox_image,
+            cpu_limit=settings.sandbox_cpu_limit,
+            memory_limit=settings.sandbox_memory_limit,
+            pid_limit=settings.sandbox_pid_limit,
+            timeout_seconds=max(600, settings.sandbox_timeout_seconds),
+            max_output_bytes=settings.sandbox_max_output_bytes,
+            network_enabled=True,
+        )
+        repository_store = RepositoryWorkspaceStore(deepagents_root / "repository_workspaces.db")
+        repository_providers = RepositoryProviderRegistry(
+            providers=[
+                DaytonaRepositoryProvider(
+                    token_resolver=repository_daytona_token,
+                    api_url=settings.repository_sandbox_api_url,
+                    target=settings.repository_sandbox_target,
+                    snapshot=settings.repository_sandbox_snapshot,
+                ),
+                LocalRepositoryProvider(
+                    root=deepagents_root / "repository_workspaces",
+                    policy=repository_policy,
+                    container_cli=settings.sandbox_container_cli,
+                ),
+            ],
+            default=settings.repository_sandbox_provider,
+        )
+        repositories = RepositoryWorkspaceService(
+            store=repository_store,
+            providers=repository_providers,
+            github_token_resolver=repository_github_token,
+            github_api_proxy=ComposioGitHubAPIProxy(provider=raw_composio),
+        )
+        fallback_execution = TenantSandboxBackend(
+            workspaces_root=_resolve_path(project_root, settings.deepagents_workspaces_root),
+            policy=repository_policy,
+            container_cli=settings.sandbox_container_cli,
+            persistent_execution_workspace=True,
+            execution_provider=sandbox_execution,
+        )
+        execution_backend = RepositoryRoutingSandbox(
+            repositories=repositories,
+            fallback=fallback_execution,
+            route_files=False,
+        )
+        fallback_workspace = TenantSandboxBackend(
+            workspaces_root=_resolve_path(project_root, settings.deepagents_workspaces_root),
+            policy=repository_policy,
+            container_cli=settings.sandbox_container_cli,
+            persistent_files=True,
+            execution_provider=sandbox_execution,
+        )
+        workspace_backend = RepositoryRoutingSandbox(
+            repositories=repositories,
+            fallback=fallback_workspace,
+            route_files=True,
+        )
+
         seed_default_agent_spec_refs(
             agent_spec_store,
             tenant_id=owner_tenant_id,
@@ -1073,13 +1064,9 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 return {}
             tenant_label = tenant_namespace_label(tenant_id)
             managed_production = (
-                str(os.environ.get("OPENTULPA_MANAGED_RELEASE") or "")
-                .strip()
-                .casefold()
+                str(os.environ.get("OPENTULPA_MANAGED_RELEASE") or "").strip().casefold()
                 in {"1", "true", "yes", "on"}
-                and str(os.environ.get("OPENTULPA_RELEASE_MODE") or "")
-                .strip()
-                .casefold()
+                and str(os.environ.get("OPENTULPA_RELEASE_MODE") or "").strip().casefold()
                 == "production"
             )
             return {
@@ -1110,9 +1097,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         capabilities = CapabilityControlService(
             revisions=CapabilityRevisionStore(deepagents_root / "capabilities.db"),
             evaluator=BundledCapabilityEvaluator(),
-            workers=CapabilityWorkerManager(
-                _capability_worker_host(project_root)
-            ),
+            workers=CapabilityWorkerManager(_capability_worker_host(project_root)),
             tool_host=MCPToolRuntime(
                 broker=MCPToolBroker(
                     audit_sink=SQLiteMCPAuditSink(mcp_db_path),
@@ -1180,9 +1165,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         )
         schedules = ScheduleService(
             trigger_specs,
-            resolve_agent_spec=lambda tenant_id: resolve_agent_spec(
-                tenant_id, "routine"
-            ),
+            resolve_agent_spec=lambda tenant_id: resolve_agent_spec(tenant_id, "routine"),
             on_changed=trigger_dispatcher.upsert,
             on_deleted=lambda tenant_id, trigger_id: trigger_dispatcher.remove(
                 tenant_id=tenant_id,

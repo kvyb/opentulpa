@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import opentulpa.integrations.composio as composio_module
@@ -178,6 +179,45 @@ def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> N
 
     assert second is not first
     assert keys == ["first-composio-key", "rotated-composio-key"]
+
+
+def test_composio_proxy_uses_connected_account_without_exposing_headers(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def proxy(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            status=201,
+            data={"sha": "a" * 40},
+            headers={"authorization": "Bearer provider-secret"},
+        )
+
+    monkeypatch.setattr(
+        ComposioService,
+        "_sdk",
+        lambda self: SimpleNamespace(tools=SimpleNamespace(proxy=proxy)),
+    )
+    service = ComposioService(api_key="test-key")
+
+    result = service.proxy_tool(
+        endpoint="https://api.github.com/repos/acme/project/git/blobs",
+        method="POST",
+        connected_account_id="connection-1",
+        body={"content": "ZGF0YQ==", "encoding": "base64"},
+    )
+
+    assert result == {"status": 201, "data": {"sha": "a" * 40}}
+    assert calls == [
+        {
+            "endpoint": "https://api.github.com/repos/acme/project/git/blobs",
+            "method": "POST",
+            "body": {"content": "ZGF0YQ==", "encoding": "base64"},
+            "connected_account_id": "connection-1",
+        }
+    ]
+    assert "provider-secret" not in repr(result)
 
 
 def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> None:

@@ -104,9 +104,10 @@ restart. Then call integration_list, and use integration_connect to return the p
 for GitHub, Gmail, Slack, calendars, or another requested toolkit. After the owner authorizes it,
 verify with connection_list before using integration_action_search or integration_invoke. Do not ask
 for a GitHub personal token when a Composio GitHub OAuth connection can satisfy an ordinary API
-action. Repository checkout and publishing are the exception: if repository_open or
-repository_publish_pr reports missing GitHub access, ask for a fine-grained
-`GITHUB_TOKEN=<value>` limited to the target repository with Contents and Pull requests write.
+action. The trusted repository publisher also uses the active tenant-owned Composio GitHub
+connection automatically while preserving the exact approved sandbox commit. Ask for a fine-grained
+`GITHUB_TOKEN=<value>` only when there is no active Composio GitHub connection, a private checkout
+needs Git credentials, or the publisher explicitly reports a commit shape that requires direct Git.
 
 Use capability tools for interfaces and workers already bundled with the active release. A
 typical Telegram setup is: list safe secret handles, seed bundled capabilities if necessary,
