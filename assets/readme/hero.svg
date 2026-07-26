@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="240" viewBox="0 0 1200 240"
+     role="img" aria-labelledby="title desc">
+  <title id="title">OpenTulpa, the self-evolving agent</title>
+  <desc id="desc">OpenTulpa with a ghost emoji and the phrase The self-evolving agent.</desc>
+
+  <rect width="1200" height="240" rx="24" fill="#080A0D"/>
+  <rect x=".5" y=".5" width="1199" height="239" rx="23.5" fill="none" stroke="#292E35"/>
+
+  <g text-anchor="middle">
+    <text x="555" y="116"
+          fill="#F6F4EE" font-size="78" font-weight="800" letter-spacing="-2"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+      OpenTulpa
+    </text>
+    <text x="805" y="116"
+          font-size="68"
+          font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif">👻</text>
+    <text x="600" y="169"
+          fill="#C9FA67" font-size="29" font-weight="600" letter-spacing=".2"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+      The self-evolving agent
+    </text>
+  </g>
+</svg>
