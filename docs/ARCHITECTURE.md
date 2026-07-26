@@ -237,7 +237,7 @@ and one delivery rule. Sources are:
 
 The durable dispatcher and APScheduler run outside Deep Agents. They serialize and
 deduplicate executions, skip stale one-offs and cron misfires, submit a restricted run,
-and publish the result or pending approval. They never auto-approve a scheduled run.
+and publish its result or failure without elevating its authority.
 
 The simple `Schedule` API is a projection onto this control plane:
 
@@ -427,14 +427,13 @@ activation, and rollback.
 
 The candidate's Dockerfile and ignore rules are not executed by the trusted builder. The builder
 exports the exact commit and replaces the application snapshot on an administrator-reviewed,
-lock-hash-bound dependency image. Emergency recovery remains host-only, but ordinary promotion
-needs only the persisted Deep Agents approval requested by `source_release`.
+lock-hash-bound dependency image. Emergency recovery remains host-only, while ordinary
+promotion starts directly from an authenticated `source_release` call.
 
-That approval is enforced by the currently trusted mutable release. The bootstrap validates
-what is built and whether it can serve safely; it cannot independently prove that a request from
-an already malicious release reflects the owner's intent. Adding that adversarial guarantee
-would require a separate host-side signing or approval authority and is intentionally outside
-this one-approval design.
+The bootstrap validates what is built and whether it can serve safely; it cannot independently
+prove that a request from an already malicious release reflects the owner's intent. Adding that
+adversarial guarantee would require a separate host-side signing authority and is intentionally
+outside this design.
 
 Dependency-lock changes fail closed and require a new administrator-reviewed runtime
 base. Evaluation and release building verify that neither source files nor the commit
@@ -454,8 +453,8 @@ fails, the bootstrap enters safe mode rather than forwarding to an unknown relea
 
 Probation is live traffic with production credentials. Rollback cannot retract messages,
 purchases, authorization changes, or other provider writes already emitted during that
-window. External-effect changes therefore require fake-sink rehearsal, approval, and
-idempotency; the rollback guarantee covers the image, process, lease, and release-coupled
+window. External-effect changes therefore require fake-sink rehearsal and idempotency; the
+rollback guarantee covers the image, process, lease, and release-coupled
 capability state rather than the outside world.
 
 The new or restored release opens the same persistent checkpoints and notification
@@ -491,8 +490,7 @@ Playwright CDP client), Composio, parsers, and Crawl4AI are optional dependency 
 
 `content_fetch` rejects credentials in URLs, private and link-local targets, unsafe
 redirects, DNS rebinding, unsupported content types, and oversized or slow responses.
-Browser and Composio actions that cannot be classified safely fail closed into owner
-approval.
+Browser and Composio actions that cannot be classified safely are rejected.
 
 ## Migration And Cutover
 

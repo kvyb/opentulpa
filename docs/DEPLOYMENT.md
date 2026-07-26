@@ -217,7 +217,7 @@ separation and writability while starting.
 
 On an empty state store, the bootstrap builds the canonical checkout as the first
 content-addressed release, starts it with ingress disabled, verifies production health,
-and only then accepts public traffic. Subsequent approved candidates follow:
+and only then accepts public traffic. Subsequent accepted candidates follow:
 
 ```text
 queue -> prepare -> isolated staging -> drain old release -> start new release
@@ -234,7 +234,7 @@ gateway enters safe mode rather than forwarding to an unverified process.
 Probation serves live traffic with production credentials. Automatic rollback restores
 the release process and release-coupled capability state, but it cannot retract external
 messages, purchases, authorization changes, or provider writes. Rehearse changes near
-external effects with fake sinks and retain normal approval and idempotency controls.
+external effects with fake sinks and retain normal authorization and idempotency controls.
 
 Recovery is host-shell only. There is intentionally no browser console: `/recovery` and
 all children are reserved by the stable gateway and always return `404` instead of being
@@ -257,13 +257,12 @@ opentulpa-recovery safe-mode
 The CLI uses `httpx` with redirects, proxy-environment inheritance, and browser headers
 disabled.
 
-Ordinary source promotion has one persisted Deep Agents approval in the owner chat. That
-approval is application policy, not a cryptographic defense against an already malicious
-active release. The stable bootstrap independently binds and verifies the source commit,
-fixed evaluator evidence, artifact digest, staging health, and rollback path, but does not
-prove owner intent. Deployments that require a hostile-release threat model need a separate
-host-controlled signing or approval authority, which is intentionally not part of this
-minimal mode.
+Ordinary source promotion starts directly from the authenticated owner run. The stable
+bootstrap independently binds and verifies the source commit, fixed evaluator evidence,
+artifact digest, staging health, and rollback path, but does not prove owner intent if the
+active release is already malicious. Deployments that require that hostile-release threat
+model need a separate host-controlled signing authority, which is intentionally not part
+of this minimal mode.
 
 ### 5. Back up the right state
 
@@ -288,9 +287,8 @@ To let the running agent establish Telegram itself, do **not** set a host
 3. Ask OpenTulpa to enable Telegram and paste the BotFather token in that message.
 4. Credential ingress encrypts the value and replaces it with a `secret://` handle
    before checkpointing.
-5. The agent seeds the Telegram manifest, runs its deterministic tests, and requests
-   activation approval.
-6. Approve the exact capability revision and secret-handle binding.
+5. The agent seeds the Telegram manifest and runs its deterministic tests.
+6. The agent activates the exact passing capability revision and secret-handle binding.
 7. In Telegram, send `/start <code>`. The default one-time code is the final eight
    characters of the bot token; `OPENTULPA_TELEGRAM_PAIRING_CODE` can override it.
 8. The worker begins Telegram long polling and uses only scoped Agent API, file,
@@ -458,10 +456,10 @@ For the single production cutover:
 2. take a complete product-data and source-lineage backup;
 3. run migration and retain its count/checksum report;
 4. deploy the V2 API and coordinated clients;
-5. smoke test web, Telegram, intake, schedules, approvals, and optional adapters;
+5. smoke test web, Telegram, intake, schedules, destructive-shell approvals, and optional adapters;
 6. resume consumers and triggers.
 
-Cross-tenant access, duplicate external effects, migration loss, or an approval that
+Cross-tenant access, duplicate external effects, migration loss, or a destructive-shell approval that
 cannot resume are immediate rollback conditions. Migration rollback restores the old
 image/client and pre-cutover data snapshot. Managed candidate rollback is a separate
 release operation and does not reverse product-data migration.

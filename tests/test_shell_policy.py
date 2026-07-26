@@ -26,6 +26,8 @@ from opentulpa.deep_agent.shell_policy import (
         "sudo -u root rm -rf build",
         "env -i rm -rf build",
         "exec -a cleanup rm -rf build",
+        "timeout 10 rm -rf build",
+        "nice -n 5 rm -rf build",
     ],
 )
 def test_recursive_forced_removal_requires_approval(command: str) -> None:

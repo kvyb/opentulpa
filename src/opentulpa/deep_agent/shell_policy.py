@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import PurePosixPath
 
@@ -21,6 +22,7 @@ _DYNAMIC_WORD_NODES = frozenset(
 )
 _SHELL_COMMANDS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 _SIMPLE_WRAPPERS = frozenset({"builtin", "command", "exec", "nohup"})
+_LITERAL_DATA_COMMANDS = frozenset({"echo", "grep", "printf", "rg"})
 _RM_SHORT_OPTIONS = frozenset({"d", "f", "i", "I", "r", "R", "v", "W"})
 _ENV_SHORT_OPTIONS = frozenset({"0", "i", "v"})
 _ENV_SHORT_OPTIONS_WITH_VALUE = frozenset({"C", "S", "u"})
@@ -61,24 +63,21 @@ _SUDO_LONG_OPTIONS_WITH_VALUE = frozenset(
         "user",
     }
 )
-_XARGS_OPTIONS_WITH_VALUE = frozenset(
+_XARGS_SHORT_OPTIONS = frozenset({"0", "o", "p", "r", "t", "x"})
+_XARGS_SHORT_OPTIONS_WITH_VALUE = frozenset({"E", "I", "L", "P", "a", "d", "n", "s"})
+_XARGS_LONG_OPTIONS = frozenset(
+    {"exit", "interactive", "no-run-if-empty", "null", "open-tty", "verbose"}
+)
+_XARGS_LONG_OPTIONS_WITH_VALUE = frozenset(
     {
-        "-a",
-        "-d",
-        "-E",
-        "-I",
-        "-L",
-        "-n",
-        "-P",
-        "-s",
-        "--arg-file",
-        "--delimiter",
-        "--eof",
-        "--max-args",
-        "--max-chars",
-        "--max-lines",
-        "--max-procs",
-        "--replace",
+        "arg-file",
+        "delimiter",
+        "eof",
+        "max-args",
+        "max-chars",
+        "max-lines",
+        "max-procs",
+        "replace",
     }
 )
 
@@ -143,13 +142,15 @@ def _classify_words(
         return _classify_shell_script(arguments)
     if executable == "eval":
         return _classify_literal_script(arguments)
-    if executable in {"xargs", "parallel"}:
+    if executable == "xargs":
         return _classify_xargs(arguments)
     if executable == "find":
         return _classify_find(arguments)
     if executable == "busybox":
         return _classify_wrapped(executable, arguments)
-    return ShellCommandDisposition.ALLOW
+    if executable in _LITERAL_DATA_COMMANDS:
+        return ShellCommandDisposition.ALLOW
+    return _classify_embedded_rm(arguments)
 
 
 def _classify_rm_arguments(arguments: list[str | None]) -> ShellCommandDisposition:
@@ -182,15 +183,16 @@ def _classify_wrapped(
     if executable == "command" and any(argument in {"-V", "-v"} for argument in remaining):
         return ShellCommandDisposition.ALLOW
     if executable == "exec":
-        remaining = _consume_options(
+        parsed = _consume_options(
             remaining,
             short_options=frozenset({"c", "l"}),
             short_options_with_value=frozenset({"a"}),
             long_options=frozenset(),
             long_options_with_value=frozenset(),
         )
-        if remaining is None:
+        if parsed is None:
             return ShellCommandDisposition.REJECT
+        remaining = parsed
     else:
         while remaining and remaining[0] is not None and remaining[0].startswith("-"):
             remaining.pop(0)
@@ -241,9 +243,12 @@ def _classify_shell_script(arguments: list[str | None]) -> ShellCommandDispositi
             and argument.startswith("-")
             and "c" in argument[1:]
         ):
-            if index + 1 >= len(arguments) or arguments[index + 1] is None:
+            if index + 1 >= len(arguments):
                 return ShellCommandDisposition.REJECT
-            return classify_shell_command(arguments[index + 1])
+            script = arguments[index + 1]
+            if script is None:
+                return ShellCommandDisposition.REJECT
+            return classify_shell_command(script)
     literal_arguments = [argument for argument in arguments if argument is not None]
     script_paths = [argument for argument in literal_arguments if not argument.startswith("-")]
     if any(path not in {"-", "/dev/stdin", "/proc/self/fd/0"} for path in script_paths):
@@ -310,26 +315,21 @@ def _consume_options(
 
 
 def _classify_xargs(arguments: list[str | None]) -> ShellCommandDisposition:
-    index = 0
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument is None:
-            return ShellCommandDisposition.REJECT
-        if argument == "--":
-            index += 1
-            break
-        option = argument.split("=", 1)[0]
-        if not argument.startswith("-"):
-            break
-        index += 1
-        if option in _XARGS_OPTIONS_WITH_VALUE and "=" not in argument:
-            index += 1
-    if index >= len(arguments):
+    remaining = _consume_options(
+        arguments,
+        short_options=_XARGS_SHORT_OPTIONS,
+        short_options_with_value=_XARGS_SHORT_OPTIONS_WITH_VALUE,
+        long_options=_XARGS_LONG_OPTIONS,
+        long_options_with_value=_XARGS_LONG_OPTIONS_WITH_VALUE,
+    )
+    if remaining is None:
+        return ShellCommandDisposition.REJECT
+    if not remaining:
         return ShellCommandDisposition.ALLOW
-    name = arguments[index]
+    name = remaining.pop(0)
     if name is None:
         return ShellCommandDisposition.REJECT
-    return _classify_words(name, arguments[index + 1 :])
+    return _classify_words(name, remaining)
 
 
 def _classify_find(arguments: list[str | None]) -> ShellCommandDisposition:
@@ -353,6 +353,14 @@ def _classify_find(arguments: list[str | None]) -> ShellCommandDisposition:
         if current is ShellCommandDisposition.REQUIRE_APPROVAL:
             disposition = current
     return disposition
+
+
+def _classify_embedded_rm(arguments: list[str | None]) -> ShellCommandDisposition:
+    for index, argument in enumerate(arguments):
+        if argument is None or PurePosixPath(argument).name != "rm":
+            continue
+        return _classify_rm_arguments(arguments[index + 1 :])
+    return ShellCommandDisposition.ALLOW
 
 
 def _literal_word(node: Node, source: bytes) -> str | None:
@@ -399,7 +407,7 @@ def _remove_line_continuations(command: str) -> str:
     return "".join(output)
 
 
-def _walk(node: Node):
+def _walk(node: Node) -> Iterator[Node]:
     yield node
     for child in node.children:
         yield from _walk(child)

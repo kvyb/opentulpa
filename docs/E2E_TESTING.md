@@ -17,12 +17,12 @@ git diff --check
 The suite covers:
 
 - Deep Agent compilation, new checkpoints, memory/skills, ordered streaming, and
-  approval approve/edit/reject after restart;
+  destructive-shell approval approve/edit/reject after restart;
 - generated tool schemas, hidden context, ownership, effect policy, idempotency,
   direct-service invocation, and sanitized errors;
 - tenant sandbox mounts, paths, network, limits, and secret absence;
 - AgentSpec and TriggerSpec revisions, model/tool policy, event authentication,
-  schedules, timezones, misfires, duplicate dispatch, and paused approvals;
+  schedules, timezones, misfires, duplicate dispatch, and restricted execution;
 - intake draft revision/token conflicts, atomic activation, deterministic decisions,
   send-once delivery, sink retry, cursor handling, and recovery;
 - jobs, file ownership, integration ownership, SSRF protection, browser sessions,
@@ -47,11 +47,12 @@ Use a copy of representative legacy data:
    routines, memories, and user skills against the report.
 6. Confirm invalid routines and setup rows are reported and disabled, not guessed.
 7. Start the V2 application against the migrated copy.
-8. Restart it and verify approvals, jobs, specs, triggers, memory, skills, and workspaces.
+8. Restart it and verify destructive-shell approvals, jobs, specs, triggers, memory,
+   skills, and workspaces.
 9. Confirm no fake sink received duplicate writes or sends.
 
 Any product-data loss, unexpected checksum change, cross-tenant access, duplicate
-external effect, or non-resumable approval fails the rehearsal.
+external effect, or non-resumable destructive-shell approval fails the rehearsal.
 
 ## Universal Interface Rehearsal
 
@@ -87,9 +88,9 @@ blocked so only one consumer owns the bot.
 5. Restart before a fire and prove it still executes once.
 6. Replay the same source event ID and prove it does not execute twice.
 7. Miss a one-off and a stale cron fire and prove both are skipped.
-8. Make the run request approval and prove the dispatcher pauses rather than
-   auto-approving.
-9. Resume through web and Telegram and verify one terminal notification.
+8. Invoke an authorized effect tool and prove the dispatcher completes without requesting
+   per-call approval.
+9. Verify web and Telegram receive one terminal notification.
 
 Also exercise `/v2/schedules` to prove its reminder and agent-job records are projections
 over the same TriggerSpec store rather than a second scheduler database.
@@ -112,7 +113,7 @@ credentials out of the evaluator and candidate environment.
    worktree, can change the requested source, and resumes it on the next chat turn.
 7. Run tests in the source shell, inspect a redacted `trace_get`, and iterate after owner
    feedback without creating another agent run loop.
-8. Call `source_release` and approve its one persisted Deep Agents interrupt.
+8. Call `source_release` and verify it starts without a user approval interrupt.
 9. Verify fixed public, security, and kernel-contract evaluation run without network and
    are bound to the same source commit, lock hash, evaluator fingerprint, and OCI digest.
 10. Observe staging, old-release drain, cutover, health checks, and probation. Verify the
@@ -132,7 +133,7 @@ Run separate candidates or fake-host injections for:
 - probation failure;
 - bootstrap restart at every persisted activation phase;
 - previous image missing during rollback;
-- duplicate approval and promotion requests;
+- duplicate destructive-shell approval and promotion requests;
 - candidate dependency-lock change;
 - candidate attempt to commit a secret, symlink, traversal path, or special file;
 - binary, secret-bearing, private-path, or oversized contribution patch.
@@ -157,9 +158,9 @@ Expected outcomes:
 4. Verify the source shell can fetch a public HTTPS URL but cannot read production data,
    credentials, Git metadata, bootstrap state, host paths, or the container socket.
    Verify the fixed evaluator remains offline.
-5. Approve `source_release` once in the originating web or Telegram conversation.
+5. Call `source_release` in the originating web or Telegram conversation.
 6. Verify fixed evaluation commits and builds the exact tested bytes and that bootstrap
-   stages, drains, cuts over, and starts probation without a second CLI approval.
+   stages, drains, cuts over, and starts probation without a CLI approval.
 7. Inject a startup or probation failure and verify automatic previous-image rollback.
 8. Verify the original conversation receives the release or rollback outcome and the
    agent can explain it using durable traces after restart.
@@ -177,13 +178,13 @@ Before resuming production consumers, verify with dedicated accounts and reversi
 actions:
 
 - `/healthz` and `/agent/healthz` return success;
-- web streams ordered events and restores pending approvals after refresh;
+- web streams ordered events and restores pending destructive-shell approvals after refresh;
 - Telegram owner chat and attachments use the expected tenant and thread;
-- an approval can be approved, edited, and rejected from web and Telegram;
+- an `rm -rf` approval can be approved, edited, and rejected from web and Telegram;
 - one intake reply and one booking reach the intended sink exactly once;
 - one reminder and one restricted AgentSpec trigger execute and notify the owner;
-- Composio connection ownership and a risky invocation require approval;
-- a risky browser submission requires approval;
+- Composio connection ownership and a risky invocation execute without approval;
+- a risky browser submission executes without approval;
 - tenant workspace data persists after release replacement and is invisible to another
   tenant;
 - Langfuse contains corresponding run/model/tool traces without secrets;

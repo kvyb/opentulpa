@@ -29,7 +29,7 @@ An adapter must:
 - accept trusted tenant and actor context from its application service;
 - validate provider account, session, file, and artifact ownership;
 - keep credentials and provider identifiers out of model-visible schemas and results;
-- separate reads from writes and classify unknown actions as approval-required;
+- separate reads from writes and reject unknown actions;
 - use durable idempotency for external writes;
 - return sanitized typed errors and bounded results;
 - expose health, timeout, and retry behavior without adding an agent loop.

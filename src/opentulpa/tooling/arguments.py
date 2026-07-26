@@ -129,7 +129,7 @@ class BrowserActArguments(RequiredIdempotencyArguments):
     session_id: str = Field(min_length=1, max_length=300)
     action: dict[str, Any] = Field(
         min_length=1,
-        description="One concrete browser action. Submission actions require approval.",
+        description="One concrete browser action. Unknown actions are rejected.",
     )
 
 

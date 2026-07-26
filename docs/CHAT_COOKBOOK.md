@@ -1,7 +1,7 @@
 # Prompt Cookbook
 
 OpenTulpa works best when a request says what should change, what evidence proves it,
-what may run automatically, and what still needs approval. The examples below match
+what may run automatically, and when destructive shell work needs approval. The examples below match
 the current fixed/mutable architecture.
 
 ## Set A Durable Persona
@@ -31,8 +31,8 @@ Start without a host `TELEGRAM_BOT_TOKEN`, then write in the local OpenTulpa TUI
 
 > Enable Telegram as another private interface to this OpenTulpa. Here is the BotFather
 > token: `<token>`. Use the existing tenant and agent context. Test the bundled
-> capability first, show me the activation approval before starting it, and then tell
-> me how to form the one-time `/start` pairing command without revealing the token.
+> capability first, activate that exact passing revision, and then tell me how to form
+> the one-time `/start` pairing command without revealing the token.
 
 The token is encrypted before checkpointing and replaced by an opaque secret handle.
 The agent should seed, test, and activate the Telegram capability, not write a second
@@ -42,20 +42,21 @@ with `/start` followed by the final eight characters of the bot token.
 ### Change Telegram behavior
 
 > Improve the Telegram interface so long answers are split cleanly at paragraph
-> boundaries and approvals remain usable after a worker restart. Use your source shell,
-> add regression tests, show me the test result, and ask before releasing it.
+> boundaries and destructive-shell approvals remain usable after a worker restart. Use
+> your source shell, add regression tests, show me the test result, and release it when
+> the checks pass.
 
 The main agent receives a detached source worktree, not the serving checkout. It can
-edit and test there over multiple turns. After one `source_release` approval, managed
-mode stages and restarts the release; on failure it restores the prior image and reports
-the result in the same conversation.
+edit and test there over multiple turns. `source_release` uses a restart-safe internal
+handoff while managed mode stages and restarts the release; on failure it restores the
+prior image and reports the result in the same conversation.
 
 ### Add another interface
 
 > Add a minimal Slack interface capability. It must submit and resume work through the
 > universal Agent API, use a scoped capability credential, store provider secrets as
 > handles, consume durable notifications, and keep Slack-specific state outside agent
-> checkpoints. Add deterministic tests and ask me before releasing it.
+> checkpoints. Add deterministic tests and release it when they pass.
 
 An interface is transport and presentation. It must not add its own model loop,
 planner, memory store, or untyped tool gateway.
@@ -65,7 +66,7 @@ planner, memory store, or untyped tool gateway.
 ### Request a focused improvement
 
 > Add a compact run-history view to the bundled terminal UI. Keep the Agent API unchanged,
-> add tests for refresh and pending approvals, use `trace_get` to inspect a failed test,
+> add tests for refresh and pending destructive-shell approvals, use `trace_get` to inspect a failed test,
 > and show me the result before calling `source_release`.
 
 ### Respect the stable boundary
@@ -105,12 +106,11 @@ upstream credential or open a pull request by itself.
 
 > For the background run that terminated without a completed response, use your source
 > shell to add the smallest observable fix and a regression test. Run it, explain the
-> evidence, ask for my feedback, and request release approval only when it passes.
+> evidence, ask for my feedback, and release it when it passes.
 
 Trace reads are tenant-scoped, bounded, and redacted. They expose enough model/tool
 activity to debug a concrete run, but they do not generate held-out tasks or prove that
-a change is an improvement. Fixed evaluation and one explicit release approval remain
-outside the editable source session.
+a change is an improvement. Fixed evaluation remains outside the editable source session.
 
 ## Configure Background Work
 
@@ -124,8 +124,7 @@ This uses the simple `Schedule` projection: `At -> Reminder`.
 ### Recurring agent job
 
 > Every weekday at 08:00 Europe/Moscow, use the routine agent to summarize new items in
-> this workspace. Send a notification only after the run finishes. Never auto-approve
-> an external send.
+> this workspace. Send a notification only after the run finishes.
 
 This uses `Cron -> AgentJob` with the routine AgentSpec.
 
@@ -184,14 +183,14 @@ and content-type limits. Crawl4AI is an optional extractor, not required for thi
 ### Browser session
 
 > Start a browser session limited to `example.com`, inspect the form, and draft the
-> values you would enter. Do not submit until I approve the browser action.
+> values you would enter. Do not submit it in this turn.
 
 Browser tools require `BROWSER_USE_API_KEY` and always use Browser Use Cloud. Playwright
 is only the CDP control client; no Chromium process or fallback browser runs on the
 OpenTulpa host. Explicit allowed domains and direct private/link-local rejection apply
 before navigation. Browser Use Cloud owns target-network isolation, so OpenTulpa cannot
-DNS-pin Chromium in the vendor environment. Submission and unknown actions fail closed
-into approval.
+DNS-pin Chromium in the vendor environment. Unknown actions fail closed instead of
+executing.
 
 ## Integrations
 
@@ -206,11 +205,11 @@ into approval.
 ### Draft before sending
 
 > Find the latest qualified lead, draft a follow-up in my tone, and show it to me. Do
-> not send until I approve the exact external action.
+> not send it in this turn.
 
 Composio is optional. Its key is encrypted before the model sees the message and is
 hot-loaded without restarting the runtime. Provider accounts remain tenant-owned,
-external writes require idempotency, and unclassified actions require approval.
+external writes require idempotency, and the agent executes only the requested action.
 
 ## Intake
 
@@ -238,7 +237,7 @@ Weak:
 Better:
 
 > In a source candidate, make Telegram split messages at paragraph boundaries, retain
-> approval buttons across worker restart, and add tests for both. Show the evaluated
+> destructive-shell approval buttons across worker restart, and add tests for both. Show the evaluated
 > patch before promotion.
 
 Weak:
@@ -257,5 +256,5 @@ Weak:
 
 Better:
 
-> Explain the minimum capability, tool, secret scope, network destination, and approval
-> policy required. Test that bounded revision before asking me to activate it.
+> Explain the minimum capability, tool, secret scope, network destination, and execution
+> policy required. Test that bounded revision before activating it.
