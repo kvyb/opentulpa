@@ -12,6 +12,8 @@ from opentulpa.deep_agent.shell_policy import (
     "command",
     [
         "rm -rf build",
+        'rm -rf "$TARGET"',
+        'rm "$TARGET" -rf',
         "rm -fr build",
         "rm -r -f build",
         "/bin/rm --recursive --force build",

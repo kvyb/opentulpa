@@ -156,9 +156,11 @@ def _classify_words(
 def _classify_rm_arguments(arguments: list[str | None]) -> ShellCommandDisposition:
     recursive = False
     force = False
+    ambiguous_option = False
     for argument in arguments:
         if argument is None:
-            return ShellCommandDisposition.REJECT
+            ambiguous_option = True
+            continue
         if argument == "--":
             break
         if len(argument) > 2 and "--recursive".startswith(argument):
@@ -172,6 +174,8 @@ def _classify_rm_arguments(arguments: list[str | None]) -> ShellCommandDispositi
                 force = force or "f" in flags
     if recursive and force:
         return ShellCommandDisposition.REQUIRE_APPROVAL
+    if ambiguous_option:
+        return ShellCommandDisposition.REJECT
     return ShellCommandDisposition.ALLOW
 
 
