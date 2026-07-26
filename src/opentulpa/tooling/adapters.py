@@ -462,6 +462,8 @@ def _description(spec: ToolSpec) -> str:
     action = spec.name.replace("_", " ")
     return (
         f"{action.capitalize()} for the authenticated OpenTulpa tenant. "
+        f"Effect: {spec.effect.value}; approval: {spec.approval.value}; "
+        f"execution: {spec.execution.value}. "
         "Resource ownership is always resolved from trusted run context."
     )
 

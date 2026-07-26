@@ -125,6 +125,10 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     for tool in tools:
         schema = tool.tool_call_schema.model_json_schema()
         properties = schema.get("properties", {})
+        spec = TOOL_SPEC_BY_NAME[tool.name]
+        assert f"Effect: {spec.effect.value}" in tool.description
+        assert f"approval: {spec.approval.value}" in tool.description
+        assert f"execution: {spec.execution.value}" in tool.description
         assert "runtime" not in properties
         assert "context" not in properties
         assert "tenant_id" not in properties
