@@ -1,86 +1,53 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-label="OpenTulpa hero">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0d1117"/>
-      <stop offset="0.55" stop-color="#101826"/>
-      <stop offset="1" stop-color="#13231f"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#58e6c9"/>
-      <stop offset="1" stop-color="#6aa9ff"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.78" cy="0.3" r="0.6">
-      <stop offset="0" stop-color="#58e6c9" stop-opacity="0.16"/>
-      <stop offset="1" stop-color="#58e6c9" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+  <title id="title">OpenTulpa</title>
+  <desc id="desc">An original ASCII ghost mascot floats beside the OpenTulpa name and a terminal transcript showing inspect, edit, test, and owner-approved release.</desc>
 
-  <rect width="1200" height="360" rx="18" fill="url(#bg)"/>
-  <rect width="1200" height="360" rx="18" fill="url(#glow)"/>
-  <rect x="1" y="1" width="1198" height="358" rx="17" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <rect width="1200" height="400" fill="#080b0a"/>
+  <path d="M0 36H1200" stroke="#1d2822" stroke-width="2"/>
 
-  <!-- Title -->
-  <text x="64" y="112" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="56" font-weight="700" fill="#f2f5f7" letter-spacing="0.5">OpenTulpa</text>
-  <rect x="64" y="132" width="300" height="4" rx="2" fill="url(#accent)"/>
+  <!-- Original terminal ghost: the spirit living in the owner's machine. -->
+  <g id="ghost" transform="translate(74 52)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="29" font-weight="700">
+    <text x="0" y="30" fill="#34483d">01</text>
+    <text x="0" y="72" fill="#34483d">02</text>
+    <text x="0" y="114" fill="#34483d">03</text>
+    <text x="0" y="156" fill="#34483d">04</text>
+    <text x="0" y="198" fill="#34483d">05</text>
+    <text x="0" y="240" fill="#34483d">06</text>
 
-  <!-- Tagline -->
-  <text x="64" y="172" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="20" fill="#aab4bf">A small, self-hosted agent operator that can inspect, edit,</text>
-  <text x="64" y="198" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="20" fill="#aab4bf">test, and safely replace its own code.</text>
-
-  <!-- Chips -->
-  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">
-    <rect x="64" y="228" width="132" height="34" rx="17" fill="#58e6c9" fill-opacity="0.10" stroke="#58e6c9" stroke-opacity="0.5"/>
-    <text x="130" y="250" text-anchor="middle" fill="#58e6c9">typed tools</text>
-    <rect x="210" y="228" width="158" height="34" rx="17" fill="#6aa9ff" fill-opacity="0.10" stroke="#6aa9ff" stroke-opacity="0.5"/>
-    <text x="289" y="250" text-anchor="middle" fill="#6aa9ff">durable triggers</text>
-    <rect x="382" y="228" width="168" height="34" rx="17" fill="#c792ea" fill-opacity="0.10" stroke="#c792ea" stroke-opacity="0.5"/>
-    <text x="466" y="250" text-anchor="middle" fill="#c792ea">rollback boundary</text>
+    <g fill="#b8ffce">
+      <text x="58" y="30" xml:space="preserve">      .----.</text>
+      <text x="58" y="72" xml:space="preserve">   .-'      `-.</text>
+      <text x="58" y="114" xml:space="preserve">  /   (o  o)   \</text>
+      <text x="58" y="156" xml:space="preserve"> |      ^       |</text>
+      <text x="58" y="198" xml:space="preserve"> |   &lt;edit/&gt;    |</text>
+      <text x="58" y="240" xml:space="preserve">  `._/\/\_/\/\_.'</text>
+    </g>
+    <text x="59" y="286" fill="#8aa092" font-size="19">// friendly haunt · owner controlled</text>
   </g>
 
-  <!-- Architecture diagram -->
-  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
-    <!-- interfaces -->
-    <g font-weight="600">
-      <rect x="640" y="72" width="120" height="40" rx="10" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.18"/>
-      <text x="700" y="97" text-anchor="middle" fill="#dfe6ec">TUI</text>
-      <rect x="640" y="126" width="120" height="40" rx="10" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.18"/>
-      <text x="700" y="151" text-anchor="middle" fill="#dfe6ec">Telegram</text>
-      <rect x="640" y="180" width="120" height="40" rx="10" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.18"/>
-      <text x="700" y="205" text-anchor="middle" fill="#dfe6ec">Triggers</text>
-    </g>
-    <!-- arrows -->
-    <g stroke="#58e6c9" stroke-opacity="0.65" stroke-width="2" fill="none">
-      <path d="M 760 92 C 800 92 800 130 842 142"/>
-      <path d="M 760 146 L 842 146"/>
-      <path d="M 760 200 C 800 200 800 162 842 150"/>
-    </g>
-    <g fill="#58e6c9" fill-opacity="0.8">
-      <path d="M 842 137 l 10 5 -10 5 z"/>
-      <path d="M 842 141 l 10 5 -10 5 z"/>
-      <path d="M 842 145 l 10 5 -10 5 z"/>
-    </g>
-    <!-- agent api -->
-    <rect x="856" y="112" width="150" height="68" rx="12" fill="#58e6c9" fill-opacity="0.12" stroke="#58e6c9" stroke-opacity="0.6"/>
-    <text x="931" y="142" text-anchor="middle" font-size="16" font-weight="700" fill="#7df0d8">Agent API</text>
-    <text x="931" y="164" text-anchor="middle" font-size="12" fill="#aab4bf">tenant-scoped</text>
-    <!-- loop -->
-    <g stroke="#6aa9ff" stroke-opacity="0.7" stroke-width="2" fill="none">
-      <path d="M 1006 130 C 1060 130 1078 110 1078 146 C 1078 182 1060 162 1006 162"/>
-    </g>
-    <text x="1092" y="150" font-size="12" fill="#6aa9ff" text-anchor="middle">tools</text>
+  <g id="identity" transform="translate(430 74)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="0" y="0" fill="#6f887b" font-size="18" letter-spacing="3">SELF-HOSTED AGENT OPERATOR</text>
+    <text x="0" y="78" fill="#f1f7f3" font-size="68" font-weight="800" letter-spacing="-3">OpenTulpa</text>
+    <text x="2" y="118" fill="#b8ffce" font-size="23">a persistent ghost in your machine.</text>
   </g>
 
-  <!-- Footer -->
-  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
-    <rect x="64" y="296" width="700" height="36" rx="8" fill="#ffffff" fill-opacity="0.04" stroke="#ffffff" stroke-opacity="0.10"/>
-    <text x="84" y="319" fill="#8b949e">source_release</text>
-    <text x="200" y="319" fill="#58e6c9">&#8594;</text>
-    <text x="224" y="319" fill="#8b949e">fixed checks + image build</text>
-    <text x="430" y="319" fill="#58e6c9">&#8594;</text>
-    <text x="454" y="319" fill="#8b949e">staged health</text>
-    <text x="578" y="319" fill="#58e6c9">&#8594;</text>
-    <text x="602" y="319" fill="#7df0d8">activate</text>
-    <text x="676" y="319" fill="#8b949e">/</text>
-    <text x="690" y="319" fill="#f47067">rollback</text>
+  <!-- The proof is a real OpenTulpa action rhythm, not decorative architecture. -->
+  <g id="terminal-proof" transform="translate(434 220)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">
+    <text x="0" y="0" fill="#8aa092">owner@opentulpa:~$</text>
+    <text x="240" y="0" fill="#f1f7f3">change yourself</text>
+
+    <text x="0" y="40" fill="#b8ffce">› inspect</text>
+    <text x="116" y="40" fill="#b8ffce">› edit</text>
+    <text x="205" y="40" fill="#b8ffce">› test</text>
+    <text x="292" y="40" fill="#b8ffce">› ask approval</text>
+
+    <text x="0" y="82" fill="#8aa092">candidate</text>
+    <text x="118" y="82" fill="#f1f7f3">a8f3c2d</text>
+    <text x="238" y="82" fill="#8aa092">checks</text>
+    <text x="322" y="82" fill="#b8ffce">passed</text>
+
+    <text x="0" y="124" fill="#8aa092">release</text>
+    <text x="100" y="124" fill="#f1f7f3">owner-approved</text>
+    <rect x="300" y="102" width="12" height="25" fill="#b8ffce"/>
   </g>
 </svg>
