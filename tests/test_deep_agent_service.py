@@ -26,14 +26,13 @@ from opentulpa.deep_agent import (
     TenantDynamicToolRegistry,
 )
 from opentulpa.deep_agent.contracts import (
-    AgentRunCapabilityConflictError,
     AgentRunCheckpointConflictError,
     AgentRunIdempotencyConflictError,
 )
 from opentulpa.deep_agent.sandbox import TenantSandboxBackend
 from opentulpa.deep_agent.service import (
-    _browser_action_requires_approval,
     _ProviderFallbackMiddleware,
+    _shell_command_requires_approval,
     _with_deepagents_context_budget,
     build_openrouter_chat_model,
 )
@@ -63,6 +62,17 @@ class _ToolCapableMessageModel(FakeMessagesListChatModel):
     ) -> _ToolCapableMessageModel:
         del tools, tool_choice, kwargs
         return self
+
+
+def _destructive_shell_tool(calls: list[str]) -> BaseTool:
+    @tool("source_shell")
+    def source_shell(command: str) -> dict[str, str]:
+        """Run a source command after destructive-shell approval."""
+
+        calls.append(command)
+        return {"command": command}
+
+    return source_shell
 
 
 class _AttachmentResolver:
@@ -444,18 +454,37 @@ def test_deepagents_context_budget_preserves_stricter_model_profiles() -> None:
     }
 
 
-@pytest.mark.parametrize("kind", ["navigate", "wait"])
-def test_browser_policy_auto_approves_non_submitting_actions(kind: str) -> None:
-    request = SimpleNamespace(tool_call={"args": {"action": {"kind": kind}}})
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf build",
+        "rm -fr build",
+        "rm -r -f build",
+        "sudo /bin/rm --recursive --force build",
+        "cd /workspace && rm -Rf build",
+        "bash -c 'rm -rf build'",
+    ],
+)
+def test_shell_policy_requires_approval_for_recursive_forced_removal(command: str) -> None:
+    request = SimpleNamespace(tool_call={"args": {"command": command}})
 
-    assert _browser_action_requires_approval(request) is False
+    assert _shell_command_requires_approval(request) is True
 
 
-@pytest.mark.parametrize("kind", ["click", "fill", "press", "select", "unknown"])
-def test_browser_policy_fails_closed_for_mutating_or_unknown_actions(kind: str) -> None:
-    request = SimpleNamespace(tool_call={"args": {"action": {"kind": kind}}})
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm build.log",
+        "rm -r build",
+        "rm -f build.log",
+        "find build -delete",
+        "python cleanup.py",
+    ],
+)
+def test_shell_policy_auto_approves_other_commands(command: str) -> None:
+    request = SimpleNamespace(tool_call={"args": {"command": command}})
 
-    assert _browser_action_requires_approval(request) is True
+    assert _shell_command_requires_approval(request) is False
 
 
 def test_job_artifact_tool_output_emits_public_artifact_event() -> None:
@@ -1813,13 +1842,7 @@ async def test_startup_reconciles_orphaned_running_runs(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_approval_interrupt_survives_restart_and_resumes(tmp_path: Path) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -1827,8 +1850,8 @@ async def test_approval_interrupt_survives_restart_and_resumes(tmp_path: Path) -
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -1837,7 +1860,7 @@ async def test_approval_interrupt_survives_restart_and_resumes(tmp_path: Path) -
             AIMessage(content="Schedule deleted."),
         ]
     )
-    first = _service(tmp_path, model, tools=[delete_schedule])
+    first = _service(tmp_path, model, tools=[source_shell])
     await first.start()
     events = [
         event async for event in first.stream(AgentRunRequest(context=_context(), text="Delete it"))
@@ -1851,7 +1874,7 @@ async def test_approval_interrupt_survives_restart_and_resumes(tmp_path: Path) -
     assert len(interrupted.approvals) == 1
     assert calls == []
 
-    second = _service(tmp_path, model, tools=[delete_schedule])
+    second = _service(tmp_path, model, tools=[source_shell])
     await second.start()
     try:
         resumed = [
@@ -1874,7 +1897,7 @@ async def test_approval_interrupt_survives_restart_and_resumes(tmp_path: Path) -
     assert completed is not None
     assert completed.status == "completed"
     assert completed.final_text == "Schedule deleted."
-    assert calls == ["schedule-1"]
+    assert calls == ["rm -rf schedule-1"]
 
 
 @pytest.mark.asyncio
@@ -1882,13 +1905,7 @@ async def test_new_message_cannot_discard_a_pending_same_thread_approval(
     tmp_path: Path,
 ) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -1896,8 +1913,8 @@ async def test_new_message_cannot_discard_a_pending_same_thread_approval(
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -1906,7 +1923,7 @@ async def test_new_message_cannot_discard_a_pending_same_thread_approval(
             AIMessage(content="Schedule deleted."),
         ]
     )
-    service = _service(tmp_path, model, tools=[delete_schedule])
+    service = _service(tmp_path, model, tools=[source_shell])
     await service.start()
     try:
         events = [
@@ -1934,20 +1951,14 @@ async def test_new_message_cannot_discard_a_pending_same_thread_approval(
     finally:
         await service.shutdown()
 
-    assert calls == ["schedule-1"]
+    assert calls == ["rm -rf schedule-1"]
     assert resumed[-1].type == "run.completed"
 
 
 @pytest.mark.asyncio
 async def test_claimed_approval_resume_recovers_after_process_restart(tmp_path: Path) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -1955,8 +1966,8 @@ async def test_claimed_approval_resume_recovers_after_process_restart(tmp_path: 
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -1965,7 +1976,7 @@ async def test_claimed_approval_resume_recovers_after_process_restart(tmp_path: 
             AIMessage(content="Recovered after restart."),
         ]
     )
-    first = _service(tmp_path, model, tools=[delete_schedule])
+    first = _service(tmp_path, model, tools=[source_shell])
     await first.start()
     interrupted_events = [
         event
@@ -1985,7 +1996,7 @@ async def test_claimed_approval_resume_recovers_after_process_restart(tmp_path: 
     assert claimed is not None and claimed.status == "resume_pending"
     await first.shutdown()
 
-    second = _service(tmp_path, model, tools=[delete_schedule])
+    second = _service(tmp_path, model, tools=[source_shell])
     await second.start()
     try:
         for _ in range(100):
@@ -2005,11 +2016,11 @@ async def test_claimed_approval_resume_recovers_after_process_restart(tmp_path: 
     assert completed.status == "completed"
     assert completed.final_text == "Recovered after restart."
     assert replayed[-1].type == "run.completed"
-    assert calls == ["schedule-1"]
+    assert calls == ["rm -rf schedule-1"]
 
 
 @pytest.mark.asyncio
-async def test_approved_source_release_hands_off_to_restarted_runtime(
+async def test_source_release_hands_off_to_restarted_runtime(
     tmp_path: Path,
 ) -> None:
     release_started = asyncio.Event()
@@ -2063,23 +2074,13 @@ async def test_approved_source_release_hands_off_to_restarted_runtime(
     )
     first = _service(tmp_path, model, tools=[source_release])
     await first.start()
-    interrupted_events = [
-        event
-        async for event in first.stream(
-            AgentRunRequest(context=_context(), text="Release the tested change")
-        )
-    ]
-    run_id = interrupted_events[0].run_id
-    interrupted = await first.get_run(run_id)
-    assert interrupted is not None and interrupted.status == "interrupted"
-    await first.open_resume(
-        run_id,
-        ApprovalDecision(
-            approval_id=interrupted.approvals[0].id,
-            decision="approve",
-        ),
+    events = await first.open_stream(
+        AgentRunRequest(context=_context(), text="Release the tested change")
     )
+    started = await anext(events)
+    run_id = started.run_id
     await asyncio.wait_for(release_started.wait(), timeout=1)
+    await events.aclose()
     await first.shutdown()
 
     second = _service(tmp_path, model, tools=[source_release])
@@ -2102,6 +2103,7 @@ async def test_approved_source_release_hands_off_to_restarted_runtime(
     assert completed.status == "completed"
     assert completed.final_text == "The new source release is active."
     assert replayed[-1].type == "run.completed"
+    assert all(event.type != "approval.required" for event in replayed)
     assert (
         sum(event.type == "run.started" and event.data.get("resumed") is True for event in replayed)
         == 2
@@ -2110,226 +2112,77 @@ async def test_approved_source_release_hands_off_to_restarted_runtime(
 
 
 @pytest.mark.asyncio
-async def test_restart_defers_dynamic_resume_until_exact_capability_is_restored(
+async def test_source_release_does_not_surface_alongside_shell_approval(
     tmp_path: Path,
 ) -> None:
-    specs = AgentSpecStore(tmp_path / "agent-specs.db")
-    owner = specs.create_revision(
-        tenant_id="tenant-1",
-        spec_id="owner",
-        write=AgentSpecWrite(
-            name="Owner",
-            runtime_profile="owner",
-            instructions="Help the owner.",
-            tool_policy="profile_default",
-            memory_scope="none",
-            workspace_scope="none",
-        ),
-        expected_revision=None,
-        created_by="owner-1",
-    )
-    context = _context().model_copy(update={"agent_spec": owner.ref})
     calls: list[str] = []
+    source_shell = _destructive_shell_tool(calls)
 
-    @tool("send_alert")
-    def send_alert(message: str) -> str:
-        """Send an alert."""
+    @tool("source_release")
+    def source_release(message: str) -> dict[str, str]:
+        """Activate a source candidate without a user-facing approval."""
 
         calls.append(message)
-        return "sent"
+        return {"message": message}
 
-    first_dynamic = TenantDynamicToolRegistry()
-    first_dynamic.register(
-        tenant_id="tenant-1",
-        instance_id="alerts",
-        tools=(send_alert,),
-        interrupt_on={"send_alert": True},
-    )
     model = _ToolCapableMessageModel(
         responses=[
             AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": "send_alert",
-                        "args": {"message": "restored payload"},
-                        "id": "call-alert",
+                        "name": "source_release",
+                        "args": {"message": "release candidate-1"},
+                        "id": "call-release",
                         "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(content="Alert sent after restore."),
-        ]
-    )
-    first = _service(
-        tmp_path,
-        model,
-        agent_specs=specs,
-        dynamic_tools=first_dynamic,
-    )
-    await first.start()
-    interrupted_events = [
-        event
-        async for event in first.stream(AgentRunRequest(context=context, text="Send an alert"))
-    ]
-    run_id = interrupted_events[0].run_id
-    interrupted = await first.get_run(run_id)
-    assert interrupted is not None
-    await first._claim_approval_decision(  # noqa: SLF001
-        run_id,
-        ApprovalDecision(
-            approval_id=interrupted.approvals[0].id,
-            decision="approve",
-        ),
-    )
-    await first.shutdown()
-
-    restored_dynamic = TenantDynamicToolRegistry()
-    second = _service(
-        tmp_path,
-        model,
-        agent_specs=specs,
-        dynamic_tools=restored_dynamic,
-    )
-    await second.start(recover_pending_resumes=False)
-    try:
-        deferred = await second.get_run(run_id)
-        assert deferred is not None and deferred.status == "resume_pending"
-        restored_dynamic.register(
-            tenant_id="tenant-1",
-            instance_id="alerts",
-            tools=(send_alert,),
-            interrupt_on={"send_alert": True},
-        )
-        await second.recover_pending_resumes()
-        for _ in range(100):
-            completed = await second.get_run(run_id)
-            if completed is not None and completed.status == "completed":
-                break
-            await asyncio.sleep(0.01)
-    finally:
-        await second.shutdown()
-
-    assert completed is not None and completed.status == "completed"
-    assert completed.final_text == "Alert sent after restore."
-    assert calls == ["restored payload"]
-
-
-@pytest.mark.asyncio
-async def test_pending_approval_fails_closed_when_dynamic_capability_changes(
-    tmp_path: Path,
-) -> None:
-    specs = AgentSpecStore(tmp_path / "agent-specs.db")
-    owner = specs.create_revision(
-        tenant_id="tenant-1",
-        spec_id="owner",
-        write=AgentSpecWrite(
-            name="Owner",
-            runtime_profile="owner",
-            instructions="Help the owner.",
-            tool_policy="profile_default",
-            memory_scope="none",
-            workspace_scope="none",
-        ),
-        expected_revision=None,
-        created_by="owner-1",
-    )
-    context = _context().model_copy(update={"agent_spec": owner.ref})
-    calls: list[str] = []
-
-    @tool("send_alert")
-    def old_alert(message: str) -> str:
-        """Send an alert."""
-
-        calls.append(f"old:{message}")
-        return "sent"
-
-    @tool("send_alert")
-    def new_alert(message: str) -> str:
-        """Send an alert."""
-
-        calls.append(f"new:{message}")
-        return "sent"
-
-    dynamic = TenantDynamicToolRegistry()
-    dynamic.register(
-        tenant_id="tenant-1",
-        instance_id="alerts",
-        tools=(old_alert,),
-        interrupt_on={"send_alert": True},
-    )
-    model = _ToolCapableMessageModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
+                    },
                     {
-                        "name": "send_alert",
-                        "args": {"message": "approved payload"},
-                        "id": "call-alert",
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf build"},
+                        "id": "call-shell",
                         "type": "tool_call",
-                    }
+                    },
                 ],
             ),
-            AIMessage(content="Alert sent."),
+            AIMessage(content="Release completed."),
         ]
     )
-    first = _service(
-        tmp_path,
-        model,
-        agent_specs=specs,
-        dynamic_tools=dynamic,
-    )
-    await first.start()
-    events = [
-        event
-        async for event in first.stream(AgentRunRequest(context=context, text="Send an alert"))
-    ]
-    interrupted = await first.get_run(events[0].run_id)
-    await first.shutdown()
-    assert interrupted is not None
-
-    dynamic.unregister(tenant_id="tenant-1", instance_id="alerts")
-    dynamic.register(
-        tenant_id="tenant-1",
-        instance_id="alerts",
-        tools=(new_alert,),
-        interrupt_on={"send_alert": True},
-    )
-    second = _service(
-        tmp_path,
-        model,
-        agent_specs=specs,
-        dynamic_tools=dynamic,
-    )
-    await second.start()
+    service = _service(tmp_path, model, tools=[source_release, source_shell])
+    await service.start()
     try:
-        with pytest.raises(AgentRunCapabilityConflictError):
-            await second.open_resume(
+        events = [
+            event
+            async for event in service.stream(
+                AgentRunRequest(context=_context(), text="Release and clean up")
+            )
+        ]
+        interrupted = await service.get_run(events[0].run_id)
+        assert interrupted is not None
+        pending = [approval for approval in interrupted.approvals if approval.status == "pending"]
+        resumed = [
+            event
+            async for event in service.resume(
                 interrupted.run_id,
                 ApprovalDecision(
-                    approval_id=interrupted.approvals[0].id,
+                    approval_id=pending[0].id,
                     decision="approve",
                 ),
             )
-        unchanged = await second.get_run(interrupted.run_id)
+        ]
     finally:
-        await second.shutdown()
+        await service.shutdown()
 
-    assert unchanged is not None and unchanged.status == "interrupted"
-    assert calls == []
+    surfaced = [event.data["tool_name"] for event in events if event.type == "approval.required"]
+    assert surfaced == ["source_shell"]
+    assert [approval.tool_name for approval in pending] == ["source_shell"]
+    assert resumed[-1].type == "run.completed"
+    assert calls == ["release candidate-1", "rm -rf build"]
 
 
 @pytest.mark.asyncio
 async def test_closed_resume_stream_continues_from_durable_decision(tmp_path: Path) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -2337,8 +2190,8 @@ async def test_closed_resume_stream_continues_from_durable_decision(tmp_path: Pa
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -2347,7 +2200,7 @@ async def test_closed_resume_stream_continues_from_durable_decision(tmp_path: Pa
             AIMessage(content="Continued without the SSE client."),
         ]
     )
-    service = _service(tmp_path, model, tools=[delete_schedule])
+    service = _service(tmp_path, model, tools=[source_shell])
     await service.start()
     resume_events: AsyncGenerator[Any, None] | None = None
     try:
@@ -2387,19 +2240,13 @@ async def test_closed_resume_stream_continues_from_durable_decision(tmp_path: Pa
     assert completed is not None and completed.status == "completed"
     assert completed.final_text == "Continued without the SSE client."
     assert replayed[-1].type == "run.completed"
-    assert calls == ["schedule-1"]
+    assert calls == ["rm -rf schedule-1"]
 
 
 @pytest.mark.asyncio
 async def test_unconsumed_resume_stream_continues_from_durable_decision(tmp_path: Path) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -2407,8 +2254,8 @@ async def test_unconsumed_resume_stream_continues_from_durable_decision(tmp_path
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -2417,7 +2264,7 @@ async def test_unconsumed_resume_stream_continues_from_durable_decision(tmp_path
             AIMessage(content="Continued before the SSE body started."),
         ]
     )
-    service = _service(tmp_path, model, tools=[delete_schedule])
+    service = _service(tmp_path, model, tools=[source_shell])
     await service.start()
     resume_events: AsyncIterator[Any] | None = None
     try:
@@ -2453,7 +2300,7 @@ async def test_unconsumed_resume_stream_continues_from_durable_decision(tmp_path
     assert completed is not None and completed.status == "completed"
     assert completed.final_text == "Continued before the SSE body started."
     assert replayed[-1].type == "run.completed"
-    assert calls == ["schedule-1"]
+    assert calls == ["rm -rf schedule-1"]
 
 
 @pytest.mark.asyncio
@@ -2462,13 +2309,7 @@ async def test_concurrent_resume_claims_one_approval_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -2476,8 +2317,8 @@ async def test_concurrent_resume_claims_one_approval_once(
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -2486,7 +2327,7 @@ async def test_concurrent_resume_claims_one_approval_once(
             AIMessage(content="Schedule deleted."),
         ]
     )
-    service = _service(tmp_path, model, tools=[delete_schedule])
+    service = _service(tmp_path, model, tools=[source_shell])
     await service.start()
     try:
         interrupted_events = [
@@ -2537,19 +2378,13 @@ async def test_concurrent_resume_claims_one_approval_once(
     assert "approval state changed" in str(conflicts[0])
     assert completed is not None
     assert completed.status == "completed"
-    assert calls == ["schedule-1"]
+    assert calls == ["rm -rf schedule-1"]
 
 
 @pytest.mark.asyncio
 async def test_reject_skips_external_effect(tmp_path: Path) -> None:
     calls: list[str] = []
-
-    @tool("job_cancel")
-    def cancel_job(job_id: str, idempotency_key: str) -> dict[str, str]:
-        """Cancel a background job after owner approval."""
-
-        calls.append(job_id)
-        return {"job_id": job_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -2557,8 +2392,8 @@ async def test_reject_skips_external_effect(tmp_path: Path) -> None:
                 content="",
                 tool_calls=[
                     {
-                        "name": "job_cancel",
-                        "args": {"job_id": "job-1", "idempotency_key": "key-1"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf job-1"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -2567,7 +2402,7 @@ async def test_reject_skips_external_effect(tmp_path: Path) -> None:
             AIMessage(content="Cancellation rejected."),
         ]
     )
-    service = _service(tmp_path, model, tools=[cancel_job])
+    service = _service(tmp_path, model, tools=[source_shell])
     await service.start()
     try:
         events = [
@@ -2597,13 +2432,7 @@ async def test_reject_skips_external_effect(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_sequential_interrupts_have_distinct_approval_bindings(tmp_path: Path) -> None:
     calls: list[str] = []
-
-    @tool("schedule_delete")
-    def delete_schedule(schedule_id: str, idempotency_key: str) -> dict[str, str]:
-        """Delete a tenant schedule after owner approval."""
-
-        calls.append(schedule_id)
-        return {"schedule_id": schedule_id, "idempotency_key": idempotency_key}
+    source_shell = _destructive_shell_tool(calls)
 
     model = _ToolCapableMessageModel(
         responses=[
@@ -2611,8 +2440,8 @@ async def test_sequential_interrupts_have_distinct_approval_bindings(tmp_path: P
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-a", "idempotency_key": "key-a"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-a"},
                         "id": "call-a",
                         "type": "tool_call",
                     }
@@ -2622,8 +2451,8 @@ async def test_sequential_interrupts_have_distinct_approval_bindings(tmp_path: P
                 content="",
                 tool_calls=[
                     {
-                        "name": "schedule_delete",
-                        "args": {"schedule_id": "schedule-b", "idempotency_key": "key-b"},
+                        "name": "source_shell",
+                        "args": {"command": "rm -rf schedule-b"},
                         "id": "call-b",
                         "type": "tool_call",
                     }
@@ -2632,7 +2461,7 @@ async def test_sequential_interrupts_have_distinct_approval_bindings(tmp_path: P
             AIMessage(content="Both approved."),
         ]
     )
-    service = _service(tmp_path, model, tools=[delete_schedule])
+    service = _service(tmp_path, model, tools=[source_shell])
     await service.start()
     try:
         first_events = [
@@ -2671,7 +2500,7 @@ async def test_sequential_interrupts_have_distinct_approval_bindings(tmp_path: P
 
     assert first_approval.id != second_approval.id
     assert first_resume[-1].type == "approval.required"
-    assert calls == ["schedule-a", "schedule-b"]
+    assert calls == ["rm -rf schedule-a", "rm -rf schedule-b"]
     assert final_events[-1].type == "run.completed"
 
 

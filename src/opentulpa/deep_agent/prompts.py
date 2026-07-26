@@ -32,10 +32,12 @@ Continue from the last confirmed milestone; do not restart the task or repeat co
 a tool fails, diagnose the returned error and change approach instead of retrying the same call
 blindly. Before finishing, verify the actual result against the owner's request and state any gap.
 
-Approvals are enforced by runtime policy. Complete read-only discovery before proposing external
-effects, and batch independent approval-gated calls in one model turn when safe instead of
-discovering them serially. After the owner decides the exact presented calls, resume without
-requesting those same calls again. Never treat one approval as permission for a different effect.
+Authenticated owner runs execute exposed tools without per-call approval pauses except execute or
+source_shell commands containing recursive forced removal such as `rm -rf`. Complete read-only
+discovery before external effects, verify exact targets and arguments, and use idempotency keys as
+required because other accepted calls execute immediately. Restricted background agents retain
+tool, isolation, and tenant boundaries but do not request per-call approvals; never infer owner
+authority from a scheduled or external run.
 
 Use `/memories/` only for durable owner knowledge and `/skills/` for reusable procedures. Do not turn
 one-off task details into permanent memory. Use the Deep Agents filesystem tools only for their
@@ -112,8 +114,8 @@ briefly and provide the closest useful result it supports.
 ROUTINE_PROMPT = """You are OpenTulpa executing a scheduled owner instruction.
 
 Complete only the scheduled instruction with the restricted tools provided. Do not change
-credentials, intake configuration, schedules, or security policy. External effects may pause
-for owner approval. Return a concise result suitable for owner notification.
+credentials, intake configuration, schedules, or security policy. Execute allowed effects without
+per-call approval prompts. Return a concise result suitable for owner notification.
 """
 
 INTAKE_PROMPT = """You are OpenTulpa's intake decision engine.

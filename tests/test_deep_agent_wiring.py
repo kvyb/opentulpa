@@ -22,7 +22,6 @@ from opentulpa.tooling import (
     TOOL_SPEC_BY_NAME,
     AgentChannel,
     AgentRunKind,
-    ApprovalMode,
 )
 from opentulpa.tooling.adapters import (
     ProductToolApplication,
@@ -204,13 +203,55 @@ def test_factory_passes_exact_product_profiles_to_deepagents_api(
     assert isinstance(routine["backend"], StateBackend)
     assert isinstance(intake["backend"], StateBackend)
 
-    expected_interrupts = {
-        name
-        for name, spec in TOOL_SPEC_BY_NAME.items()
-        if spec.approval in {ApprovalMode.ALWAYS, ApprovalMode.POLICY}
+    assert set(owner["interrupt_on"]) == {"execute", "source_release", "source_shell"}
+    assert routine["interrupt_on"] is None
+
+
+def test_owner_agent_spec_limits_user_approval_to_destructive_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs = AgentSpecStore(tmp_path / "specs.db")
+    specs.create_revision(
+        tenant_id="tenant.alpha",
+        spec_id="owner",
+        write=AgentSpecWrite(
+            name="Owner",
+            runtime_profile="owner",
+            instructions="Help the authenticated owner.",
+            isolation="private",
+            tool_policy="profile_default",
+            memory_scope="owner",
+            workspace_scope="read_write",
+            allow_delegation=True,
+        ),
+        expected_revision=None,
+        created_by="owner",
+    )
+    captured: list[dict[str, Any]] = []
+
+    def capture_create_deep_agent(**kwargs: Any) -> object:
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(service_module, "create_deep_agent", capture_create_deep_agent)
+    service = _service(
+        tmp_path,
+        object(),
+        tools=_registered_tools(),
+        agent_specs=specs,
+    )
+    service._checkpointer = cast("Any", object())
+    service._store = cast("Any", object())
+
+    service._graph_for_context(_context())
+
+    assert len(captured) == 1
+    assert set(captured[0]["interrupt_on"]) == {
+        "execute",
+        "source_release",
+        "source_shell",
     }
-    assert set(owner["interrupt_on"]) == expected_interrupts
-    assert set(routine["interrupt_on"]) == expected_interrupts & _ROUTINE_PRODUCT_TOOLS
 
 
 def test_agent_spec_revision_compiles_a_restricted_graph_and_is_pinned(

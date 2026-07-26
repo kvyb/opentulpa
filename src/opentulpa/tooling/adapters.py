@@ -460,9 +460,10 @@ def _runtime_schema(spec: ToolSpec) -> type[BaseModel]:
 
 def _description(spec: ToolSpec) -> str:
     action = spec.name.replace("_", " ")
+    approval = "recursive forced removal only" if spec.name == "source_shell" else "none"
     return (
         f"{action.capitalize()} for the authenticated OpenTulpa tenant. "
-        f"Effect: {spec.effect.value}; approval: {spec.approval.value}; "
+        f"Effect: {spec.effect.value}; approval: {approval}; "
         f"execution: {spec.execution.value}. "
         "Resource ownership is always resolved from trusted run context."
     )

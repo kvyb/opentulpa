@@ -11,7 +11,7 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import nullcontext, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from weakref import WeakValueDictionary
@@ -86,11 +86,7 @@ from opentulpa.persistence.tenant_namespace import (
     tenant_store_namespace,
 )
 from opentulpa.specs import AgentSpec, AgentSpecRef, AgentSpecStore, OriginRef
-from opentulpa.tooling import (
-    TOOL_SPEC_BY_NAME,
-    AgentRunKind,
-    ApprovalMode,
-)
+from opentulpa.tooling import TOOL_SPEC_BY_NAME, AgentRunKind
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +119,7 @@ _TRACE_LIST_LIMIT = 100
 _TRACE_TEXT_PREVIEW_CHARS = 500
 _TRACE_TOOL_VALUE_CHARS = 4_000
 _TRACE_FAILURE_CAUSE_CHARS = 500
+_RM_COMMAND_RE = re.compile(r"\brm\s+(?P<arguments>[^;&|\n]*)", re.IGNORECASE)
 _TRACE_HIDDEN_KEYS = frozenset(
     {"actor_id", "checkpoint_thread_id", "customer_id", "tenant_id", "thread_id"}
 )
@@ -305,17 +302,28 @@ def _is_model_provider_failure(error: BaseException) -> bool:
     return _is_provider_fallback_error(error) or is_codex_transient(error)
 
 
-def _browser_action_requires_approval(request: Any) -> bool:
-    """Auto-run only browser operations that cannot submit or modify page state."""
+def _shell_command_requires_approval(request: Any) -> bool:
+    """Interrupt only shell calls that combine recursive and forced removal."""
 
     raw_arguments = request.tool_call.get("args", {})
     if not isinstance(raw_arguments, dict):
-        return True
-    action = raw_arguments.get("action")
-    if not isinstance(action, dict):
-        return True
-    kind = str(action.get("kind") or action.get("type") or "").strip().casefold()
-    return kind not in {"navigate", "wait"}
+        return False
+    command = raw_arguments.get("command")
+    if not isinstance(command, str):
+        return False
+    for match in _RM_COMMAND_RE.finditer(command):
+        recursive = False
+        force = False
+        for flag in re.findall(r"(?<!\S)--?[A-Za-z-]+", match.group("arguments")):
+            if flag.startswith("--"):
+                recursive = recursive or flag[2:].casefold() == "recursive"
+                force = force or flag[2:].casefold() == "force"
+            else:
+                recursive = recursive or "r" in flag[1:].casefold()
+                force = force or "f" in flag[1:].casefold()
+        if recursive and force:
+            return True
+    return False
 
 
 class AgentRunObserver(Protocol):
@@ -1992,8 +2000,10 @@ class DeepAgentService:
             self._provided_model or self._build_model(),
             provider="api",
         )
-        interrupt_on = self._interrupt_on()
         owner_tools = [tool for tool in self._tools if tool.name in _OWNER_PRODUCT_TOOL_NAMES]
+        owner_interrupt_on = self._owner_interrupt_for_tools(
+            {tool.name for tool in owner_tools} | {"execute"}
+        )
         routine_tools = [tool for tool in owner_tools if tool.name in _ROUTINE_PRODUCT_TOOL_NAMES]
         intake_tools = [tool for tool in owner_tools if tool.name in _INTAKE_PRODUCT_TOOL_NAMES]
         middleware = self._provider_fallback_middleware()
@@ -2007,7 +2017,7 @@ class DeepAgentService:
                 skills=["/skills/"],
                 memory=["/memories/AGENTS.md"],
                 backend=self._owner_backend(),
-                interrupt_on=interrupt_on,
+                interrupt_on=owner_interrupt_on,
                 context_schema=AgentRunContext,
                 checkpointer=self._checkpointer,
                 store=self._store,
@@ -2019,11 +2029,7 @@ class DeepAgentService:
                 tools=routine_tools,
                 system_prompt=ROUTINE_PROMPT,
                 backend=StateBackend(),
-                interrupt_on={
-                    name: config
-                    for name, config in interrupt_on.items()
-                    if name in _ROUTINE_PRODUCT_TOOL_NAMES
-                },
+                interrupt_on=None,
                 context_schema=AgentRunContext,
                 checkpointer=self._checkpointer,
                 middleware=self._provider_fallback_middleware(),
@@ -2096,13 +2102,12 @@ class DeepAgentService:
         active_dynamic = dynamic or self._dynamic_snapshot(spec.tenant_id)
         tools = self._tools_for_spec(spec, dynamic=active_dynamic)
         tool_names = {tool.name for tool in tools}
-        dynamic_tool_names = {tool.name for tool in active_dynamic.tools}
-        interrupt_on = self._interrupt_for_tools(
-            tool_names,
-            dynamic=active_dynamic,
-        )
-        if spec.isolation == "private" and spec.id != "owner":
-            interrupt_on.update(dict.fromkeys(tool_names.intersection(dynamic_tool_names), True))
+        interrupt_on: dict[str, bool | InterruptOnConfig] = {}
+        if spec.runtime_profile == AgentRunKind.OWNER.value:
+            owner_tool_names = set(tool_names)
+            if spec.workspace_scope == "read_write":
+                owner_tool_names.add("execute")
+            interrupt_on = self._owner_interrupt_for_tools(owner_tool_names)
         backend, uses_store = self._backend_for_spec(spec)
         denied: set[str] = set()
         permissions: list[FilesystemPermission] = []
@@ -2397,19 +2402,6 @@ class DeepAgentService:
             raise RuntimeError("AgentSpec tools are unavailable: " + ", ".join(missing))
         return [tool for tool in all_tools if tool.name in names]
 
-    def _interrupt_for_tools(
-        self,
-        tool_names: set[str],
-        *,
-        dynamic: DynamicToolSnapshot | None = None,
-    ) -> dict[str, bool | InterruptOnConfig]:
-        policy = self._interrupt_on()
-        if dynamic is not None:
-            policy.update(
-                {name: True for name, required in dynamic.interrupt_on.items() if required}
-            )
-        return {name: config for name, config in policy.items() if name in tool_names}
-
     def _dynamic_snapshot(self, tenant_id: str) -> DynamicToolSnapshot:
         if self._dynamic_tools is None:
             return DynamicToolSnapshot(generation=0, tools=(), interrupt_on={})
@@ -2673,18 +2665,22 @@ class DeepAgentService:
             },
         )
 
-    def _interrupt_on(self) -> dict[str, bool | InterruptOnConfig]:
-        names = {tool.name for tool in self._tools}
-        policy: dict[str, bool | InterruptOnConfig] = {}
-        for name, spec in TOOL_SPEC_BY_NAME.items():
-            if name not in names or spec.approval is ApprovalMode.AUTO:
-                continue
-            config = InterruptOnConfig(allowed_decisions=list(_OWNER_DECISIONS))
-            if name == "browser_act":
-                config["when"] = _browser_action_requires_approval
-            # Integration action metadata is provider-defined. Until an adapter
-            # supplies a trusted read-only classifier, policy mode fails closed.
-            policy[name] = config
+    @staticmethod
+    def _owner_interrupt_for_tools(
+        tool_names: set[str],
+    ) -> dict[str, bool | InterruptOnConfig]:
+        policy: dict[str, bool | InterruptOnConfig] = {
+            name: InterruptOnConfig(
+                allowed_decisions=list(_OWNER_DECISIONS),
+                when=_shell_command_requires_approval,
+            )
+            for name in {"execute", "source_shell"}.intersection(tool_names)
+        }
+        if "source_release" in tool_names:
+            # Keep release handoff restart-safe without surfacing an approval.
+            policy["source_release"] = InterruptOnConfig(
+                allowed_decisions=list(_OWNER_DECISIONS)
+            )
         return policy
 
     @staticmethod
@@ -2805,6 +2801,42 @@ class DeepAgentService:
                         approvals = self._approvals_from_stream(data, run_id)
                         if approvals:
                             interrupted = True
+                            if context.run_kind == AgentRunKind.OWNER.value and any(
+                                approval.tool_name == "source_release"
+                                for approval in approvals
+                            ):
+                                decided = [
+                                    replace(approval, status="approve")
+                                    if approval.tool_name == "source_release"
+                                    else approval
+                                    for approval in approvals
+                                ]
+                                pending = [
+                                    approval
+                                    for approval in decided
+                                    if approval.status == "pending"
+                                ]
+                                updated = await self._update_run(
+                                    run_id,
+                                    status="interrupted" if pending else "resume_pending",
+                                    approvals=decided,
+                                    final_text="".join(final_parts).strip(),
+                                    allowed_statuses={"running", "resume_pending"},
+                                )
+                                if not updated:
+                                    return
+                                if not pending:
+                                    self._schedule_pending_resume(run_id)
+                                for approval in pending:
+                                    event = await self._append_event(
+                                        run_id=run_id,
+                                        type="approval.required",
+                                        data=self._public_approval(approval),
+                                    )
+                                    if event is None:
+                                        return
+                                    yield event
+                                return
                             updated = await self._update_run(
                                 run_id,
                                 status="interrupted",

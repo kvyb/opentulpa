@@ -42,10 +42,12 @@ def test_owner_prompt_treats_tools_and_approvals_as_runtime_state() -> None:
     assert "actual model-provided tools and schemas are authoritative" in prompt
     assert "when the active agentspec permits them" in prompt
     assert "when workspace access is available" in prompt
-    assert "approvals are enforced by runtime policy" in prompt
+    assert "without per-call approval pauses except execute or source_shell" in prompt
+    assert "recursive forced removal such as `rm -rf`" in prompt
     assert "complete read-only discovery" in prompt
-    assert "batch independent approval-gated calls" in prompt
-    assert "never treat one approval as permission for a different effect" in prompt
+    assert "other accepted calls execute immediately" in prompt
+    assert "restricted background agents retain tool, isolation, and tenant boundaries" in prompt
+    assert "do not request per-call approvals" in prompt
 
 
 def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:

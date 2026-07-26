@@ -117,7 +117,7 @@ def test_active_dynamic_generation_recompiles_owner_graph(
     first = service._graph_for_context(context)
     assert service._graph_for_context(context) is first
     assert {tool.name for tool in calls[0]["tools"]} == {"profile_get", "send_alert"}
-    assert calls[0]["interrupt_on"] == {"send_alert": True}
+    assert calls[0]["interrupt_on"] is None
 
     dynamic.unregister(tenant_id="tenant-a", instance_id="alerts-v1")
     second = service._graph_for_context(context)
@@ -125,7 +125,7 @@ def test_active_dynamic_generation_recompiles_owner_graph(
     assert [tool.name for tool in calls[1]["tools"]] == ["profile_get"]
 
 
-def test_private_background_spec_can_allowlist_dynamic_tool_but_never_auto_approves(
+def test_private_background_spec_can_allowlist_dynamic_tool_without_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -176,7 +176,7 @@ def test_private_background_spec_can_allowlist_dynamic_tool_but_never_auto_appro
     service._graph_for_context(context)
 
     assert [tool.name for tool in calls[0]["tools"]] == ["send_alert"]
-    assert calls[0]["interrupt_on"] == {"send_alert": True}
+    assert calls[0]["interrupt_on"] is None
 
 
 def test_external_agent_cannot_configure_dynamic_capability_tool() -> None:
