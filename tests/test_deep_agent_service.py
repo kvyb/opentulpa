@@ -487,6 +487,83 @@ def test_shell_policy_auto_approves_other_commands(command: str) -> None:
     assert _shell_command_requires_approval(request) is False
 
 
+@pytest.mark.asyncio
+async def test_shell_policy_allows_harmless_rm_reference_without_approval(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    source_shell = _destructive_shell_tool(calls)
+    model = _ToolCapableMessageModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "source_shell",
+                        "args": {"command": "grep -R 'rm -rf' ."},
+                        "id": "call-shell",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Search completed."),
+        ]
+    )
+    service = _service(tmp_path, model, tools=[source_shell])
+    await service.start()
+    try:
+        events = [
+            event
+            async for event in service.stream(
+                AgentRunRequest(context=_context(), text="Find destructive commands")
+            )
+        ]
+    finally:
+        await service.shutdown()
+
+    assert all(event.type != "approval.required" for event in events)
+    assert calls == ["grep -R 'rm -rf' ."]
+
+
+@pytest.mark.asyncio
+async def test_shell_policy_rejects_ambiguous_command_before_execution(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    source_shell = _destructive_shell_tool(calls)
+    model = _ToolCapableMessageModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "source_shell",
+                        "args": {"command": "rm${IFS}-rf build"},
+                        "id": "call-shell",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The ambiguous command was rejected."),
+        ]
+    )
+    service = _service(tmp_path, model, tools=[source_shell])
+    await service.start()
+    try:
+        events = [
+            event
+            async for event in service.stream(
+                AgentRunRequest(context=_context(), text="Run the ambiguous command")
+            )
+        ]
+    finally:
+        await service.shutdown()
+
+    assert all(event.type != "approval.required" for event in events)
+    assert events[-1].type == "run.completed"
+    assert calls == []
+
+
 def test_job_artifact_tool_output_emits_public_artifact_event() -> None:
     message = ToolMessage(
         name="job_artifacts",

@@ -255,6 +255,7 @@ class MCPToolBroker:
         context: AgentRunContext,
         tool_call_id: str,
         approval_granted: bool = False,
+        approval_enforced: bool = True,
         idempotency_key: str | None = None,
     ) -> MCPBrokerResult:
         audit_id = f"audit_{uuid4().hex}"
@@ -314,8 +315,8 @@ class MCPToolBroker:
                 approval_granted=approval_granted,
             )
         descriptor = binding.descriptor
-        requires_approval = self._core_requires_approval(binding.policy)
-        if self._approval_hook is not None:
+        requires_approval = approval_enforced and self._core_requires_approval(binding.policy)
+        if approval_enforced and self._approval_hook is not None:
             requires_approval = requires_approval or self._approval_hook.requires_approval(
                 descriptor,
                 context,

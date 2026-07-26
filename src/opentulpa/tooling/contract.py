@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opentulpa.specs.protocol import AgentRunContext
 
-CONTRACT_VERSION: Literal["1.0"] = "1.0"
+CONTRACT_VERSION: Literal["1.1"] = "1.1"
 
 
 class AgentChannel(StrEnum):
@@ -113,7 +113,7 @@ class _ToolContractEnvelope[T](_ContractModel):
 
 
 class _ToolContractDocument(_ContractModel):
-    contract_version: Literal["1.0"] = CONTRACT_VERSION
+    contract_version: Literal["1.1"] = CONTRACT_VERSION
     operations: tuple[ToolSpec, ...]
 
 
@@ -163,7 +163,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "artifact_deliver",
         "files",
         ToolEffect.SEND,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("knowledge_list", "knowledge", ToolEffect.READ),
@@ -206,7 +205,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "browser_act",
         "browser",
         ToolEffect.EXECUTE,
-        approval=ApprovalMode.POLICY,
         idempotency=IdempotencyMode.REQUIRED,
         execution=ExecutionMode.JOB,
         timeout_seconds=120,
@@ -215,7 +213,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "browser_stop",
         "browser",
         ToolEffect.DELETE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("integration_list", "composio", ToolEffect.READ),
@@ -223,7 +220,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "integration_connect",
         "composio",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("connection_list", "composio", ToolEffect.READ),
@@ -231,7 +227,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "connection_disconnect",
         "composio",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("integration_action_search", "composio", ToolEffect.READ),
@@ -239,7 +234,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "integration_invoke",
         "composio",
         ToolEffect.EXECUTE,
-        approval=ApprovalMode.POLICY,
         idempotency=IdempotencyMode.REQUIRED,
         execution=ExecutionMode.JOB,
         timeout_seconds=120,
@@ -263,14 +257,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "intake_draft_activate",
         "intake",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool(
         "intake_workflow_delete",
         "intake",
         ToolEffect.DELETE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool(
@@ -292,7 +284,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "schedule_delete",
         "scheduler",
         ToolEffect.DELETE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("agent_spec_list", "agent_specs", ToolEffect.READ),
@@ -306,14 +297,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "agent_spec_activate",
         "agent_specs",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool(
         "agent_spec_rollback",
         "agent_specs",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("trigger_spec_list", "trigger_specs", ToolEffect.READ),
@@ -327,14 +316,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "trigger_spec_activate",
         "trigger_specs",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool(
         "trigger_spec_rollback",
         "trigger_specs",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("secret_handle_list", "secrets", ToolEffect.READ),
@@ -342,7 +329,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "secret_handle_revoke",
         "secrets",
         ToolEffect.DELETE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool("capability_list", "capabilities", ToolEffect.READ),
@@ -362,7 +348,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "capability_activate",
         "capabilities",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=600,
     ),
@@ -370,7 +355,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "capability_rollback",
         "capabilities",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=600,
     ),
@@ -378,7 +362,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "capability_deactivate",
         "capabilities",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=600,
     ),
@@ -389,7 +372,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "job_cancel",
         "jobs",
         ToolEffect.DELETE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
     ),
     _tool(
@@ -412,7 +394,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "repository_publish_pr",
         "repositories",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=600,
     ),
@@ -421,13 +402,13 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "source_shell",
         "evolution",
         ToolEffect.EXECUTE,
+        approval=ApprovalMode.POLICY,
         timeout_seconds=660,
     ),
     _tool(
         "source_release",
         "evolution",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=1_800,
     ),
@@ -435,7 +416,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "source_rollback",
         "evolution",
         ToolEffect.AUTHORIZE,
-        approval=ApprovalMode.ALWAYS,
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=60,
     ),
@@ -500,14 +480,15 @@ def render_tool_contract_markdown() -> str:
         "",
         "- `approval=auto` runs without an interrupt after normal authorization checks.",
         "- `approval=always` persists an interrupt for explicit owner approval.",
-        "- `approval=policy` classifies the concrete action and fails closed to approval.",
+        "- `approval=policy` classifies the concrete action and rejects ambiguous input.",
+        "- Only recursive forced removal through `source_shell` or the Deep Agents `execute` built-in requires user approval.",
         "- `idempotency=required` rejects calls without a caller-supplied key.",
         "- `idempotency=derived` derives a stable key from canonical tenant-scoped input.",
         "- `execution=job` returns `status=accepted` and a durable `job_id`.",
         "- Every service validates tenant ownership; errors are sanitized before entering `ToolResult`.",
         "- `intake_draft_prepare` returns a hash-bound one-time `confirmation_handle`; only `intake_draft_activate` accepts it.",
         "- Secret tools expose handle metadata and revocation only. Plaintext credentials enter through authenticated pre-checkpoint ingress, never through model-visible tool arguments or results. `NAME_API_KEY=<value>` and `NAME_TOKEN=<value>` create named handles; `<secret name=\"NAME\">...</secret>` supports arbitrary multiline credentials. Trusted adapters and declared capability bindings redeem only the scope they require.",
-        "- Capability activation accepts config plus opaque secret-handle bindings only, requires an exact passing test attestation, and is always owner-approved.",
+        "- Capability activation accepts config plus opaque secret-handle bindings only and requires an exact passing test attestation.",
         "- `trace_list` is newest-first; pass the last returned `run_id` as `before_run_id` to read the next page.",
         "",
         "## Result Envelope",

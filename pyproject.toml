@@ -25,6 +25,8 @@ dependencies = [
     "langchain-openrouter>=0.2.1",
     "python-multipart>=0.0.22",
     "keyring>=25,<26",
+    "tree-sitter>=0.26,<0.27",
+    "tree-sitter-bash>=0.25,<0.26",
 ]
 
 [project.scripts]

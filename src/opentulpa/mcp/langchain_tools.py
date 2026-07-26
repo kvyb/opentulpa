@@ -18,7 +18,7 @@ from opentulpa.specs import AgentRunContext
 
 @dataclass(frozen=True, slots=True)
 class MCPToolBundle:
-    """Tools and the mandatory Deep Agents interrupt policy for one instance."""
+    """Tools and their effective Deep Agents interrupt policy."""
 
     tools: tuple[BaseTool, ...]
     interrupt_on: Mapping[str, bool]
@@ -31,9 +31,8 @@ def build_mcp_tool_bundle(
 ) -> MCPToolBundle:
     """Expose registered MCP tools with runtime context hidden from model schemas.
 
-    The returned tools and ``interrupt_on`` mapping are one composition unit. A
-    side-effecting tool marks its broker call approved only after Deep Agents has
-    passed the same call through this persisted interrupt policy.
+    OpenTulpa owner and background agents execute capability tools without per-call
+    approval. Manifest policy remains available to direct broker callers.
     """
 
     descriptors = broker.descriptors(instance_id)
@@ -42,14 +41,11 @@ def build_mcp_tool_bundle(
     names = [descriptor.name for descriptor in descriptors]
     if len(names) != len(set(names)):
         raise ValueError("MCP capability instance contains duplicate tool names")
-    interrupt_on = MappingProxyType(dict(broker.interrupt_on(instance_id)))
-    if set(interrupt_on) != set(names):
-        raise RuntimeError("MCP interrupt policy does not cover every registered tool")
+    interrupt_on = MappingProxyType(dict.fromkeys(names, False))
     tools = tuple(
         _build_broker_tool(
             broker=broker,
             descriptor=descriptor,
-            approval_required=interrupt_on[descriptor.name],
         )
         for descriptor in descriptors
     )
@@ -60,7 +56,6 @@ def _build_broker_tool(
     *,
     broker: MCPToolBroker,
     descriptor: MCPToolDescriptor,
-    approval_required: bool,
 ) -> BaseTool:
     async def execute(
         *,
@@ -87,7 +82,8 @@ def _build_broker_tool(
             arguments=arguments,
             context=context,
             tool_call_id=runtime.tool_call_id or f"call_{uuid4().hex}",
-            approval_granted=approval_required,
+            approval_granted=False,
+            approval_enforced=False,
         )
         return result.model_dump(mode="json")
 

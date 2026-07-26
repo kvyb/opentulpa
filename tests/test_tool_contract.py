@@ -101,18 +101,17 @@ def test_registry_is_complete_unique_and_versioned() -> None:
     assert {spec.version for spec in TOOL_SPECS} == {1}
 
 
-def test_registry_enforces_risk_based_approval() -> None:
+def test_registry_limits_approval_to_source_shell_policy() -> None:
     for spec in TOOL_SPECS:
+        expected = (
+            ApprovalMode.POLICY if spec.name == "source_shell" else ApprovalMode.AUTO
+        )
+        assert spec.approval is expected
         if spec.effect is ToolEffect.READ:
-            assert spec.approval is ApprovalMode.AUTO
             assert spec.idempotency is IdempotencyMode.NONE
         if spec.effect in {ToolEffect.DELETE, ToolEffect.SEND, ToolEffect.AUTHORIZE}:
-            assert spec.approval is ApprovalMode.ALWAYS
             assert spec.idempotency is IdempotencyMode.REQUIRED
 
-    assert TOOL_SPEC_BY_NAME["browser_act"].approval is ApprovalMode.POLICY
-    assert TOOL_SPEC_BY_NAME["integration_invoke"].approval is ApprovalMode.POLICY
-    assert TOOL_SPEC_BY_NAME["intake_draft_activate"].approval is ApprovalMode.ALWAYS
     for name in (
         "agent_spec_activate",
         "agent_spec_rollback",
@@ -123,16 +122,14 @@ def test_registry_enforces_risk_based_approval() -> None:
         "capability_rollback",
         "capability_deactivate",
     ):
-        assert TOOL_SPEC_BY_NAME[name].approval is ApprovalMode.ALWAYS
         assert TOOL_SPEC_BY_NAME[name].idempotency is IdempotencyMode.REQUIRED
     assert TOOL_SPEC_BY_NAME["agent_spec_save"].idempotency is IdempotencyMode.DERIVED
     assert TOOL_SPEC_BY_NAME["trigger_spec_save"].idempotency is IdempotencyMode.DERIVED
     assert TOOL_SPEC_BY_NAME["capability_seed_bundled"].idempotency is IdempotencyMode.DERIVED
     assert TOOL_SPEC_BY_NAME["capability_test"].idempotency is IdempotencyMode.NONE
-    assert TOOL_SPEC_BY_NAME["source_shell"].approval is ApprovalMode.AUTO
+    assert TOOL_SPEC_BY_NAME["source_shell"].approval is ApprovalMode.POLICY
     assert TOOL_SPEC_BY_NAME["source_shell"].idempotency is IdempotencyMode.NONE
     for name in ("source_release", "source_rollback"):
-        assert TOOL_SPEC_BY_NAME[name].approval is ApprovalMode.ALWAYS
         assert TOOL_SPEC_BY_NAME[name].idempotency is IdempotencyMode.REQUIRED
 
 

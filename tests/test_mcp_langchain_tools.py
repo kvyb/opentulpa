@@ -14,6 +14,7 @@ from opentulpa.capabilities import (
     WorkerSpec,
 )
 from opentulpa.mcp import (
+    InMemoryMCPAuditSink,
     MCPBrokerRegistrationError,
     MCPCallMetadata,
     MCPRemoteTool,
@@ -133,7 +134,8 @@ def _runtime(tool_call_id: str) -> ToolRuntime[AgentRunContext]:
 @pytest.mark.asyncio
 async def test_bundle_hides_context_and_executes_through_broker_policy() -> None:
     adapter = _Adapter((_remote("lookup", READ_SCHEMA), _remote("send", SEND_SCHEMA)))
-    broker = MCPToolBroker()
+    audit = InMemoryMCPAuditSink()
+    broker = MCPToolBroker(audit_sink=audit)
     await broker.register(
         instance_id="instance-a",
         manifest=_manifest(),
@@ -142,7 +144,7 @@ async def test_bundle_hides_context_and_executes_through_broker_policy() -> None
     )
     bundle = build_mcp_tool_bundle(broker, instance_id="instance-a")
 
-    assert bundle.interrupt_on == {"lookup": False, "send": True}
+    assert bundle.interrupt_on == {"lookup": False, "send": False}
     assert [tool.name for tool in bundle.tools] == ["lookup", "send"]
     lookup_schema = bundle.tools[0].tool_call_schema
     assert isinstance(lookup_schema, dict)
@@ -157,6 +159,7 @@ async def test_bundle_hides_context_and_executes_through_broker_policy() -> None
     assert adapter.calls[0][0:2] == ("send", {"message": "hello"})
     assert adapter.calls[0][2].tenant_id == "tenant-a"
     assert adapter.calls[0][2].tool_call_id == "call-send"
+    assert [event.approval_granted for event in audit.events] == [False, False]
 
 
 @pytest.mark.asyncio

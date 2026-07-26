@@ -22,6 +22,7 @@ from opentulpa.tooling.contract import (
     TOOL_SPEC_BY_NAME,
     TOOL_SPECS,
     AgentRunContext,
+    ApprovalMode,
     ExecutionMode,
     IdempotencyMode,
     ToolError,
@@ -460,7 +461,11 @@ def _runtime_schema(spec: ToolSpec) -> type[BaseModel]:
 
 def _description(spec: ToolSpec) -> str:
     action = spec.name.replace("_", " ")
-    approval = "recursive forced removal only" if spec.name == "source_shell" else "none"
+    approval = (
+        "policy (recursive forced removal only)"
+        if spec.approval is ApprovalMode.POLICY
+        else spec.approval.value
+    )
     return (
         f"{action.capitalize()} for the authenticated OpenTulpa tenant. "
         f"Effect: {spec.effect.value}; approval: {approval}; "

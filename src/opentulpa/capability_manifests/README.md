@@ -6,5 +6,5 @@ module below `opentulpa.capability_workers` and may use dependencies already pre
 the reviewed runtime base.
 
 Source evolution may add or revise manifests and worker modules. The fixed evaluator
-tests the exact candidate commit, and the stable bootstrap binds owner approval to
-that commit before the overlay becomes a trusted release.
+tests the exact candidate commit, and the stable bootstrap binds activation to that
+commit before the overlay becomes a trusted release.

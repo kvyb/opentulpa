@@ -186,7 +186,8 @@ run.failed
 ```
 
 Every event contains a run ID, monotonic sequence, and timestamp. Public tool arguments
-and results are redacted. Runs and approval interrupts remain queryable after restart.
+and results are redacted. Runs and destructive-shell approval interrupts remain queryable
+after restart.
 
 Checkpoint thread IDs include the exact AgentSpec ID and revision. Different specs can
 therefore use the same logical thread name without sharing history or blocking each
@@ -256,15 +257,14 @@ The registry in `opentulpa.tooling` is the single source of truth for:
 - tool names and versions;
 - effect, approval, idempotency, execution, and timeout policy;
 - Pydantic and LangChain schemas;
-- Deep Agents `interrupt_on` configuration;
+- Deep Agents destructive-shell `interrupt_on` configuration;
 - machine-readable JSON Schema and [the committed tool contract](tool-contract.md).
 
 Trusted `AgentRunContext` is injected through `ToolRuntime`; tenant IDs, credentials,
 filesystem roots, and ownership identifiers are absent from model-visible arguments.
 Application services repeat ownership checks at the data boundary. External writes
-require idempotency. Deletes, authorization changes, sends, workflow activation,
-browser submission, capability activation, and source promotion require persisted
-owner approval.
+require idempotency. Authorized product effects execute directly; only recursive forced
+removal through `execute` or `source_shell` requires persisted owner approval.
 
 Tools call application ports directly. There is no loopback model-tool HTTP gateway or
 generic group-dispatch surface.
@@ -315,7 +315,7 @@ remain separate host paths.
 `CapabilityManifest` is an import-free, revisioned contract. It declares exported
 tools and services, workers, config schema, dependencies, permissions, secrets,
 network policy, and deterministic evaluation commands. Activation is bound to a
-passing manifest digest and requires owner approval.
+passing manifest digest, tenant authorization, and an idempotency key.
 
 The mutable release accepts no tenant-supplied capability manifests or executables.
 Its V2 capability API can only seed, test, activate, roll back, and deactivate exact
@@ -404,7 +404,7 @@ OpenTulpa keeps source editing simple and deployment authority separate:
 owner asks main agent for a change
   -> source_shell creates or resumes its detached worktree
   -> main agent edits, tests, experiments, and discusses results in chat
-  -> source_release pauses once for native owner approval
+  -> source_release persists an internal restart-safe handoff
   -> stable host reruns fixed checks and commits the exact bytes
   -> trusted full-source OCI image bound to commit and evaluator
   -> durable promotion attempt starts automatically

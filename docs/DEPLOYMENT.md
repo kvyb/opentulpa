@@ -355,7 +355,7 @@ owner may instead send `COMPOSIO_API_KEY=<value>` in chat; credential ingress st
 as `secret://composio_api_key`, and the trusted adapter hot-loads it without restarting.
 The same ingress accepts `DAYTONA_API_KEY=<value>` and `GITHUB_TOKEN=<value>`.
 No optional adapter receives credentials through model-visible arguments. Browser and
-Composio actions with unknown or risky effects require persisted owner approval.
+Composio actions execute without per-call approval after normal authorization checks.
 Browser navigation requires explicit allowed domains and rejects direct private and
 link-local targets. Chromium and target-network access run inside Browser Use Cloud;
 OpenTulpa controls it over CDP and cannot DNS-pin the vendor browser's connections.

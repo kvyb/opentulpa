@@ -66,6 +66,10 @@ from opentulpa.deep_agent.sandbox import (
     TenantExecutionProvider,
     TenantSandboxBackend,
 )
+from opentulpa.deep_agent.shell_policy import (
+    ShellCommandDisposition,
+    classify_shell_command,
+)
 from opentulpa.inference.codex import is_transient as is_codex_transient
 from opentulpa.inference.codex import is_unauthorized as is_codex_unauthorized
 from opentulpa.inference.models import (
@@ -119,7 +123,6 @@ _TRACE_LIST_LIMIT = 100
 _TRACE_TEXT_PREVIEW_CHARS = 500
 _TRACE_TOOL_VALUE_CHARS = 4_000
 _TRACE_FAILURE_CAUSE_CHARS = 500
-_RM_COMMAND_RE = re.compile(r"\brm\s+(?P<arguments>[^;&|\n]*)", re.IGNORECASE)
 _TRACE_HIDDEN_KEYS = frozenset(
     {"actor_id", "checkpoint_thread_id", "customer_id", "tenant_id", "thread_id"}
 )
@@ -303,7 +306,7 @@ def _is_model_provider_failure(error: BaseException) -> bool:
 
 
 def _shell_command_requires_approval(request: Any) -> bool:
-    """Interrupt only shell calls that combine recursive and forced removal."""
+    """Interrupt only shell calls classified as recursive forced removal."""
 
     raw_arguments = request.tool_call.get("args", {})
     if not isinstance(raw_arguments, dict):
@@ -311,19 +314,7 @@ def _shell_command_requires_approval(request: Any) -> bool:
     command = raw_arguments.get("command")
     if not isinstance(command, str):
         return False
-    for match in _RM_COMMAND_RE.finditer(command):
-        recursive = False
-        force = False
-        for flag in re.findall(r"(?<!\S)--?[A-Za-z-]+", match.group("arguments")):
-            if flag.startswith("--"):
-                recursive = recursive or flag[2:].casefold() == "recursive"
-                force = force or flag[2:].casefold() == "force"
-            else:
-                recursive = recursive or "r" in flag[1:].casefold()
-                force = force or "f" in flag[1:].casefold()
-        if recursive and force:
-            return True
-    return False
+    return classify_shell_command(command) is ShellCommandDisposition.REQUIRE_APPROVAL
 
 
 class AgentRunObserver(Protocol):
@@ -364,6 +355,31 @@ class _DenyToolsMiddleware(AgentMiddleware):
             return ToolMessage(
                 content="This AgentSpec is not permitted to use that tool.",
                 tool_call_id=str(request.tool_call.get("id", "denied-tool-call")),
+                name=name,
+                status="error",
+            )
+        return await handler(request)
+
+
+class _ShellCommandPolicyMiddleware(AgentMiddleware):
+    """Reject shell calls whose destructive behavior cannot be classified safely."""
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        tool_call = request.tool_call
+        name = str(tool_call.get("name", ""))
+        arguments = tool_call.get("args", {})
+        command = arguments.get("command") if isinstance(arguments, dict) else None
+        if (
+            name in {"execute", "source_shell"}
+            and isinstance(command, str)
+            and classify_shell_command(command) is ShellCommandDisposition.REJECT
+        ):
+            return ToolMessage(
+                content=(
+                    "This shell command uses syntax that cannot be classified safely. "
+                    "Use a literal command without dynamic executable or option construction."
+                ),
+                tool_call_id=str(tool_call.get("id", "rejected-shell-call")),
                 name=name,
                 status="error",
             )
@@ -2006,7 +2022,10 @@ class DeepAgentService:
         )
         routine_tools = [tool for tool in owner_tools if tool.name in _ROUTINE_PRODUCT_TOOL_NAMES]
         intake_tools = [tool for tool in owner_tools if tool.name in _INTAKE_PRODUCT_TOOL_NAMES]
-        middleware = self._provider_fallback_middleware()
+        middleware = [
+            _ShellCommandPolicyMiddleware(),
+            *self._provider_fallback_middleware(),
+        ]
 
         return {
             "owner": create_deep_agent(
@@ -2155,7 +2174,8 @@ class DeepAgentService:
             ModelCallLimitMiddleware(
                 run_limit=spec.max_model_calls,
                 exit_behavior="error",
-            )
+            ),
+            _ShellCommandPolicyMiddleware(),
         ]
         middleware.extend(self._middleware_for_plan(active_plan, resolved_model))
         if denied:

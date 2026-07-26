@@ -81,8 +81,9 @@ fixed host must reject a release that fails its external gates.
 > Roll back to the previous healthy OpenTulpa release. Tell me which release became
 > active and preserve this conversation.
 
-Rollback is an owner-approved, durable activation attempt. The bootstrap changes the
-release lease; it does not reverse product databases or erase later messages.
+Rollback is a durable activation attempt bound to the requested release IDs. The
+bootstrap changes the release lease; it does not reverse product databases or erase
+later messages.
 
 ### Prepare an upstream contribution
 

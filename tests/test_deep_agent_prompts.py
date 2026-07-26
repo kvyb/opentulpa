@@ -44,6 +44,7 @@ def test_owner_prompt_treats_tools_and_approvals_as_runtime_state() -> None:
     assert "when workspace access is available" in prompt
     assert "without per-call approval pauses except execute or source_shell" in prompt
     assert "recursive forced removal such as `rm -rf`" in prompt
+    assert "ambiguous dynamic construction is rejected" in prompt
     assert "complete read-only discovery" in prompt
     assert "other accepted calls execute immediately" in prompt
     assert "restricted background agents retain tool, isolation, and tenant boundaries" in prompt

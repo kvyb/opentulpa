@@ -59,16 +59,16 @@ Exercise the local TUI first, then prove another interface uses the same state:
 
 1. Start a terminal-only deployment with no host `TELEGRAM_BOT_TOKEN`.
 2. Connect with `opentulpa connect`, submit text and an attachment, and observe ordered SSE.
-3. Trigger a risky reversible test tool and verify the TUI approval can be approved,
-   edited, and rejected.
+3. Trigger recursive forced removal in a disposable owner workspace and verify the TUI
+   approval can be approved, edited, and rejected. Confirm ordinary tools run directly.
 4. Paste a dedicated BotFather test token and ask OpenTulpa to enable Telegram.
 5. Verify the stored run text and traces contain only `secret://telegram_bot_token`, not
    plaintext.
-6. Verify the Telegram manifest test is digest-bound and activation interrupts for
-   owner approval.
-7. Approve it, message the bot, and verify Telegram continues the same tenant's Deep
-   Agents context. Pair the first account with `/start <last-eight-token-characters>`
-   or the configured host override.
+6. Verify the Telegram manifest test is digest-bound and activation executes without
+   a per-call approval.
+7. Message the bot and verify Telegram continues the same tenant's Deep Agents context.
+   Pair the first account with `/start <last-eight-token-characters>` or the configured
+   host override.
 8. Trigger a background run and verify both web and Telegram receive their own durable
    notification and acknowledgement state.
 9. Rotate the Telegram secret and verify the worker restarts on the new vault revision
