@@ -55,6 +55,30 @@ async def test_bot_api_explicitly_disables_webhook_without_dropping_updates() ->
 
 
 @pytest.mark.asyncio
+async def test_bot_api_registers_native_slash_commands() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramBotAPI(token="private-token", client=http)
+
+    await client.set_my_commands(
+        [{"command": "model", "description": "Show or select the model"}]
+    )
+
+    assert requests[0].url.path.endswith("/setMyCommands")
+    assert json.loads(requests[0].content) == {
+        "commands": [
+            {"command": "model", "description": "Show or select the model"}
+        ]
+    }
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bot_api_renders_markdown_as_telegram_html() -> None:
     requests: list[httpx.Request] = []
 

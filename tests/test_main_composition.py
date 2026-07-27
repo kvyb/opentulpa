@@ -182,7 +182,7 @@ def test_build_application_injects_browser_use_cloud_session_provider(tmp_path: 
     )
 
 
-def test_build_application_routes_scheduled_results_to_universal_notifications(
+def test_build_application_separates_business_webhook_from_owner_notifications(
     tmp_path: Path,
 ) -> None:
     composition = main_module.build_application(
@@ -194,7 +194,7 @@ def test_build_application_routes_scheduled_results_to_universal_notifications(
         ),
     )
     app = composition.app
-    relay = app.state.telegram_relay
+    relay = app.state.telegram_business_relay
     delivery = app.state.trigger_dispatcher._deliver  # noqa: SLF001
 
     assert relay is not None
@@ -222,7 +222,6 @@ async def test_managed_release_health_includes_configured_consumer_interfaces(
 
     agent = SyncHealthProbe(True)
     capabilities = AsyncHealthProbe(False)
-    telegram = SyncHealthProbe(False)
     monkeypatch.setenv("OPENTULPA_RELEASE_ID", "release-health-test")
     monkeypatch.setenv("OPENTULPA_CONTROL_TOKEN", "t" * 32)
     monkeypatch.delenv("OPENTULPA_DISABLE_CONSUMERS", raising=False)
@@ -233,7 +232,6 @@ async def test_managed_release_health_includes_configured_consumer_interfaces(
         secret_ingress=cast(Any, object()),
         notifications=cast(Any, object()),
         capabilities=cast(Any, capabilities),
-        telegram_relay=cast(Any, telegram),
     )
 
     assert service is not None
@@ -243,14 +241,12 @@ async def test_managed_release_health_includes_configured_consumer_interfaces(
         "runtime": True,
         "agent_api": True,
         "capabilities": False,
-        "telegram_owner_interface": False,
     }
 
     monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", "true")
     staging_report = await service.health()
     assert staging_report.healthy is True
     assert staging_report.components["capabilities"] is True
-    assert staging_report.components["telegram_owner_interface"] is True
 
 
 @pytest.mark.asyncio

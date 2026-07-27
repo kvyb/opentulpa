@@ -93,12 +93,12 @@ from opentulpa.integrations.tenant_composio import (
 )
 from opentulpa.integrations.web_search import get_web_search_provider
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
+from opentulpa.interfaces.telegram.business_relay import TelegramBusinessRelay
 from opentulpa.interfaces.telegram.client import TelegramClient
-from opentulpa.interfaces.telegram.constants import TELEGRAM_WEBHOOK_ALLOWED_UPDATES
-from opentulpa.interfaces.telegram.deep_agent_relay import DeepAgentTelegramRelay
-from opentulpa.interfaces.telegram.delivery import TelegramOwnerDelivery
+from opentulpa.interfaces.telegram.constants import (
+    TELEGRAM_BUSINESS_WEBHOOK_ALLOWED_UPDATES,
+)
 from opentulpa.interfaces.telegram.security import parse_csv_set
-from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.jobs.registry import JobHandlerRegistry
 from opentulpa.jobs.service import JobService
 from opentulpa.logging import LangfuseTracer, create_langfuse_tracer
@@ -144,7 +144,6 @@ from opentulpa.specs import (
     seed_default_agent_spec_refs,
 )
 from opentulpa.specs.dispatcher import TriggerDispatcher, TriggerExecutionStore
-from opentulpa.specs.models import TriggerSpec
 from opentulpa.tooling import TOOL_SPEC_BY_NAME
 from opentulpa.tooling.adapters import build_product_tools
 
@@ -222,15 +221,7 @@ class _DeferredAgentService:
         )
 
 
-class _OwnerDeliveryProxy:
-    """Share one optional owner channel across triggers and artifact delivery."""
-
-    def __init__(self) -> None:
-        self._delegate: TelegramOwnerDelivery | None = None
-
-    def bind(self, delegate: TelegramOwnerDelivery) -> None:
-        self._delegate = delegate
-
+class _UnavailableArtifactDelivery:
     async def deliver_artifact(
         self,
         *,
@@ -240,37 +231,9 @@ class _OwnerDeliveryProxy:
         media_type: str | None = None,
         caption: str | None = None,
     ) -> dict[str, Any]:
-        if self._delegate is None:
-            raise RuntimeError("owner delivery channel is unavailable")
-        return await self._delegate.deliver_artifact(
-            tenant_id=tenant_id,
-            path=path,
-            filename=filename,
-            media_type=media_type,
-            caption=caption,
-        )
-
-    async def deliver_trigger(
-        self,
-        *,
-        trigger: TriggerSpec,
-        snapshot: AgentRunSnapshot,
-        mode: Literal["origin", "owner"],
-    ) -> None:
-        if self._delegate is None or mode != "owner":
-            return
-        text = snapshot.final_text
-        if snapshot.status == "interrupted":
-            text = text or "Background work is waiting for owner approval."
-        elif snapshot.status == "failed":
-            text = text or "Background work failed."
-        await self._delegate.deliver_text(
-            tenant_id=trigger.tenant_id,
-            title=trigger.name,
-            text=text or "Background work completed.",
-            run_id=snapshot.run_id,
-            approval_required=snapshot.status == "interrupted",
-            approvals=snapshot.approvals,
+        del tenant_id, path, filename, media_type, caption
+        raise RuntimeError(
+            "artifact delivery is unavailable through the current interface capability"
         )
 
 
@@ -401,30 +364,12 @@ def _capability_worker_host(project_root: Path) -> CapabilityWorkerClient | Subp
 def _resolve_owner_tenant_id(
     settings: Settings,
     profiles: CustomerProfileService,
-    telegram_state: TelegramStateStore,
 ) -> str:
     configured = str(settings.opentulpa_owner_customer_id or "").strip()
     if configured:
         return profiles.resolve_customer_id(configured) or configured
 
     allowed_ids = parse_csv_set(settings.telegram_allowed_user_ids)
-    allowed_usernames = parse_csv_set(
-        settings.telegram_allowed_usernames,
-        normalize_username=True,
-    )
-    for summary in telegram_state.list_owner_customer_summaries():
-        user_id = str(summary.get("owner_user_id", "") or "").strip()
-        username = str(summary.get("owner_username", "") or "").strip().lower()
-        if (
-            (allowed_ids or allowed_usernames)
-            and user_id not in allowed_ids
-            and username not in allowed_usernames
-        ):
-            continue
-        customer_id = str(summary.get("customer_id", "") or "").strip()
-        if customer_id:
-            return profiles.resolve_customer_id(customer_id) or customer_id
-
     numeric_ids = sorted(value for value in allowed_ids if value.isdigit())
     if numeric_ids:
         return profiles.resolve_telegram_customer_id(numeric_ids[0])
@@ -531,7 +476,6 @@ def _build_release_control_service(
     secret_ingress: SecretIngressService,
     notifications: NotificationService,
     capabilities: CapabilityControlService,
-    telegram_relay: DeepAgentTelegramRelay | None,
 ) -> ReleaseControlService | None:
     """Bind stable bootstrap envelopes to the same universal Agent API as interfaces."""
 
@@ -663,10 +607,6 @@ def _build_release_control_service(
             "agent_api": runtime_healthy,
             "capabilities": await capabilities.healthy() if consumers_enabled else True,
         }
-        if telegram_relay is not None:
-            components["telegram_owner_interface"] = (
-                telegram_relay.healthy() if consumers_enabled else True
-            )
         return components
 
     return ReleaseControlService.from_environment(
@@ -695,7 +635,7 @@ def _auto_configure_telegram_webhook(
     payload = {
         "url": webhook_url,
         "secret_token": resolved_secret,
-        "allowed_updates": json.dumps(TELEGRAM_WEBHOOK_ALLOWED_UPDATES),
+        "allowed_updates": json.dumps(TELEGRAM_BUSINESS_WEBHOOK_ALLOWED_UPDATES),
     }
     try:
         import httpx
@@ -716,7 +656,8 @@ def _auto_configure_telegram_webhook(
         if bool(data.get("ok")):
             print(
                 "Telegram webhook configured: "
-                f"{webhook_url} allowed_updates={','.join(TELEGRAM_WEBHOOK_ALLOWED_UPDATES)}"
+                f"{webhook_url} "
+                f"allowed_updates={','.join(TELEGRAM_BUSINESS_WEBHOOK_ALLOWED_UPDATES)}"
             )
         else:
             print(
@@ -872,8 +813,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             project_root=project_root,
             settings=settings,
         )
-        telegram_state = TelegramStateStore(data_root / "telegram_state.json")
-        owner_tenant_id = _resolve_owner_tenant_id(settings, profiles, telegram_state)
+        owner_tenant_id = _resolve_owner_tenant_id(settings, profiles)
         composio_vault_cache: dict[str, Any] = {"revision": None, "value": ""}
 
         def resolve_vault_secret(
@@ -1111,7 +1051,6 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 capability_credentials=capability_credentials,
             ),
             config_defaults=capability_config_defaults,
-            blocked_capabilities=("telegram",) if bot_token else (),
             release_state_path=capability_state_root / "seed_activations.json",
         )
         secret_vault.add_change_listener(capabilities.notify_secret_changed)
@@ -1119,7 +1058,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             tenant_id=owner_tenant_id,
             actor_id="bootstrap",
         )
-        owner_delivery = _OwnerDeliveryProxy()
+        artifact_delivery = _UnavailableArtifactDelivery()
         telegram_client: TelegramClient | None = None
         telegram_business: TelegramBusinessService | None = None
         if bot_token:
@@ -1206,7 +1145,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             files=FileVaultProductPort(files=file_vault, analysis=file_analysis),
             artifacts=ArtifactDeliveryProductPort(
                 jobs=jobs,
-                delivery=owner_delivery,
+                delivery=artifact_delivery,
                 allowed_roots=(
                     artifacts_root,
                     _resolve_path(project_root, settings.deepagents_workspaces_root),
@@ -1276,23 +1215,12 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         deferred_agent.bind(agent_service)
 
         telegram_webhook_secret = _ensure_telegram_webhook_secret(settings) if bot_token else None
-        telegram_relay = (
-            DeepAgentTelegramRelay(
-                agent=agent_service,
-                client=telegram_client,
-                state=telegram_state,
-                profiles=profiles,
-                files=file_vault,
-                bot_token=bot_token,
-                owner_tenant_id=owner_tenant_id,
-                allowed_user_ids=settings.telegram_allowed_user_ids,
-                allowed_usernames=settings.telegram_allowed_usernames,
-                telegram_business=telegram_business,
-                intake_workflows=intake_workflows,
-                resolve_agent_spec=resolve_agent_spec,
-                inference=inference,
+        telegram_business_relay = (
+            TelegramBusinessRelay(
+                business=telegram_business,
+                workflows=intake_workflows,
             )
-            if telegram_client is not None
+            if telegram_business is not None
             else None
         )
         release_control = _build_release_control_service(
@@ -1301,16 +1229,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             secret_ingress=secret_ingress,
             notifications=notifications,
             capabilities=capabilities,
-            telegram_relay=telegram_relay,
         )
-        if telegram_client is not None and telegram_relay is not None:
-            owner_delivery.bind(
-                TelegramOwnerDelivery(
-                    client=telegram_client,
-                    state=telegram_state,
-                    deliver_approval=telegram_relay.deliver_approval,
-                )
-            )
         owner_token = str(settings.opentulpa_owner_token or "").strip()
         principal = OwnerOrCapabilityPrincipalResolver(
             owner=OwnerPrincipalResolver(
@@ -1336,7 +1255,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             capability_service=capabilities,
             trigger_dispatcher=trigger_dispatcher,
             intake_poll_dispatcher=intake_poller,
-            telegram_relay=telegram_relay,
+            telegram_business_relay=telegram_business_relay,
             telegram_webhook_secret=telegram_webhook_secret,
             browser_service=browser,
             telegram_client=telegram_client,

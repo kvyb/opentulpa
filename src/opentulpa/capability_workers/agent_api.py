@@ -173,6 +173,115 @@ class AgentAPIClient:
             headers["X-OpenTulpa-Origin-Message-ID"] = _origin_id(origin_message_id)
         return headers
 
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Mapping[str, Any] | None = None,
+        params: Mapping[str, Any] | None = None,
+        expected_status: int = 200,
+    ) -> dict[str, Any]:
+        try:
+            response = await self._client.request(
+                method,
+                f"{self._base_url}{path}",
+                headers=self._headers(),
+                json=dict(json_body) if json_body is not None else None,
+                params=dict(params) if params is not None else None,
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            raise AgentAPIError("Agent API request failed.") from exc
+        if response.status_code != expected_status:
+            detail = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    detail = str(payload.get("detail") or "").strip()
+            except ValueError:
+                pass
+            suffix = f": {detail}" if detail else "."
+            raise AgentAPIError(
+                f"Agent API returned HTTP {response.status_code}{suffix}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AgentAPIError("Agent API returned invalid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise AgentAPIError("Agent API returned an invalid response.")
+        return payload
+
+    async def ensure_thread(self, thread_id: str) -> None:
+        await self._request_json(
+            "PUT",
+            f"/v2/agent/threads/{quote(thread_id, safe='')}",
+            json_body={},
+        )
+
+    async def get_thread_inference(self, thread_id: str) -> dict[str, Any]:
+        return await self._request_json(
+            "GET",
+            f"/v2/agent/threads/{quote(thread_id, safe='')}/inference",
+        )
+
+    async def update_thread_inference(
+        self,
+        thread_id: str,
+        *,
+        expected_revision: int,
+        selection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._request_json(
+            "PATCH",
+            f"/v2/agent/threads/{quote(thread_id, safe='')}/inference",
+            json_body={
+                "expected_revision": max(0, int(expected_revision)),
+                "selection": dict(selection),
+            },
+        )
+
+    async def inference_status(self) -> dict[str, Any]:
+        return await self._request_json("GET", "/v2/inference")
+
+    async def list_models(
+        self,
+        *,
+        provider: Literal["api", "codex"],
+        query: str = "",
+    ) -> list[dict[str, Any]]:
+        payload = await self._request_json(
+            "GET",
+            "/v2/inference/models",
+            params={"provider": provider, "query": str(query or "")[:200]},
+        )
+        models = payload.get("models")
+        if not isinstance(models, list) or any(not isinstance(item, dict) for item in models):
+            raise AgentAPIError("Agent API returned invalid inference models.")
+        return [dict(item) for item in models]
+
+    async def start_codex_login(self) -> dict[str, Any]:
+        return await self._request_json(
+            "POST",
+            "/v2/inference/codex/device-logins",
+            json_body={},
+            expected_status=201,
+        )
+
+    async def get_codex_login(self, login_id: str) -> dict[str, Any]:
+        return await self._request_json(
+            "GET",
+            f"/v2/inference/codex/device-logins/{quote(login_id, safe='')}",
+        )
+
+    async def cancel_thread(self, thread_id: str) -> dict[str, Any]:
+        return await self._request_json(
+            "POST",
+            f"/v2/agent/threads/{quote(thread_id, safe='')}/cancel",
+            json_body={},
+        )
+
     async def upload_file(
         self,
         *,

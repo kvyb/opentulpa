@@ -1,4 +1,4 @@
-"""Authenticated Telegram webhook for the Deep Agent channel adapter."""
+"""Authenticated webhook for Telegram Business intake updates."""
 
 from __future__ import annotations
 
@@ -12,28 +12,31 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Re
 logger = logging.getLogger(__name__)
 
 
-class TelegramUpdateHandler(Protocol):
+class TelegramBusinessUpdateHandler(Protocol):
     async def accept_update(self, body: dict[str, Any]) -> Any: ...
 
     async def process_update(self, accepted: Any) -> None: ...
 
 
-def register_telegram_deep_agent_routes(
+def register_telegram_business_routes(
     app: FastAPI,
     *,
-    get_relay: Callable[[], TelegramUpdateHandler | None],
+    get_relay: Callable[[], TelegramBusinessUpdateHandler | None],
     webhook_secret: str | None,
 ) -> None:
-    """Persist intake ingress before acknowledgement; process slow work afterward."""
+    """Persist business ingress before acknowledgement and process it afterward."""
 
-    async def process_safely(relay: TelegramUpdateHandler, accepted: Any) -> None:
+    async def process_safely(
+        relay: TelegramBusinessUpdateHandler,
+        accepted: Any,
+    ) -> None:
         try:
             await relay.process_update(accepted)
         except Exception:
-            logger.exception("Telegram update processing failed after acknowledgement")
+            logger.exception("Telegram Business update processing failed")
 
     @app.post("/webhook/telegram", status_code=200)
-    async def telegram_webhook(
+    async def telegram_business_webhook(
         request: Request,
         background: BackgroundTasks,
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
@@ -41,12 +44,18 @@ def register_telegram_deep_agent_routes(
         expected = str(webhook_secret or "").strip()
         provided = str(x_telegram_bot_api_secret_token or "").strip()
         if not expected:
-            raise HTTPException(status_code=503, detail="Telegram webhook is not configured")
+            raise HTTPException(
+                status_code=503,
+                detail="Telegram Business webhook is not configured",
+            )
         if not provided or not compare_digest(provided, expected):
             raise HTTPException(status_code=401, detail="invalid Telegram webhook secret")
         relay = get_relay()
         if relay is None:
-            raise HTTPException(status_code=503, detail="Telegram relay unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="Telegram Business relay unavailable",
+            )
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="invalid Telegram update")
@@ -54,15 +63,15 @@ def register_telegram_deep_agent_routes(
             accepted = await relay.accept_update(body)
         except Exception as exc:
             logger.error(
-                "Telegram update could not be durably accepted",
+                "Telegram Business update could not be durably accepted",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
             raise HTTPException(
                 status_code=503,
-                detail="Telegram update could not be accepted",
+                detail="Telegram Business update could not be accepted",
             ) from exc
         background.add_task(process_safely, relay, accepted)
         return Response(status_code=200)
 
 
-__all__ = ["TelegramUpdateHandler", "register_telegram_deep_agent_routes"]
+__all__ = ["TelegramBusinessUpdateHandler", "register_telegram_business_routes"]

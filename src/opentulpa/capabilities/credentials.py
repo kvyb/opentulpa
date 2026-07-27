@@ -39,6 +39,7 @@ class CapabilityAPIScope(StrEnum):
     AGENT_RUN_SUBMIT = "agent.runs.submit"
     AGENT_RUN_REPLAY = "agent.runs.replay"
     AGENT_RUN_RESUME = "agent.runs.resume"
+    AGENT_RUN_CANCEL = "agent.runs.cancel"
     FILE_UPLOAD = "files.upload"
     NOTIFICATIONS_READ = "notifications.read"
     NOTIFICATIONS_ACK = "notifications.ack"
@@ -48,6 +49,7 @@ CAPABILITY_API_SCOPES = frozenset(scope.value for scope in CapabilityAPIScope)
 _OWNER_ONLY_SCOPES = frozenset(
     {
         CapabilityAPIScope.AGENT_RUN_RESUME.value,
+        CapabilityAPIScope.AGENT_RUN_CANCEL.value,
         CapabilityAPIScope.NOTIFICATIONS_READ.value,
         CapabilityAPIScope.NOTIFICATIONS_ACK.value,
     }

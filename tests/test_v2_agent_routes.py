@@ -33,6 +33,7 @@ class _FakeAgentService:
     requests: list[AgentRunRequest] = field(default_factory=list)
     decisions: list[tuple[str, ApprovalDecision]] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
+    ensured_threads: list[tuple[str, str, str]] = field(default_factory=list)
     stream_error: Exception | None = None
     thread_tenant: str = "tenant-a"
 
@@ -119,6 +120,15 @@ class _FakeAgentService:
             "channel": channel,
             "archived": False,
         }
+
+    async def ensure_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        channel: str,
+    ) -> None:
+        self.ensured_threads.append((tenant_id, thread_id, channel))
 
     async def list_threads(
         self, *, tenant_id: str, cursor: str | None = None, limit: int = 50
@@ -290,12 +300,18 @@ def test_start_run_injects_principal_context_and_streams_normalized_sse() -> Non
 
 
 def test_thread_routes_are_server_owned_and_tenant_scoped() -> None:
-    client, _ = _client()
+    client, service = _client()
     headers = {"x-tenant-id": "tenant-a", "x-actor-id": "actor-1"}
 
     created = client.post("/v2/agent/threads", headers=headers, json={"title": "Research"})
     assert created.status_code == 201
     assert created.json()["title"] == "Research"
+    ensured = client.put("/v2/agent/threads/thread-telegram", headers=headers)
+    assert ensured.status_code == 200
+    assert ensured.json() == {"thread_id": "thread-telegram"}
+    assert service.ensured_threads == [
+        ("tenant-a", "thread-telegram", "web"),
+    ]
     assert client.get("/v2/agent/threads", headers=headers).json()["threads"][0]["title"] == "Main"
     assert (
         client.get("/v2/agent/threads/thread-1/timeline", headers=headers).status_code == 200

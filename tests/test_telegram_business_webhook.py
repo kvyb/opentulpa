@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from opentulpa.api.routes.telegram_deep_agent import register_telegram_deep_agent_routes
+from opentulpa.api.routes.telegram_business import register_telegram_business_routes
 
 
 class _Relay:
@@ -30,7 +30,7 @@ async def test_webhook_sends_200_after_accept_and_before_background_processing()
     order: list[str] = []
     relay = _Relay(order)
     app = FastAPI()
-    register_telegram_deep_agent_routes(
+    register_telegram_business_routes(
         app,
         get_relay=lambda: relay,
         webhook_secret="webhook-secret",
@@ -84,7 +84,7 @@ def test_webhook_acceptance_failure_is_generic() -> None:
             del accepted
 
     app = FastAPI()
-    register_telegram_deep_agent_routes(
+    register_telegram_business_routes(
         app,
         get_relay=FailingRelay,
         webhook_secret="webhook-secret",
@@ -96,6 +96,6 @@ def test_webhook_acceptance_failure_is_generic() -> None:
     )
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Telegram update could not be accepted"
+    assert response.json()["detail"] == "Telegram Business update could not be accepted"
     assert "private-secret" not in response.text
     assert "/srv/private" not in response.text

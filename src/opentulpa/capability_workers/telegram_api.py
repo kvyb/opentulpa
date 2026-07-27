@@ -181,6 +181,15 @@ class TelegramBotAPI:
         if result is not True:
             raise TelegramAPIError("Telegram deleteWebhook returned an invalid result.")
 
+    async def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        result = await self._post(
+            "setMyCommands",
+            {"commands": commands},
+            timeout=20,
+        )
+        if result is not True:
+            raise TelegramAPIError("Telegram setMyCommands returned an invalid result.")
+
     async def get_updates(self, *, offset: int, timeout_seconds: int) -> list[dict[str, Any]]:
         result = await self._post(
             "getUpdates",

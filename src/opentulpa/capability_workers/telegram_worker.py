@@ -12,6 +12,7 @@ import secrets
 import signal
 from collections.abc import AsyncIterator, Callable, Mapping, MutableMapping
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -29,6 +30,10 @@ from opentulpa.capability_workers.telegram_api import (
     TelegramBotAPI,
     _text_chunks,
     extract_attachments,
+)
+from opentulpa.capability_workers.telegram_controls import (
+    INFERENCE_COMMANDS,
+    TelegramInferenceControls,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +70,16 @@ _HIDDEN_EDIT_ARGUMENTS = {
     "thread_id",
 }
 _MAX_SECRET_BYTES = 16 * 1024
+_TELEGRAM_COMMANDS = [
+    {"command": "start", "description": "Show connection help"},
+    {"command": "fresh", "description": "Start a new conversation"},
+    {"command": "regenerate", "description": "Regenerate the last response"},
+    {"command": "model", "description": "Show or select the model"},
+    {"command": "models", "description": "List available models"},
+    {"command": "reasoning", "description": "Set reasoning effort"},
+    {"command": "codex", "description": "Connect or inspect Codex"},
+    {"command": "cancel", "description": "Cancel the active run or approval edit"},
+]
 
 
 class WorkerConfigurationError(RuntimeError):
@@ -72,6 +87,33 @@ class WorkerConfigurationError(RuntimeError):
 
 
 class AgentRunClient(Protocol):
+    async def ensure_thread(self, thread_id: str) -> None: ...
+
+    async def get_thread_inference(self, thread_id: str) -> dict[str, Any]: ...
+
+    async def update_thread_inference(
+        self,
+        thread_id: str,
+        *,
+        expected_revision: int,
+        selection: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
+    async def inference_status(self) -> dict[str, Any]: ...
+
+    async def list_models(
+        self,
+        *,
+        provider: Literal["api", "codex"],
+        query: str = "",
+    ) -> list[dict[str, Any]]: ...
+
+    async def start_codex_login(self) -> dict[str, Any]: ...
+
+    async def get_codex_login(self, login_id: str) -> dict[str, Any]: ...
+
+    async def cancel_thread(self, thread_id: str) -> dict[str, Any]: ...
+
     async def upload_file(
         self,
         *,
@@ -124,6 +166,8 @@ class TelegramTransport(Protocol):
     async def delete_webhook(self) -> None: ...
 
     async def get_me(self) -> dict[str, Any]: ...
+
+    async def set_my_commands(self, commands: list[dict[str, str]]) -> None: ...
 
     async def get_updates(
         self,
@@ -363,6 +407,15 @@ class TelegramInterfaceWorker:
         self._retry_delay_seconds = retry_delay_seconds
         self._bot_id: int | None = None
         self._webhook_cleared = False
+        self._commands_registered = False
+        self._normal_update_lock = asyncio.Lock()
+        self._update_tasks: dict[int, asyncio.Task[None]] = {}
+        self._normal_update_id: int | None = None
+        self._inference_controls = TelegramInferenceControls(
+            agent=agent,
+            telegram=telegram,
+            state=state,
+        )
 
     async def run(
         self,
@@ -377,17 +430,28 @@ class TelegramInterfaceWorker:
             return
         if on_ready is not None:
             on_ready()
-        while not stop.is_set():
-            try:
-                await self._run_until_stopped(self.poll_once(), stop)
-            except (AgentAPIError, TelegramAPIError) as exc:
-                if stop.is_set():
-                    break
-                logger.warning("Telegram worker request failed: %s", exc)
-                await self._sleep_until_stopped(stop)
+        try:
+            while not stop.is_set():
+                try:
+                    await self._run_until_stopped(self._poll_updates(), stop)
+                    self._dispatch_pending_updates()
+                except (AgentAPIError, TelegramAPIError) as exc:
+                    if stop.is_set():
+                        break
+                    logger.warning("Telegram worker request failed: %s", exc)
+                    await self._sleep_until_stopped(stop)
+        finally:
+            tasks = list(self._update_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._update_tasks.clear()
 
     async def _initialize(self) -> None:
         await self._ensure_bot_identity()
+        if not self._commands_registered:
+            await self._telegram.set_my_commands(_TELEGRAM_COMMANDS)
+            self._commands_registered = True
         if not self._webhook_cleared:
             await self._telegram.delete_webhook()
             self._webhook_cleared = True
@@ -402,6 +466,14 @@ class TelegramInterfaceWorker:
     async def poll_once(self) -> int:
         """Poll and serially handle one Telegram update batch."""
 
+        accepted = await self._poll_updates()
+        for update_id, update in self._state.pending_updates():
+            await self._process_accepted_update(update_id, update)
+        return accepted
+
+    async def _poll_updates(self) -> int:
+        """Durably accept a Telegram batch before advancing its remote cursor."""
+
         await self._ensure_bot_identity()
         await self._deliver_undelivered_approvals()
         await self._deliver_notifications()
@@ -409,34 +481,87 @@ class TelegramInterfaceWorker:
             offset=self._state.next_update_id,
             timeout_seconds=self._poll_timeout_seconds,
         )
-        handled = 0
+        accepted = 0
         for update in updates:
             update_id = _nonnegative_int(update.get("update_id"))
             if update_id is None:
                 continue
-            source_event_id = self._source_event_id(update_id)
-            if self._state.source_seen(source_event_id):
-                self._state.complete_update(
-                    update_id=update_id,
-                    source_event_id=source_event_id,
-                )
-                handled += 1
+            if self._state.accept_update(update_id=update_id, update=update):
+                accepted += 1
+        return accepted
+
+    def _dispatch_pending_updates(self) -> None:
+        for update_id, update in self._state.pending_updates():
+            if update_id in self._update_tasks:
                 continue
+            is_cancel = _is_cancel_update(update)
+            if not is_cancel and self._normal_update_id is not None:
+                continue
+            task = asyncio.create_task(self._process_accepted_update(update_id, update))
+            self._update_tasks[update_id] = task
+            if not is_cancel:
+                self._normal_update_id = update_id
+            task.add_done_callback(partial(self._update_finished, update_id))
+
+    def _update_finished(self, update_id: int, task: asyncio.Task[None]) -> None:
+        self._update_tasks.pop(update_id, None)
+        if self._normal_update_id == update_id:
+            self._normal_update_id = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("Telegram update %s failed: %s", update_id, error)
+            return
+        self._dispatch_pending_updates()
+
+    async def _process_accepted_update(
+        self,
+        update_id: int,
+        update: Mapping[str, Any],
+    ) -> None:
+        source_event_id = self._source_event_id(update_id)
+
+        async def process() -> None:
+            if self._state.source_seen(source_event_id):
+                self._complete(update_id=update_id, source_event_id=source_event_id)
+                return
             pending = self._state.pending_run(source_event_id)
             if pending is not None:
                 await self._recover_pending_record(pending)
-            else:
-                await self._handle_update(
-                    update=update,
-                    update_id=update_id,
-                    source_event_id=source_event_id,
-                )
-            handled += 1
-        return handled
+                return
+            await self._handle_update(
+                update=update,
+                update_id=update_id,
+                source_event_id=source_event_id,
+            )
+
+        if _is_cancel_update(update):
+            while True:
+                prior_tasks = [
+                    task
+                    for identifier, task in self._update_tasks.items()
+                    if identifier < update_id and not task.done()
+                ]
+                if not prior_tasks or any(
+                    int(record.get("update_id") or -1) < update_id
+                    for record in self._state.pending_runs()
+                ):
+                    break
+                await asyncio.sleep(0.01)
+            await process()
+        else:
+            async with self._normal_update_lock:
+                await process()
 
     async def recover(self) -> None:
         """Resume observed Agent API runs and redeliver persisted approvals."""
 
+        pending_updates = self._state.pending_updates()
+        if pending_updates:
+            await self._ensure_bot_identity()
+        for update_id, update in pending_updates:
+            await self._process_accepted_update(update_id, update)
         for record in self._state.pending_runs():
             try:
                 await self._recover_pending_record(record)
@@ -543,7 +668,8 @@ class TelegramInterfaceWorker:
                 chat_id=chat_id,
                 text=(
                     "OpenTulpa is connected. Send a request or attach files. "
-                    "Use /fresh to start a new conversation."
+                    "Use /fresh for a new conversation, /model to inspect inference, "
+                    "or /codex login to connect Codex."
                 ),
             )
             self._complete(update_id=update_id, source_event_id=source_event_id)
@@ -554,6 +680,32 @@ class TelegramInterfaceWorker:
                 chat_id=chat_id,
                 text="Started a fresh conversation.",
             )
+            self._complete(update_id=update_id, source_event_id=source_event_id)
+            return
+        thread_id = self._state.thread_id(chat_id)
+        if command in INFERENCE_COMMANDS:
+            await self._inference_controls.handle(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                text=text,
+            )
+            self._complete(update_id=update_id, source_event_id=source_event_id)
+            return
+        if command == "/cancel":
+            try:
+                await self._agent.cancel_thread(thread_id)
+            except AgentAPIError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+                await self._telegram.send_message(
+                    chat_id=chat_id,
+                    text="There is no active run to cancel.",
+                )
+            else:
+                await self._telegram.send_message(
+                    chat_id=chat_id,
+                    text="Cancellation requested.",
+                )
             self._complete(update_id=update_id, source_event_id=source_event_id)
             return
         if command == "/regenerate" and not argument:
@@ -576,7 +728,7 @@ class TelegramInterfaceWorker:
             text = "Please inspect and respond to the attached files."
         await self._consume_events(
             events=self._agent.start_run(
-                thread_id=self._state.thread_id(chat_id),
+                thread_id=thread_id,
                 text=text,
                 file_ids=file_ids,
                 source_event_id=source_event_id,
@@ -1349,6 +1501,14 @@ def _command(text: str) -> tuple[str, str]:
     command = parts[0].split("@", 1)[0].lower()
     argument = parts[1].strip() if len(parts) == 2 else ""
     return command, argument
+
+
+def _is_cancel_update(update: Mapping[str, Any]) -> bool:
+    message = update.get("message") or update.get("edited_message")
+    if not isinstance(message, dict):
+        return False
+    text = str(message.get("text") or message.get("caption") or "")
+    return _command(text)[0] == "/cancel"
 
 
 def _safe_filename(value: str) -> str:

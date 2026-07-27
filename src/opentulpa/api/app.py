@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from opentulpa.api.routes.telegram_deep_agent import (
-    TelegramUpdateHandler,
-    register_telegram_deep_agent_routes,
+from opentulpa.api.routes.telegram_business import (
+    TelegramBusinessUpdateHandler,
+    register_telegram_business_routes,
 )
 from opentulpa.api.routes.v2_agent import AgentRunService, register_v2_agent_routes
 from opentulpa.api.routes.v2_capabilities import register_v2_capability_routes
@@ -191,7 +191,7 @@ def create_app(
     capability_service: CapabilityControlService | None = None,
     trigger_dispatcher: TriggerDispatcher | None = None,
     intake_poll_dispatcher: IntakePollDispatcher | None = None,
-    telegram_relay: TelegramUpdateHandler | None = None,
+    telegram_business_relay: TelegramBusinessUpdateHandler | None = None,
     telegram_webhook_secret: str | None = None,
     browser_service: TenantBrowserService | None = None,
     telegram_client: TelegramClient | None = None,
@@ -220,9 +220,6 @@ def create_app(
                 # tools until their exact persisted capability generation is restored.
                 await agent_service.start(recover_pending_resumes=False)
             if consumers_enabled:
-                relay_start = getattr(telegram_relay, "start", None)
-                if callable(relay_start):
-                    await relay_start()
                 await job_service.start()
                 await intake_workflow_service.start()
                 if capability_service is not None:
@@ -234,9 +231,6 @@ def create_app(
                     intake_poll_dispatcher.start()
             yield
         finally:
-            relay_shutdown = getattr(telegram_relay, "shutdown", None)
-            if callable(relay_shutdown):
-                await _shutdown_async("Telegram relay", relay_shutdown)
             if intake_poll_dispatcher is not None:
                 _shutdown_sync("intake poll dispatcher", intake_poll_dispatcher.shutdown)
             if trigger_dispatcher is not None:
@@ -269,7 +263,7 @@ def create_app(
     app.state.intake_draft_service = intake_draft_service
     app.state.schedule_service = schedule_service
     app.state.intake_poll_dispatcher = intake_poll_dispatcher
-    app.state.telegram_relay = telegram_relay
+    app.state.telegram_business_relay = telegram_business_relay
     app.state.telegram_client = telegram_client
     app.state.browser_service = browser_service
     app.state.evolution_service = evolution_service
@@ -381,9 +375,9 @@ def create_app(
         get_schedule_service=lambda: schedule_service,
         resolve_principal=resolve_principal,
     )
-    register_telegram_deep_agent_routes(
+    register_telegram_business_routes(
         app,
-        get_relay=lambda: telegram_relay,
+        get_relay=lambda: telegram_business_relay,
         webhook_secret=telegram_webhook_secret,
     )
     _register_composio_callback(app)

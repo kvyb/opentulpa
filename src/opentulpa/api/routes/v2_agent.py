@@ -79,6 +79,14 @@ class AgentRunService(Protocol):
         self, *, tenant_id: str, channel: str, title: str | None = None
     ) -> dict[str, Any]: ...
 
+    async def ensure_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        channel: str,
+    ) -> None: ...
+
     async def list_threads(
         self, *, tenant_id: str, cursor: str | None = None, limit: int = 50
     ) -> dict[str, Any]: ...
@@ -351,6 +359,17 @@ def register_v2_agent_routes(
             channel=principal.channel,
             title=body.title,
         )
+
+    @app.put("/v2/agent/threads/{thread_id}")
+    async def ensure_agent_thread(thread_id: str, request: Request) -> dict[str, str]:
+        principal = await resolve_v2_principal(request, resolve_principal)
+        require_v2_scope(principal, CapabilityAPIScope.AGENT_RUN_SUBMIT.value)
+        await service_or_503().ensure_thread(
+            tenant_id=principal.tenant_id,
+            thread_id=thread_id,
+            channel=principal.channel,
+        )
+        return {"thread_id": thread_id}
 
     @app.get("/v2/agent/threads")
     async def list_agent_threads(

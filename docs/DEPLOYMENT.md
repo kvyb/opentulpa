@@ -303,19 +303,19 @@ before starting the new generation. If startup or activation persistence fails, 
 prior generation is restarted against the same state and the activation pointer is not
 advanced, so two pollers never intentionally share the bot token.
 
-If `TELEGRAM_BOT_TOKEN` is set on the host, OpenTulpa uses the bundled webhook route at
-`/webhook/telegram`. Configure:
+The owner chat always runs through the Telegram capability worker above. A host-level
+`TELEGRAM_BOT_TOKEN` is reserved for the separate Telegram Business intake webhook at
+`/webhook/telegram`; it does not enable a second owner-chat implementation. Configure:
 
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_WEBHOOK_SECRET=...
-TELEGRAM_ALLOWED_USER_IDS=123456789
 PUBLIC_BASE_URL=https://opentulpa.example.com
 ```
 
-The dynamic Telegram capability is blocked in that configuration to prevent duplicate
-consumers. Telegram Business intake also uses the webhook form and requires Business
-Mode plus the appropriate inbox permissions.
+Telegram Business intake requires Business Mode plus the appropriate inbox permissions.
+Do not bind the same bot token to the long-polling owner capability and the Business
+webhook because Telegram permits only one update transport per bot.
 
 ## Optional Adapters
 

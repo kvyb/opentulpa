@@ -404,6 +404,7 @@ def test_restricted_binding_cannot_receive_owner_control_scopes(tmp_path: Path) 
     )
     for scope in (
         CapabilityAPIScope.AGENT_RUN_RESUME.value,
+        CapabilityAPIScope.AGENT_RUN_CANCEL.value,
         CapabilityAPIScope.NOTIFICATIONS_READ.value,
         CapabilityAPIScope.NOTIFICATIONS_ACK.value,
     ):

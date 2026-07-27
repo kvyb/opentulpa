@@ -46,12 +46,16 @@ class _Telegram:
         self.actions: list[dict[str, Any]] = []
         self.edits: list[dict[str, Any]] = []
         self.webhook_deletes = 0
+        self.commands: list[dict[str, str]] = []
 
     async def delete_webhook(self) -> None:
         self.webhook_deletes += 1
 
     async def get_me(self) -> dict[str, Any]:
         return {"id": 99, "username": "open_tulpa_bot"}
+
+    async def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        self.commands = list(commands)
 
     async def get_updates(self, *, offset: int, timeout_seconds: int) -> list[dict[str, Any]]:
         assert 1 <= timeout_seconds <= 50
@@ -119,6 +123,30 @@ class _Agent:
         self.notification_requests: list[dict[str, Any]] = []
         self.notification_acks: list[int] = []
         self.fail_notification_ack = False
+        self.ensured_threads: list[str] = []
+        self.inference_updates: list[dict[str, Any]] = []
+        self.cancelled_threads: list[str] = []
+        self.inference = {
+            "revision": 0,
+            "effective": {
+                "provider": "api",
+                "model": "openai/gpt-5.2",
+                "reasoning_effort": "high",
+            },
+        }
+        self.models = [
+            {
+                "id": "openai/gpt-5.2",
+                "reasoning_efforts": ["low", "medium", "high"],
+            }
+        ]
+        self.codex_status: dict[str, Any] = {"codex": {"connected": False}}
+        self.codex_login = {
+            "id": "login-1",
+            "verification_url": "https://auth.openai.com/device",
+            "user_code": "ABCD-EFGH",
+            "status": "pending",
+        }
         self.start_events = [
             _event("run.started", 1, {}),
             _event("message.delta", 2, {"text": "hello"}),
@@ -126,6 +154,51 @@ class _Agent:
         ]
         self.resume_events = [_event("run.completed", 4, {"text": "approved"})]
         self.replay_events = [_event("run.completed", 3, {"text": "recovered"})]
+
+    async def ensure_thread(self, thread_id: str) -> None:
+        self.ensured_threads.append(thread_id)
+
+    async def get_thread_inference(self, thread_id: str) -> dict[str, Any]:
+        del thread_id
+        return dict(self.inference)
+
+    async def update_thread_inference(
+        self,
+        thread_id: str,
+        *,
+        expected_revision: int,
+        selection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self.inference_updates.append(
+            {
+                "thread_id": thread_id,
+                "expected_revision": expected_revision,
+                "selection": dict(selection),
+            }
+        )
+        self.inference = {
+            "revision": expected_revision + 1,
+            "effective": dict(selection),
+        }
+        return dict(self.inference)
+
+    async def inference_status(self) -> dict[str, Any]:
+        return dict(self.codex_status)
+
+    async def list_models(self, **kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        return list(self.models)
+
+    async def start_codex_login(self) -> dict[str, Any]:
+        return dict(self.codex_login)
+
+    async def get_codex_login(self, login_id: str) -> dict[str, Any]:
+        assert login_id == self.codex_login["id"]
+        return dict(self.codex_login)
+
+    async def cancel_thread(self, thread_id: str) -> dict[str, Any]:
+        self.cancelled_threads.append(thread_id)
+        return {"status": "cancelled"}
 
     async def upload_file(self, **kwargs: Any) -> str:
         self.uploads.append(kwargs)
@@ -210,6 +283,16 @@ async def test_worker_becomes_ready_while_local_agent_api_is_starting(tmp_path: 
 
     assert stop.is_set()
     assert telegram.webhook_deletes == 1
+    assert [item["command"] for item in telegram.commands] == [
+        "start",
+        "fresh",
+        "regenerate",
+        "model",
+        "models",
+        "reasoning",
+        "codex",
+        "cancel",
+    ]
 
 
 @pytest.mark.asyncio
@@ -245,6 +328,98 @@ async def test_one_time_pairing_then_routes_only_owner_messages(tmp_path: Path) 
 
     await worker.poll_once()
     assert len(agent.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_inference_and_codex_commands_use_agent_api_without_starting_runs(
+    tmp_path: Path,
+) -> None:
+    telegram = _Telegram(
+        [
+            _message(1, text="/model"),
+            _message(2, text="/reasoning ultra"),
+            _message(3, text="/codex login"),
+        ]
+    )
+    agent = _Agent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    assert await worker.poll_once() == 3
+
+    thread_id = state.thread_id(9)
+    assert agent.ensured_threads == [thread_id, thread_id, thread_id]
+    assert agent.starts == []
+    assert agent.inference_updates[0]["selection"]["reasoning_effort"] == "ultra"
+    assert state.codex_login(9) == "login-1"
+    assert [message["text"].splitlines()[0] for message in telegram.messages] == [
+        "Current model:",
+        "Reasoning updated:",
+        "Connect Codex:",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_bypasses_a_long_running_message(tmp_path: Path) -> None:
+    run_finished = asyncio.Event()
+    stop = asyncio.Event()
+
+    class _LongAgent(_Agent):
+        async def start_run(self, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            self.starts.append(kwargs)
+            yield _event("run.started", 1, {})
+            await run_finished.wait()
+            yield _event(
+                "run.failed",
+                2,
+                {"message": "The agent run was cancelled before completion."},
+            )
+
+        async def cancel_thread(self, thread_id: str) -> dict[str, Any]:
+            self.cancelled_threads.append(thread_id)
+            run_finished.set()
+            return {"status": "cancelled"}
+
+    class _LiveTelegram(_Telegram):
+        async def get_updates(
+            self,
+            *,
+            offset: int,
+            timeout_seconds: int,
+        ) -> list[dict[str, Any]]:
+            del timeout_seconds
+            if offset <= 1:
+                return [
+                    _message(1, text="work for a long time"),
+                    _message(2, text="/cancel"),
+                ]
+            await run_finished.wait()
+            stop.set()
+            return []
+
+    telegram = _LiveTelegram()
+    agent = _LongAgent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await asyncio.wait_for(worker.run(stop), timeout=2)
+
+    assert agent.cancelled_threads == [state.thread_id(9)]
+    assert "Cancellation requested." in [message["text"] for message in telegram.messages]
 
 
 @pytest.mark.asyncio
@@ -541,6 +716,33 @@ async def test_recovery_replays_from_durable_sequence_without_new_run(tmp_path: 
     assert telegram.messages[-1]["text"] == "recovered"
     assert state.source_seen("telegram:99:5")
     assert state.pending_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_processes_an_update_accepted_before_worker_restart(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "worker.json"
+    state = TelegramWorkerState(state_path)
+    state.pair(user_id=7, chat_id=9)
+    assert state.accept_update(
+        update_id=5,
+        update=_message(5, text="continue durable work"),
+    )
+
+    telegram = _Telegram()
+    agent = _Agent()
+    restarted = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=TelegramWorkerState(state_path),
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+    await restarted.recover()
+
+    assert agent.starts[0]["text"] == "continue durable work"
+    assert TelegramWorkerState(state_path).pending_updates() == []
 
 
 @pytest.mark.asyncio

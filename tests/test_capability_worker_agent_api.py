@@ -307,3 +307,93 @@ async def test_notifications_reject_out_of_order_or_incomplete_payloads() -> Non
     with pytest.raises(AgentAPIError, match="out of order"):
         await client.list_notifications(after_id=0)
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_interface_controls_use_scoped_agent_api_routes() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.path
+        if path == "/v2/agent/threads/thread_1" and request.method == "PUT":
+            return httpx.Response(200, json={"thread_id": "thread_1"})
+        if path == "/v2/inference":
+            return httpx.Response(200, json={"codex": {"connected": False}})
+        if path.endswith("/inference") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "revision": 0,
+                    "effective": {"provider": "api", "model": "openai/gpt-5.2"},
+                },
+            )
+        if path.endswith("/inference") and request.method == "PATCH":
+            assert json.loads(request.content) == {
+                "expected_revision": 0,
+                "selection": {
+                    "provider": "codex",
+                    "model": "gpt-5.2-codex",
+                },
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "revision": 1,
+                    "effective": {"provider": "codex", "model": "gpt-5.2-codex"},
+                },
+            )
+        if path == "/v2/inference/models":
+            assert request.url.params["provider"] == "codex"
+            assert request.url.params["query"] == "gpt"
+            return httpx.Response(
+                200,
+                json={
+                    "provider": "codex",
+                    "models": [{"id": "gpt-5.2-codex", "reasoning_efforts": ["high"]}],
+                },
+            )
+        if path == "/v2/inference/codex/device-logins" and request.method == "POST":
+            return httpx.Response(
+                201,
+                json={
+                    "id": "login-1",
+                    "verification_url": "https://auth.openai.com/device",
+                    "user_code": "ABCD-EFGH",
+                },
+            )
+        if path.endswith("/device-logins/login-1"):
+            return httpx.Response(200, json={"id": "login-1", "status": "pending"})
+        if path.endswith("/cancel"):
+            return httpx.Response(200, json={"status": "cancelled"})
+        raise AssertionError(request.url)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = AgentAPIClient(
+        base_url="http://agent.test",
+        credential="private-token",
+        client=http,
+    )
+
+    await client.ensure_thread("thread_1")
+    current = await client.get_thread_inference("thread_1")
+    updated = await client.update_thread_inference(
+        "thread_1",
+        expected_revision=0,
+        selection={"provider": "codex", "model": "gpt-5.2-codex"},
+    )
+    models = await client.list_models(provider="codex", query="gpt")
+    status = await client.inference_status()
+    login = await client.start_codex_login()
+    login_status = await client.get_codex_login("login-1")
+    cancelled = await client.cancel_thread("thread_1")
+
+    assert current["revision"] == 0
+    assert updated["revision"] == 1
+    assert models[0]["id"] == "gpt-5.2-codex"
+    assert status["codex"]["connected"] is False
+    assert login["id"] == "login-1"
+    assert login_status["status"] == "pending"
+    assert cancelled["status"] == "cancelled"
+    assert all(request.headers["Authorization"] == "Bearer private-token" for request in requests)
+    await http.aclose()

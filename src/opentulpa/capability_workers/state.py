@@ -22,6 +22,8 @@ def _default_state() -> dict[str, Any]:
         "next_update_id": 0,
         "paired": None,
         "threads": {},
+        "codex_logins": {},
+        "update_inbox": {},
         "seen_source_events": [],
         "pending_runs": {},
         "approvals": {},
@@ -61,7 +63,14 @@ class TelegramWorkerState:
             raise TelegramStateError("Telegram worker state has an unsupported schema")
         default = _default_state()
         default.update(value)
-        for key in ("threads", "pending_runs", "approvals", "awaiting_edits"):
+        for key in (
+            "threads",
+            "codex_logins",
+            "update_inbox",
+            "pending_runs",
+            "approvals",
+            "awaiting_edits",
+        ):
             if not isinstance(default[key], dict):
                 raise TelegramStateError(f"Telegram worker state field {key!r} is invalid")
         if not isinstance(default["seen_source_events"], list):
@@ -157,6 +166,45 @@ class TelegramWorkerState:
             self._write()
             return value
 
+    def codex_login(self, chat_id: int) -> str:
+        with self._lock:
+            return str(self._state["codex_logins"].get(str(int(chat_id))) or "").strip()
+
+    def set_codex_login(self, chat_id: int, login_id: str | None) -> None:
+        key = str(int(chat_id))
+        with self._lock:
+            if login_id:
+                self._state["codex_logins"][key] = str(login_id)
+            else:
+                self._state["codex_logins"].pop(key, None)
+            self._write()
+
+    def accept_update(self, *, update_id: int, update: dict[str, Any]) -> bool:
+        """Persist an update before advancing the Telegram long-poll cursor."""
+
+        identifier = int(update_id)
+        detached = json.loads(json.dumps(update, ensure_ascii=False, allow_nan=False))
+        key = str(identifier)
+        with self._lock:
+            existing = self._state["update_inbox"].get(key)
+            if existing is not None and existing != detached:
+                raise TelegramStateError("Telegram update id payload conflict")
+            self._state["update_inbox"][key] = detached
+            self._state["next_update_id"] = max(self.next_update_id, identifier + 1)
+            self._write()
+            return existing is None
+
+    def pending_updates(self) -> list[tuple[int, dict[str, Any]]]:
+        with self._lock:
+            return sorted(
+                (
+                    int(key),
+                    cast(dict[str, Any], json.loads(json.dumps(value))),
+                )
+                for key, value in self._state["update_inbox"].items()
+                if isinstance(value, dict)
+            )
+
     @property
     def notification_cursor(self) -> int:
         with self._lock:
@@ -212,6 +260,7 @@ class TelegramWorkerState:
                 self.next_update_id,
                 int(update_id) + 1,
             )
+            self._state["update_inbox"].pop(str(int(update_id)), None)
             self._state["pending_runs"].pop(source_event_id, None)
             if consumed_approval_token:
                 self._state["approvals"].pop(consumed_approval_token, None)
