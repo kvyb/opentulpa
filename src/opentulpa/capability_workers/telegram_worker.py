@@ -45,6 +45,8 @@ _EDIT_ARGUMENT_MAX_NODES = 512
 _STREAM_EDIT_MIN_INTERVAL_SECONDS = 0.9
 _STREAM_TYPING_REFRESH_SECONDS = 4.0
 _STREAM_PREVIEW_CHARS = 3_500
+_TEXT_COALESCE_QUIET_SECONDS = 0.8
+_TEXT_COALESCE_MAX_SECONDS = 3.0
 _TOOL_PROGRESS_LABELS = {
     "browser_act": "Using browser",
     "browser_get": "Reading browser",
@@ -520,9 +522,11 @@ class TelegramInterfaceWorker:
         update_id: int,
         update: Mapping[str, Any],
     ) -> None:
+        if not self._state.update_pending(update_id):
+            return
         source_event_id = self._source_event_id(update_id)
 
-        async def process() -> None:
+        async def process(current_update: Mapping[str, Any]) -> None:
             if self._state.source_seen(source_event_id):
                 self._complete(update_id=update_id, source_event_id=source_event_id)
                 return
@@ -531,7 +535,7 @@ class TelegramInterfaceWorker:
                 await self._recover_pending_record(pending)
                 return
             await self._handle_update(
-                update=update,
+                update=current_update,
                 update_id=update_id,
                 source_event_id=source_event_id,
             )
@@ -549,10 +553,63 @@ class TelegramInterfaceWorker:
                 ):
                     break
                 await asyncio.sleep(0.01)
-            await process()
+            await process(update)
         else:
             async with self._normal_update_lock:
-                await process()
+                current_update = update
+                if (
+                    not self._state.source_seen(source_event_id)
+                    and self._state.pending_run(source_event_id) is None
+                ):
+                    current_update = await self._coalesce_text_updates(
+                        update_id,
+                        update,
+                    )
+                await process(current_update)
+
+    async def _coalesce_text_updates(
+        self,
+        update_id: int,
+        update: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        first = _coalescible_text(update)
+        if first is None:
+            return update
+        user_id, chat_id, _ = first
+        if self._state.paired_identity() != (user_id, chat_id):
+            return update
+        if self._state.awaiting_edit(chat_id):
+            return update
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TEXT_COALESCE_MAX_SECONDS
+        previous_ids: tuple[int, ...] = ()
+        batch: list[tuple[int, Mapping[str, Any], str]] = []
+        while True:
+            batch = _pending_text_batch(
+                self._state.pending_updates(),
+                first_update_id=update_id,
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+            update_ids = tuple(identifier for identifier, _, _ in batch)
+            if update_ids != previous_ids:
+                previous_ids = update_ids
+                quiet_until = loop.time() + _TEXT_COALESCE_QUIET_SECONDS
+            remaining = min(quiet_until, deadline) - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
+
+        if len(batch) < 2:
+            return update
+        merged = json.loads(json.dumps(batch[0][1]))
+        message = merged["message"]
+        message["text"] = "\n\n".join(text for _, _, text in batch)
+        return self._state.coalesce_updates(
+            update_ids=[identifier for identifier, _, _ in batch],
+            merged_update=merged,
+        )
 
     async def recover(self) -> None:
         """Resume observed Agent API runs and redeliver persisted approvals."""
@@ -1501,6 +1558,47 @@ def _command(text: str) -> tuple[str, str]:
     command = parts[0].split("@", 1)[0].lower()
     argument = parts[1].strip() if len(parts) == 2 else ""
     return command, argument
+
+
+def _coalescible_text(
+    update: Mapping[str, Any],
+) -> tuple[int, int, str] | None:
+    message = update.get("message")
+    if not isinstance(message, dict) or extract_attachments(message):
+        return None
+    text = str(message.get("text") or "").strip()
+    sender = message.get("from")
+    chat = message.get("chat")
+    user_id = _positive_int(sender.get("id")) if isinstance(sender, dict) else None
+    chat_id = _telegram_chat_id(chat.get("id")) if isinstance(chat, dict) else None
+    if (
+        not text
+        or _command(text)[0].startswith("/")
+        or user_id is None
+        or chat_id is None
+    ):
+        return None
+    return user_id, chat_id, text
+
+
+def _pending_text_batch(
+    pending: list[tuple[int, dict[str, Any]]],
+    *,
+    first_update_id: int,
+    user_id: int,
+    chat_id: int,
+) -> list[tuple[int, Mapping[str, Any], str]]:
+    batch: list[tuple[int, Mapping[str, Any], str]] = []
+    for identifier, update in pending:
+        if identifier < first_update_id:
+            continue
+        if not batch and identifier != first_update_id:
+            break
+        candidate = _coalescible_text(update)
+        if candidate is None or candidate[:2] != (user_id, chat_id):
+            break
+        batch.append((identifier, update, candidate[2]))
+    return batch
 
 
 def _is_cancel_update(update: Mapping[str, Any]) -> bool:

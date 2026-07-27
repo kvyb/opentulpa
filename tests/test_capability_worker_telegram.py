@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import pytest
 
+import opentulpa.capability_workers.telegram_worker as telegram_worker_module
 from opentulpa.capability_workers.agent_api import (
     AgentAPIError,
     AgentEvent,
@@ -328,6 +329,66 @@ async def test_one_time_pairing_then_routes_only_owner_messages(tmp_path: Path) 
 
     await worker.poll_once()
     assert len(agent.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_rapid_text_messages_start_one_agent_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        telegram_worker_module,
+        "_TEXT_COALESCE_QUIET_SECONDS",
+        0.02,
+    )
+    monkeypatch.setattr(
+        telegram_worker_module,
+        "_TEXT_COALESCE_MAX_SECONDS",
+        0.1,
+    )
+    telegram = _Telegram([_message(index, text=f"part {index}") for index in range(1, 4)])
+    agent = _Agent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    poll = asyncio.create_task(worker.poll_once())
+    while len(state.pending_updates()) < 3:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    for index in range(4, 7):
+        state.accept_update(
+            update_id=index,
+            update=_message(index, text=f"part {index}"),
+        )
+    await poll
+
+    assert len(agent.starts) == 1
+    assert agent.starts[0]["text"] == "\n\n".join(
+        f"part {index}" for index in range(1, 7)
+    )
+    assert agent.starts[0]["source_event_id"] == "telegram:99:1"
+    assert state.pending_updates() == []
+    assert state.next_update_id == 7
+
+
+def test_coalesced_updates_survive_worker_restart(tmp_path: Path) -> None:
+    state_path = tmp_path / "worker.json"
+    state = TelegramWorkerState(state_path)
+    state.accept_update(update_id=1, update=_message(1, text="first"))
+    state.accept_update(update_id=2, update=_message(2, text="second"))
+    merged = _message(1, text="first\n\nsecond")
+
+    state.coalesce_updates(update_ids=(1, 2), merged_update=merged)
+
+    assert TelegramWorkerState(state_path).pending_updates() == [(1, merged)]
+    assert TelegramWorkerState(state_path).next_update_id == 3
 
 
 @pytest.mark.asyncio

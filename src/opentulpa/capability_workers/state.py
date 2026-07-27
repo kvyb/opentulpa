@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import threading
+from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -204,6 +205,39 @@ class TelegramWorkerState:
                 for key, value in self._state["update_inbox"].items()
                 if isinstance(value, dict)
             )
+
+    def update_pending(self, update_id: int) -> bool:
+        with self._lock:
+            return str(int(update_id)) in self._state["update_inbox"]
+
+    def coalesce_updates(
+        self,
+        *,
+        update_ids: Sequence[int],
+        merged_update: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically replace consecutive pending updates with one merged update."""
+
+        identifiers = tuple(dict.fromkeys(int(item) for item in update_ids))
+        if not identifiers:
+            raise ValueError("update_ids must not be empty")
+        detached = json.loads(
+            json.dumps(merged_update, ensure_ascii=False, allow_nan=False)
+        )
+        primary = str(identifiers[0])
+        with self._lock:
+            missing = [
+                identifier
+                for identifier in identifiers
+                if str(identifier) not in self._state["update_inbox"]
+            ]
+            if missing:
+                raise TelegramStateError("cannot coalesce updates that are not pending")
+            self._state["update_inbox"][primary] = detached
+            for identifier in identifiers[1:]:
+                self._state["update_inbox"].pop(str(identifier), None)
+            self._write()
+        return cast(dict[str, Any], json.loads(json.dumps(detached)))
 
     @property
     def notification_cursor(self) -> int:
