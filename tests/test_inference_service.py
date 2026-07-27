@@ -489,6 +489,55 @@ def test_pinned_langchain_codex_adapter_contract(tmp_path: Path) -> None:
     assert fallback_model.disable_streaming is True
 
 
+def test_codex_repairs_interrupted_tool_history_at_request_boundary(
+    tmp_path: Path,
+) -> None:
+    store = InferenceCredentialStore(tmp_path / "inference.db", cipher=_cipher())
+    provider = CodexTokenProvider(tenant_id="tenant-1", store=store)
+    model = build_codex_model(
+        model="gpt-test",
+        reasoning_effort="high",
+        token_provider=provider,
+    )
+    tool_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "lookup", "args": {}, "id": "lookup_1"}],
+    )
+
+    interrupted = model._get_request_payload(  # noqa: SLF001
+        [HumanMessage(content="hello"), tool_call],
+        _codex_headers={},
+    )
+    interrupted_items = interrupted["input"]
+    assert [item["type"] for item in interrupted_items[-2:]] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert interrupted_items[-1]["call_id"] == "lookup_1"
+    assert "was cancelled" in interrupted_items[-1]["output"]
+
+    completed = model._get_request_payload(  # noqa: SLF001
+        [
+            HumanMessage(content="hello"),
+            tool_call,
+            ToolMessage(content="real result", tool_call_id="lookup_1"),
+        ],
+        _codex_headers={},
+    )
+    outputs = [
+        item
+        for item in completed["input"]
+        if item.get("type") == "function_call_output"
+    ]
+    assert outputs == [
+        {
+            "type": "function_call_output",
+            "call_id": "lookup_1",
+            "output": "real result",
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_codex_retries_transient_stream_before_first_chunk(
     tmp_path: Path,

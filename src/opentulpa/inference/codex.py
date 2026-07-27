@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC
@@ -31,6 +32,59 @@ CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models?client_version=
 _INITIAL_STREAM_ATTEMPTS = 3
 _INITIAL_STREAM_RETRY_SECONDS = 0.5
 logger = logging.getLogger(__name__)
+
+
+def _repair_missing_function_call_outputs(payload: dict[str, Any]) -> dict[str, Any]:
+    """Make stateless Responses API history valid after an interrupted tool call."""
+
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return payload
+    calls = Counter(
+        str(item.get("call_id"))
+        for item in input_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id")
+    )
+    outputs = Counter(
+        str(item.get("call_id"))
+        for item in input_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id")
+    )
+    missing = calls - outputs
+    if not missing:
+        return payload
+
+    repaired: list[Any] = []
+    pending_outputs: list[dict[str, str]] = []
+    for item in input_items:
+        is_function_call = isinstance(item, dict) and item.get("type") == "function_call"
+        if pending_outputs and not is_function_call:
+            repaired.extend(pending_outputs)
+            pending_outputs.clear()
+        repaired.append(item)
+        if not is_function_call:
+            continue
+        call_id = str(item.get("call_id") or "")
+        if not call_id or missing[call_id] <= 0:
+            continue
+        missing[call_id] -= 1
+        name = str(item.get("name") or "unknown")
+        pending_outputs.append(
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": (
+                    f"Tool call {name} with id {call_id} was cancelled before it "
+                    "could be completed."
+                ),
+            }
+        )
+    repaired.extend(pending_outputs)
+    return {**payload, "input": repaired}
 
 
 class CodexAuthenticationError(RuntimeError):
@@ -138,6 +192,16 @@ class CodexTokenProvider:
 
 class _RetryingChatOpenAICodex(_ChatOpenAICodex):
     """Retry transient Codex streams only before any chunk can reach the client."""
+
+    def _get_request_payload(
+        self,
+        input_: Any,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        return _repair_missing_function_call_outputs(payload)
 
     def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
         for attempt in range(_INITIAL_STREAM_ATTEMPTS):
