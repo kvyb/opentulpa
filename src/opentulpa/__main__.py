@@ -1290,6 +1290,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 telegram_business=telegram_business,
                 intake_workflows=intake_workflows,
                 resolve_agent_spec=resolve_agent_spec,
+                inference=inference,
             )
             if telegram_client is not None
             else None

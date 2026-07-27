@@ -709,17 +709,11 @@ async def test_thread_preference_is_revisioned_owned_and_run_plan_is_pinned(tmp_
     context = _context()
     await service.start()
     try:
-        await service.create_thread(
+        await service.ensure_thread(
             tenant_id=context.tenant_id,
+            thread_id=context.thread_id,
             channel="web",
-            title="Inference test",
         )
-        db = service._require_runs_db()  # noqa: SLF001
-        await db.execute(
-            "UPDATE agent_threads SET thread_id = ? WHERE tenant_id = ?",
-            (context.thread_id, context.tenant_id),
-        )
-        await db.commit()
         selected = InferenceSelection(
             provider="api",
             model="test-model",

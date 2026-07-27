@@ -28,6 +28,7 @@ class TelegramStateStore:
             "support_bindings": {},
             "support_audit": [],
             "support_command_chats": {},
+            "codex_logins": {},
             "owner_update_inbox": {},
             "owner_update_completed": [],
         }
@@ -184,6 +185,33 @@ class TelegramStateStore:
         item = inbox.get(ingress_key) if isinstance(inbox, dict) else None
         body = item.get("body") if isinstance(item, dict) else None
         return dict(body) if isinstance(body, dict) else None
+
+    def owner_update_preparation(self, ingress_key: str) -> dict[str, Any] | None:
+        state = self.load()
+        inbox = state.get("owner_update_inbox")
+        item = inbox.get(ingress_key) if isinstance(inbox, dict) else None
+        preparation = item.get("preparation") if isinstance(item, dict) else None
+        return dict(preparation) if isinstance(preparation, dict) else None
+
+    def prepare_owner_update(
+        self,
+        ingress_key: str,
+        preparation: dict[str, Any],
+    ) -> dict[str, Any]:
+        detached = json.loads(json.dumps(preparation, ensure_ascii=False, allow_nan=False))
+
+        def prepare(state: dict[str, Any]) -> dict[str, Any]:
+            inbox = state.get("owner_update_inbox")
+            item = inbox.get(ingress_key) if isinstance(inbox, dict) else None
+            if not isinstance(item, dict):
+                raise KeyError(f"Telegram owner update is unavailable: {ingress_key}")
+            existing = item.get("preparation")
+            if isinstance(existing, dict):
+                return dict(existing)
+            item["preparation"] = detached
+            return dict(detached)
+
+        return cast("dict[str, Any]", self.update(prepare))
 
     def pending_owner_updates(self, *, limit: int = 100) -> list[tuple[str, dict[str, Any]]]:
         state = self.load()

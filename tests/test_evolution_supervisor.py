@@ -349,7 +349,8 @@ async def test_interactive_source_session_survives_restart_and_releases(
     assert shell["exit_code"] == 0
     assert shell["output"] == "source-edited\n"
     assert shell["dirty"] is True
-    assert "@app.get('/status')" in shell["diff"]
+    assert "diff" not in shell
+    assert shell["diff_sha256"]
     await first.shutdown()
 
     resumed = _supervisor(tmp_path, source, activator=activator)

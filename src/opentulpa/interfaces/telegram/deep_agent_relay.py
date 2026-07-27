@@ -19,10 +19,17 @@ from opentulpa.deep_agent.contracts import (
     AgentApproval,
     AgentRunEvent,
     AgentRunRequest,
+    AgentRunSnapshot,
     ApprovalDecision,
 )
 from opentulpa.interfaces.telegram.attachments import extract_attachments
 from opentulpa.interfaces.telegram.client import TelegramClient
+from opentulpa.interfaces.telegram.inference_controls import (
+    TelegramInferenceAgent,
+    TelegramInferenceControls,
+    TelegramInferenceService,
+)
+from opentulpa.interfaces.telegram.run_output import TelegramRunOutput
 from opentulpa.interfaces.telegram.security import is_user_allowed
 from opentulpa.interfaces.telegram.state_store import TelegramStateStore
 from opentulpa.specs import AgentSpecRef, OriginRef
@@ -48,6 +55,14 @@ _HIDDEN_EDIT_ARGUMENTS = {
     "tenant_id",
     "thread_id",
 }
+_TELEGRAM_COMMANDS = [
+    {"command": "fresh", "description": "Start a new conversation"},
+    {"command": "model", "description": "Show or select the model"},
+    {"command": "models", "description": "List available models"},
+    {"command": "reasoning", "description": "Set reasoning effort"},
+    {"command": "codex", "description": "Connect or inspect Codex"},
+    {"command": "cancel", "description": "Cancel the active run or approval edit"},
+]
 
 
 @dataclass(frozen=True)
@@ -68,7 +83,7 @@ async def _with_first_event(
         yield event
 
 
-class TelegramAgentService(Protocol):
+class TelegramAgentService(TelegramInferenceAgent, Protocol):
     def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]: ...
 
     def resume(
@@ -76,6 +91,13 @@ class TelegramAgentService(Protocol):
         run_id: str,
         decision: ApprovalDecision,
     ) -> AsyncIterator[AgentRunEvent]: ...
+
+    async def cancel_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+    ) -> AgentRunSnapshot | None: ...
 
 
 class DeepAgentTelegramRelay:
@@ -100,6 +122,7 @@ class DeepAgentTelegramRelay:
         telegram_business: Any | None = None,
         intake_workflows: Any | None = None,
         resolve_agent_spec: Callable[[str, str], AgentSpecRef] | None = None,
+        inference: TelegramInferenceService | None = None,
     ) -> None:
         self._agent = agent
         self._client = client
@@ -113,9 +136,17 @@ class DeepAgentTelegramRelay:
         self._telegram_business = telegram_business
         self._intake_workflows = intake_workflows
         self._resolve_agent_spec = resolve_agent_spec
+        self._inference_controls = TelegramInferenceControls(
+            agent=agent,
+            inference=inference,
+            client=client,
+            state=state,
+        )
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._approval_locks: dict[str, asyncio.Lock] = {}
         self._owner_ingress_lock = asyncio.Lock()
+        self._owner_updates_inflight: dict[str, asyncio.Task[Any]] = {}
+        self._owner_dispatch_tasks: set[asyncio.Task[None]] = set()
         self._inbox_dispatcher: asyncio.Task[None] | None = None
         self._accepted_approvals: dict[
             str,
@@ -170,16 +201,29 @@ class DeepAgentTelegramRelay:
         ingress_key = accepted.ingress_key
         if ingress_key is None:
             raise RuntimeError("Telegram owner ingress identity is unavailable")
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("Telegram owner update is not running in an asyncio task")
         async with self._owner_ingress_lock:
             body = self._state.owner_update(ingress_key)
-            if body is None:
+            if body is None or ingress_key in self._owner_updates_inflight:
                 return
-            await self._handle_owner_update(body)
+            self._owner_updates_inflight[ingress_key] = current_task
+        try:
+            await self._handle_owner_update(body, ingress_key=ingress_key)
             self._state.complete_owner_update(ingress_key)
+        finally:
+            async with self._owner_ingress_lock:
+                if self._owner_updates_inflight.get(ingress_key) is current_task:
+                    self._owner_updates_inflight.pop(ingress_key, None)
 
     async def start(self) -> None:
         if self._inbox_dispatcher is not None and not self._inbox_dispatcher.done():
             return
+        try:
+            await self._client.set_my_commands(commands=_TELEGRAM_COMMANDS)
+        except Exception:
+            logger.exception("Telegram command registration failed")
         self._inbox_dispatcher = asyncio.create_task(
             self._dispatch_owner_inbox(),
             name="opentulpa-telegram-owner-inbox",
@@ -188,33 +232,54 @@ class DeepAgentTelegramRelay:
     async def shutdown(self) -> None:
         task = self._inbox_dispatcher
         self._inbox_dispatcher = None
-        if task is None:
-            return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        active = self._owner_dispatch_tasks | {
+            owner_task
+            for owner_task in self._owner_updates_inflight.values()
+            if not owner_task.done() and owner_task is not asyncio.current_task()
+        }
+        for owner_task in active:
+            owner_task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
 
     async def _dispatch_owner_inbox(self) -> None:
         while True:
             for ingress_key, body in self._state.pending_owner_updates(limit=100):
-                try:
-                    await self.process_update(
+                if ingress_key in self._owner_updates_inflight:
+                    continue
+                task = asyncio.create_task(
+                    self.process_update(
                         AcceptedTelegramUpdate(
                             body=body,
                             is_business=False,
                             ingress_key=ingress_key,
                         )
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("Persisted Telegram owner update processing failed")
+                    ),
+                    name=f"opentulpa-telegram-owner-update:{ingress_key}",
+                )
+                self._owner_dispatch_tasks.add(task)
+                task.add_done_callback(self._owner_update_done)
             await asyncio.sleep(1.0)
+
+    def _owner_update_done(self, task: asyncio.Task[None]) -> None:
+        self._owner_dispatch_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Persisted Telegram owner update processing failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def handle_update(self, body: dict[str, Any]) -> None:
         accepted = await self.accept_update(body)
         await self.process_update(accepted)
 
-    async def _handle_owner_update(self, body: dict[str, Any]) -> None:
+    async def _handle_owner_update(self, body: dict[str, Any], *, ingress_key: str) -> None:
         callback = body.get("callback_query")
         if isinstance(callback, dict):
             await self._handle_callback(callback)
@@ -241,39 +306,26 @@ class DeepAgentTelegramRelay:
             return
 
         text = str(message.get("text") or message.get("caption") or "").strip()
-        if text.split(None, 1)[0:1] == ["/start"]:
+        command = self._command(text)
+        if command == "/start":
             await self._client.send_message(
                 chat_id=chat_id,
                 text=(
                     "OpenTulpa is connected. Send a request or attach files. "
-                    "Use /fresh to start a new conversation checkpoint."
+                    "Use /fresh for a new conversation, /model to inspect inference, "
+                    "or /codex login to connect Codex."
                 ),
                 parse_mode=None,
             )
             return
-        if text.split(None, 1)[0:1] == ["/fresh"]:
-            tenant_id = self._resolve_tenant(user_id)
-            self._reset_session(
-                chat_id=chat_id,
-                user_id=user_id,
-                username=username,
-                tenant_id=tenant_id,
-            )
-            await self._client.send_message(
-                chat_id=chat_id,
-                text="Started a fresh conversation.",
-                parse_mode=None,
-            )
-            return
 
-        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
-        async with lock:
-            tenant_id = self._resolve_tenant(user_id)
+        tenant_id = self._resolve_tenant(user_id)
+        if command == "/cancel":
             if await self._handle_pending_approval_edit(
                 chat_id=chat_id,
                 user_id=user_id,
                 tenant_id=tenant_id,
-                text=text,
+                text="/cancel",
             ):
                 return
             thread_id = self._session(
@@ -282,9 +334,84 @@ class DeepAgentTelegramRelay:
                 username=username,
                 tenant_id=tenant_id,
             )
-            file_ids = await self._ingest_files(
-                message=message,
+            cancelled = await self._agent.cancel_thread(
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+            )
+            if cancelled is None:
+                await self._send_plain(chat_id, "There is no active run to cancel.")
+                return
+            self._discard_run_approvals(cancelled.run_id)
+            await self._send_plain(chat_id, "Cancelled the active run.")
+            return
+
+        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            if command == "/fresh":
+                self._reset_session(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                    tenant_id=tenant_id,
+                )
+                await self._client.send_message(
+                    chat_id=chat_id,
+                    text="Started a fresh conversation.",
+                    parse_mode=None,
+                )
+                return
+            preparation = self._state.owner_update_preparation(ingress_key)
+            if preparation is None:
+                thread_id = self._session(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                    tenant_id=tenant_id,
+                )
+            else:
+                thread_id, _, _ = self._decode_owner_run_preparation(
+                    preparation,
+                    tenant_id=tenant_id,
+                )
+            if await self._inference_controls.handle(
                 chat_id=chat_id,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                text=text,
+            ):
+                return
+            if await self._handle_pending_approval_edit(
+                chat_id=chat_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                text=text,
+            ):
+                return
+            if preparation is None:
+                file_ids = await self._ingest_files(
+                    message=message,
+                    chat_id=chat_id,
+                    tenant_id=tenant_id,
+                )
+                agent_spec = (
+                    self._resolve_agent_spec(tenant_id, AgentRunKind.OWNER.value)
+                    if self._resolve_agent_spec is not None
+                    else AgentSpecRef(
+                        tenant_id=tenant_id,
+                        spec_id="owner",
+                        revision=1,
+                    )
+                )
+                preparation = self._state.prepare_owner_update(
+                    ingress_key,
+                    {
+                        "thread_id": thread_id,
+                        "file_ids": file_ids,
+                        "agent_spec": agent_spec.model_dump(mode="json"),
+                    },
+                )
+            thread_id, file_ids, agent_spec = self._decode_owner_run_preparation(
+                preparation,
                 tenant_id=tenant_id,
             )
             if not text:
@@ -302,15 +429,7 @@ class DeepAgentTelegramRelay:
                     conversation_id=str(chat_id),
                     message_id=str(message.get("message_id") or "") or None,
                 ),
-                agent_spec=(
-                    self._resolve_agent_spec(tenant_id, AgentRunKind.OWNER.value)
-                    if self._resolve_agent_spec is not None
-                    else AgentSpecRef(
-                        tenant_id=tenant_id,
-                        spec_id="owner",
-                        revision=1,
-                    )
-                ),
+                agent_spec=agent_spec,
                 trust_class="owner",
             )
             await self._deliver_events(
@@ -321,6 +440,7 @@ class DeepAgentTelegramRelay:
                         context=context,
                         text=text,
                         file_ids=tuple(file_ids),
+                        idempotency_key=ingress_key,
                     )
                 ),
             )
@@ -332,38 +452,40 @@ class DeepAgentTelegramRelay:
         tenant_id: str,
         events: AsyncIterator[AgentRunEvent],
     ) -> None:
-        chunks: list[str] = []
-        failed = ""
+        output = TelegramRunOutput(client=self._client, chat_id=chat_id)
         interrupted = False
+        settled = False
         async for event in events:
             if event.type == "message.delta":
-                chunks.append(str(event.data.get("text") or ""))
+                await output.delta(str(event.data.get("text") or ""))
+            elif event.type == "tool.started":
+                await output.tool_started(str(event.data.get("name") or "").strip())
+            elif event.type == "tool.completed":
+                await output.tool_completed()
             elif event.type == "approval.required":
                 interrupted = True
-                await self._send_approval(
+                delivered = await self._send_approval(
                     chat_id=chat_id,
                     tenant_id=tenant_id,
                     run_id=event.run_id,
                     approval=event.data,
                 )
+                if delivered:
+                    await output.discard()
             elif event.type == "run.failed":
-                failed = str(event.data.get("message") or "Agent run failed.")
+                settled = True
+                await output.finish(str(event.data.get("message") or "Agent run failed."))
             elif event.type == "run.completed":
+                settled = True
                 final = str(event.data.get("text") or "").strip()
-                if final:
-                    chunks = [final]
-        reply = "".join(chunks).strip()
-        if reply:
-            await self._client.send_message(chat_id=chat_id, text=reply, parse_mode=None)
+                await output.finish(final)
+        if not interrupted:
+            if not settled:
+                await output.finish("")
             self._state.touch_assistant_message(chat_id)
-        elif failed:
-            await self._client.send_message(chat_id=chat_id, text=failed, parse_mode=None)
-        elif not interrupted:
-            await self._client.send_message(
-                chat_id=chat_id,
-                text="The run completed without a message.",
-                parse_mode=None,
-            )
+
+    async def _send_plain(self, chat_id: int, text: str) -> None:
+        await self._client.send_message(chat_id=chat_id, text=text, parse_mode=None)
 
     async def _send_approval(
         self,
@@ -372,7 +494,7 @@ class DeepAgentTelegramRelay:
         tenant_id: str,
         run_id: str,
         approval: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         approval_id = str(approval.get("approval_id") or "").strip()
         token = new_short_id("approval", suffix_chars=12)
         raw_allowed = approval.get("allowed_decisions")
@@ -407,12 +529,13 @@ class DeepAgentTelegramRelay:
             if decision in allowed_decisions
         ]
         markup = {"inline_keyboard": [buttons]}
-        await self._client.send_message(
+        response = await self._client.send_message(
             chat_id=chat_id,
             text=f"Approval required for {tool_name}: {description}",
             parse_mode=None,
             reply_markup=markup,
         )
+        return response is not None
 
     async def deliver_approval(
         self,
@@ -688,6 +811,31 @@ class DeepAgentTelegramRelay:
 
         return bool(self._state.update(consume))
 
+    def _discard_run_approvals(self, run_id: str) -> None:
+        def discard(state: dict[str, Any]) -> None:
+            pending = state.get("pending_approvals")
+            if not isinstance(pending, dict):
+                return
+            removed = {
+                token
+                for token, record in pending.items()
+                if isinstance(record, dict) and str(record.get("run_id") or "") == run_id
+            }
+            if not removed:
+                return
+            state["pending_approvals"] = {
+                token: record for token, record in pending.items() if token not in removed
+            }
+            edits = state.get("pending_approval_edits")
+            if isinstance(edits, dict):
+                state["pending_approval_edits"] = {
+                    key: marker
+                    for key, marker in edits.items()
+                    if not isinstance(marker, dict) or str(marker.get("token") or "") not in removed
+                }
+
+        self._state.update(discard)
+
     def _finish_accepted_approval(
         self,
         *,
@@ -785,7 +933,7 @@ class DeepAgentTelegramRelay:
                 parse_mode=None,
             )
             return True
-        if text.split(None, 1)[0:1] == ["/cancel"]:
+        if self._command(text) == "/cancel":
             self._clear_pending_approval_edit(
                 chat_id=chat_id,
                 user_id=user_id,
@@ -893,6 +1041,24 @@ class DeepAgentTelegramRelay:
         if self._owner_tenant_id:
             return self._profiles.resolve_customer_id(self._owner_tenant_id)
         return self._profiles.resolve_telegram_customer_id(user_id)
+
+    @staticmethod
+    def _decode_owner_run_preparation(
+        preparation: dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> tuple[str, list[str], AgentSpecRef]:
+        thread_id = str(preparation.get("thread_id") or "").strip()
+        raw_file_ids = preparation.get("file_ids")
+        file_ids = (
+            [str(file_id) for file_id in raw_file_ids if str(file_id).strip()]
+            if isinstance(raw_file_ids, list)
+            else []
+        )
+        agent_spec = AgentSpecRef.model_validate(preparation.get("agent_spec"))
+        if not thread_id or agent_spec.tenant_id != tenant_id:
+            raise RuntimeError("Telegram owner run preparation is invalid")
+        return thread_id, file_ids, agent_spec
 
     def _session(
         self,
@@ -1026,6 +1192,11 @@ class DeepAgentTelegramRelay:
                     },
                 )
                 raise RuntimeError("Telegram Business intake could not be queued")
+
+    @staticmethod
+    def _command(text: str) -> str:
+        parts = str(text or "").split(None, 1)
+        return parts[0].split("@", 1)[0].casefold() if parts else ""
 
     @staticmethod
     def _positive_int(value: Any) -> int | None:

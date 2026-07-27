@@ -5,6 +5,8 @@ from opentulpa.specs.models import AgentSpecWrite
 DEFAULT_OWNER_SPEC_ID = "owner"
 DEFAULT_ROUTINE_SPEC_ID = "routine"
 DEFAULT_INTAKE_SPEC_ID = "intake"
+DEFAULT_OWNER_MAX_RUNTIME_SECONDS = 7_200
+DEFAULT_OWNER_MAX_MODEL_CALLS = 500
 
 
 def default_agent_spec_writes() -> dict[str, AgentSpecWrite]:
@@ -22,6 +24,8 @@ def default_agent_spec_writes() -> dict[str, AgentSpecWrite]:
             memory_scope="owner",
             workspace_scope="read_write",
             allow_delegation=True,
+            max_runtime_seconds=DEFAULT_OWNER_MAX_RUNTIME_SECONDS,
+            max_model_calls=DEFAULT_OWNER_MAX_MODEL_CALLS,
         ),
         DEFAULT_ROUTINE_SPEC_ID: AgentSpecWrite(
             name="Routine",
@@ -51,6 +55,8 @@ def default_agent_spec_writes() -> dict[str, AgentSpecWrite]:
 
 __all__ = [
     "DEFAULT_INTAKE_SPEC_ID",
+    "DEFAULT_OWNER_MAX_MODEL_CALLS",
+    "DEFAULT_OWNER_MAX_RUNTIME_SECONDS",
     "DEFAULT_OWNER_SPEC_ID",
     "DEFAULT_ROUTINE_SPEC_ID",
     "default_agent_spec_writes",
