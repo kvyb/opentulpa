@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from opentulpa.api.principal import (
@@ -457,6 +458,91 @@ def test_capability_route_scopes_and_revocation_fail_closed(tmp_path: Path) -> N
         json={"thread_id": "thread-1", "text": "hello", "file_ids": []},
     )
     assert denied.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "required_scope"),
+    [
+        ("PUT", "/v2/agent/threads/thread-1", CapabilityAPIScope.AGENT_RUN_SUBMIT),
+        (
+            "GET",
+            "/v2/agent/threads/thread-1/inference",
+            CapabilityAPIScope.AGENT_RUN_REPLAY,
+        ),
+        (
+            "PATCH",
+            "/v2/agent/threads/thread-1/inference",
+            CapabilityAPIScope.AGENT_RUN_SUBMIT,
+        ),
+        ("GET", "/v2/inference", CapabilityAPIScope.AGENT_RUN_REPLAY),
+        ("GET", "/v2/inference/models", CapabilityAPIScope.AGENT_RUN_REPLAY),
+        (
+            "POST",
+            "/v2/inference/codex/device-logins",
+            CapabilityAPIScope.AGENT_RUN_SUBMIT,
+        ),
+        (
+            "GET",
+            "/v2/inference/codex/device-logins/login-1",
+            CapabilityAPIScope.AGENT_RUN_REPLAY,
+        ),
+        (
+            "POST",
+            "/v2/agent/runs/run-1/cancel",
+            CapabilityAPIScope.AGENT_RUN_CANCEL,
+        ),
+        (
+            "POST",
+            "/v2/agent/threads/thread-1/cancel",
+            CapabilityAPIScope.AGENT_RUN_CANCEL,
+        ),
+    ],
+)
+def test_owner_capability_control_routes_require_their_declared_scope(
+    tmp_path: Path,
+    method: str,
+    path: str,
+    required_scope: CapabilityAPIScope,
+) -> None:
+    store = CapabilityCredentialStore(tmp_path / "capability_credentials.db")
+    _, allowed_token = _issue(
+        store,
+        instance_id="cap_tenant_a_telegram_allowed",
+        scopes=frozenset({required_scope.value}),
+    )
+    wrong_scope = (
+        CapabilityAPIScope.AGENT_RUN_REPLAY
+        if required_scope is not CapabilityAPIScope.AGENT_RUN_REPLAY
+        else CapabilityAPIScope.AGENT_RUN_SUBMIT
+    )
+    _, denied_token = _issue(
+        store,
+        instance_id="cap_tenant_a_telegram_denied",
+        scopes=frozenset({wrong_scope.value}),
+    )
+    resolver = CapabilityPrincipalResolver(CapabilityAPICredentialService(store))
+
+    allowed = resolver(_capability_request(method, path, allowed_token))
+
+    assert required_scope.value in allowed.scopes
+    with pytest.raises(HTTPException, match="credential scope") as exc_info:
+        resolver(_capability_request(method, path, denied_token))
+    assert exc_info.value.status_code == 403
+
+
+def _capability_request(method: str, path: str, token: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "path": path,
+            "raw_path": path.encode("ascii"),
+            "query_string": b"",
+            "headers": [(b"authorization", f"Bearer {token}".encode("ascii"))],
+        }
+    )
 
 
 def _owner_context(tenant_id: str) -> AgentRunContext:

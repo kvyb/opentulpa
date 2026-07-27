@@ -44,6 +44,11 @@ _CAPABILITY_ROUTE_SCOPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         CapabilityAPIScope.AGENT_RUN_SUBMIT.value,
     ),
     (
+        "PUT",
+        re.compile(r"^/v2/agent/threads/[^/]+$"),
+        CapabilityAPIScope.AGENT_RUN_SUBMIT.value,
+    ),
+    (
         "GET",
         re.compile(r"^/v2/agent/runs/[^/]+$"),
         CapabilityAPIScope.AGENT_RUN_REPLAY.value,
@@ -57,6 +62,46 @@ _CAPABILITY_ROUTE_SCOPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "POST",
         re.compile(r"^/v2/agent/runs/[^/]+/resume$"),
         CapabilityAPIScope.AGENT_RUN_RESUME.value,
+    ),
+    (
+        "POST",
+        re.compile(r"^/v2/agent/runs/[^/]+/cancel$"),
+        CapabilityAPIScope.AGENT_RUN_CANCEL.value,
+    ),
+    (
+        "POST",
+        re.compile(r"^/v2/agent/threads/[^/]+/cancel$"),
+        CapabilityAPIScope.AGENT_RUN_CANCEL.value,
+    ),
+    (
+        "GET",
+        re.compile(r"^/v2/inference$"),
+        CapabilityAPIScope.AGENT_RUN_REPLAY.value,
+    ),
+    (
+        "GET",
+        re.compile(r"^/v2/inference/models$"),
+        CapabilityAPIScope.AGENT_RUN_REPLAY.value,
+    ),
+    (
+        "POST",
+        re.compile(r"^/v2/inference/codex/device-logins$"),
+        CapabilityAPIScope.AGENT_RUN_SUBMIT.value,
+    ),
+    (
+        "GET",
+        re.compile(r"^/v2/inference/codex/device-logins/[^/]+$"),
+        CapabilityAPIScope.AGENT_RUN_REPLAY.value,
+    ),
+    (
+        "GET",
+        re.compile(r"^/v2/agent/threads/[^/]+/inference$"),
+        CapabilityAPIScope.AGENT_RUN_REPLAY.value,
+    ),
+    (
+        "PATCH",
+        re.compile(r"^/v2/agent/threads/[^/]+/inference$"),
+        CapabilityAPIScope.AGENT_RUN_SUBMIT.value,
     ),
     (
         "POST",
