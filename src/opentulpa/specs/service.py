@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from opentulpa.core.ids import new_short_id
-from opentulpa.specs.defaults import default_agent_spec_writes
+from opentulpa.specs.defaults import DEFAULT_OWNER_SPEC_ID, default_agent_spec_writes
 from opentulpa.specs.models import AgentSpec, AgentSpecWrite, TriggerSpec, TriggerSpecWrite
 from opentulpa.specs.protocol import AgentSpecRef
 from opentulpa.specs.store import (
@@ -137,6 +137,11 @@ class AgentSpecService:
         for spec_id, write in default_agent_spec_writes().items():
             active = self._store.get_active(tenant_id=tenant_id, spec_id=spec_id)
             if active is not None:
+                active = self._upgrade_legacy_owner_default(
+                    active=active,
+                    desired=write,
+                    actor_id=actor_id,
+                )
                 active_specs.append(active)
                 continue
             latest = self._store.get_latest(tenant_id=tenant_id, spec_id=spec_id)
@@ -155,6 +160,49 @@ class AgentSpecService:
             )
             active_specs.append(latest)
         return active_specs
+
+    def _upgrade_legacy_owner_default(
+        self,
+        *,
+        active: AgentSpec,
+        desired: AgentSpecWrite,
+        actor_id: str,
+    ) -> AgentSpec:
+        if active.id != DEFAULT_OWNER_SPEC_ID:
+            return active
+        active_write = AgentSpecWrite.model_validate(
+            active.model_dump(include=set(AgentSpecWrite.model_fields))
+        )
+        legacy = desired.model_copy(
+            update={
+                "max_runtime_seconds": 900,
+                "max_model_calls": 100,
+            }
+        )
+        if active_write != legacy:
+            return active
+        latest = self._store.get_latest(tenant_id=active.tenant_id, spec_id=active.id)
+        if latest is not None and latest.revision != active.revision:
+            latest_write = AgentSpecWrite.model_validate(
+                latest.model_dump(include=set(AgentSpecWrite.model_fields))
+            )
+            if latest_write != desired:
+                return active
+            upgraded = latest
+        else:
+            upgraded = self._store.create_revision(
+                tenant_id=active.tenant_id,
+                spec_id=active.id,
+                write=desired,
+                expected_revision=active.revision,
+                created_by=actor_id,
+            )
+        self._store.activate(
+            upgraded.ref,
+            expected_active_revision=active.revision,
+            updated_by=actor_id,
+        )
+        return upgraded
 
 
 class TriggerSpecService:

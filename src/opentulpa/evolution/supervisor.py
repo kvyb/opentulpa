@@ -206,7 +206,7 @@ class EvolutionSupervisor:
         timeout_seconds: int = 300,
         audit_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Run one command in the isolated, writable source candidate."""
+        """Run one command and return concise candidate status; source_status includes the diff."""
 
         self._require_started()
         safe_command = str(command or "").strip()
@@ -229,7 +229,7 @@ class EvolutionSupervisor:
             with self._hide_git_metadata(workspace):
                 response = await backend.aexecute(safe_command, timeout=timeout)
             current = await self._required_candidate(candidate.id)
-            snapshot = await self._source_snapshot(current, workspace)
+            snapshot = await self._source_snapshot(current, workspace, include_diff=False)
             output, output_truncated = self._bounded_text(response.output)
             return {
                 **snapshot,
@@ -1773,10 +1773,11 @@ class EvolutionSupervisor:
         self,
         candidate: Candidate,
         workspace: CandidateWorkspace,
+        *,
+        include_diff: bool = True,
     ) -> dict[str, Any]:
         diff = await asyncio.to_thread(self._source_diff, workspace)
         status = await asyncio.to_thread(self._workspaces.status, workspace)
-        bounded_diff, diff_truncated = self._bounded_text(diff)
         metadata_paths = candidate.metadata.get("changed_paths")
         changed_files = (
             {str(path) for path in metadata_paths if isinstance(path, str)}
@@ -1785,17 +1786,20 @@ class EvolutionSupervisor:
         )
         changed_files.update(self._status_path(item) for item in status)
         changed_files.discard("")
-        return {
+        snapshot = {
             "active": True,
             "candidate_id": candidate.id,
             "candidate": self._source_candidate_data(candidate),
             "dirty": bool(status),
             "changed_files": sorted(changed_files)[:1_000],
             "working_tree_status": [item[:1_000] for item in status[:1_000]],
-            "diff": bounded_diff,
             "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
-            "diff_truncated": diff_truncated,
         }
+        if include_diff:
+            bounded_diff, diff_truncated = self._bounded_text(diff)
+            snapshot["diff"] = bounded_diff
+            snapshot["diff_truncated"] = diff_truncated
+        return snapshot
 
     def _source_diff(self, workspace: CandidateWorkspace) -> str:
         return self._workspaces.full_diff(workspace)

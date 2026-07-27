@@ -14,6 +14,7 @@ from opentulpa.deep_agent.contracts import (
     AgentRunRequest,
     ApprovalDecision,
 )
+from opentulpa.inference import InferenceModel
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.deep_agent_relay import DeepAgentTelegramRelay
 from opentulpa.interfaces.telegram.delivery import TelegramOwnerDelivery
@@ -37,11 +38,26 @@ class _Files:
 class _Client:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []
+        self.deleted: list[dict[str, Any]] = []
+        self.commands: list[dict[str, str]] = []
         self.callbacks: list[dict[str, Any]] = []
 
     async def send_message(self, **kwargs: Any) -> dict[str, Any]:
         self.messages.append(kwargs)
-        return {"ok": True}
+        return {"ok": True, "result": {"message_id": len(self.messages)}}
+
+    async def edit_message_text(self, **kwargs: Any) -> bool:
+        self.edits.append(kwargs)
+        return True
+
+    async def set_my_commands(self, *, commands: list[dict[str, str]]) -> bool:
+        self.commands = commands
+        return True
+
+    async def delete_message(self, **kwargs: Any) -> bool:
+        self.deleted.append(kwargs)
+        return True
 
     async def answer_callback_query(self, **kwargs: Any) -> bool:
         self.callbacks.append(kwargs)
@@ -56,6 +72,18 @@ class _Agent:
     def __init__(self) -> None:
         self.requests: list[AgentRunRequest] = []
         self.decisions: list[tuple[str, ApprovalDecision]] = []
+        self.threads: set[tuple[str, str]] = set()
+        self.inference = {
+            "revision": 0,
+            "selection": None,
+            "effective": {
+                "provider": "api",
+                "model": "api/default",
+                "reasoning_effort": "low",
+                "service_tier": None,
+                "fallback_to_api": False,
+            },
+        }
 
     async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
         self.requests.append(request)
@@ -71,6 +99,88 @@ class _Agent:
         self.decisions.append((run_id, decision))
         yield AgentRunEvent("run.started", run_id, 3, "now", {"resumed": True})
         yield AgentRunEvent("run.completed", run_id, 4, "now", {"text": "approved"})
+
+    async def ensure_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        channel: str,
+    ) -> None:
+        assert channel == "telegram"
+        self.threads.add((tenant_id, thread_id))
+
+    async def get_thread_inference(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        return self.inference if (tenant_id, thread_id) in self.threads else None
+
+    async def update_thread_inference(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        expected_revision: int,
+        selection: Any,
+    ) -> dict[str, Any] | None:
+        if (tenant_id, thread_id) not in self.threads:
+            return None
+        assert expected_revision == self.inference["revision"]
+        self.inference = {
+            "revision": expected_revision + 1,
+            "selection": selection.model_dump(mode="json"),
+            "effective": selection.model_dump(mode="json"),
+        }
+        return self.inference
+
+class _Inference:
+    def __init__(self) -> None:
+        self.connected = False
+
+    def codex_connected(self, tenant_id: str) -> bool:
+        assert tenant_id == "tenant-a"
+        return self.connected
+
+    async def status(self, tenant_id: str) -> dict[str, Any]:
+        return {"codex": {"connected": self.codex_connected(tenant_id)}}
+
+    async def models(
+        self,
+        tenant_id: str,
+        provider: str,
+        *,
+        query: str = "",
+    ) -> tuple[InferenceModel, ...]:
+        assert tenant_id == "tenant-a"
+        model = InferenceModel(
+            provider=provider,
+            id="gpt-5.3-codex" if provider == "codex" else "api/default",
+            reasoning_efforts=("low", "high", "ultra"),
+            default_reasoning_effort="low",
+        )
+        return (model,) if not query or query in model.id else ()
+
+    async def start_device_login(self, tenant_id: str) -> dict[str, Any]:
+        assert tenant_id == "tenant-a"
+        return {
+            "id": "login_1",
+            "status": "pending",
+            "verification_url": "https://auth.openai.com/codex/device",
+            "user_code": "ABCD-EFGH",
+        }
+
+    async def get_device_login(
+        self,
+        tenant_id: str,
+        login_id: str,
+    ) -> dict[str, Any] | None:
+        assert tenant_id == "tenant-a"
+        assert login_id == "login_1"
+        self.connected = True
+        return {"id": login_id, "status": "authorized"}
 
 
 class _GatedAgent(_Agent):
@@ -89,6 +199,30 @@ class _GatedAgent(_Agent):
         await self.resume_accepted.wait()
         yield AgentRunEvent("run.started", run_id, 3, "now", {"resumed": True})
         yield AgentRunEvent("run.completed", run_id, 4, "now", {"text": "approved"})
+
+
+class _ProgressAgent(_Agent):
+    async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
+        self.requests.append(request)
+        yield AgentRunEvent("run.started", "run_1", 1, "now", {})
+        yield AgentRunEvent("message.delta", "run_1", 2, "now", {"text": "Inspecting"})
+        yield AgentRunEvent(
+            "tool.started",
+            "run_1",
+            3,
+            "now",
+            {"name": "source_shell"},
+        )
+        await asyncio.sleep(0.02)
+        yield AgentRunEvent(
+            "tool.completed",
+            "run_1",
+            4,
+            "now",
+            {"name": "source_shell"},
+        )
+        yield AgentRunEvent("message.delta", "run_1", 5, "now", {"text": "Finished"})
+        yield AgentRunEvent("run.completed", "run_1", 6, "now", {"text": "All done"})
 
 
 class _FailOnceAgent(_Agent):
@@ -155,6 +289,7 @@ def _relay(
     agent: _Agent | None = None,
     owner_tenant_id: str | None = "tenant-a",
     allowed_user_ids: str = "7",
+    inference: _Inference | None = None,
 ) -> tuple[DeepAgentTelegramRelay, _Agent, _Client, TelegramStateStore]:
     agent = agent or _Agent()
     client = _Client()
@@ -169,6 +304,7 @@ def _relay(
         owner_tenant_id=owner_tenant_id,
         allowed_user_ids=allowed_user_ids,
         allowed_usernames=None,
+        inference=inference,
     )
     return relay, agent, client, state
 
@@ -180,11 +316,19 @@ def test_edited_arguments_reject_exponent_overflow() -> None:
 
 @pytest.mark.asyncio
 async def test_health_tracks_durable_owner_inbox_dispatcher(tmp_path: Path) -> None:
-    relay, _, _, _ = _relay(tmp_path)
+    relay, _, client, _ = _relay(tmp_path)
 
     assert relay.healthy() is False
     await relay.start()
     assert relay.healthy() is True
+    assert {command["command"] for command in client.commands} == {
+        "fresh",
+        "model",
+        "models",
+        "reasoning",
+        "codex",
+        "cancel",
+    }
     await relay.shutdown()
     assert relay.healthy() is False
 
@@ -206,7 +350,74 @@ async def test_owner_update_injects_tenant_context_and_reuses_thread(tmp_path: P
     assert [request.context.tenant_id for request in agent.requests] == ["tenant-a", "tenant-a"]
     assert agent.requests[0].context.thread_id == agent.requests[1].context.thread_id
     assert agent.requests[0].context.actor_id == "telegram:7"
-    assert [message["text"] for message in client.messages] == ["hello", "hello"]
+    assert [message["text"] for message in client.messages] == [
+        "hello",
+        "hello",
+        "hello",
+        "hello",
+    ]
+    assert [item["message_id"] for item in client.deleted] == [1, 3]
+
+
+@pytest.mark.asyncio
+async def test_owner_progress_edits_one_message_without_concatenating_segments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "opentulpa.interfaces.telegram.run_output._EDIT_MIN_INTERVAL_SECONDS",
+        0.01,
+    )
+    relay, _, client, _ = _relay(tmp_path, agent=_ProgressAgent())
+
+    await relay.handle_update(
+        {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 9},
+                "from": {"id": 7, "username": "owner"},
+                "text": "change the source",
+            },
+        }
+    )
+
+    assert [message["text"] for message in client.messages] == ["Inspecting", "All done"]
+    assert client.edits[0]["text"] == (
+        "Inspecting\n\nWorking: Working on OpenTulpa source..."
+    )
+    assert client.deleted == [{"chat_id": 9, "message_id": 1}]
+    assert all("InspectingFinished" not in edit["text"] for edit in client.edits)
+
+
+@pytest.mark.asyncio
+async def test_telegram_codex_login_model_and_reasoning_commands(tmp_path: Path) -> None:
+    inference = _Inference()
+    relay, agent, client, _ = _relay(tmp_path, inference=inference)
+
+    async def send(update_id: int, text: str) -> None:
+        await relay.handle_update(
+            {
+                "update_id": update_id,
+                "message": {
+                    "chat": {"id": 9},
+                    "from": {"id": 7, "username": "owner"},
+                    "text": text,
+                },
+            }
+        )
+
+    await send(1, "/codex login")
+    assert "ABCD-EFGH" in client.messages[-1]["text"]
+    await send(2, "/codex status")
+    assert client.messages[-1]["text"].startswith("Codex is connected")
+    await send(3, "/models codex")
+    assert "gpt-5.3-codex" in client.messages[-1]["text"]
+    await send(4, "/model codex gpt-5.3-codex high")
+    assert agent.inference["effective"]["provider"] == "codex"
+    assert agent.inference["effective"]["reasoning_effort"] == "high"
+    await send(5, "/reasoning ultra")
+    assert agent.inference["effective"]["reasoning_effort"] == "ultra"
+    assert agent.requests == []
 
 
 @pytest.mark.asyncio

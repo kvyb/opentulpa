@@ -1624,6 +1624,30 @@ class DeepAgentService:
             "preview": "",
         }
 
+    async def ensure_thread(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        channel: str,
+    ) -> None:
+        """Persist caller-owned thread metadata before a run or preference update."""
+
+        self._require_started()
+        now = utc_now_iso()
+        db = self._require_runs_db()
+        async with self._run_event_lock:
+            await db.execute(
+                """
+                INSERT INTO agent_threads (
+                    tenant_id, thread_id, title, channel, archived, created_at, updated_at
+                ) VALUES (?, ?, 'New session', ?, 0, ?, ?)
+                ON CONFLICT (tenant_id, thread_id) DO NOTHING
+                """,
+                (tenant_id, thread_id, channel, now, now),
+            )
+            await db.commit()
+
     async def list_threads(
         self,
         *,

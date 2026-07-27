@@ -17,6 +17,7 @@ from opentulpa.specs import (
     TriggerSpecService,
     TriggerSpecStore,
     TriggerSpecWrite,
+    default_agent_spec_writes,
 )
 
 NOW = datetime(2026, 7, 20, 12, tzinfo=UTC)
@@ -87,6 +88,80 @@ def test_agent_spec_revisions_are_immutable_idempotent_and_tenant_scoped(
             expected_revision=1,
             created_by="owner",
         )
+
+
+def test_seed_defaults_upgrades_only_the_legacy_owner_budget(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    service = AgentSpecService(store)
+    desired = default_agent_spec_writes()["owner"]
+    legacy = desired.model_copy(
+        update={"max_runtime_seconds": 900, "max_model_calls": 100}
+    )
+    first = store.create_revision(
+        tenant_id="tenant-a",
+        spec_id="owner",
+        write=legacy,
+        expected_revision=None,
+        created_by="bootstrap",
+    )
+    store.activate(
+        first.ref,
+        expected_active_revision=None,
+        updated_by="bootstrap",
+    )
+
+    seeded = service.seed_defaults(tenant_id="tenant-a", actor_id="bootstrap")
+    owner = next(spec for spec in seeded if spec.id == "owner")
+
+    assert owner.revision == 2
+    assert owner.max_runtime_seconds == 7_200
+    assert owner.max_model_calls == 500
+    assert store.get_active(tenant_id="tenant-a", spec_id="owner") == owner
+
+    customized = service.save(
+        tenant_id="tenant-a",
+        actor_id="owner",
+        spec_id="owner",
+        expected_revision=2,
+        write=desired.model_copy(update={"max_runtime_seconds": 3_600}),
+    )
+    service.activate(
+        tenant_id="tenant-a",
+        actor_id="owner",
+        spec_id="owner",
+        revision=customized.revision,
+        expected_active_revision=2,
+    )
+
+    reseeded = service.seed_defaults(tenant_id="tenant-a", actor_id="bootstrap")
+    active = next(spec for spec in reseeded if spec.id == "owner")
+    assert active.revision == customized.revision
+    assert active.max_runtime_seconds == 3_600
+
+    legacy_b = store.create_revision(
+        tenant_id="tenant-b",
+        spec_id="owner",
+        write=legacy,
+        expected_revision=None,
+        created_by="bootstrap",
+    )
+    store.activate(
+        legacy_b.ref,
+        expected_active_revision=None,
+        updated_by="bootstrap",
+    )
+    interrupted_upgrade = store.create_revision(
+        tenant_id="tenant-b",
+        spec_id="owner",
+        write=desired,
+        expected_revision=1,
+        created_by="bootstrap",
+    )
+
+    recovered = service.seed_defaults(tenant_id="tenant-b", actor_id="bootstrap")
+    recovered_owner = next(spec for spec in recovered if spec.id == "owner")
+    assert recovered_owner == interrupted_upgrade
+    assert store.get_active(tenant_id="tenant-b", spec_id="owner") == interrupted_upgrade
 
 
 def test_agent_spec_activation_is_compare_and_swap_and_can_roll_back(tmp_path: Path) -> None:
