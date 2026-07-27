@@ -254,6 +254,45 @@ def test_owner_agent_spec_limits_user_approval_to_destructive_shell(
     }
 
 
+def test_profile_default_omits_tools_unavailable_in_the_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs = AgentSpecStore(tmp_path / "specs.db")
+    specs.create_revision(
+        tenant_id="tenant.alpha",
+        spec_id="routine",
+        write=AgentSpecWrite(
+            name="Routine",
+            runtime_profile="routine",
+            instructions="Handle background work.",
+            isolation="private",
+            tool_policy="profile_default",
+            memory_scope="none",
+            workspace_scope="none",
+        ),
+        expected_revision=None,
+        created_by="owner",
+    )
+    captured: list[dict[str, Any]] = []
+
+    def capture_create_deep_agent(**kwargs: Any) -> object:
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(service_module, "create_deep_agent", capture_create_deep_agent)
+    tools = tuple(tool for tool in _registered_tools() if tool.name != "web_search")
+    service = _service(tmp_path, object(), tools=tools, agent_specs=specs)
+    service._checkpointer = cast("Any", object())
+    service._store = cast("Any", object())
+
+    service._graph_for_context(_context(run_kind=AgentRunKind.ROUTINE))
+
+    tool_names = {tool.name for tool in captured[0]["tools"]}
+    assert "web_search" not in tool_names
+    assert "content_fetch" in tool_names
+
+
 def test_agent_spec_revision_compiles_a_restricted_graph_and_is_pinned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

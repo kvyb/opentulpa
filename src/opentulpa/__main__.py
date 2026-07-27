@@ -1140,6 +1140,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         intake_port.register_handlers(registry)
         jobs = JobService(deepagents_root / "jobs.db", registry=registry)
 
+        web_search_provider = get_web_search_provider()
         product_application = ProductToolApplication(
             profiles=CustomerProfileProductPort(profiles),
             files=FileVaultProductPort(files=file_vault, analysis=file_analysis),
@@ -1153,7 +1154,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             ),
             knowledge=tenant_knowledge,
             research=ResearchProductPort(
-                web_search=get_web_search_provider(),
+                web_search=web_search_provider,
                 content_fetch=ContentFetchService(
                     extractor=default_content_extractor(),
                 ),
@@ -1174,7 +1175,14 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             capabilities=capabilities,
             evolution_owner_tenant_id=owner_tenant_id,
         )
-        product_tools = build_product_tools(product_application)
+        product_tools = build_product_tools(
+            product_application,
+            names=tuple(
+                name
+                for name in TOOL_SPEC_BY_NAME
+                if name != "web_search" or web_search_provider is not None
+            ),
+        )
 
         agent_service = DeepAgentService(
             api_key=api_key,

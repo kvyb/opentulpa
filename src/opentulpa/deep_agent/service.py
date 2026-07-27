@@ -2420,10 +2420,11 @@ class DeepAgentService:
         if len(available) != len(all_tools):
             raise RuntimeError("active capability tools collide with kernel tools")
         if spec.tool_policy == "profile_default":
+            available_names = frozenset(available)
             names = {
-                AgentRunKind.OWNER.value: frozenset(available),
-                AgentRunKind.ROUTINE.value: _ROUTINE_PRODUCT_TOOL_NAMES,
-                AgentRunKind.INTAKE.value: _INTAKE_PRODUCT_TOOL_NAMES,
+                AgentRunKind.OWNER.value: available_names,
+                AgentRunKind.ROUTINE.value: _ROUTINE_PRODUCT_TOOL_NAMES & available_names,
+                AgentRunKind.INTAKE.value: _INTAKE_PRODUCT_TOOL_NAMES & available_names,
             }.get(spec.runtime_profile)
             if names is None:
                 raise RuntimeError("custom AgentSpecs must declare an explicit tool allowlist")

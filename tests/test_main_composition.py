@@ -111,7 +111,11 @@ def test_secret_vault_refuses_a_group_readable_host_key(tmp_path: Path) -> None:
         load_or_create_host_cipher(tmp_path)
 
 
-def test_build_application_composes_only_v2_product_services(tmp_path: Path) -> None:
+def test_build_application_composes_only_v2_product_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "get_web_search_provider", lambda: None)
     composition = main_module.build_application(
         project_root=tmp_path,
         settings=_settings(tmp_path),
@@ -119,7 +123,9 @@ def test_build_application_composes_only_v2_product_services(tmp_path: Path) -> 
     app = composition.app
 
     assert app.state.owner_tenant_id == "owner"
-    assert len(app.state.product_tools) == len(TOOL_SPECS)
+    tool_names = {tool.name for tool in app.state.product_tools}
+    assert tool_names == {spec.name for spec in TOOL_SPECS} - {"web_search"}
+    assert "content_fetch" in tool_names
     assert app.state.evolution_service is None
     assert app.state.job_registry.names() == (
         "browser_act",
@@ -167,6 +173,20 @@ def test_build_application_composes_only_v2_product_services(tmp_path: Path) -> 
         tmp_path / ".opentulpa" / "deepagents" / "mcp.db"
     )
     assert mcp_broker._idempotency.db_path == mcp_broker._audit.db_path  # noqa: SLF001
+
+
+def test_build_application_exposes_web_search_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "get_web_search_provider", object)
+
+    composition = main_module.build_application(
+        project_root=tmp_path,
+        settings=_settings(tmp_path),
+    )
+
+    assert "web_search" in {tool.name for tool in composition.app.state.product_tools}
 
 
 def test_build_application_injects_browser_use_cloud_session_provider(tmp_path: Path) -> None:
