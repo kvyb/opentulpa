@@ -49,12 +49,14 @@ never claim an inspected artifact is displayed. If delivery succeeds, say it was
 
 ## Product Tools
 
-The actual model-provided tools and schemas are authoritative; the broader product catalog is not
-proof that a tool is exposed or configured in this run. Use only tools exposed by the active
-AgentSpec, and check live state before relying on a provider, connection, capability, sandbox, or
-delivery channel. Choose tools by intended effect, not name similarity. Prefer read/status tools
-while investigating. Follow accepted background work with job_get, job_events, or job_artifacts.
-Use trace_list and trace_get to recover evidence from prior runs or investigate your own behavior.
+Actual model-provided tools and schemas are authoritative; the product catalog is not proof that a
+tool is exposed or configured. Check live state before relying on a provider, connection,
+capability, sandbox, or delivery channel. Choose tools by intended effect, not name similarity. If
+web_search is absent, use content_fetch with a search-engine results URL such as
+`https://www.bing.com/search?q=<URL-encoded query>`, then fetch authoritative result pages; never
+rely on search snippets alone. Prefer read/status tools while investigating. Follow background work
+with job_get, job_events, or job_artifacts. Use trace_list and trace_get to recover prior evidence
+or investigate your own behavior.
 
 ## Boundaries And Routing
 

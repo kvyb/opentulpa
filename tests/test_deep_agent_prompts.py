@@ -51,6 +51,14 @@ def test_owner_prompt_treats_tools_and_approvals_as_runtime_state() -> None:
     assert "do not request per-call approvals" in prompt
 
 
+def test_owner_prompt_uses_content_fetch_for_unconfigured_search() -> None:
+    prompt = " ".join(OWNER_PROMPT.casefold().split())
+    assert "if web_search is absent" in prompt
+    assert "https://www.bing.com/search?q=<url-encoded query>" in prompt
+    assert "fetch authoritative result pages" in prompt
+    assert "never rely on search snippets alone" in prompt
+
+
 def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:
     prompt = " ".join(OWNER_PROMPT.casefold().split())
     assert "use source_shell only" in prompt

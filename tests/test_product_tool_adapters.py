@@ -163,6 +163,12 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     assert '"secret_value"' not in serialized_capability_schema
     profile_get = next(tool for tool in tools if tool.name == "profile_get")
     assert profile_get.tool_call_schema.model_json_schema()["properties"] == {}
+    web_search = next(tool for tool in tools if tool.name == "web_search")
+    assert "configured provider" in web_search.description
+    assert "content_fetch" in web_search.description
+    content_fetch = next(tool for tool in tools if tool.name == "content_fetch")
+    assert "https://www.bing.com/search?q=<URL-encoded query>" in content_fetch.description
+    assert "result pages before answering" in content_fetch.description
     source_status = next(tool for tool in tools if tool.name == "source_status")
     assert source_status.tool_call_schema.model_json_schema()["properties"] == {}
     source_shell = next(tool for tool in tools if tool.name == "source_shell")

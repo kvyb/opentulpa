@@ -460,14 +460,28 @@ def _runtime_schema(spec: ToolSpec) -> type[BaseModel]:
 
 
 def _description(spec: ToolSpec) -> str:
-    action = spec.name.replace("_", " ")
+    description = {
+        "web_search": (
+            "Search the public web through the configured provider. Use content_fetch to read "
+            "authoritative result pages."
+        ),
+        "content_fetch": (
+            "Fetch and extract a public HTTP(S) URL. When web_search is unavailable, it can "
+            "fetch a search-engine results URL such as "
+            "https://www.bing.com/search?q=<URL-encoded query> for discovery. Fetch the relevant "
+            "result pages before answering."
+        ),
+    }.get(spec.name)
+    if description is None:
+        action = spec.name.replace("_", " ")
+        description = f"{action.capitalize()} for the authenticated OpenTulpa tenant."
     approval = (
         "policy (recursive forced removal only)"
         if spec.approval is ApprovalMode.POLICY
         else spec.approval.value
     )
     return (
-        f"{action.capitalize()} for the authenticated OpenTulpa tenant. "
+        f"{description} "
         f"Effect: {spec.effect.value}; approval: {approval}; "
         f"execution: {spec.execution.value}. "
         "Resource ownership is always resolved from trusted run context."
