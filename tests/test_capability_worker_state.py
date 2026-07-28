@@ -32,7 +32,6 @@ def test_state_persists_pairing_threads_dedupe_and_private_mode(tmp_path: Path) 
     assert reloaded.next_update_id == 13
     assert reloaded.pending_runs() == []
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert reloaded.reset_thread(9) != thread_id
 
 
 def test_completion_atomically_consumes_approval_and_edit_marker(tmp_path: Path) -> None:
@@ -58,6 +57,29 @@ def test_completion_atomically_consumes_approval_and_edit_marker(tmp_path: Path)
     assert state.approval("token_1") is None
     assert state.awaiting_edit(9) is None
     assert state.source_seen("telegram:1:3")
+
+
+def test_thread_replacement_is_committed_only_after_compare_and_swap(tmp_path: Path) -> None:
+    path = tmp_path / "worker.json"
+    state = TelegramWorkerState(path)
+    current = state.thread_id(9)
+    replacement = state.new_thread_id(9)
+
+    assert TelegramWorkerState(path).thread_id(9) == current
+
+    state.replace_thread(
+        9,
+        expected_thread_id=current,
+        replacement_thread_id=replacement,
+    )
+
+    assert TelegramWorkerState(path).thread_id(9) == replacement
+    with pytest.raises(TelegramStateError, match="changed during replacement"):
+        state.replace_thread(
+            9,
+            expected_thread_id=current,
+            replacement_thread_id=state.new_thread_id(9),
+        )
 
 
 def test_state_rejects_corruption_and_existing_symlink(tmp_path: Path) -> None:

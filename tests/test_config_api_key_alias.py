@@ -48,7 +48,7 @@ def test_settings_default_deep_agent_model_uses_kimi_k3(monkeypatch, tmp_path: P
     settings = Settings()
 
     assert settings.llm_model == "moonshotai/kimi-k3"
-    assert settings.llm_reasoning_effort == "low"
+    assert settings.llm_reasoning_effort == "high"
     assert settings.llm_fallback_models == ["z-ai/glm-5.2"]
     assert settings.llm_provider_order == {
         "z-ai/glm-5.2": ["z-ai/fp8", "fireworks", "deepinfra/fp4"]

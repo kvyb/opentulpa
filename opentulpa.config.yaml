@@ -42,7 +42,7 @@ llm_provider_order:
     - fireworks
     - deepinfra/fp4
 model_aliases: {}
-llm_reasoning_effort: low
+llm_reasoning_effort: high
 business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
 
 # Injected integration defaults

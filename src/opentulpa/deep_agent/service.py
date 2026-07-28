@@ -565,7 +565,7 @@ def build_openrouter_chat_model(
     api_key: str,
     base_url: str,
     model_name: str,
-    reasoning_effort: str | None = "low",
+    reasoning_effort: str | None = "high",
     max_completion_tokens: int | None = None,
     provider_order: Sequence[str] = (),
 ) -> ChatOpenRouter:
@@ -645,7 +645,7 @@ class DeepAgentService:
         workspaces_root: str | Path,
         tools: Sequence[BaseTool] = (),
         dynamic_tools: DynamicToolProvider | None = None,
-        reasoning_effort: str | None = "low",
+        reasoning_effort: str | None = "high",
         max_completion_tokens: int | None = None,
         langfuse_tracer: Any | None = None,
         model: Any | None = None,

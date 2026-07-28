@@ -154,18 +154,32 @@ class TelegramWorkerState:
             value = str(self._state["threads"].get(key) or "").strip()
             if value:
                 return value
-            value = f"telegram_{chat_id}_{uuid4().hex}"
+            value = self.new_thread_id(chat_id)
             self._state["threads"][key] = value
             self._write()
             return value
 
-    def reset_thread(self, chat_id: int) -> str:
+    @staticmethod
+    def new_thread_id(chat_id: int) -> str:
+        return f"telegram_{int(chat_id)}_{uuid4().hex}"
+
+    def replace_thread(
+        self,
+        chat_id: int,
+        *,
+        expected_thread_id: str,
+        replacement_thread_id: str,
+    ) -> None:
         key = str(int(chat_id))
+        replacement = str(replacement_thread_id or "").strip()
+        if not replacement:
+            raise ValueError("replacement_thread_id must not be empty")
         with self._lock:
-            value = f"telegram_{chat_id}_{uuid4().hex}"
-            self._state["threads"][key] = value
+            current = str(self._state["threads"].get(key) or "").strip()
+            if current != str(expected_thread_id or "").strip():
+                raise TelegramStateError("Telegram conversation changed during replacement")
+            self._state["threads"][key] = replacement
             self._write()
-            return value
 
     def codex_login(self, chat_id: int) -> str:
         with self._lock:

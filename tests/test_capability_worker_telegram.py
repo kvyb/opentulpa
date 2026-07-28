@@ -428,6 +428,46 @@ async def test_inference_and_codex_commands_use_agent_api_without_starting_runs(
 
 
 @pytest.mark.asyncio
+async def test_fresh_conversation_preserves_explicit_model_selection(tmp_path: Path) -> None:
+    telegram = _Telegram([_message(1, text="/fresh")])
+    agent = _Agent()
+    selection = {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "reasoning_effort": "high",
+    }
+    agent.inference = {
+        "revision": 3,
+        "selection": selection,
+        "effective": selection,
+    }
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    current_thread_id = state.thread_id(9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    replacement_thread_id = state.thread_id(9)
+    assert replacement_thread_id != current_thread_id
+    assert agent.ensured_threads == [current_thread_id, replacement_thread_id]
+    assert agent.inference_updates == [
+        {
+            "thread_id": replacement_thread_id,
+            "expected_revision": 0,
+            "selection": selection,
+        }
+    ]
+    assert telegram.messages[-1]["text"] == "Started a fresh conversation."
+
+
+@pytest.mark.asyncio
 async def test_cancel_bypasses_a_long_running_message(tmp_path: Path) -> None:
     run_finished = asyncio.Event()
     stop = asyncio.Event()

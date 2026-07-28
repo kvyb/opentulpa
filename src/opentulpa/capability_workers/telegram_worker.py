@@ -732,7 +732,23 @@ class TelegramInterfaceWorker:
             self._complete(update_id=update_id, source_event_id=source_event_id)
             return
         if command == "/fresh":
-            self._state.reset_thread(chat_id)
+            current_thread_id = self._state.thread_id(chat_id)
+            await self._agent.ensure_thread(current_thread_id)
+            current = await self._agent.get_thread_inference(current_thread_id)
+            replacement_thread_id = self._state.new_thread_id(chat_id)
+            await self._agent.ensure_thread(replacement_thread_id)
+            selection = current.get("selection")
+            if isinstance(selection, Mapping):
+                await self._agent.update_thread_inference(
+                    replacement_thread_id,
+                    expected_revision=0,
+                    selection=selection,
+                )
+            self._state.replace_thread(
+                chat_id,
+                expected_thread_id=current_thread_id,
+                replacement_thread_id=replacement_thread_id,
+            )
             await self._telegram.send_message(
                 chat_id=chat_id,
                 text="Started a fresh conversation.",
