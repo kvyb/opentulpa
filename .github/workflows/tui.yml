@@ -25,7 +25,7 @@ jobs:
         include:
           - runner: macos-14
             target: darwin-arm64
-          - runner: macos-13
+          - runner: macos-15-intel
             target: darwin-x64
           - runner: ubuntu-24.04-arm
             target: linux-arm64
