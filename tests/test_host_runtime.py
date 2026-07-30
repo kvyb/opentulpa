@@ -36,6 +36,7 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 ) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "host-telegram-token")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "host-webhook-secret")
+    monkeypatch.setenv("OPENTULPA_OWNER_CUSTOMER_ID", "opentulpa-gf")
     runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
     runtime.configure_evolution_control(
         base_url="http://127.0.0.1:8000/bootstrap/internal/v1/evolution",
@@ -55,6 +56,7 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 
     assert environment["OPENAI_COMPATIBLE_API_KEY"] == "provider-secret-value"
     assert environment["OPENTULPA_OWNER_TOKEN"] == "internal-owner-secret-value"
+    assert environment["OPENTULPA_OWNER_CUSTOMER_ID"] == "opentulpa-gf"
     assert environment["OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN"] == "e" * 48
     assert environment["OPENTULPA_BOOTSTRAP_EVOLUTION_URL"].endswith(
         "/bootstrap/internal/v1/evolution"
@@ -68,6 +70,9 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     assert "internal-owner-secret-value" not in line
     assert "hunter2" not in line
     assert line.count("[redacted]") == 3
+
+    monkeypatch.delenv("OPENTULPA_OWNER_CUSTOMER_ID")
+    assert runtime._child_environment(config, port=8124)["OPENTULPA_OWNER_CUSTOMER_ID"] == "owner"
     await runtime.shutdown()
 
 
