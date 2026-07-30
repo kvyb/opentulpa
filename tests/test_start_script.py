@@ -594,6 +594,37 @@ def test_direct_start_without_container_engine_keeps_chat_available(tmp_path: Pa
     assert "chat will start but sandbox shell commands will be unavailable" in result.stderr
 
 
+def test_direct_start_recognizes_railway_hosted_sandbox(tmp_path: Path) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source ./start.sh; unset OPENTULPA_CONTAINER_CLI; "
+            "configure_container_engine server; "
+            "test \"$DIRECT_ENGINE_AVAILABLE\" = 0",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": "/usr/bin:/bin",
+            "OPENTULPA_CONTAINER_CLI": "",
+            "SANDBOX_PROVIDER": "railway",
+            "RAILWAY_TOKEN": "project-token",
+            "RAILWAY_ENVIRONMENT_ID": "environment-id",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "using Railway-hosted sandbox VMs for tenant commands" in result.stdout
+    assert "shell commands will be unavailable" not in result.stderr
+
+
 def test_start_script_install_managed_builds_trusted_runtime_and_evaluator_images() -> None:
     result = _run_start(
         "install",

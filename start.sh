@@ -889,6 +889,10 @@ install_python_deps() {
 install_tenant_sandbox_image() {
   local engine tenant_image
   if [[ "${DIRECT_ENGINE_AVAILABLE}" != "1" ]]; then
+    if railway_tenant_sandbox_configured; then
+      log "tenant sandbox image build skipped; using Railway-hosted sandbox VMs."
+      return 0
+    fi
     log "tenant sandbox image build skipped; chat will start with shell execution unavailable."
     return 0
   fi
@@ -1183,6 +1187,15 @@ process_repository_sandbox_available() {
     && command -v prlimit >/dev/null 2>&1
 }
 
+railway_tenant_sandbox_configured() {
+  local provider
+  provider="$(config_value "SANDBOX_PROVIDER" "sandbox_provider")"
+  provider="$(printf '%s' "${provider:-auto}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${provider}" == "auto" || "${provider}" == "railway" ]] \
+    && env_is_set "RAILWAY_TOKEN" \
+    && env_is_set "RAILWAY_ENVIRONMENT_ID"
+}
+
 warn_without_container_engine() {
   if process_repository_sandbox_available; then
     warn "no isolated OCI engine was found; general tenant shell commands are unavailable, but repository work will use the bundled unprivileged process sandbox."
@@ -1195,6 +1208,11 @@ configure_container_engine() {
   local runtime="$1" requested candidate
   requested="${OPENTULPA_CONTAINER_CLI:-}"
   DIRECT_ENGINE_AVAILABLE=0
+
+  if [[ "${runtime}" != "managed" ]] && railway_tenant_sandbox_configured; then
+    log "using Railway-hosted sandbox VMs for tenant commands."
+    return 0
+  fi
 
   if [[ "${DRY_RUN}" == "1" ]]; then
     export OPENTULPA_CONTAINER_CLI="${requested:-docker}"
@@ -1314,13 +1332,17 @@ run_doctor() {
   fi
   if [[ "${runtime}" != "managed" ]]; then
     local direct_engine direct_tenant_image
-    direct_engine="${OPENTULPA_CONTAINER_CLI:-docker}"
-    direct_tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
-    direct_tenant_image="${direct_tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
-    doctor_check "${direct_engine} is available for tenant commands" "$(command -v "${direct_engine}" >/dev/null 2>&1 && echo 1 || echo 0)" "install a rootless Docker or Podman engine" || failures=$((failures + 1))
-    if command -v "${direct_engine}" >/dev/null 2>&1; then
-      doctor_check "${direct_engine} has direct-mode isolation" "$(container_engine_is_safe_for_direct "${direct_engine}" && echo 1 || echo 0)" "configure rootless Docker/Podman or use Docker Desktop/OrbStack on macOS" || failures=$((failures + 1))
-      doctor_check "tenant sandbox image exists" "$("${direct_engine}" image inspect "${direct_tenant_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install ${runtime}" || failures=$((failures + 1))
+    if railway_tenant_sandbox_configured; then
+      echo "[doctor] ok: Railway-hosted tenant sandbox is configured"
+    else
+      direct_engine="${OPENTULPA_CONTAINER_CLI:-docker}"
+      direct_tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
+      direct_tenant_image="${direct_tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
+      doctor_check "${direct_engine} is available for tenant commands" "$(command -v "${direct_engine}" >/dev/null 2>&1 && echo 1 || echo 0)" "install a rootless Docker or Podman engine" || failures=$((failures + 1))
+      if command -v "${direct_engine}" >/dev/null 2>&1; then
+        doctor_check "${direct_engine} has direct-mode isolation" "$(container_engine_is_safe_for_direct "${direct_engine}" && echo 1 || echo 0)" "configure rootless Docker/Podman or use Docker Desktop/OrbStack on macOS" || failures=$((failures + 1))
+        doctor_check "tenant sandbox image exists" "$("${direct_engine}" image inspect "${direct_tenant_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install ${runtime}" || failures=$((failures + 1))
+      fi
     fi
   fi
   doctor_check ".opentulpa is writable" "$(mkdir -p "${REPO_ROOT}/.opentulpa" 2>/dev/null && [[ -w "${REPO_ROOT}/.opentulpa" ]] && echo 1 || echo 0)" "make .opentulpa writable" || failures=$((failures + 1))
