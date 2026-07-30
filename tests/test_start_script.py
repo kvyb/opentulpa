@@ -613,7 +613,7 @@ def test_direct_start_recognizes_railway_hosted_sandbox(tmp_path: Path) -> None:
             "OPENTULPA_CONTAINER_CLI": "",
             "SANDBOX_PROVIDER": "railway",
             "RAILWAY_TOKEN": "project-token",
-            "RAILWAY_ENVIRONMENT_ID": "environment-id",
+            "OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID": "environment-id",
         },
         capture_output=True,
         text=True,

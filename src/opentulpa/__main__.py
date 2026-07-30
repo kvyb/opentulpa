@@ -322,12 +322,15 @@ def _sandbox_execution_configuration(
         raise RuntimeError("stable sandbox credentials are valid only in a managed release")
     provider = settings.sandbox_provider
     railway_token = str(os.environ.get("RAILWAY_TOKEN") or "").strip()
-    railway_environment_id = str(os.environ.get("RAILWAY_ENVIRONMENT_ID") or "").strip()
+    railway_environment_id = str(
+        os.environ.get("OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID") or ""
+    ).strip()
     railway_configured = bool(railway_token and railway_environment_id)
     if provider == "railway" or (provider == "auto" and railway_configured):
         if not railway_configured:
             raise RuntimeError(
-                "Railway sandbox execution requires RAILWAY_TOKEN and RAILWAY_ENVIRONMENT_ID"
+                "Railway sandbox execution requires RAILWAY_TOKEN and "
+                "OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID"
             )
         return settings.sandbox_image, RailwaySandboxExecutionProvider(
             token=railway_token,

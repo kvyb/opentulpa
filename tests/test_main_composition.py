@@ -401,7 +401,11 @@ def test_direct_railway_runtime_uses_hosted_sandbox_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RAILWAY_TOKEN", "project-token")
-    monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "environment-id")
+    monkeypatch.setenv(
+        "OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID",
+        "environment-id",
+    )
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "app-environment-id")
 
     image, execution = main_module._sandbox_execution_configuration(  # noqa: SLF001
         project_root=tmp_path,
@@ -410,6 +414,7 @@ def test_direct_railway_runtime_uses_hosted_sandbox_provider(
 
     assert image == "opentulpa-tenant-sandbox:test"
     assert isinstance(execution, RailwaySandboxExecutionProvider)
+    assert execution._environment_id == "environment-id"  # noqa: SLF001
 
 
 def test_explicit_railway_runtime_fails_when_project_credentials_are_incomplete(
@@ -417,9 +422,15 @@ def test_explicit_railway_runtime_fails_when_project_credentials_are_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RAILWAY_TOKEN", "project-token")
-    monkeypatch.delenv("RAILWAY_ENVIRONMENT_ID", raising=False)
+    monkeypatch.delenv(
+        "OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID",
+        raising=False,
+    )
 
-    with pytest.raises(RuntimeError, match="RAILWAY_TOKEN and RAILWAY_ENVIRONMENT_ID"):
+    with pytest.raises(
+        RuntimeError,
+        match="RAILWAY_TOKEN and OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID",
+    ):
         main_module._sandbox_execution_configuration(  # noqa: SLF001
             project_root=tmp_path,
             settings=_settings(tmp_path, sandbox_provider="railway"),

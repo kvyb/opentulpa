@@ -1215,7 +1215,7 @@ railway_tenant_sandbox_configured() {
   provider="$(printf '%s' "${provider:-auto}" | tr '[:upper:]' '[:lower:]')"
   [[ "${provider}" == "auto" || "${provider}" == "railway" ]] \
     && env_is_set "RAILWAY_TOKEN" \
-    && env_is_set "RAILWAY_ENVIRONMENT_ID"
+    && env_is_set "OPENTULPA_SANDBOX_RAILWAY_ENVIRONMENT_ID"
 }
 
 warn_without_container_engine() {
