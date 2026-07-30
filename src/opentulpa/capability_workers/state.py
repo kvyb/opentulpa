@@ -328,6 +328,8 @@ class TelegramWorkerState:
         chat_id: int,
         sequence: int,
         accumulated_text: str,
+        response_message_id: int | None = None,
+        rendered_text: str = "",
     ) -> None:
         with self._lock:
             self._state["pending_runs"][source_event_id] = {
@@ -337,7 +339,32 @@ class TelegramWorkerState:
                 "chat_id": int(chat_id),
                 "sequence": max(0, int(sequence)),
                 "accumulated_text": accumulated_text[-200_000:],
+                "response_message_id": (
+                    int(response_message_id)
+                    if response_message_id is not None and int(response_message_id) > 0
+                    else None
+                ),
+                "rendered_text": rendered_text[-200_000:],
             }
+            self._write()
+
+    def save_pending_delivery(
+        self,
+        *,
+        source_event_id: str,
+        response_message_id: int | None,
+        rendered_text: str,
+    ) -> None:
+        with self._lock:
+            record = self._state["pending_runs"].get(source_event_id)
+            if not isinstance(record, dict):
+                return
+            record["response_message_id"] = (
+                int(response_message_id)
+                if response_message_id is not None and int(response_message_id) > 0
+                else None
+            )
+            record["rendered_text"] = rendered_text[-200_000:]
             self._write()
 
     def pending_run(self, source_event_id: str) -> dict[str, Any] | None:

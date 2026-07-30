@@ -215,6 +215,21 @@ async def test_connections_are_filtered_and_foreign_mutations_fail_closed(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_integration_catalog_uses_supported_provider_page_size(tmp_path: Path) -> None:
+    service, provider, _ = _adapter(tmp_path)
+
+    listed = await service.list_integrations(tenant_id="tenant-a", query="mail")
+
+    assert isinstance(listed["items"], list)
+    toolkit_call = next(kwargs for name, kwargs in provider.calls if name == "list_toolkits")
+    assert toolkit_call == {
+        "customer_id": "tenant-a",
+        "limit": 50,
+        "search": "mail",
+    }
+
+
+@pytest.mark.asyncio
 async def test_connect_replays_mismatches_and_pending_claims_fail_closed(tmp_path: Path) -> None:
     service, provider, store = _adapter(tmp_path)
     main_thread = threading.get_ident()

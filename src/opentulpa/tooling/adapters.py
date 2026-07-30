@@ -471,6 +471,10 @@ def _description(spec: ToolSpec) -> str:
             "https://www.bing.com/search?q=<URL-encoded query> for discovery. Fetch the relevant "
             "result pages before answering."
         ),
+        "source_status": (
+            "Inspect source self-update state. available reports whether self-update is usable; "
+            "active and session_active report only whether an editable candidate session exists."
+        ),
     }.get(spec.name)
     if description is None:
         action = spec.name.replace("_", " ")

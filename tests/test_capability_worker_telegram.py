@@ -583,6 +583,51 @@ async def test_message_deltas_stream_by_editing_one_telegram_message(
 
 
 @pytest.mark.asyncio
+async def test_transient_edit_failure_does_not_send_duplicate_message() -> None:
+    class _TransientEditFailure(_Telegram):
+        async def edit_message_text(self, **kwargs: Any) -> None:
+            del kwargs
+            raise TelegramAPIError("Telegram editMessageText transport failed.")
+
+    telegram = _TransientEditFailure()
+    streamer = telegram_worker_module._TelegramResponseStreamer(  # noqa: SLF001
+        telegram=telegram,
+        chat_id=9,
+        message_id=41,
+        rendered_text="before",
+    )
+
+    with pytest.raises(TelegramAPIError, match="transport failed"):
+        await streamer.update("after")
+
+    assert telegram.messages == []
+
+
+@pytest.mark.asyncio
+async def test_missing_edit_target_is_replaced_once() -> None:
+    class _MissingEditTarget(_Telegram):
+        async def edit_message_text(self, **kwargs: Any) -> None:
+            del kwargs
+            raise TelegramAPIError(
+                "Telegram editMessageText rejected the request.",
+                edit_target_unavailable=True,
+            )
+
+    telegram = _MissingEditTarget()
+    streamer = telegram_worker_module._TelegramResponseStreamer(  # noqa: SLF001
+        telegram=telegram,
+        chat_id=9,
+        message_id=41,
+        rendered_text="before",
+    )
+
+    await streamer.update("after")
+
+    assert [item["text"] for item in telegram.messages] == ["after"]
+    assert streamer.message_id == 1
+
+
+@pytest.mark.asyncio
 async def test_tool_progress_flushes_throttled_text_and_finishes_cleanly(
     tmp_path: Path,
 ) -> None:
@@ -829,11 +874,14 @@ async def test_recovery_replays_from_durable_sequence_without_new_run(tmp_path: 
         chat_id=9,
         sequence=2,
         accumulated_text="partial",
+        response_message_id=41,
+        rendered_text="partial",
     )
+    restarted_state = TelegramWorkerState(tmp_path / "worker.json")
     worker = TelegramInterfaceWorker(
         telegram=telegram,
         agent=agent,
-        state=state,
+        state=restarted_state,
         pairing_code=None,
         poll_timeout_seconds=1,
     )
@@ -842,9 +890,15 @@ async def test_recovery_replays_from_durable_sequence_without_new_run(tmp_path: 
 
     assert agent.replays == [{"run_id": "run_1", "after_sequence": 2}]
     assert agent.starts == []
-    assert telegram.messages[-1]["text"] == "recovered"
-    assert state.source_seen("telegram:99:5")
-    assert state.pending_runs() == []
+    assert telegram.messages == []
+    assert telegram.edits[-1] == {
+        "chat_id": 9,
+        "message_id": 41,
+        "text": "recovered",
+        "reply_markup": None,
+    }
+    assert restarted_state.source_seen("telegram:99:5")
+    assert restarted_state.pending_runs() == []
 
 
 @pytest.mark.asyncio

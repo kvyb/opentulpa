@@ -18,9 +18,18 @@ from opentulpa.telegram_formatting import (
 class TelegramAPIError(RuntimeError):
     """Sanitized Telegram transport error that never contains the bot token."""
 
-    def __init__(self, message: str, *, invalid_markup: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        invalid_markup: bool = False,
+        edit_target_unavailable: bool = False,
+        message_not_modified: bool = False,
+    ) -> None:
         super().__init__(message)
         self.invalid_markup = invalid_markup
+        self.edit_target_unavailable = edit_target_unavailable
+        self.message_not_modified = message_not_modified
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +161,8 @@ class TelegramBotAPI:
             raise TelegramAPIError(
                 f"Telegram {method} returned HTTP {response.status_code}.",
                 invalid_markup=_is_invalid_markup_error(error_data),
+                edit_target_unavailable=_is_edit_target_unavailable_error(error_data),
+                message_not_modified=_is_message_not_modified_error(error_data),
             )
         try:
             data = response.json()
@@ -161,6 +172,8 @@ class TelegramBotAPI:
             raise TelegramAPIError(
                 f"Telegram {method} rejected the request.",
                 invalid_markup=_is_invalid_markup_error(data),
+                edit_target_unavailable=_is_edit_target_unavailable_error(data),
+                message_not_modified=_is_message_not_modified_error(data),
             )
         return data.get("result")
 
@@ -265,11 +278,17 @@ class TelegramBotAPI:
         try:
             await self._post("editMessageText", payload, timeout=30)
         except TelegramAPIError as exc:
+            if exc.message_not_modified:
+                return
             if not exc.invalid_markup:
                 raise
             payload.pop("parse_mode", None)
             payload["text"] = telegram_html_to_plain(final_text)[:4_000] or "…"
-            await self._post("editMessageText", payload, timeout=30)
+            try:
+                await self._post("editMessageText", payload, timeout=30)
+            except TelegramAPIError as fallback_exc:
+                if not fallback_exc.message_not_modified:
+                    raise
 
     async def answer_callback_query(
         self,
@@ -353,6 +372,27 @@ def _is_invalid_markup_error(data: Any) -> bool:
         return False
     description = str(data.get("description") or "").lower()
     return "can't parse entities" in description or "unsupported start tag" in description
+
+
+def _is_edit_target_unavailable_error(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    description = str(data.get("description") or "").lower()
+    return any(
+        message in description
+        for message in (
+            "message to edit not found",
+            "message can't be edited",
+            "message can not be edited",
+        )
+    )
+
+
+def _is_message_not_modified_error(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    description = str(data.get("description") or "").lower()
+    return "message is not modified" in description
 
 
 __all__ = [

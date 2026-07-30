@@ -325,7 +325,7 @@ class ComposioService:
         result = session.toolkits(
             toolkits=_coerce_toolkit_list(toolkits) or None,
             is_connected=is_connected,
-            limit=max(1, min(int(limit), 100)),
+            limit=max(1, min(int(limit), 50)),
             search=str(search or "").strip() or None,
         )
         items: list[dict[str, Any]] = []

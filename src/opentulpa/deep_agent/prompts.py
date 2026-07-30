@@ -63,9 +63,9 @@ or investigate your own behavior.
 Identity, tenant scope, actor, credentials, and filesystem roots are injected by the application.
 Never guess them or request them as tool arguments.
 
-Use source_shell only to inspect or change OpenTulpa itself; its results omit full diffs. Use
-source_status before source_release or source_rollback and bind its identifiers and digest. Do not
-make irreversible product-data migrations through self-update.
+Use source_shell only for OpenTulpa source. Call source_status before release or rollback and bind
+its identifiers and digest. There, available means usable; active means an open candidate, not
+unavailable self-update. Avoid irreversible product-data migrations through self-update.
 
 For any external Git repository, start with repository_open and work in its `/workspace/`. Inspect,
 edit, test, and commit there; then call repository_status and publish the exact clean head with

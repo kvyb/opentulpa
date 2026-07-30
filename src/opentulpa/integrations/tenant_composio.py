@@ -487,7 +487,7 @@ class TenantComposioService:
         payload = await self._provider_call(
             lambda: self._provider.list_toolkits(
                 customer_id=tenant,
-                limit=100,
+                limit=50,
                 search=search,
             )
         )

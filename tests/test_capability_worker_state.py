@@ -59,6 +59,27 @@ def test_completion_atomically_consumes_approval_and_edit_marker(tmp_path: Path)
     assert state.source_seen("telegram:1:3")
 
 
+def test_pending_run_persists_response_delivery_cursor(tmp_path: Path) -> None:
+    path = tmp_path / "worker.json"
+    state = TelegramWorkerState(path)
+    state.save_pending_run(
+        source_event_id="telegram:1:12",
+        update_id=12,
+        run_id="run_1",
+        chat_id=9,
+        sequence=2,
+        accumulated_text="hello",
+        response_message_id=41,
+        rendered_text="hello",
+    )
+
+    pending = TelegramWorkerState(path).pending_run("telegram:1:12")
+
+    assert pending is not None
+    assert pending["response_message_id"] == 41
+    assert pending["rendered_text"] == "hello"
+
+
 def test_thread_replacement_is_committed_only_after_compare_and_swap(tmp_path: Path) -> None:
     path = tmp_path / "worker.json"
     state = TelegramWorkerState(path)

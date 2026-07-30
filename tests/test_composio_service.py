@@ -181,6 +181,34 @@ def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> N
     assert keys == ["first-composio-key", "rotated-composio-key"]
 
 
+def test_list_toolkits_clamps_provider_limit_to_fifty(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _Session:
+        def toolkits(self, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            return SimpleNamespace(items=[], next_cursor=None, total_pages=0)
+
+    monkeypatch.setattr(
+        ComposioService,
+        "_session",
+        lambda self, **kwargs: _Session(),
+    )
+    service = ComposioService(api_key="test-key")
+
+    result = service.list_toolkits(customer_id="tenant-1", limit=100)
+
+    assert result["ok"] is True
+    assert calls == [
+        {
+            "toolkits": None,
+            "is_connected": None,
+            "limit": 50,
+            "search": None,
+        }
+    ]
+
+
 def test_composio_proxy_uses_connected_account_without_exposing_headers(
     monkeypatch,
 ) -> None:

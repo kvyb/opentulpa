@@ -329,7 +329,9 @@ async def test_interactive_source_session_survives_restart_and_releases(
     audit = _source_audit()
     await first.start()
     empty = await first.source_status(audit_context=audit)
+    assert empty["available"] is True
     assert empty["active"] is False
+    assert empty["session_active"] is False
     assert empty["candidate_id"] is None
     shell = await first.source_shell(
         command=(
@@ -357,7 +359,9 @@ async def test_interactive_source_session_survives_restart_and_releases(
     await resumed.start()
     try:
         status = await resumed.source_status(audit_context=audit)
+        assert status["available"] is True
         assert status["active"] is True
+        assert status["session_active"] is True
         assert status["candidate"]["id"] == candidate_id
         assert "@app.get('/status')" in status["diff"]
 
@@ -372,7 +376,10 @@ async def test_interactive_source_session_survives_restart_and_releases(
         assert released["candidate"]["id"] == candidate_id
         assert released["candidate"]["status"] == CandidateStatus.READY.value
         assert released["candidate"]["evaluation"]["passed"] is True
-        assert (await resumed.source_status(audit_context=audit))["active"] is False
+        final_status = await resumed.source_status(audit_context=audit)
+        assert final_status["available"] is True
+        assert final_status["active"] is False
+        assert final_status["session_active"] is False
         attempt = PromotionAttempt.model_validate(released["promotion"])
         completed = await _terminal_attempt(resumed, attempt)
         assert completed.status is PromotionAttemptStatus.ACTIVE
