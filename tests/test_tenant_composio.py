@@ -22,7 +22,7 @@ from opentulpa.persistence.idempotency import (
     IdempotencyStore,
 )
 from opentulpa.specs import AgentSpecRef, OriginRef
-from opentulpa.tooling.adapters import ProductToolInvocation
+from opentulpa.tooling.adapters import ProductToolApplicationError, ProductToolInvocation
 from opentulpa.tooling.contract import (
     TOOL_SPEC_BY_NAME,
     AgentChannel,
@@ -54,6 +54,8 @@ class _Provider:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.worker_threads: list[int] = []
         self.fail_authorize = False
+        self.fail_toolkits = False
+        self.fail_connections = False
 
     def _record(self, name: str, **kwargs: Any) -> None:
         self.calls.append((name, kwargs))
@@ -61,6 +63,8 @@ class _Provider:
 
     def list_toolkits(self, **kwargs: Any) -> dict[str, Any]:
         self._record("list_toolkits", **kwargs)
+        if self.fail_toolkits:
+            raise RuntimeError("api_key=provider-secret")
         return {
             "items": [
                 {"slug": "gmail", "name": "Gmail", "is_no_auth": False},
@@ -82,6 +86,8 @@ class _Provider:
 
     def list_connected_accounts(self, **kwargs: Any) -> dict[str, Any]:
         self._record("list_connected_accounts", **kwargs)
+        if self.fail_connections:
+            raise RuntimeError("api_key=provider-secret")
         toolkits = {str(item).casefold() for item in kwargs.get("toolkits") or []}
         items = [
             dict(item)
@@ -315,6 +321,66 @@ async def test_provider_errors_are_sanitized_and_failed_keys_do_not_retry(tmp_pa
             idempotency_key="provider-failure",
         )
     assert [name for name, _ in provider.calls].count("authorize_toolkit") == 1
+
+
+@pytest.mark.asyncio
+async def test_integration_list_keeps_connected_accounts_when_catalog_fails(
+    tmp_path: Path,
+) -> None:
+    service, provider, _ = _adapter(tmp_path)
+    provider.fail_toolkits = True
+
+    result = await service.list_integrations(
+        tenant_id="tenant-a",
+        query=None,
+    )
+
+    assert result == {
+        "tenant_id": "tenant-a",
+        "items": [
+            {
+                "id": "gmail",
+                "name": "Gmail",
+                "connected": True,
+                "connection_id": "connection-own",
+                "connection_status": "ACTIVE",
+                "requires_authentication": True,
+            }
+        ],
+        "catalog_available": False,
+        "warning": "The integration catalog is temporarily unavailable.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_product_application_maps_composio_provider_failures(
+    tmp_path: Path,
+) -> None:
+    service, provider, store = _adapter(tmp_path)
+    provider.fail_connections = True
+    unused = _UnusedPort()
+    application = ProductToolApplication(
+        profiles=unused,
+        files=unused,
+        artifacts=unused,
+        knowledge=unused,
+        research=unused,
+        browser=unused,
+        integrations=service,
+        intake=unused,
+        schedules=unused,
+        jobs=unused,
+        idempotency=store,
+    )
+
+    with pytest.raises(ProductToolApplicationError) as error:
+        await application.integration_list(
+            _invocation("integration_list", {"query": None}, "integration-list")
+        )
+
+    assert error.value.code == "integration_provider_failed"
+    assert error.value.public_message == "The integration provider request failed."
+    assert error.value.retryable is True
 
 
 @pytest.mark.asyncio

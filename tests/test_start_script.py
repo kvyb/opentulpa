@@ -594,6 +594,33 @@ def test_direct_start_without_container_engine_keeps_chat_available(tmp_path: Pa
     assert "chat will start but sandbox shell commands will be unavailable" in result.stderr
 
 
+def test_direct_start_reports_restricted_process_sandbox_when_available(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "start.sh"
+    script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source ./start.sh; "
+            "process_repository_sandbox_available() { return 0; }; "
+            "warn_without_container_engine",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "SANDBOX_PROVIDER": "auto"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "tenant and repository commands will use" in result.stderr
+    assert "restricted process sandbox" in result.stderr
+    assert "shell commands will be unavailable" not in result.stderr
+
+
 def test_direct_start_recognizes_railway_hosted_sandbox(tmp_path: Path) -> None:
     script = tmp_path / "start.sh"
     script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")

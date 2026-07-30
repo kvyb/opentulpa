@@ -555,7 +555,13 @@ class CandidateProcessBackend(CandidateContainerBackend):
         # temporarily owned by that identity.
         self._lock = _PROCESS_SANDBOX_EXECUTION_LOCK
 
-    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+    def execute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> ExecuteResponse:
         safe_command = str(command or "").strip()
         if not safe_command or "\x00" in safe_command:
             return ExecuteResponse(output="command is invalid", exit_code=2, truncated=False)
@@ -588,14 +594,19 @@ class CandidateProcessBackend(CandidateContainerBackend):
             traversal_modes: list[tuple[Path, int]] = []
             monitor_stop = threading.Event()
             workspace_invalid = threading.Event()
+            abort_requested = threading.Event()
             monitor: threading.Thread | None = None
 
             def monitor_workspace() -> None:
                 while not monitor_stop.wait(0.1):
+                    if cancel_event is not None and cancel_event.is_set():
+                        abort_requested.set()
+                        return
                     try:
                         self._scan_tree()
                     except (OSError, RuntimeError):
                         workspace_invalid.set()
+                        abort_requested.set()
                         return
 
             try:
@@ -623,7 +634,7 @@ class CandidateProcessBackend(CandidateContainerBackend):
                     },
                     timeout_seconds=effective_timeout,
                     max_output_bytes=self._policy.max_output_bytes,
-                    abort_event=workspace_invalid,
+                    abort_event=abort_requested,
                 )
                 monitor_stop.set()
                 monitor.join(timeout=5)
@@ -636,6 +647,12 @@ class CandidateProcessBackend(CandidateContainerBackend):
                     return ExecuteResponse(
                         output="command exceeded workspace safety limits; changes were reverted",
                         exit_code=126,
+                        truncated=False,
+                    )
+                if cancel_event is not None and cancel_event.is_set():
+                    return ExecuteResponse(
+                        output="sandbox execution was cancelled",
+                        exit_code=130,
                         truncated=False,
                     )
                 if completed.timed_out:

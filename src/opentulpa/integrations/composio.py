@@ -321,41 +321,76 @@ class ComposioService:
         limit: int = 50,
         search: str | None = None,
     ) -> dict[str, Any]:
-        session = self._session(customer_id=customer_id, manage_connections=False)
-        result = session.toolkits(
-            toolkits=_coerce_toolkit_list(toolkits) or None,
-            is_connected=is_connected,
-            limit=max(1, min(int(limit), 50)),
-            search=str(search or "").strip() or None,
-        )
+        safe_customer = str(customer_id or "").strip()
+        requested_toolkits = {value.casefold() for value in _coerce_toolkit_list(toolkits)}
+        safe_search = str(search or "").strip().casefold()
+        safe_limit = max(1, min(int(limit), 50))
+        connections: dict[str, dict[str, Any]] = {}
+        if is_connected is not None:
+            connected = self.list_connected_accounts(
+                customer_id=safe_customer,
+                limit=100,
+            )
+            for account in connected.get("items", []):
+                slug = str(account.get("toolkit_slug", "") or "").casefold()
+                if slug:
+                    connections[slug] = account
+
         items: list[dict[str, Any]] = []
-        for item in list(getattr(result, "items", []) or []):
-            connection = getattr(item, "connection", None)
-            connected_account = (
-                getattr(connection, "connected_account", None) if connection else None
+        cursor: str | None = None
+        next_cursor: str | None = None
+        total_pages = 0
+        while len(items) < safe_limit:
+            result = self._sdk().toolkits.list(
+                cursor=cursor,
+                limit=50,
+                sort_by="alphabetically",
             )
-            auth_config = getattr(connection, "auth_config", None) if connection else None
-            items.append(
-                {
-                    "slug": str(getattr(item, "slug", "") or ""),
-                    "name": str(getattr(item, "name", "") or ""),
-                    "is_no_auth": bool(getattr(item, "is_no_auth", False)),
-                    "is_connected": bool(getattr(connection, "is_active", False))
-                    if connection
-                    else False,
-                    "connected_account_id": str(getattr(connected_account, "id", "") or "") or None,
-                    "connected_account_status": str(getattr(connected_account, "status", "") or "")
-                    or None,
-                    "auth_config_id": str(getattr(auth_config, "id", "") or "") or None,
-                    "auth_mode": str(getattr(auth_config, "mode", "") or "") or None,
-                }
-            )
+            total_pages = int(getattr(result, "total_pages", 0) or 0)
+            for item in list(getattr(result, "items", []) or []):
+                slug = str(getattr(item, "slug", "") or "")
+                name = str(getattr(item, "name", "") or "")
+                normalized_slug = slug.casefold()
+                if requested_toolkits and normalized_slug not in requested_toolkits:
+                    continue
+                if safe_search and safe_search not in f"{slug} {name}".casefold():
+                    continue
+                connection = connections.get(normalized_slug)
+                connected_now = connection is not None
+                if is_connected is not None and connected_now is not is_connected:
+                    continue
+                items.append(
+                    {
+                        "slug": slug,
+                        "name": name,
+                        "is_no_auth": bool(getattr(item, "no_auth", False)),
+                        "is_connected": connected_now,
+                        "connected_account_id": (
+                            str(connection.get("id", "") or "") or None
+                            if connection is not None
+                            else None
+                        ),
+                        "connected_account_status": (
+                            str(connection.get("status", "") or "") or None
+                            if connection is not None
+                            else None
+                        ),
+                        "auth_config_id": None,
+                        "auth_mode": None,
+                    }
+                )
+                if len(items) >= safe_limit:
+                    break
+            next_cursor = str(getattr(result, "next_cursor", "") or "") or None
+            if len(items) >= safe_limit or next_cursor is None or next_cursor == cursor:
+                break
+            cursor = next_cursor
         return {
             "ok": True,
-            "customer_id": str(customer_id),
+            "customer_id": safe_customer,
             "items": items,
-            "next_cursor": str(getattr(result, "next_cursor", "") or "") or None,
-            "total_pages": int(getattr(result, "total_pages", 0) or 0),
+            "next_cursor": next_cursor,
+            "total_pages": total_pages,
         }
 
     def list_connected_accounts(

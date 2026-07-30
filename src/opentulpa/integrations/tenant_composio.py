@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from opentulpa.jobs import (
 from opentulpa.persistence.idempotency import IdempotencyStore
 
 _T = TypeVar("_T")
+logger = logging.getLogger(__name__)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,299}$")
 _SECRET_KEY_RE = re.compile(
     r"authorization|api[_-]?key|secret|token|password|passwd|cookie|credential",
@@ -484,14 +486,6 @@ class TenantComposioService:
     ) -> dict[str, JsonValue]:
         tenant = self._required(tenant_id, "tenant_id")
         search = str(query or "").strip()[:500] or None
-        payload = await self._provider_call(
-            lambda: self._provider.list_toolkits(
-                customer_id=tenant,
-                limit=50,
-                search=search,
-            )
-        )
-        mapping = self._provider_mapping(payload)
         connections = await self.list_connections(tenant_id=tenant, integration_id=None)
         raw_connections = connections.get("items")
         owned = raw_connections if isinstance(raw_connections, list) else []
@@ -503,8 +497,50 @@ class TenantComposioService:
             if integration_id:
                 by_integration[integration_id] = item
 
+        try:
+            payload = await self._provider_call(
+                lambda: self._provider.list_toolkits(
+                    customer_id=tenant,
+                    limit=50,
+                    search=search,
+                )
+            )
+            mapping = self._provider_mapping(payload)
+        except ComposioProviderError:
+            fallback_items: list[JsonValue] = []
+            normalized_search = str(search or "").casefold()
+            for fallback_connection in by_integration.values():
+                integration_id = str(
+                    fallback_connection.get("integration_id", "") or ""
+                ).strip()
+                name = str(
+                    fallback_connection.get("integration_name", "") or integration_id
+                ).strip()
+                if normalized_search and normalized_search not in (
+                    f"{integration_id} {name}".casefold()
+                ):
+                    continue
+                fallback_items.append(
+                    {
+                        "id": integration_id,
+                        "name": name[:500],
+                        "connected": True,
+                        "connection_id": str(fallback_connection.get("id", "") or ""),
+                        "connection_status": str(
+                            fallback_connection.get("status", "") or ""
+                        ),
+                        "requires_authentication": True,
+                    }
+                )
+            return {
+                "tenant_id": tenant,
+                "items": fallback_items,
+                "catalog_available": False,
+                "warning": "The integration catalog is temporarily unavailable.",
+            }
+
         raw_items = mapping.get("items")
-        items: list[JsonValue] = []
+        catalog_items: list[JsonValue] = []
         for raw in raw_items if isinstance(raw_items, list) else []:
             if not isinstance(raw, Mapping):
                 continue
@@ -513,7 +549,7 @@ class TenantComposioService:
                 continue
             connection = by_integration.get(integration_id.casefold())
             no_auth = bool(raw.get("is_no_auth", False))
-            items.append(
+            catalog_items.append(
                 {
                     "id": integration_id,
                     "name": str(raw.get("name", "") or integration_id)[:500],
@@ -529,7 +565,11 @@ class TenantComposioService:
                     "requires_authentication": not no_auth,
                 }
             )
-        return {"tenant_id": tenant, "items": items}
+        return {
+            "tenant_id": tenant,
+            "items": catalog_items,
+            "catalog_available": True,
+        }
 
     async def connect(
         self,
@@ -827,7 +867,11 @@ class TenantComposioService:
             return await asyncio.to_thread(callback)
         except (ComposioProviderError, IntegrationConnectionNotFoundError):
             raise
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "integration provider request failed (%s)",
+                type(exc).__name__,
+            )
             raise ComposioProviderError("integration provider request failed") from None
 
     @staticmethod

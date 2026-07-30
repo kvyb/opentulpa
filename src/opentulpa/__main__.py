@@ -63,6 +63,7 @@ from opentulpa.core.config import (
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
+from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
 from opentulpa.deep_agent.railway_sandbox import RailwaySandboxExecutionProvider
 from opentulpa.deep_agent.sandbox import (
     TenantContainerPolicy,
@@ -352,6 +353,26 @@ def _sandbox_execution_configuration(
             allow_desktop_vm=allow_desktop_vm,
         )
     except (OSError, RuntimeError) as exc:
+        if provider == "auto" and RestrictedProcessExecutionProvider.supported():
+            logger.warning(
+                "isolated OCI sandbox is unavailable (%s); using the restricted "
+                "unprivileged process sandbox",
+                exc,
+            )
+            return settings.sandbox_image, RestrictedProcessExecutionProvider(
+                policy=TenantContainerPolicy(
+                    image=settings.sandbox_image,
+                    cpu_limit=settings.sandbox_cpu_limit,
+                    memory_limit=settings.sandbox_memory_limit,
+                    pid_limit=settings.sandbox_pid_limit,
+                    timeout_seconds=settings.sandbox_timeout_seconds,
+                    max_output_bytes=settings.sandbox_max_output_bytes,
+                    max_file_bytes=settings.sandbox_max_file_bytes,
+                    max_workspace_entries=settings.sandbox_max_workspace_entries,
+                    network_enabled=True,
+                ),
+                max_workspace_bytes=settings.railway_sandbox_max_sync_bytes,
+            )
         logger.warning("tenant sandbox shell is unavailable: %s", exc)
         return settings.sandbox_image, _UnavailableSandboxExecutionProvider()
     return image, None

@@ -181,32 +181,52 @@ def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> N
     assert keys == ["first-composio-key", "rotated-composio-key"]
 
 
-def test_list_toolkits_clamps_provider_limit_to_fifty(monkeypatch) -> None:
+def test_list_toolkits_uses_catalog_api_and_supported_page_size(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    class _Session:
-        def toolkits(self, **kwargs: Any) -> Any:
-            calls.append(kwargs)
-            return SimpleNamespace(items=[], next_cursor=None, total_pages=0)
+    def list_toolkits(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if kwargs["cursor"] is None:
+            return SimpleNamespace(
+                items=[SimpleNamespace(slug="gmail", name="Gmail", no_auth=False)],
+                next_cursor="page-2",
+                total_pages=2,
+            )
+        return SimpleNamespace(
+            items=[SimpleNamespace(slug="slack", name="Slack", no_auth=False)],
+            next_cursor=None,
+            total_pages=2,
+        )
 
     monkeypatch.setattr(
         ComposioService,
-        "_session",
-        lambda self, **kwargs: _Session(),
+        "_sdk",
+        lambda self: SimpleNamespace(
+            toolkits=SimpleNamespace(list=list_toolkits),
+        ),
     )
     service = ComposioService(api_key="test-key")
 
-    result = service.list_toolkits(customer_id="tenant-1", limit=100)
+    result = service.list_toolkits(
+        customer_id="tenant-a",
+        search="slack",
+        limit=100,
+    )
 
-    assert result["ok"] is True
-    assert calls == [
+    assert result["items"] == [
         {
-            "toolkits": None,
-            "is_connected": None,
-            "limit": 50,
-            "search": None,
+            "slug": "slack",
+            "name": "Slack",
+            "is_no_auth": False,
+            "is_connected": False,
+            "connected_account_id": None,
+            "connected_account_status": None,
+            "auth_config_id": None,
+            "auth_mode": None,
         }
     ]
+    assert [call["cursor"] for call in calls] == [None, "page-2"]
+    assert all(call["limit"] == 50 for call in calls)
 
 
 def test_composio_proxy_uses_connected_account_without_exposing_headers(

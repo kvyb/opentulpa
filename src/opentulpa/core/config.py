@@ -134,7 +134,8 @@ class Settings(BaseSettings):
         default="auto",
         description=(
             "Tenant command provider: auto uses Railway when project credentials are present "
-            "and local OCI otherwise; railway and local require that provider explicitly."
+            "and otherwise prefers local OCI before the restricted Linux process sandbox; "
+            "railway and local require that provider explicitly."
         ),
     )
     railway_sandbox_idle_timeout_minutes: int = Field(default=30, ge=1, le=120)
