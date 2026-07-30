@@ -181,6 +181,53 @@ def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> N
     assert keys == ["first-composio-key", "rotated-composio-key"]
 
 
+def test_list_toolkits_uses_catalog_api_and_filters_across_pages(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def list_toolkits(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if kwargs["cursor"] is None:
+            return SimpleNamespace(
+                items=[SimpleNamespace(slug="gmail", name="Gmail", no_auth=False)],
+                next_cursor="page-2",
+                total_pages=2,
+            )
+        return SimpleNamespace(
+            items=[SimpleNamespace(slug="slack", name="Slack", no_auth=False)],
+            next_cursor=None,
+            total_pages=2,
+        )
+
+    monkeypatch.setattr(
+        ComposioService,
+        "_sdk",
+        lambda self: SimpleNamespace(
+            toolkits=SimpleNamespace(list=list_toolkits),
+        ),
+    )
+    service = ComposioService(api_key="test-key")
+
+    result = service.list_toolkits(
+        customer_id="tenant-a",
+        search="slack",
+        limit=10,
+    )
+
+    assert result["items"] == [
+        {
+            "slug": "slack",
+            "name": "Slack",
+            "is_no_auth": False,
+            "is_connected": False,
+            "connected_account_id": None,
+            "connected_account_status": None,
+            "auth_config_id": None,
+            "auth_mode": None,
+        }
+    ]
+    assert [call["cursor"] for call in calls] == [None, "page-2"]
+
+
 def test_composio_proxy_uses_connected_account_without_exposing_headers(
     monkeypatch,
 ) -> None:

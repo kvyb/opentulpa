@@ -12,6 +12,7 @@ from opentulpa.bootstrap.evolution_api import EvolutionClient
 from opentulpa.bootstrap.sandbox_api import SandboxExecutionClient
 from opentulpa.capabilities import SubprocessWorkerHost
 from opentulpa.core.config import Settings
+from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
 from opentulpa.deep_agent.railway_sandbox import RailwaySandboxExecutionProvider
 from opentulpa.deep_agent.service import DeepAgentService
 from opentulpa.integrations.browser_use_cloud import BrowserUseCloudSessionProvider
@@ -384,6 +385,11 @@ def test_direct_runtime_keeps_chat_available_when_sandbox_is_unavailable(
         raise RuntimeError("configured OCI engine must operate in rootless mode")
 
     monkeypatch.setattr(main_module, "resolve_local_oci_image", unavailable)
+    monkeypatch.setattr(
+        main_module.RestrictedProcessExecutionProvider,
+        "supported",
+        lambda: False,
+    )
 
     image, execution = main_module._sandbox_execution_configuration(  # noqa: SLF001
         project_root=tmp_path,
@@ -394,6 +400,29 @@ def test_direct_runtime_keeps_chat_available_when_sandbox_is_unavailable(
     assert execution is not None
     with pytest.raises(RuntimeError, match="sandbox execution is unavailable"):
         execution.execute(tenant_id="tenant", command="pwd", timeout=1)
+
+
+def test_direct_runtime_uses_restricted_process_sandbox_without_oci(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(**_: Any) -> str:
+        raise RuntimeError("configured OCI engine must operate in rootless mode")
+
+    monkeypatch.setattr(main_module, "resolve_local_oci_image", unavailable)
+    monkeypatch.setattr(
+        main_module.RestrictedProcessExecutionProvider,
+        "supported",
+        lambda: True,
+    )
+
+    image, execution = main_module._sandbox_execution_configuration(  # noqa: SLF001
+        project_root=tmp_path,
+        settings=_settings(tmp_path),
+    )
+
+    assert image == "opentulpa-tenant-sandbox:test"
+    assert isinstance(execution, RestrictedProcessExecutionProvider)
 
 
 def test_direct_railway_runtime_uses_hosted_sandbox_provider(

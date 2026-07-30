@@ -915,6 +915,10 @@ install_tenant_sandbox_image() {
       log "tenant sandbox image build skipped; using Railway-hosted sandbox VMs."
       return 0
     fi
+    if process_tenant_sandbox_configured; then
+      log "tenant sandbox image build skipped; using the bundled restricted process sandbox."
+      return 0
+    fi
     log "tenant sandbox image build skipped; chat will start with shell execution unavailable."
     return 0
   fi
@@ -1209,6 +1213,13 @@ process_repository_sandbox_available() {
     && command -v prlimit >/dev/null 2>&1
 }
 
+process_tenant_sandbox_configured() {
+  local provider
+  provider="$(config_value "SANDBOX_PROVIDER" "sandbox_provider")"
+  provider="$(printf '%s' "${provider:-auto}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${provider}" == "auto" ]] && process_repository_sandbox_available
+}
+
 railway_tenant_sandbox_configured() {
   local provider
   provider="$(config_value "SANDBOX_PROVIDER" "sandbox_provider")"
@@ -1219,8 +1230,10 @@ railway_tenant_sandbox_configured() {
 }
 
 warn_without_container_engine() {
-  if process_repository_sandbox_available; then
-    warn "no isolated OCI engine was found; general tenant shell commands are unavailable, but repository work will use the bundled unprivileged process sandbox."
+  if process_tenant_sandbox_configured; then
+    warn "no isolated OCI engine was found; tenant and repository commands will use the bundled restricted process sandbox."
+  elif process_repository_sandbox_available; then
+    warn "no isolated OCI engine was found; general tenant shell commands are unavailable, but repository work will use the bundled restricted process sandbox."
   else
     warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
   fi
@@ -1360,6 +1373,8 @@ run_doctor() {
       local railway_bridge
       railway_bridge="$(railway_bridge_dir)"
       doctor_check "Railway sandbox bridge dependencies are installed" "$([[ -f "${railway_bridge}/node_modules/railway/package.json" ]] && echo 1 || echo 0)" "run ./start.sh install ${runtime}" || failures=$((failures + 1))
+    elif process_tenant_sandbox_configured; then
+      echo "[doctor] ok: bundled restricted process sandbox is available for tenant commands"
     else
       direct_engine="${OPENTULPA_CONTAINER_CLI:-docker}"
       direct_tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"

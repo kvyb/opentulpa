@@ -17,6 +17,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel
 
+from opentulpa.integrations.tenant_composio import ComposioProviderError
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.repositories.providers import RepositorySandboxError
 from opentulpa.repositories.service import RepositoryWorkspaceError
@@ -832,6 +833,12 @@ class ProductToolApplication:
             value = await _resolve(call())
         except ProductToolApplicationError:
             raise
+        except ComposioProviderError as exc:
+            raise ProductToolApplicationError(
+                "integration_provider_failed",
+                "The integration provider request failed.",
+                retryable=True,
+            ) from exc
         except PermissionError as exc:
             raise ProductToolApplicationError(
                 "not_found",
