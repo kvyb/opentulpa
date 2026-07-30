@@ -342,6 +342,9 @@ class RuntimeSupervisor:
     ) -> dict[str, str]:
         source_root = project_root or self._project_root
         environment = os.environ.copy()
+        owner_customer_id = (
+            str(environment.get("OPENTULPA_OWNER_CUSTOMER_ID") or "").strip() or "owner"
+        )
         for key in (
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_ALLOWED_USER_IDS",
@@ -360,7 +363,7 @@ class RuntimeSupervisor:
                 "OPENAI_COMPATIBLE_BASE_URL": config.base_url,
                 "LLM_MODEL": config.model,
                 "OPENTULPA_OWNER_TOKEN": config.internal_runtime_token.get_secret_value(),
-                "OPENTULPA_OWNER_CUSTOMER_ID": "owner",
+                "OPENTULPA_OWNER_CUSTOMER_ID": owner_customer_id,
                 "OPENTULPA_INTERNAL_AGENT_API_URL": f"http://127.0.0.1:{port}",
                 "OPENTULPA_DYNAMIC_HOST": "1",
                 "PYTHONPATH": str(source_root / "src"),
