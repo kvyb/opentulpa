@@ -143,7 +143,7 @@ class _Agent:
         ]
         self.codex_status: dict[str, Any] = {"codex": {"connected": False}}
         self.codex_login = {
-            "id": "login-1",
+            "login_id": "login-1",
             "verification_url": "https://auth.openai.com/device",
             "user_code": "ABCD-EFGH",
             "status": "pending",
@@ -194,7 +194,7 @@ class _Agent:
         return dict(self.codex_login)
 
     async def get_codex_login(self, login_id: str) -> dict[str, Any]:
-        assert login_id == self.codex_login["id"]
+        assert login_id == self.codex_login["login_id"]
         return dict(self.codex_login)
 
     async def cancel_thread(self, thread_id: str) -> dict[str, Any]:

@@ -189,7 +189,7 @@ class TelegramInferenceControls:
                 )
                 return
             login = await self._agent.start_codex_login()
-            login_id = str(login["id"])
+            login_id = str(login["login_id"])
             self._state.set_codex_login(chat_id, login_id)
             await self._send(
                 chat_id,

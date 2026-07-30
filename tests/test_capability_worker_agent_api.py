@@ -357,13 +357,16 @@ async def test_interface_controls_use_scoped_agent_api_routes() -> None:
             return httpx.Response(
                 201,
                 json={
-                    "id": "login-1",
+                    "login_id": "login-1",
                     "verification_url": "https://auth.openai.com/device",
                     "user_code": "ABCD-EFGH",
                 },
             )
         if path.endswith("/device-logins/login-1"):
-            return httpx.Response(200, json={"id": "login-1", "status": "pending"})
+            return httpx.Response(
+                200,
+                json={"login_id": "login-1", "status": "pending"},
+            )
         if path.endswith("/cancel"):
             return httpx.Response(200, json={"status": "cancelled"})
         raise AssertionError(request.url)
@@ -392,7 +395,7 @@ async def test_interface_controls_use_scoped_agent_api_routes() -> None:
     assert updated["revision"] == 1
     assert models[0]["id"] == "gpt-5.2-codex"
     assert status["codex"]["connected"] is False
-    assert login["id"] == "login-1"
+    assert login["login_id"] == "login-1"
     assert login_status["status"] == "pending"
     assert cancelled["status"] == "cancelled"
     assert all(request.headers["Authorization"] == "Bearer private-token" for request in requests)
