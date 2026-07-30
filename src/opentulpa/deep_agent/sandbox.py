@@ -143,6 +143,7 @@ class TenantExecutionProvider(Protocol):
         tenant_id: str,
         command: str,
         timeout: int,
+        workspace: Path | None = None,
     ) -> ExecuteResponse: ...
 
 
@@ -1080,18 +1081,7 @@ class TenantContainerBackend(SandboxBackendProtocol):
         )
         effective_timeout = min(requested_timeout, self._policy.timeout_seconds)
         if self._execution_provider is not None:
-            try:
-                return self._execution_provider.execute(
-                    tenant_id=self._tenant_id,
-                    command=safe_command,
-                    timeout=effective_timeout,
-                )
-            except Exception:
-                return ExecuteResponse(
-                    output="sandbox execution service unavailable",
-                    exit_code=127,
-                    truncated=False,
-                )
+            return self._execute_with_provider(safe_command, timeout=effective_timeout)
 
         completed: subprocess.CompletedProcess[bytes] | None = None
         failure: OSError | subprocess.TimeoutExpired | None = None
@@ -1237,6 +1227,46 @@ class TenantContainerBackend(SandboxBackendProtocol):
             exit_code=int(completed.returncode),
             truncated=truncated,
         )
+
+    def _execute_with_provider(self, command: str, *, timeout: int) -> ExecuteResponse:
+        transaction: Path | None = None
+        committed = False
+        try:
+            provider = self._execution_provider
+            if provider is None:
+                raise RuntimeError("sandbox execution provider is unavailable")
+            with self._serialized_workspace():
+                self._validate_workspace_tree()
+                workspace: Path | None = None
+                if self._persistent_workspace:
+                    transaction, workspace = self._stage_workspace()
+                response = provider.execute(
+                    tenant_id=self._tenant_id,
+                    command=command,
+                    timeout=timeout,
+                    workspace=workspace,
+                )
+                if transaction is not None and workspace is not None:
+                    self._validate_workspace_tree(workspace)
+                    authority = self._commit_authority
+                    if authority is None:
+                        self._commit_workspace(transaction, workspace)
+                    else:
+                        with authority():
+                            self._commit_workspace(transaction, workspace)
+                    committed = True
+                return response
+        except Exception:
+            return ExecuteResponse(
+                output="sandbox execution service unavailable",
+                exit_code=127,
+                truncated=False,
+            )
+        finally:
+            if transaction is not None and transaction.exists():
+                with suppress(OSError, _WorkspaceSecurityError):
+                    if committed or not (transaction / "previous").exists():
+                        self._discard_transaction(transaction)
 
     def _cancel_controlled_execution(self, control: _ExecutionControl) -> None:
         if not control.name_ready.wait(timeout=1.0):

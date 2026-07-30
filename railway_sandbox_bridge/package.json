@@ -1,0 +1,12 @@
+{
+  "name": "opentulpa-railway-sandbox-bridge",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "railway": "3.7.0",
+    "ws": "8.21.1"
+  }
+}

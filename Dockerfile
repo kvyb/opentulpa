@@ -1,6 +1,18 @@
+FROM node:22-bookworm-slim AS railway-sandbox-bridge
+
+WORKDIR /bridge
+
+COPY railway_sandbox_bridge/package.json railway_sandbox_bridge/package-lock.json /bridge/
+RUN npm ci --omit=dev
+
+COPY railway_sandbox_bridge/bridge.mjs /bridge/bridge.mjs
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
+
+COPY --from=railway-sandbox-bridge /usr/local/ /usr/local/
+COPY --from=railway-sandbox-bridge /bridge /app/railway_sandbox_bridge
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl git util-linux \

@@ -297,7 +297,9 @@ class SandboxExecutionClient:
         tenant_id: str,
         command: str,
         timeout: int,
+        workspace: Path | None = None,
     ) -> ExecuteResponse:
+        del workspace
         try:
             with httpx.Client(
                 follow_redirects=False,

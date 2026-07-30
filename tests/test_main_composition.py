@@ -12,6 +12,7 @@ from opentulpa.bootstrap.evolution_api import EvolutionClient
 from opentulpa.bootstrap.sandbox_api import SandboxExecutionClient
 from opentulpa.capabilities import SubprocessWorkerHost
 from opentulpa.core.config import Settings
+from opentulpa.deep_agent.railway_sandbox import RailwaySandboxExecutionProvider
 from opentulpa.deep_agent.service import DeepAgentService
 from opentulpa.integrations.browser_use_cloud import BrowserUseCloudSessionProvider
 from opentulpa.mcp import SQLiteMCPAuditSink, SQLiteMCPIdempotencyStore
@@ -393,6 +394,36 @@ def test_direct_runtime_keeps_chat_available_when_sandbox_is_unavailable(
     assert execution is not None
     with pytest.raises(RuntimeError, match="sandbox execution is unavailable"):
         execution.execute(tenant_id="tenant", command="pwd", timeout=1)
+
+
+def test_direct_railway_runtime_uses_hosted_sandbox_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAILWAY_TOKEN", "project-token")
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "environment-id")
+
+    image, execution = main_module._sandbox_execution_configuration(  # noqa: SLF001
+        project_root=tmp_path,
+        settings=_settings(tmp_path),
+    )
+
+    assert image == "opentulpa-tenant-sandbox:test"
+    assert isinstance(execution, RailwaySandboxExecutionProvider)
+
+
+def test_explicit_railway_runtime_fails_when_project_credentials_are_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAILWAY_TOKEN", "project-token")
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="RAILWAY_TOKEN and RAILWAY_ENVIRONMENT_ID"):
+        main_module._sandbox_execution_configuration(  # noqa: SLF001
+            project_root=tmp_path,
+            settings=_settings(tmp_path, sandbox_provider="railway"),
+        )
 
 
 def test_managed_production_uses_lease_bound_stable_sandbox_client(

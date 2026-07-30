@@ -128,6 +128,21 @@ class Settings(BaseSettings):
     sandbox_pid_limit: int = Field(default=128, ge=16, le=4096)
     sandbox_timeout_seconds: int = Field(default=60, ge=1, le=3600)
     sandbox_max_output_bytes: int = Field(default=512_000, ge=1024, le=10_000_000)
+    sandbox_max_file_bytes: int = Field(default=10 * 1024 * 1024, ge=1_024)
+    sandbox_max_workspace_entries: int = Field(default=20_000, ge=1)
+    sandbox_provider: str = Field(
+        default="auto",
+        description=(
+            "Tenant command provider: auto uses Railway when project credentials are present "
+            "and local OCI otherwise; railway and local require that provider explicitly."
+        ),
+    )
+    railway_sandbox_idle_timeout_minutes: int = Field(default=30, ge=1, le=120)
+    railway_sandbox_max_sync_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1_024,
+        le=128 * 1024 * 1024,
+    )
     repository_sandbox_provider: str = Field(
         default="auto",
         description=(
@@ -153,6 +168,14 @@ class Settings(BaseSettings):
         provider = str(value or "").strip().casefold()
         if provider not in {"auto", "daytona", "local"}:
             raise ValueError("repository_sandbox_provider must be auto, daytona, or local")
+        return provider
+
+    @field_validator("sandbox_provider")
+    @classmethod
+    def validate_sandbox_provider(cls, value: str) -> str:
+        provider = str(value or "").strip().casefold()
+        if provider not in {"auto", "railway", "local"}:
+            raise ValueError("sandbox_provider must be auto, railway, or local")
         return provider
     # Telegram
     telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")

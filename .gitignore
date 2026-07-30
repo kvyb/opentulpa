@@ -38,6 +38,7 @@ graphify-out/
 clients/tui/node_modules/
 clients/tui/dist/
 clients/tui/release/
+railway_sandbox_bridge/node_modules/
 /output/
 notion-opentulpa-board.png
 

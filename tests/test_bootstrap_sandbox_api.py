@@ -569,8 +569,10 @@ def test_tenant_backend_uses_remote_provider_without_invoking_local_oci(tmp_path
     class Provider:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
+            self.workspace_was_ready = False
 
         def execute(self, **kwargs: Any) -> ExecuteResponse:
+            self.workspace_was_ready = kwargs["workspace"].is_dir()
             self.calls.append(kwargs)
             return ExecuteResponse(output="remote", exit_code=0, truncated=False)
 
@@ -585,4 +587,8 @@ def test_tenant_backend_uses_remote_provider_without_invoking_local_oci(tmp_path
     result = backend.execute("printf remote", timeout=999)
 
     assert result.output == "remote"
-    assert provider.calls == [{"tenant_id": "tenant-a", "command": "printf remote", "timeout": 7}]
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["tenant_id"] == "tenant-a"
+    assert provider.calls[0]["command"] == "printf remote"
+    assert provider.calls[0]["timeout"] == 7
+    assert provider.workspace_was_ready is True

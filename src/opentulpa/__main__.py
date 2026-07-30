@@ -62,6 +62,7 @@ from opentulpa.core.config import (
 from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
+from opentulpa.deep_agent.railway_sandbox import RailwaySandboxExecutionProvider
 from opentulpa.deep_agent.sandbox import (
     TenantContainerPolicy,
     TenantExecutionProvider,
@@ -162,7 +163,15 @@ class ApplicationComposition:
 class _UnavailableSandboxExecutionProvider:
     """Keep chat available without ever falling back to host command execution."""
 
-    def execute(self, *, tenant_id: str, command: str, timeout: int) -> Any:
+    def execute(
+        self,
+        *,
+        tenant_id: str,
+        command: str,
+        timeout: int,
+        workspace: Path | None = None,
+    ) -> Any:
+        del tenant_id, command, timeout, workspace
         raise RuntimeError("tenant sandbox execution is unavailable")
 
 
@@ -309,6 +318,24 @@ def _sandbox_execution_configuration(
         return settings.sandbox_image, None
     if sandbox_url or sandbox_token:
         raise RuntimeError("stable sandbox credentials are valid only in a managed release")
+    provider = settings.sandbox_provider
+    railway_token = str(os.environ.get("RAILWAY_TOKEN") or "").strip()
+    railway_environment_id = str(os.environ.get("RAILWAY_ENVIRONMENT_ID") or "").strip()
+    railway_configured = bool(railway_token and railway_environment_id)
+    if provider == "railway" or (provider == "auto" and railway_configured):
+        if not railway_configured:
+            raise RuntimeError(
+                "Railway sandbox execution requires RAILWAY_TOKEN and RAILWAY_ENVIRONMENT_ID"
+            )
+        return settings.sandbox_image, RailwaySandboxExecutionProvider(
+            token=railway_token,
+            environment_id=railway_environment_id,
+            max_output_bytes=settings.sandbox_max_output_bytes,
+            max_workspace_archive_bytes=settings.railway_sandbox_max_sync_bytes,
+            max_workspace_entries=settings.sandbox_max_workspace_entries,
+            max_file_bytes=settings.sandbox_max_file_bytes,
+            idle_timeout_minutes=settings.railway_sandbox_idle_timeout_minutes,
+        )
     allow_desktop_vm = str(
         os.environ.get("OPENTULPA_ALLOW_DESKTOP_VM") or ""
     ).strip().casefold() in {"1", "true", "yes", "on"}
@@ -919,6 +946,8 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             pid_limit=settings.sandbox_pid_limit,
             timeout_seconds=max(600, settings.sandbox_timeout_seconds),
             max_output_bytes=settings.sandbox_max_output_bytes,
+            max_file_bytes=settings.sandbox_max_file_bytes,
+            max_workspace_entries=settings.sandbox_max_workspace_entries,
             network_enabled=True,
         )
         repository_store = RepositoryWorkspaceStore(deepagents_root / "repository_workspaces.db")
@@ -1210,6 +1239,8 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 pid_limit=settings.sandbox_pid_limit,
                 timeout_seconds=settings.sandbox_timeout_seconds,
                 max_output_bytes=settings.sandbox_max_output_bytes,
+                max_file_bytes=settings.sandbox_max_file_bytes,
+                max_workspace_entries=settings.sandbox_max_workspace_entries,
                 network_enabled=True,
             ),
             container_cli=settings.sandbox_container_cli,
