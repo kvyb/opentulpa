@@ -45,6 +45,22 @@ _HOST_HEADERS = {
 }
 
 
+def _resume_log_cursor(
+    *,
+    after: int,
+    last_event_id: str | None,
+    requested_stream_id: str | None,
+    current_stream_id: str,
+) -> int:
+    if requested_stream_id and requested_stream_id != current_stream_id:
+        return 0
+    cursor = max(0, after)
+    try:
+        return max(cursor, max(0, int(last_event_id or "0")))
+    except ValueError:
+        return cursor
+
+
 class _RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -243,19 +259,29 @@ def create_host_app(
         session: Annotated[str | None, Cookie(alias=HOST_SESSION_COOKIE)] = None,
     ) -> dict[str, Any]:
         require_owner(request, authorization, session)
-        return {"logs": service.runtime.logs(after=max(0, after))}
+        return {
+            "stream_id": service.runtime.log_stream_id,
+            "logs": service.runtime.logs(after=max(0, after)),
+        }
 
     @app.get("/_host/api/logs/stream")
     async def log_stream(
         request: Request,
         after: int = 0,
+        stream_id: str | None = None,
+        last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
         authorization: Annotated[str | None, Header()] = None,
         session: Annotated[str | None, Cookie(alias=HOST_SESSION_COOKIE)] = None,
     ) -> StreamingResponse:
         require_owner(request, authorization, session)
 
         async def events() -> AsyncIterator[str]:
-            cursor = max(0, after)
+            cursor = _resume_log_cursor(
+                after=after,
+                last_event_id=last_event_id,
+                requested_stream_id=stream_id,
+                current_stream_id=service.runtime.log_stream_id,
+            )
             while not await request.is_disconnected():
                 entries = await service.runtime.wait_for_logs(after=cursor)
                 if not entries:

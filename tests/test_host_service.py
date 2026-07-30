@@ -52,7 +52,8 @@ class _Service(HostService):
             store=store,
             runtime=runtime,  # type: ignore[arg-type]
         )
-        self.fail_capability = False
+        self.fail_revision: int | None = None
+        self.configured_revisions: list[int] = []
 
     async def _validate_external(
         self, value: HostConfigInput, *, previous: HostConfig | None
@@ -60,7 +61,8 @@ class _Service(HostService):
         return None
 
     async def _configure_telegram(self, config: HostConfig) -> None:
-        if self.fail_capability:
+        self.configured_revisions.append(config.revision)
+        if config.revision == self.fail_revision:
             raise HostActivationError("Telegram worker failed readiness")
 
 
@@ -109,7 +111,7 @@ async def test_failed_candidate_keeps_previous_revision_and_runtime(tmp_path: Pa
     runtime = _Runtime()
     runtime.current = first
     service = _Service(store=store, runtime=runtime)
-    service.fail_capability = True
+    service.fail_revision = first.revision + 1
 
     with pytest.raises(HostActivationError, match="Telegram worker failed readiness"):
         await service.apply(
@@ -123,6 +125,7 @@ async def test_failed_candidate_keeps_previous_revision_and_runtime(tmp_path: Pa
     assert runtime.current is not None
     assert runtime.current.revision == first.revision
     assert runtime.replacements == [first.revision + 1, first.revision]
+    assert service.configured_revisions == [first.revision + 1, first.revision]
     assert store.get(first.revision + 1).status == "failed"  # type: ignore[union-attr]
     await service.shutdown()
 

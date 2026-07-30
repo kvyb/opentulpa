@@ -63,6 +63,7 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     assert "TELEGRAM_BOT_TOKEN" not in environment
     assert "TELEGRAM_WEBHOOK_SECRET" not in environment
     line = runtime.logs()[0].text
+    assert runtime.logs()[0].stream_id == runtime.log_stream_id
     assert "provider-secret-value" not in line
     assert "internal-owner-secret-value" not in line
     assert "hunter2" not in line

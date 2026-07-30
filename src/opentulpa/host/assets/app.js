@@ -2,6 +2,8 @@ const $ = (id) => document.getElementById(id);
 let current = null;
 let logSource = null;
 let logCount = 0;
+let logStreamId = "";
+let lastLogSequence = 0;
 
 $("connect-command").textContent = `opentulpa connect ${location.origin}`;
 
@@ -68,6 +70,15 @@ async function refresh() {
 }
 
 function addLog(entry) {
+  const incomingStreamId = String(entry.stream_id || "");
+  const incomingSequence = Number(entry.sequence || 0);
+  if (logStreamId && incomingStreamId && incomingStreamId !== logStreamId) {
+    $("logs").replaceChildren();
+    logCount = 0;
+    lastLogSequence = 0;
+  }
+  if (incomingStreamId) logStreamId = incomingStreamId;
+  if (incomingSequence <= lastLogSequence) return;
   const row = document.createElement("div");
   row.className = "log-line";
   const sequence = document.createElement("span");
@@ -82,6 +93,7 @@ function addLog(entry) {
   row.append(sequence, stream, text);
   $("logs").appendChild(row);
   while ($("logs").children.length > 500) $("logs").firstChild.remove();
+  lastLogSequence = incomingSequence;
   logCount += 1;
   $("log-count").textContent = `${logCount} LINES`;
   $("logs").scrollTop = $("logs").scrollHeight;
@@ -93,7 +105,10 @@ async function startLogs() {
     const payload = await request("/_host/api/logs");
     payload.logs.forEach(addLog);
     const last = payload.logs.at(-1)?.sequence || 0;
-    logSource = new EventSource(`/_host/api/logs/stream?after=${last}`);
+    const streamId = encodeURIComponent(payload.stream_id || "");
+    logSource = new EventSource(
+      `/_host/api/logs/stream?after=${last}&stream_id=${streamId}`
+    );
     logSource.onmessage = (event) => addLog(JSON.parse(event.data));
   } catch (_) { /* Session state will be refreshed by the next owner action. */ }
 }

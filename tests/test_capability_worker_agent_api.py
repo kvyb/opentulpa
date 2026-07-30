@@ -358,7 +358,7 @@ async def test_interface_controls_use_scoped_agent_api_routes() -> None:
                 201,
                 json={
                     "login_id": "login-1",
-                    "verification_url": "https://auth.openai.com/device",
+                    "verification_url": "https://auth.openai.com/codex/device",
                     "user_code": "ABCD-EFGH",
                 },
             )

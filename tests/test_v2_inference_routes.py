@@ -64,7 +64,7 @@ class _Inference:
         return {
             "login_id": "login-1",
             "status": "pending",
-            "verification_url": "https://auth.openai.com/device",
+            "verification_url": "https://auth.openai.com/codex/device",
             "user_code": "ABCD-EFGH",
             "interval_seconds": 5,
             "expires_at": "2026-01-01T00:10:00+00:00",

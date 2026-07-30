@@ -214,6 +214,13 @@ class TelegramInferenceControls:
                     "Codex is connected. Use /models codex to select a model.",
                 )
                 return
+            if login_status in {"expired", "failed"}:
+                self._state.set_codex_login(chat_id, None)
+                await self._send(
+                    chat_id,
+                    f"Codex login {login_status}. Run /codex login to start again.",
+                )
+                return
             await self._send(
                 chat_id,
                 (
