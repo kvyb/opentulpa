@@ -8,8 +8,10 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
+from opentulpa.capability_workers.state import TelegramWorkerState
 from opentulpa.host.models import HostConfig
 from opentulpa.host.runtime import RuntimeSupervisor, RuntimeUnavailableError
+from opentulpa.persistence.tenant_namespace import tenant_namespace_label
 
 
 def _config() -> HostConfig:
@@ -65,6 +67,30 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     assert "internal-owner-secret-value" not in line
     assert "hunter2" not in line
     assert line.count("[redacted]") == 3
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_host_seeds_owner_identity_in_runtime_telegram_state(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=data_root)
+    expected_path = (
+        data_root
+        / ".opentulpa"
+        / "deepagents"
+        / "capability_state"
+        / tenant_namespace_label("owner")
+        / "telegram.json"
+    )
+
+    runtime._seed_telegram_identity(_config())
+
+    assert runtime._telegram_state_path() == expected_path
+    assert TelegramWorkerState(expected_path).paired_identity() == (7, 7)
+
+    runtime.clear_telegram_identity()
+
+    assert not expected_path.exists()
     await runtime.shutdown()
 
 

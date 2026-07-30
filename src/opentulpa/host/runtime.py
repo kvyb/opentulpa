@@ -390,6 +390,7 @@ class RuntimeSupervisor:
     def _telegram_state_path(self) -> Path:
         return (
             self._data_root
+            / ".opentulpa"
             / "deepagents"
             / "capability_state"
             / tenant_namespace_label("owner")
