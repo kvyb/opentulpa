@@ -148,6 +148,15 @@ async def test_telegram_is_validated_stored_as_handle_and_activated(tmp_path: Pa
         if request.url.path == "/v2/secrets/pending":
             return httpx.Response(201, json={"secret": {"revision": 1}})
         if request.url.path == "/v2/secrets/telegram-bot-token" and request.method == "PUT":
+            if body is not None and "scopes" in body:
+                return httpx.Response(
+                    409,
+                    json={
+                        "detail": (
+                            "pending secret scopes cannot change while storing its first value"
+                        )
+                    },
+                )
             return httpx.Response(200, json={"secret": {"revision": 2}})
         if request.url.path.endswith("/test"):
             return httpx.Response(200, json={"test": {"status": "passed"}})
@@ -179,6 +188,15 @@ async def test_telegram_is_validated_stored_as_handle_and_activated(tmp_path: Pa
         "id": "telegram-bot-token",
         "name": "telegram-bot-token",
         "scopes": ["telegram.receive", "telegram.send"],
+    }
+    stored = next(
+        body
+        for method, path, body in requests
+        if method == "PUT" and path == "/v2/secrets/telegram-bot-token"
+    )
+    assert stored == {
+        "expected_revision": 1,
+        "value": "123:telegram-secret",
     }
     activation = next(body for method, path, body in requests if path.endswith("/activate"))
     assert activation["secret_handles"] == {"TELEGRAM_BOT_TOKEN": "telegram-bot-token"}

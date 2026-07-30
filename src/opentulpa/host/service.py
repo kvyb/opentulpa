@@ -202,7 +202,6 @@ class HostService:
             json={
                 "expected_revision": int(secret["revision"]),
                 "value": config.telegram_bot_token.get_secret_value(),
-                "scopes": ["telegram.receive", "telegram.send"],
             },
         )
         if not stored.get("secret"):
