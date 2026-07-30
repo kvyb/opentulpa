@@ -76,6 +76,12 @@ def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:
     assert "pairs once with `/start <code>`" in prompt
 
 
+def test_owner_prompt_distinguishes_source_availability_from_session_state() -> None:
+    prompt = " ".join(OWNER_PROMPT.casefold().split())
+    assert "available means usable" in prompt
+    assert "active means an open candidate, not unavailable self-update" in prompt
+
+
 def test_owner_prompt_uses_handle_based_secret_ingress() -> None:
     assert "`SERVICE_API_KEY=<value>`" in OWNER_PROMPT
     assert "`SERVICE_TOKEN=<value>`" in OWNER_PROMPT

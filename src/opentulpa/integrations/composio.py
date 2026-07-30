@@ -324,7 +324,7 @@ class ComposioService:
         safe_customer = str(customer_id or "").strip()
         requested_toolkits = {value.casefold() for value in _coerce_toolkit_list(toolkits)}
         safe_search = str(search or "").strip().casefold()
-        safe_limit = max(1, min(int(limit), 100))
+        safe_limit = max(1, min(int(limit), 50))
         connections: dict[str, dict[str, Any]] = {}
         if is_connected is not None:
             connected = self.list_connected_accounts(
@@ -343,7 +343,7 @@ class ComposioService:
         while len(items) < safe_limit:
             result = self._sdk().toolkits.list(
                 cursor=cursor,
-                limit=100,
+                limit=50,
                 sort_by="alphabetically",
             )
             total_pages = int(getattr(result, "total_pages", 0) or 0)

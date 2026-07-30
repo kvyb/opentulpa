@@ -141,6 +141,46 @@ async def test_bot_api_falls_back_to_plain_text_only_for_invalid_markup() -> Non
 
 
 @pytest.mark.asyncio
+async def test_bot_api_treats_message_not_modified_as_success() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "description": "Bad Request: message is not modified",
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramBotAPI(token="private-token", client=http)
+
+    await client.edit_message_text(chat_id=7, message_id=12, text="same")
+
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bot_api_classifies_unavailable_edit_target() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "description": "Bad Request: message to edit not found",
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramBotAPI(token="private-token", client=http)
+
+    with pytest.raises(TelegramAPIError) as captured:
+        await client.edit_message_text(chat_id=7, message_id=12, text="new")
+
+    assert captured.value.edit_target_unavailable is True
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bot_api_long_poll_sorts_updates_and_never_exposes_token_in_error() -> None:
     requests: list[httpx.Request] = []
 

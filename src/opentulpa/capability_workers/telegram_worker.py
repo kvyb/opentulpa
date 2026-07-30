@@ -211,17 +211,34 @@ class TelegramTransport(Protocol):
 class _TelegramResponseStreamer:
     """Render Agent API deltas into one throttled Telegram message stream."""
 
-    def __init__(self, *, telegram: TelegramTransport, chat_id: int) -> None:
+    def __init__(
+        self,
+        *,
+        telegram: TelegramTransport,
+        chat_id: int,
+        message_id: int | None = None,
+        rendered_text: str = "",
+        on_delivery: Callable[[int | None, str], None] | None = None,
+    ) -> None:
         self._telegram = telegram
         self._chat_id = chat_id
-        self._message_id: int | None = None
-        self._rendered = ""
+        self._message_id = message_id if message_id is not None and message_id > 0 else None
+        self._rendered = str(rendered_text or "") if self._message_id is not None else ""
+        self._on_delivery = on_delivery
         self._last_edit = 0.0
         self._last_typing = 0.0
         self._typing_task: asyncio.Task[None] | None = None
         self._progress_text = ""
         self._progress_label = ""
         self._progress_started = 0.0
+
+    @property
+    def message_id(self) -> int | None:
+        return self._message_id
+
+    @property
+    def rendered_text(self) -> str:
+        return self._rendered
 
     async def start(self) -> None:
         await self._send_typing(force=True)
@@ -266,27 +283,24 @@ class _TelegramResponseStreamer:
 
     async def finish(self, text: str) -> None:
         self._clear_progress()
+        if text == self._rendered:
+            return
         chunks = _text_chunks(text)
         if self._message_id is None:
-            await self._telegram.send_message(chat_id=self._chat_id, text=text)
+            message_ids = await self._telegram.send_message(chat_id=self._chat_id, text=text)
+            if message_ids:
+                self._message_id = message_ids[0]
+                self._rendered = text
+                self._record_delivery()
             return
         if len(chunks) == 1:
-            if chunks[0] != self._rendered:
-                await self._telegram.edit_message_text(
-                    chat_id=self._chat_id,
-                    message_id=self._message_id,
-                    text=chunks[0],
-                )
-                self._rendered = chunks[0]
+            await self._replace(chunks[0])
             return
-        await self._telegram.edit_message_text(
-            chat_id=self._chat_id,
-            message_id=self._message_id,
-            text=chunks[0],
-        )
-        self._rendered = chunks[0]
+        await self._replace(chunks[0])
         for chunk in chunks[1:]:
             await self._telegram.send_message(chat_id=self._chat_id, text=chunk)
+        self._rendered = text
+        self._record_delivery()
 
     async def status(self, text: str) -> None:
         self._clear_progress()
@@ -295,12 +309,7 @@ class _TelegramResponseStreamer:
         resolved = str(text or "").strip()[:1_000]
         if not resolved or resolved == self._rendered:
             return
-        await self._telegram.edit_message_text(
-            chat_id=self._chat_id,
-            message_id=self._message_id,
-            text=resolved,
-        )
-        self._rendered = resolved
+        await self._replace(resolved)
 
     async def _replace(self, preview: str) -> None:
         if self._message_id is None:
@@ -314,12 +323,17 @@ class _TelegramResponseStreamer:
                 message_id=self._message_id,
                 text=preview,
             )
-        except TelegramAPIError:
+        except TelegramAPIError as exc:
+            if not exc.edit_target_unavailable:
+                raise
             self._message_id = None
+            self._rendered = ""
+            self._record_delivery()
             await self._send_initial(preview)
             return
         self._rendered = preview
         self._last_edit = asyncio.get_running_loop().time()
+        self._record_delivery()
 
     async def _render_progress(self) -> None:
         if not self._progress_label:
@@ -345,6 +359,11 @@ class _TelegramResponseStreamer:
             self._message_id = message_ids[0]
             self._rendered = preview
             self._last_edit = asyncio.get_running_loop().time()
+            self._record_delivery()
+
+    def _record_delivery(self) -> None:
+        if self._on_delivery is not None:
+            self._on_delivery(self._message_id, self._rendered)
 
     async def _send_typing(self, *, force: bool = False) -> None:
         now = asyncio.get_running_loop().time()
@@ -634,6 +653,8 @@ class TelegramInterfaceWorker:
         chat_id = int(record["chat_id"])
         sequence = max(0, int(record.get("sequence") or 0))
         accumulated_text = str(record.get("accumulated_text") or "")
+        response_message_id = _positive_int(record.get("response_message_id"))
+        rendered_text = str(record.get("rendered_text") or "")
         paired = self._state.paired_identity()
         if paired is None or paired[1] != chat_id or not run_id or not source_event_id:
             raise ValueError("pending run is not bound to the paired Telegram identity")
@@ -649,6 +670,8 @@ class TelegramInterfaceWorker:
             initial_run_id=run_id,
             initial_sequence=sequence,
             initial_text=accumulated_text,
+            initial_response_message_id=response_message_id,
+            initial_rendered_text=rendered_text,
         )
 
     async def _handle_update(
@@ -1035,12 +1058,24 @@ class TelegramInterfaceWorker:
         initial_run_id: str = "",
         initial_sequence: int = 0,
         initial_text: str = "",
+        initial_response_message_id: int | None = None,
+        initial_rendered_text: str = "",
         consumed_approval_token: str | None = None,
     ) -> Literal["completed", "failed", "approval"]:
         run_id = initial_run_id
         sequence = max(0, initial_sequence)
         accumulated = initial_text[-200_000:]
-        streamer = _TelegramResponseStreamer(telegram=self._telegram, chat_id=chat_id)
+        streamer = _TelegramResponseStreamer(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=initial_response_message_id,
+            rendered_text=initial_rendered_text,
+            on_delivery=lambda message_id, rendered_text: self._state.save_pending_delivery(
+                source_event_id=source_event_id,
+                response_message_id=message_id,
+                rendered_text=rendered_text,
+            ),
+        )
         await streamer.start()
         try:
             async for event in events:
@@ -1049,6 +1084,16 @@ class TelegramInterfaceWorker:
                 if event.sequence <= sequence:
                     continue
                 run_id = event.run_id
+                self._state.save_pending_run(
+                    source_event_id=source_event_id,
+                    update_id=update_id,
+                    run_id=run_id,
+                    chat_id=chat_id,
+                    sequence=sequence,
+                    accumulated_text=accumulated,
+                    response_message_id=streamer.message_id,
+                    rendered_text=streamer.rendered_text,
+                )
                 if event.type == "message.delta":
                     accumulated = (accumulated + str(event.data.get("text") or ""))[-200_000:]
                     await streamer.update(accumulated)
@@ -1067,6 +1112,8 @@ class TelegramInterfaceWorker:
                         chat_id=chat_id,
                         sequence=sequence,
                         accumulated_text=accumulated,
+                        response_message_id=streamer.message_id,
+                        rendered_text=streamer.rendered_text,
                     )
                     if event.type == "run.completed":
                         final_text = str(event.data.get("text") or "").strip() or accumulated.strip()
@@ -1112,6 +1159,8 @@ class TelegramInterfaceWorker:
                     chat_id=chat_id,
                     sequence=sequence,
                     accumulated_text=accumulated,
+                    response_message_id=streamer.message_id,
+                    rendered_text=streamer.rendered_text,
                 )
             raise AgentAPIError("Agent API event stream ended before a durable terminal event.")
         finally:

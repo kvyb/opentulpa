@@ -171,6 +171,8 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     assert "result pages before answering" in content_fetch.description
     source_status = next(tool for tool in tools if tool.name == "source_status")
     assert source_status.tool_call_schema.model_json_schema()["properties"] == {}
+    assert "available reports whether self-update is usable" in source_status.description
+    assert "candidate session" in source_status.description
     source_shell = next(tool for tool in tools if tool.name == "source_shell")
     assert set(source_shell.tool_call_schema.model_json_schema()["properties"]) == {
         "command",

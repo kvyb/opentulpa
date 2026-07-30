@@ -181,7 +181,7 @@ def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> N
     assert keys == ["first-composio-key", "rotated-composio-key"]
 
 
-def test_list_toolkits_uses_catalog_api_and_filters_across_pages(monkeypatch) -> None:
+def test_list_toolkits_uses_catalog_api_and_supported_page_size(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def list_toolkits(**kwargs: Any) -> Any:
@@ -210,7 +210,7 @@ def test_list_toolkits_uses_catalog_api_and_filters_across_pages(monkeypatch) ->
     result = service.list_toolkits(
         customer_id="tenant-a",
         search="slack",
-        limit=10,
+        limit=100,
     )
 
     assert result["items"] == [
@@ -226,6 +226,7 @@ def test_list_toolkits_uses_catalog_api_and_filters_across_pages(monkeypatch) ->
         }
     ]
     assert [call["cursor"] for call in calls] == [None, "page-2"]
+    assert all(call["limit"] == 50 for call in calls)
 
 
 def test_composio_proxy_uses_connected_account_without_exposing_headers(

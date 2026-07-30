@@ -188,13 +188,17 @@ class EvolutionSupervisor:
             )
             if candidate is None:
                 return {
+                    "available": True,
                     "active": False,
+                    "session_active": False,
                     "candidate_id": None,
                     "diff_sha256": hashlib.sha256(b"").hexdigest(),
                     **lineage,
                 }
             workspace = self._source_workspace(candidate)
             return {
+                "available": True,
+                "session_active": True,
                 **await self._source_snapshot(candidate, workspace),
                 **lineage,
             }
