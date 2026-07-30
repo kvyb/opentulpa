@@ -11,7 +11,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
-COPY --from=railway-sandbox-bridge /usr/local/ /usr/local/
+COPY --from=railway-sandbox-bridge /usr/local/bin/node /usr/local/bin/node
 COPY --from=railway-sandbox-bridge /bridge /app/railway_sandbox_bridge
 
 RUN apt-get update \

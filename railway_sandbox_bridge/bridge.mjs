@@ -6,6 +6,36 @@ import WebSocket from "ws";
 
 const INPUT_ARCHIVE = "/tmp/opentulpa-workspace-in.tar.gz";
 const OUTPUT_ARCHIVE = "/tmp/opentulpa-workspace-out.tar.gz";
+let activeExecHandle = null;
+let activeSandbox = null;
+let cancellationStarted = false;
+
+async function cancelExecution() {
+  if (cancellationStarted) {
+    return;
+  }
+  cancellationStarted = true;
+  let stopped = false;
+  if (activeExecHandle) {
+    try {
+      stopped = await activeExecHandle.kill("TERM");
+    } catch {
+      stopped = false;
+    }
+  }
+  if (!stopped && activeSandbox) {
+    try {
+      await activeSandbox.destroy();
+    } catch {
+      // The Python supervisor will force-stop this bridge if Railway is unreachable.
+    }
+  }
+  process.exit(130);
+}
+
+process.on("SIGTERM", () => {
+  void cancelExecution();
+});
 
 async function readRequest() {
   const chunks = [];
@@ -47,9 +77,21 @@ async function checkedExec(
   cwd = "/",
   failureMessage = "Railway sandbox workspace synchronization failed",
 ) {
-  const result = await sandbox.exec(command, { cwd, timeoutSec });
+  const result = await execute(sandbox, command, { cwd, timeoutSec });
   if (result.timedOut || result.exitCode !== 0) {
     throw new Error(failureMessage);
+  }
+}
+
+async function execute(sandbox, command, options) {
+  const handle = sandbox.exec(command, options);
+  activeExecHandle = handle;
+  try {
+    return await handle;
+  } finally {
+    if (activeExecHandle === handle) {
+      activeExecHandle = null;
+    }
   }
 }
 
@@ -97,6 +139,7 @@ function boundedOutput(result, limit) {
 async function main() {
   const request = await readRequest();
   const sandbox = await sandboxFor(request);
+  activeSandbox = sandbox;
   await ensureBaselineTools(sandbox);
   if (request.workspaceArchive) {
     await sandbox.files.write(INPUT_ARCHIVE, Buffer.from(request.workspaceArchive, "base64"), {
@@ -109,7 +152,7 @@ async function main() {
     );
   }
 
-  const result = await sandbox.exec(request.command, {
+  const result = await execute(sandbox, request.command, {
     cwd: request.workspaceArchive ? "/workspace" : "/",
     timeoutSec: request.timeoutSec,
   });
@@ -150,6 +193,7 @@ async function main() {
       ...bounded,
     }),
   );
+  activeSandbox = null;
 }
 
 main().catch((error) => {

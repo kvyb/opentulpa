@@ -98,6 +98,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/opentulpa"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"railway_sandbox_bridge/bridge.mjs" = "opentulpa/railway_sandbox_bridge/bridge.mjs"
+"railway_sandbox_bridge/package.json" = "opentulpa/railway_sandbox_bridge/package.json"
+"railway_sandbox_bridge/package-lock.json" = "opentulpa/railway_sandbox_bridge/package-lock.json"
+
 [tool.uv]
 dev-dependencies = [
     "crawl4ai>=0.7.0",

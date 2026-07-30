@@ -144,6 +144,7 @@ class TenantExecutionProvider(Protocol):
         command: str,
         timeout: int,
         workspace: Path | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ExecuteResponse: ...
 
 
@@ -1081,7 +1082,15 @@ class TenantContainerBackend(SandboxBackendProtocol):
         )
         effective_timeout = min(requested_timeout, self._policy.timeout_seconds)
         if self._execution_provider is not None:
-            return self._execute_with_provider(safe_command, timeout=effective_timeout)
+            try:
+                return self._execute_with_provider(
+                    safe_command,
+                    timeout=effective_timeout,
+                    control=control,
+                )
+            finally:
+                if control is not None:
+                    control.finished.set()
 
         completed: subprocess.CompletedProcess[bytes] | None = None
         failure: OSError | subprocess.TimeoutExpired | None = None
@@ -1228,7 +1237,13 @@ class TenantContainerBackend(SandboxBackendProtocol):
             truncated=truncated,
         )
 
-    def _execute_with_provider(self, command: str, *, timeout: int) -> ExecuteResponse:
+    def _execute_with_provider(
+        self,
+        command: str,
+        *,
+        timeout: int,
+        control: _ExecutionControl | None,
+    ) -> ExecuteResponse:
         transaction: Path | None = None
         committed = False
         try:
@@ -1245,7 +1260,14 @@ class TenantContainerBackend(SandboxBackendProtocol):
                     command=command,
                     timeout=timeout,
                     workspace=workspace,
+                    cancel_event=control.cancelled if control is not None else None,
                 )
+                if control is not None and control.cancelled.is_set():
+                    return ExecuteResponse(
+                        output="sandbox execution was cancelled",
+                        exit_code=130,
+                        truncated=False,
+                    )
                 if transaction is not None and workspace is not None:
                     self._validate_workspace_tree(workspace)
                     authority = self._commit_authority
@@ -1269,6 +1291,9 @@ class TenantContainerBackend(SandboxBackendProtocol):
                         self._discard_transaction(transaction)
 
     def _cancel_controlled_execution(self, control: _ExecutionControl) -> None:
+        if self._execution_provider is not None:
+            control.finished.wait(timeout=self._policy.cleanup_timeout_seconds)
+            return
         if not control.name_ready.wait(timeout=1.0):
             return
         container_name = control.container_name
@@ -1281,6 +1306,7 @@ class TenantContainerBackend(SandboxBackendProtocol):
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         control = _ExecutionControl()
+        provider_execution = self._execution_provider is not None
         worker = asyncio.create_task(
             asyncio.to_thread(self._execute, command, timeout=timeout, control=control)
         )
@@ -1291,13 +1317,22 @@ class TenantContainerBackend(SandboxBackendProtocol):
             cleanup = asyncio.create_task(
                 asyncio.to_thread(self._cancel_controlled_execution, control)
             )
+            deadline = time.monotonic() + self._policy.cleanup_timeout_seconds + 1.0
             while not worker.done() or not cleanup.done():
+                if provider_execution and time.monotonic() >= deadline:
+                    break
                 try:
                     await asyncio.sleep(0.01)
                 except asyncio.CancelledError:
                     control.cancelled.set()
-            worker.result()
-            cleanup.result()
+            if worker.done():
+                worker.result()
+            else:
+                worker.add_done_callback(lambda task: task.exception())
+            if cleanup.done():
+                cleanup.result()
+            else:
+                cleanup.add_done_callback(lambda task: task.exception())
             raise cancellation
 
     def ls(self, path: str) -> LsResult:

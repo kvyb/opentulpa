@@ -8,6 +8,7 @@ import os
 import secrets
 import shutil
 import sys
+import threading
 from dataclasses import dataclass
 from filecmp import cmp
 from pathlib import Path
@@ -170,8 +171,9 @@ class _UnavailableSandboxExecutionProvider:
         command: str,
         timeout: int,
         workspace: Path | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Any:
-        del tenant_id, command, timeout, workspace
+        del tenant_id, command, timeout, workspace, cancel_event
         raise RuntimeError("tenant sandbox execution is unavailable")
 
 

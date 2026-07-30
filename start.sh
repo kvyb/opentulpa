@@ -886,6 +886,28 @@ install_python_deps() {
   run_cmd uv "${arguments[@]}"
 }
 
+railway_bridge_dir() {
+  if [[ -f "${REPO_ROOT}/src/opentulpa/railway_sandbox_bridge/package.json" ]]; then
+    printf '%s\n' "${REPO_ROOT}/src/opentulpa/railway_sandbox_bridge"
+    return 0
+  fi
+  printf '%s\n' "${REPO_ROOT}/railway_sandbox_bridge"
+}
+
+install_railway_sandbox_bridge() {
+  local bridge_dir
+  railway_tenant_sandbox_configured || return 0
+  bridge_dir="$(railway_bridge_dir)"
+  [[ -f "${bridge_dir}/bridge.mjs" && -f "${bridge_dir}/package-lock.json" ]] \
+    || die "Railway sandbox bridge sources are unavailable"
+  if [[ -f "${bridge_dir}/node_modules/railway/package.json" ]]; then
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 || die "Node.js is required for Railway-hosted sandboxes"
+  command -v npm >/dev/null 2>&1 || die "npm is required to install the Railway sandbox bridge"
+  run_cmd npm ci --omit=dev --prefix "${bridge_dir}"
+}
+
 install_tenant_sandbox_image() {
   local engine tenant_image
   if [[ "${DIRECT_ENGINE_AVAILABLE}" != "1" ]]; then
@@ -1334,6 +1356,10 @@ run_doctor() {
     local direct_engine direct_tenant_image
     if railway_tenant_sandbox_configured; then
       echo "[doctor] ok: Railway-hosted tenant sandbox is configured"
+      doctor_check "Node.js is available for Railway sandboxes" "$(command -v node >/dev/null 2>&1 && echo 1 || echo 0)" "install Node.js 22" || failures=$((failures + 1))
+      local railway_bridge
+      railway_bridge="$(railway_bridge_dir)"
+      doctor_check "Railway sandbox bridge dependencies are installed" "$([[ -f "${railway_bridge}/node_modules/railway/package.json" ]] && echo 1 || echo 0)" "run ./start.sh install ${runtime}" || failures=$((failures + 1))
     else
       direct_engine="${OPENTULPA_CONTAINER_CLI:-docker}"
       direct_tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
@@ -1410,6 +1436,7 @@ main() {
 
   if [[ "${MODE}" != "run" ]]; then
     install_python_deps
+    install_railway_sandbox_bridge
     if [[ "${runtime}" == "managed" ]]; then
       install_managed_images
     else

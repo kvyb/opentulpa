@@ -8,17 +8,20 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from deepagents.backends.protocol import ExecuteResponse
 
-BridgeRunner = Callable[[dict[str, Any], int], dict[str, Any]]
+BridgeRunner = Callable[[dict[str, Any], int, threading.Event | None], dict[str, Any]]
 
 
 class RailwaySandboxExecutionError(RuntimeError):
@@ -54,11 +57,17 @@ class RailwaySandboxExecutionProvider:
             raise ValueError("Railway sandbox workspace limits are invalid")
         if not 1 <= idle_timeout_minutes <= 120:
             raise ValueError("Railway sandbox idle timeout is invalid")
-        default_bridge = (
+        packaged_bridge = (
+            Path(__file__).resolve().parent.parent
+            / "railway_sandbox_bridge"
+            / "bridge.mjs"
+        )
+        source_bridge = (
             Path(__file__).resolve().parents[3]
             / "railway_sandbox_bridge"
             / "bridge.mjs"
         )
+        default_bridge = packaged_bridge if packaged_bridge.is_file() else source_bridge
         self._token = safe_token
         self._environment_id = safe_environment
         self._max_output_bytes = int(max_output_bytes)
@@ -68,6 +77,20 @@ class RailwaySandboxExecutionProvider:
         self._idle_timeout_minutes = int(idle_timeout_minutes)
         self._bridge_path = Path(bridge_path or default_bridge).expanduser().resolve()
         self._node_binary = str(node_binary or "node").strip() or "node"
+        if runner is None:
+            if not self._bridge_path.is_file():
+                raise RailwaySandboxExecutionError("Railway sandbox bridge is unavailable")
+            if shutil.which(self._node_binary) is None:
+                raise RailwaySandboxExecutionError("Railway sandbox bridge requires Node.js")
+            if not (
+                self._bridge_path.parent
+                / "node_modules"
+                / "railway"
+                / "package.json"
+            ).is_file():
+                raise RailwaySandboxExecutionError(
+                    "Railway sandbox bridge dependencies are unavailable"
+                )
         self._runner = runner or self._run_bridge
         self._sandbox_ids: dict[str, str] = {}
         self._tenant_locks: dict[str, threading.Lock] = {}
@@ -77,26 +100,94 @@ class RailwaySandboxExecutionProvider:
         with self._locks_guard:
             return self._tenant_locks.setdefault(tenant_id, threading.Lock())
 
-    def _run_bridge(self, request: dict[str, Any], timeout: int) -> dict[str, Any]:
+    @staticmethod
+    def _bridge_environment(*, home: str, token: str, environment_id: str) -> dict[str, str]:
+        return {
+            "HOME": home,
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "RAILWAY_ENVIRONMENT_ID": environment_id,
+            "RAILWAY_TOKEN": token,
+        }
+
+    @staticmethod
+    def _stop_bridge(process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            with suppress(OSError):
+                process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            with suppress(OSError, ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with suppress(OSError):
+                process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+
+    def _run_bridge(
+        self,
+        request: dict[str, Any],
+        timeout: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, Any]:
         if not self._bridge_path.is_file():
             raise RailwaySandboxExecutionError("Railway sandbox bridge is unavailable")
-        environment = os.environ.copy()
-        environment["RAILWAY_TOKEN"] = self._token
-        environment["RAILWAY_ENVIRONMENT_ID"] = self._environment_id
-        try:
-            completed = subprocess.run(
-                [self._node_binary, str(self._bridge_path)],
-                input=json.dumps(request, separators=(",", ":")).encode(),
-                capture_output=True,
-                check=False,
-                timeout=timeout + 300,
-                env=environment,
-                cwd=self._bridge_path.parent,
+        with tempfile.TemporaryDirectory(prefix="opentulpa-railway-bridge-") as home:
+            environment = self._bridge_environment(
+                home=home,
+                token=self._token,
+                environment_id=self._environment_id,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RailwaySandboxExecutionError(
-                "Railway sandbox bridge is unavailable"
-            ) from exc
+            try:
+                process = subprocess.Popen(
+                    [self._node_binary, str(self._bridge_path)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    cwd=self._bridge_path.parent,
+                    start_new_session=True,
+                )
+                payload: bytes | None = json.dumps(
+                    request,
+                    separators=(",", ":"),
+                ).encode()
+                deadline = time.monotonic() + timeout + 300
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        self._stop_bridge(process)
+                        raise RailwaySandboxExecutionError(
+                            "Railway sandbox execution was cancelled"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._stop_bridge(process)
+                        raise RailwaySandboxExecutionError(
+                            "Railway sandbox bridge is unavailable"
+                        )
+                    try:
+                        stdout, stderr = process.communicate(
+                            input=payload,
+                            timeout=min(0.1, remaining),
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        payload = None
+            except OSError as exc:
+                raise RailwaySandboxExecutionError(
+                    "Railway sandbox bridge is unavailable"
+                ) from exc
+        completed = subprocess.CompletedProcess(
+            process.args,
+            process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
         response_limit = (
             self._max_workspace_archive_bytes * 2
             + self._max_output_bytes
@@ -185,6 +276,7 @@ class RailwaySandboxExecutionProvider:
         command: str,
         timeout: int,
         workspace: Path | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ExecuteResponse:
         safe_tenant = str(tenant_id or "").strip()
         if not safe_tenant:
@@ -202,7 +294,7 @@ class RailwaySandboxExecutionProvider:
                     self._archive_workspace(workspace) if workspace is not None else None
                 ),
             }
-            result = self._runner(request, max(1, int(timeout)))
+            result = self._runner(request, max(1, int(timeout)), cancel_event)
             sandbox_id = str(result.get("sandboxId") or "").strip()
             if not sandbox_id:
                 raise RailwaySandboxExecutionError(

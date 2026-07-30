@@ -298,8 +298,9 @@ class SandboxExecutionClient:
         command: str,
         timeout: int,
         workspace: Path | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ExecuteResponse:
-        del workspace
+        del workspace, cancel_event
         try:
             with httpx.Client(
                 follow_redirects=False,
