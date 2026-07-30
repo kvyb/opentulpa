@@ -94,6 +94,9 @@ class HostService:
             elif self.runtime.revision != previous.revision:
                 with suppress(Exception):
                     await self.runtime.replace(previous, rollback=previous)
+                    await self._configure_telegram(previous)
+                    if previous.telegram_bot_token is None:
+                        self.runtime.clear_telegram_identity()
             raise HostActivationError(self._safe_error(exc)) from exc
         finally:
             self._activating = False

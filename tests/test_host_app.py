@@ -6,7 +6,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from opentulpa.host.app import create_host_app
+from opentulpa.host.app import _resume_log_cursor, create_host_app
 from opentulpa.host.models import HostConfigInput
 from opentulpa.host.store import HostStore
 from opentulpa.secrets.cipher import AesGcmHostKeyCipher
@@ -17,6 +17,7 @@ class _Runtime:
     revision = None
     error = None
     endpoint = None
+    log_stream_id = "stream-current"
 
     def logs(self, *, after: int = 0) -> list[Any]:
         return []
@@ -83,7 +84,29 @@ def test_unconfigured_host_stays_healthy_and_redirects_chat_to_setup(tmp_path: P
         assert "OPEN CHAT" not in console.text
         script = client.get("/_host/assets/app.js")
         assert "opentulpa connect" in script.text
+        assert "stream_id" in script.text
         assert "open-chat" not in script.text
+
+
+def test_log_cursor_resumes_same_host_and_resets_after_host_replacement() -> None:
+    assert (
+        _resume_log_cursor(
+            after=5,
+            last_event_id="9",
+            requested_stream_id="stream-current",
+            current_stream_id="stream-current",
+        )
+        == 9
+    )
+    assert (
+        _resume_log_cursor(
+            after=9,
+            last_event_id="12",
+            requested_stream_id="stream-previous",
+            current_stream_id="stream-current",
+        )
+        == 0
+    )
 
 
 def test_remote_claim_requires_setup_token_and_sets_owner_session(tmp_path: Path) -> None:
@@ -105,6 +128,10 @@ def test_remote_claim_requires_setup_token_and_sets_owner_session(tmp_path: Path
         status = client.get("/_host/api/status").json()
         assert status["claimed"] is True
         assert status["authenticated"] is True
+        assert client.get("/_host/api/logs").json() == {
+            "stream_id": "stream-current",
+            "logs": [],
+        }
 
 
 def test_owner_can_activate_first_config_without_exposing_secrets(tmp_path: Path) -> None:

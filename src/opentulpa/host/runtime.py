@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import secrets
 import socket
 import sys
 from collections import deque
@@ -31,6 +32,7 @@ class RuntimeUnavailableError(RuntimeError):
 class RuntimeLogEntry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    stream_id: str
     sequence: int
     timestamp: datetime
     stream: str
@@ -71,6 +73,7 @@ class RuntimeSupervisor:
         self._error: str | None = None
         self._logs: deque[RuntimeLogEntry] = deque(maxlen=2_000)
         self._redaction_values: set[str] = set()
+        self._log_stream_id = secrets.token_urlsafe(12)
         self._sequence = 0
         self._log_changed = asyncio.Condition()
         self._lock = asyncio.Lock()
@@ -88,6 +91,10 @@ class RuntimeSupervisor:
     @property
     def error(self) -> str | None:
         return self._error
+
+    @property
+    def log_stream_id(self) -> str:
+        return self._log_stream_id
 
     @property
     def revision(self) -> int | None:
@@ -311,6 +318,7 @@ class RuntimeSupervisor:
         for value in sorted(self._redaction_values, key=len, reverse=True):
             safe_text = safe_text.replace(value, "[redacted]")
         entry = RuntimeLogEntry(
+            stream_id=self._log_stream_id,
             sequence=self._sequence,
             timestamp=datetime.now(UTC),
             stream=stream,

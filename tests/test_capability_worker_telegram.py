@@ -144,7 +144,7 @@ class _Agent:
         self.codex_status: dict[str, Any] = {"codex": {"connected": False}}
         self.codex_login = {
             "login_id": "login-1",
-            "verification_url": "https://auth.openai.com/device",
+            "verification_url": "https://auth.openai.com/codex/device",
             "user_code": "ABCD-EFGH",
             "status": "pending",
         }
@@ -425,6 +425,34 @@ async def test_inference_and_codex_commands_use_agent_api_without_starting_runs(
         "Reasoning updated:",
         "Connect Codex:",
     ]
+
+
+@pytest.mark.parametrize("status", ["expired", "failed"])
+@pytest.mark.asyncio
+async def test_terminal_codex_login_status_starts_over(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    telegram = _Telegram([_message(1, text="/codex status")])
+    agent = _Agent()
+    agent.codex_login["status"] = status
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    state.set_codex_login(9, "login-1")
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    assert await worker.poll_once() == 1
+
+    assert state.codex_login(9) == ""
+    assert telegram.messages[-1]["text"] == (
+        f"Codex login {status}. Run /codex login to start again."
+    )
 
 
 @pytest.mark.asyncio
