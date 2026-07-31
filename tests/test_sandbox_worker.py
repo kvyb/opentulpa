@@ -100,6 +100,31 @@ async def test_sandbox_supervisor_status_uses_cached_canary(
 
 
 @pytest.mark.asyncio
+async def test_sandbox_supervisor_starts_module_worker_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENTULPA_SANDBOX_RPC_URL", raising=False)
+    monkeypatch.delenv("OPENTULPA_SANDBOX_RPC_TOKEN", raising=False)
+    monkeypatch.setenv("OPENTULPA_DEV_ALLOW_NO_SANDBOX", "1")
+    supervisor = SandboxWorkerSupervisor(
+        project_root=Path(__file__).resolve().parents[1],
+        data_root=tmp_path / "data",
+        settings=Settings(_env_file=None),
+    )
+
+    try:
+        await supervisor.start()
+        status = await supervisor.status()
+    finally:
+        await supervisor.shutdown()
+
+    assert status["ok"] is True
+    assert status["checks"]["execute"] is True
+    assert status["checks"]["ssh"] is True
+
+
+@pytest.mark.asyncio
 async def test_sandbox_worker_api_requires_private_token(tmp_path: Path) -> None:
     app = create_sandbox_worker_app(service=_service(tmp_path), token=TOKEN)
     transport = httpx.ASGITransport(app=app)

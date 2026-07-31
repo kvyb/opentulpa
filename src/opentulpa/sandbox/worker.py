@@ -632,6 +632,10 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+if __name__ == "__main__":
+    main()
+
+
 __all__ = [
     "DevProcessEngine",
     "RestrictedProcessEngine",
