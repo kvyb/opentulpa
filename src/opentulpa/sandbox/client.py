@@ -127,11 +127,15 @@ class SandboxWorkerExecutionProvider:
                 secret_files=(),
             )
             if ssh.exit_code != 0:
+                detail = _safe_output(ssh.output)
                 return SandboxWorkerCanary(
                     ok=False,
                     step="ssh",
                     health=health,
-                    error="sandbox worker does not provide ssh",
+                    error=(
+                        f"sandbox worker ssh check failed with exit {ssh.exit_code}"
+                        + (f": {detail}" if detail else "")
+                    ),
                 )
             return SandboxWorkerCanary(ok=True, step="ready", health=health)
         except Exception as exc:
@@ -323,6 +327,10 @@ class SandboxWorkerExecutionProvider:
 
 def _safe_error(error: Exception) -> str:
     return str(error or "sandbox worker failed").strip()[:500]
+
+
+def _safe_output(output: str) -> str:
+    return str(output or "").strip()[:500]
 
 
 __all__ = [
