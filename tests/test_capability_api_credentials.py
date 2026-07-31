@@ -474,6 +474,8 @@ def test_capability_route_scopes_and_revocation_fail_closed(tmp_path: Path) -> N
             "/v2/agent/threads/thread-1/inference",
             CapabilityAPIScope.AGENT_RUN_SUBMIT,
         ),
+        ("GET", "/v2/inference/selection", CapabilityAPIScope.AGENT_RUN_REPLAY),
+        ("PATCH", "/v2/inference/selection", CapabilityAPIScope.AGENT_RUN_SUBMIT),
         ("GET", "/v2/inference", CapabilityAPIScope.AGENT_RUN_REPLAY),
         ("GET", "/v2/inference/models", CapabilityAPIScope.AGENT_RUN_REPLAY),
         (

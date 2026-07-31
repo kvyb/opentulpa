@@ -14,13 +14,10 @@ INFERENCE_COMMANDS = frozenset({"/model", "/models", "/reasoning", "/codex"})
 
 
 class InferenceClient(Protocol):
-    async def ensure_thread(self, thread_id: str) -> None: ...
+    async def get_owner_inference(self) -> dict[str, Any]: ...
 
-    async def get_thread_inference(self, thread_id: str) -> dict[str, Any]: ...
-
-    async def update_thread_inference(
+    async def update_owner_inference(
         self,
-        thread_id: str,
         *,
         expected_revision: int,
         selection: Mapping[str, Any],
@@ -74,13 +71,13 @@ class TelegramInferenceControls:
         if command not in INFERENCE_COMMANDS:
             return False
         try:
-            await self._agent.ensure_thread(thread_id)
+            del thread_id
             if command == "/model":
-                await self._model(chat_id, thread_id, parts[1:])
+                await self._model(chat_id, parts[1:])
             elif command == "/models":
-                await self._models(chat_id, thread_id, parts[1:])
+                await self._models(chat_id, parts[1:])
             elif command == "/reasoning":
-                await self._reasoning(chat_id, thread_id, parts[1:])
+                await self._reasoning(chat_id, parts[1:])
             else:
                 await self._codex(chat_id, parts[1:])
         except (AgentAPIError, ValueError) as exc:
@@ -93,12 +90,11 @@ class TelegramInferenceControls:
     async def _model(
         self,
         chat_id: int,
-        thread_id: str,
         arguments: list[str],
     ) -> None:
-        current = await self._agent.get_thread_inference(thread_id)
+        current = await self._agent.get_owner_inference()
         if not arguments:
-            await self._send(chat_id, self._selection_text("Current model", current))
+            await self._send(chat_id, self._selection_text("Global model", current))
             return
         if len(arguments) not in {2, 3}:
             raise ValueError("Usage: /model <api|codex> <model> [reasoning]")
@@ -110,20 +106,18 @@ class TelegramInferenceControls:
             "model": arguments[1],
             "reasoning_effort": arguments[2] if len(arguments) == 3 else None,
         }
-        updated = await self._agent.update_thread_inference(
-            thread_id,
+        updated = await self._agent.update_owner_inference(
             expected_revision=int(current["revision"]),
             selection=selection,
         )
-        await self._send(chat_id, self._selection_text("Model selected", updated))
+        await self._send(chat_id, self._selection_text("Global model selected", updated))
 
     async def _models(
         self,
         chat_id: int,
-        thread_id: str,
         arguments: list[str],
     ) -> None:
-        current = await self._agent.get_thread_inference(thread_id)
+        current = await self._agent.get_owner_inference()
         effective = self._effective(current)
         explicit_provider = arguments and arguments[0].casefold() in {"api", "codex"}
         provider = (
@@ -149,20 +143,17 @@ class TelegramInferenceControls:
             lines.append("- No matching models.")
         if len(models) > 20:
             lines.append(f"...and {len(models) - 20} more. Add a search term to /models.")
-        lines.append(f"Select with: /model {provider} <model> [reasoning]")
+        lines.append(f"Select globally with: /model {provider} <model> [reasoning]")
         await self._send(chat_id, "\n".join(lines))
 
     async def _reasoning(
         self,
         chat_id: int,
-        thread_id: str,
         arguments: list[str],
     ) -> None:
         if len(arguments) != 1:
-            raise ValueError(
-                "Usage: /reasoning <minimal|low|medium|high|xhigh|max|ultra>"
-            )
-        current = await self._agent.get_thread_inference(thread_id)
+            raise ValueError("Usage: /reasoning <minimal|low|medium|high|xhigh|max|ultra>")
+        current = await self._agent.get_owner_inference()
         effective = self._effective(current)
         selection = {
             "provider": effective["provider"],
@@ -171,12 +162,11 @@ class TelegramInferenceControls:
             "service_tier": effective.get("service_tier"),
             "fallback_to_api": bool(effective.get("fallback_to_api", False)),
         }
-        updated = await self._agent.update_thread_inference(
-            thread_id,
+        updated = await self._agent.update_owner_inference(
             expected_revision=int(current["revision"]),
             selection=selection,
         )
-        await self._send(chat_id, self._selection_text("Reasoning updated", updated))
+        await self._send(chat_id, self._selection_text("Global reasoning updated", updated))
 
     async def _codex(self, chat_id: int, arguments: list[str]) -> None:
         action = arguments[0].casefold() if arguments else "status"
@@ -185,7 +175,7 @@ class TelegramInferenceControls:
             if bool(status.get("codex", {}).get("connected")):
                 await self._send(
                     chat_id,
-                    "Codex is already connected. Use /models codex to select a model.",
+                    "Codex is already connected. Use /models codex to select the global model.",
                 )
                 return
             login = await self._agent.start_codex_login()
@@ -211,7 +201,7 @@ class TelegramInferenceControls:
                 self._state.set_codex_login(chat_id, None)
                 await self._send(
                     chat_id,
-                    "Codex is connected. Use /models codex to select a model.",
+                    "Codex is connected. Use /models codex to select the global model.",
                 )
                 return
             if login_status in {"expired", "failed"}:
@@ -234,7 +224,7 @@ class TelegramInferenceControls:
         await self._send(
             chat_id,
             (
-                "Codex is connected. Use /models codex to select a model."
+                "Codex is connected. Use /models codex to select the global model."
                 if connected
                 else "Codex is not connected. Run /codex login."
             ),

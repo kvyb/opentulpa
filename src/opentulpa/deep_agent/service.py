@@ -471,9 +471,7 @@ class _InferenceMessageMiddleware(AgentMiddleware):
                     changed = True
                     message_changed = True
             messages.append(
-                message.model_copy(update={"content": content})
-                if message_changed
-                else message
+                message.model_copy(update={"content": content}) if message_changed else message
             )
         return (
             await handler(request.override(messages=messages))
@@ -560,6 +558,15 @@ CREATE TABLE IF NOT EXISTS thread_inference_preferences (
     PRIMARY KEY (tenant_id, thread_id),
     FOREIGN KEY (tenant_id, thread_id)
         REFERENCES agent_threads(tenant_id, thread_id) ON DELETE CASCADE
+)
+"""
+
+_TENANT_INFERENCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tenant_inference_preferences (
+    tenant_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL DEFAULT 0,
+    selection_json TEXT,
+    updated_at TEXT NOT NULL
 )
 """
 
@@ -750,6 +757,7 @@ class DeepAgentService:
         await self._runs_db.execute(_RUN_EVENT_SCHEMA)
         await self._runs_db.execute(_THREAD_SCHEMA)
         await self._runs_db.execute(_THREAD_INFERENCE_SCHEMA)
+        await self._runs_db.execute(_TENANT_INFERENCE_SCHEMA)
         schema_cursor = await self._runs_db.execute("PRAGMA table_info(agent_runs)")
         columns = {str(row[1]) for row in await schema_cursor.fetchall()}
         await schema_cursor.close()
@@ -817,6 +825,30 @@ class DeepAgentService:
                 MAX(updated_at)
             FROM agent_runs
             GROUP BY tenant_id, thread_id
+            """
+        )
+        await self._runs_db.execute(
+            """
+            INSERT OR IGNORE INTO tenant_inference_preferences (
+                tenant_id, revision, selection_json, updated_at
+            )
+            SELECT
+                preference.tenant_id,
+                1,
+                preference.selection_json,
+                preference.updated_at
+            FROM thread_inference_preferences AS preference
+            WHERE preference.selection_json IS NOT NULL
+              AND TRIM(preference.selection_json) != ''
+              AND preference.rowid = (
+                  SELECT candidate.rowid
+                  FROM thread_inference_preferences AS candidate
+                  WHERE candidate.tenant_id = preference.tenant_id
+                    AND candidate.selection_json IS NOT NULL
+                    AND TRIM(candidate.selection_json) != ''
+                  ORDER BY candidate.updated_at DESC, candidate.rowid DESC
+                  LIMIT 1
+              )
             """
         )
         await self._runs_db.commit()
@@ -935,9 +967,7 @@ class DeepAgentService:
             name=f"opentulpa-agent-run:{prepared.run_id}",
         )
         self._active_run_tasks[prepared.run_id] = task
-        task.add_done_callback(
-            lambda completed: self._run_task_done(prepared.run_id, completed)
-        )
+        task.add_done_callback(lambda completed: self._run_task_done(prepared.run_id, completed))
 
     async def _run_prepared(
         self,
@@ -1311,7 +1341,7 @@ class DeepAgentService:
             f"""
             SELECT run_id, status, channel, run_kind, final_text, created_at, updated_at
             FROM agent_runs
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC, run_id DESC
             LIMIT ?
             """,
@@ -1436,9 +1466,7 @@ class DeepAgentService:
         count_row = await count_cursor.fetchone()
         await count_cursor.close()
         tool_count = int(count_row["tool_count"] or 0) if count_row is not None else 0
-        failed_tool_count = (
-            int(count_row["failed_tool_count"] or 0) if count_row is not None else 0
-        )
+        failed_tool_count = int(count_row["failed_tool_count"] or 0) if count_row is not None else 0
         has_more = len(event_rows) > safe_limit
         event_rows = event_rows[:safe_limit]
         events: list[dict[str, Any]] = []
@@ -1882,8 +1910,7 @@ class DeepAgentService:
         values.extend((tenant_id, thread_id))
         db = self._require_runs_db()
         result = await db.execute(
-            f"UPDATE agent_threads SET {', '.join(fields)} "
-            "WHERE tenant_id = ? AND thread_id = ?",
+            f"UPDATE agent_threads SET {', '.join(fields)} WHERE tenant_id = ? AND thread_id = ?",
             values,
         )
         found = result.rowcount == 1
@@ -1918,27 +1945,7 @@ class DeepAgentService:
         await thread.close()
         if exists is None:
             return None
-        cursor = await db.execute(
-            """
-            SELECT revision, selection_json
-            FROM thread_inference_preferences
-            WHERE tenant_id = ? AND thread_id = ?
-            """,
-            (tenant_id, thread_id),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        revision = int(row["revision"] or 0) if row is not None else 0
-        raw_selection = str(row["selection_json"] or "") if row is not None else ""
-        selection = (
-            InferenceSelection.model_validate_json(raw_selection) if raw_selection.strip() else None
-        )
-        effective = selection or self._default_inference_plan().primary
-        return {
-            "revision": revision,
-            "selection": selection.model_dump(mode="json") if selection is not None else None,
-            "effective": effective.model_dump(mode="json"),
-        }
+        return await self.get_owner_inference(tenant_id=tenant_id)
 
     async def update_thread_inference(
         self,
@@ -1949,6 +1956,55 @@ class DeepAgentService:
         selection: InferenceSelection | None,
     ) -> dict[str, Any] | None:
         self._require_started()
+        db = self._require_runs_db()
+        thread = await db.execute(
+            "SELECT 1 FROM agent_threads WHERE tenant_id = ? AND thread_id = ?",
+            (tenant_id, thread_id),
+        )
+        exists = await thread.fetchone()
+        await thread.close()
+        if exists is None:
+            return None
+        return await self.update_owner_inference(
+            tenant_id=tenant_id,
+            expected_revision=expected_revision,
+            selection=selection,
+        )
+
+    async def get_owner_inference(self, *, tenant_id: str) -> dict[str, Any]:
+        self._require_started()
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT revision, selection_json
+            FROM tenant_inference_preferences
+            WHERE tenant_id = ?
+            """,
+            (tenant_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        revision = int(row["revision"] or 0) if row is not None else 0
+        raw_selection = str(row["selection_json"] or "") if row is not None else ""
+        selection = (
+            InferenceSelection.model_validate_json(raw_selection) if raw_selection.strip() else None
+        )
+        effective = selection or self._default_inference_plan().primary
+        return {
+            "scope": "owner",
+            "revision": revision,
+            "selection": selection.model_dump(mode="json") if selection is not None else None,
+            "effective": effective.model_dump(mode="json"),
+        }
+
+    async def update_owner_inference(
+        self,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        selection: InferenceSelection | None,
+    ) -> dict[str, Any]:
+        self._require_started()
         if selection is not None and self._inference is not None:
             selection = await self._inference.validate_selection(tenant_id, selection)
         elif selection is not None and selection.provider != "api":
@@ -1957,42 +2013,32 @@ class DeepAgentService:
         async with self._run_event_lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                thread = await db.execute(
-                    "SELECT 1 FROM agent_threads WHERE tenant_id = ? AND thread_id = ?",
-                    (tenant_id, thread_id),
-                )
-                exists = await thread.fetchone()
-                await thread.close()
-                if exists is None:
-                    await db.rollback()
-                    return None
                 cursor = await db.execute(
                     """
-                    SELECT revision FROM thread_inference_preferences
-                    WHERE tenant_id = ? AND thread_id = ?
+                    SELECT revision FROM tenant_inference_preferences
+                    WHERE tenant_id = ?
                     """,
-                    (tenant_id, thread_id),
+                    (tenant_id,),
                 )
                 row = await cursor.fetchone()
                 await cursor.close()
                 revision = int(row["revision"] or 0) if row is not None else 0
                 if revision != int(expected_revision):
                     await db.rollback()
-                    raise InferenceConflictError("thread inference preference changed")
+                    raise InferenceConflictError("owner inference preference changed")
                 next_revision = revision + 1
                 await db.execute(
                     """
-                    INSERT INTO thread_inference_preferences (
-                        tenant_id, thread_id, revision, selection_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (tenant_id, thread_id) DO UPDATE SET
+                    INSERT INTO tenant_inference_preferences (
+                        tenant_id, revision, selection_json, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT (tenant_id) DO UPDATE SET
                         revision = excluded.revision,
                         selection_json = excluded.selection_json,
                         updated_at = excluded.updated_at
                     """,
                     (
                         tenant_id,
-                        thread_id,
                         next_revision,
                         selection.model_dump_json() if selection is not None else None,
                         utc_now_iso(),
@@ -2003,14 +2049,14 @@ class DeepAgentService:
                 with suppress(Exception):
                     await db.rollback()
                 raise
-        return await self.get_thread_inference(tenant_id=tenant_id, thread_id=thread_id)
+        return await self.get_owner_inference(tenant_id=tenant_id)
 
     async def codex_preference_count(self, tenant_id: str) -> int:
         db = self._require_runs_db()
         cursor = await db.execute(
             """
             SELECT COUNT(*)
-            FROM thread_inference_preferences
+            FROM tenant_inference_preferences
             WHERE tenant_id = ?
               AND json_extract(selection_json, '$.provider') = 'codex'
             """,
@@ -2023,7 +2069,18 @@ class DeepAgentService:
     async def reset_codex_preferences(self, tenant_id: str) -> int:
         db = self._require_runs_db()
         async with self._run_event_lock:
-            cursor = await db.execute(
+            global_cursor = await db.execute(
+                """
+                UPDATE tenant_inference_preferences
+                SET revision = revision + 1, selection_json = NULL, updated_at = ?
+                WHERE tenant_id = ?
+                  AND json_extract(selection_json, '$.provider') = 'codex'
+                """,
+                (utc_now_iso(), tenant_id),
+            )
+            changed = global_cursor.rowcount
+            await global_cursor.close()
+            legacy_cursor = await db.execute(
                 """
                 UPDATE thread_inference_preferences
                 SET revision = revision + 1, selection_json = NULL, updated_at = ?
@@ -2032,8 +2089,7 @@ class DeepAgentService:
                 """,
                 (utc_now_iso(), tenant_id),
             )
-            changed = cursor.rowcount
-            await cursor.close()
+            await legacy_cursor.close()
             await db.commit()
         return max(0, int(changed))
 
@@ -2104,7 +2160,7 @@ class DeepAgentService:
         active_plan = inference_plan or self._default_inference_plan()
         if self._agent_specs is None:
             if active_plan.primary != self._default_inference_plan().primary:
-                raise RuntimeError("per-thread inference requires revisioned AgentSpecs")
+                raise RuntimeError("custom inference requires revisioned AgentSpecs")
             graph = self._graphs.get(str(context.run_kind))
             if graph is None:
                 raise RuntimeError("the requested agent profile is unavailable")
@@ -2301,30 +2357,34 @@ class DeepAgentService:
         context: AgentRunContext,
     ) -> ResolvedInferencePlan:
         default = self._default_inference_plan()
-        if context.trust_class != "owner" or context.run_kind != AgentRunKind.OWNER.value:
-            return default
-        if self._agent_specs is not None:
-            spec = self._agent_specs.get_revision(context.agent_spec)
-            if spec is not None and spec.model_alias != "default":
-                return self._effective_spec_plan(spec, default)
         db = self._require_runs_db()
         cursor = await db.execute(
             """
             SELECT revision, selection_json
-            FROM thread_inference_preferences
-            WHERE tenant_id = ? AND thread_id = ?
+            FROM tenant_inference_preferences
+            WHERE tenant_id = ?
             """,
-            (context.tenant_id, context.thread_id),
+            (context.tenant_id,),
         )
         row = await cursor.fetchone()
         await cursor.close()
-        if row is None or not str(row["selection_json"] or "").strip():
-            return default
-        selection = InferenceSelection.model_validate_json(str(row["selection_json"]))
-        return ResolvedInferencePlan.resolve(
-            selection,
-            preference_revision=int(row["revision"] or 0),
-        )
+        plan = default
+        if row is not None:
+            raw_selection = str(row["selection_json"] or "")
+            selection = (
+                InferenceSelection.model_validate_json(raw_selection)
+                if raw_selection.strip()
+                else default.primary
+            )
+            plan = ResolvedInferencePlan.resolve(
+                selection,
+                preference_revision=int(row["revision"] or 0),
+            )
+        if self._agent_specs is not None:
+            spec = self._agent_specs.get_revision(context.agent_spec)
+            if spec is not None and spec.model_alias != "default":
+                return self._effective_spec_plan(spec, plan)
+        return plan
 
     def _effective_spec_plan(
         self,
@@ -2641,7 +2701,8 @@ class DeepAgentService:
         self._require_started()
         if context.run_kind != AgentRunKind.INTAKE.value:
             raise ValueError("intake decisions require run_kind=intake")
-        graph = self._graph_for_context(context)
+        inference_plan = await self._resolve_inference_plan(context)
+        graph = self._graph_for_context(context, inference_plan=inference_plan)
         checkpoint_thread_id = self._checkpoint_thread_id(context)
         graph_input = {
             "messages": [
@@ -2657,11 +2718,19 @@ class DeepAgentService:
             ]
         }
         async with self._checkpoint_lock(checkpoint_thread_id):
-            with self._trace_context(context, graph_input):
+            with self._trace_context(
+                context,
+                graph_input,
+                inference_plan=inference_plan,
+            ):
                 async with asyncio.timeout(self._runtime_limit_for_context(context)):
                     state = await graph.ainvoke(
                         graph_input,
-                        config=self._run_config(context, checkpoint_thread_id),
+                        config=self._run_config(
+                            context,
+                            checkpoint_thread_id,
+                            inference_plan=inference_plan,
+                        ),
                         context=context,
                     )
         response = state.get("structured_response") if isinstance(state, dict) else None
@@ -2727,9 +2796,7 @@ class DeepAgentService:
         }
         if "source_release" in tool_names:
             # Keep release handoff restart-safe without surfacing an approval.
-            policy["source_release"] = InterruptOnConfig(
-                allowed_decisions=list(_OWNER_DECISIONS)
-            )
+            policy["source_release"] = InterruptOnConfig(allowed_decisions=list(_OWNER_DECISIONS))
         return policy
 
     @staticmethod
@@ -2826,9 +2893,7 @@ class DeepAgentService:
                                     else pending_ai_chunk + message
                                 )
                                 if message.chunk_position == "last":
-                                    message_events.extend(
-                                        self._tool_start_events(pending_ai_chunk)
-                                    )
+                                    message_events.extend(self._tool_start_events(pending_ai_chunk))
                                     pending_ai_chunk = None
                             elif isinstance(message, ToolMessage) and pending_ai_chunk is not None:
                                 message_events = [
@@ -2851,8 +2916,7 @@ class DeepAgentService:
                         if approvals:
                             interrupted = True
                             if context.run_kind == AgentRunKind.OWNER.value and any(
-                                approval.tool_name == "source_release"
-                                for approval in approvals
+                                approval.tool_name == "source_release" for approval in approvals
                             ):
                                 decided = [
                                     replace(approval, status="approve")
@@ -2861,9 +2925,7 @@ class DeepAgentService:
                                     for approval in approvals
                                 ]
                                 pending = [
-                                    approval
-                                    for approval in decided
-                                    if approval.status == "pending"
+                                    approval for approval in decided if approval.status == "pending"
                                 ]
                                 updated = await self._update_run(
                                     run_id,
@@ -2930,8 +2992,7 @@ class DeepAgentService:
             final_text = "".join(final_parts).strip()
             if _is_model_provider_failure(exc) and final_text:
                 logger.warning(
-                    "Model provider failed after emitting output; preserving response: "
-                    "run_id=%s",
+                    "Model provider failed after emitting output; preserving response: run_id=%s",
                     run_id,
                 )
                 event = await self._transition_with_event(

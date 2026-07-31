@@ -239,7 +239,7 @@ describe("V2 event transport", () => {
     expect(requests[0]?.signal.aborted).toBe(true)
   })
 
-  test("updates only the current thread inference preference", async () => {
+  test("updates the global inference preference", async () => {
     let request: Request | undefined
     globalThis.fetch = (async (input, init) => {
       request = new Request(input, init)
@@ -263,7 +263,7 @@ describe("V2 event transport", () => {
     }) as typeof fetch
     const api = new OpenTulpaApi({ url: "https://tulpa.test", token: "owner", thread_id: "thread-1" })
 
-    const result = await api.updateThreadInference("thread-1", 2, {
+    const result = await api.updateInferencePreference(2, {
       provider: "codex",
       model: "gpt-test",
       reasoning_effort: "high",
@@ -272,7 +272,7 @@ describe("V2 event transport", () => {
     })
 
     expect(result.revision).toBe(3)
-    expect(request?.url).toBe("https://tulpa.test/v2/agent/threads/thread-1/inference")
+    expect(request?.url).toBe("https://tulpa.test/v2/inference/selection")
     expect(request?.method).toBe("PATCH")
     expect(await request?.json()).toEqual({
       expected_revision: 2,

@@ -84,10 +84,7 @@ class _Handler(BaseHTTPRequestHandler):
                 }
             )
             return
-        if path in {
-            "/v2/agent/threads/thread-smoke/inference",
-            "/v2/agent/threads/thread-new/inference",
-        }:
+        if path == "/v2/inference/selection":
             self._json(
                 {
                     "revision": 0,

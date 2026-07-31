@@ -118,8 +118,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { value: "/new", description: "Start a new session" },
   { value: "/sessions", description: "Browse previous sessions" },
   { value: "/session", description: "Open a session by name or number", acceptsArgument: true },
-  { value: "/model", description: "Choose the provider and model" },
-  { value: "/reasoning", description: "Choose the reasoning effort" },
+  { value: "/model", description: "Choose the global provider and model" },
+  { value: "/reasoning", description: "Choose the global reasoning effort" },
   { value: "/speed", description: "Choose normal or fast Codex inference" },
   { value: "/repo", description: "Open or inspect a repository workspace", acceptsArgument: true },
   { value: "/repos", description: "List repository workspaces" },
@@ -232,7 +232,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     setStatus("Loading session")
     const [timeline, preference, activeRepository] = await Promise.all([
       api.timeline(threadId),
-      api.threadInference(threadId),
+      api.inferencePreference(),
       api.activeRepository(threadId),
     ])
     let restored = turnsFromTimeline(timeline.entries)
@@ -694,15 +694,13 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
   }
 
   const applyInferenceSelection = async (selection: InferenceSelection | null) => {
-    const selectedThread = thread()
     const current = inference()
-    if (!selectedThread || !current || busy()) return
+    if (!current || busy()) return
     setPicker(undefined)
     setError("")
     setStatus("Updating model")
     try {
-      const updated = await api.updateThreadInference(
-        selectedThread.thread_id,
+      const updated = await api.updateInferencePreference(
         current.revision,
         selection,
       )
@@ -712,7 +710,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       setStatus("Failed")
       setError(message(cause))
       try {
-        setInference(await api.threadInference(selectedThread.thread_id))
+        setInference(await api.inferencePreference())
       } catch {}
     }
   }
@@ -777,7 +775,7 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
       items.push({
         id: "connect-codex",
         label: "Connect ChatGPT Codex",
-        detail: "Use a ChatGPT subscription for this conversation",
+        detail: "Use a ChatGPT subscription for all OpenTulpa operations",
         select: () => void startCodexLogin(),
       })
     }
@@ -1004,10 +1002,10 @@ export function App(props: { config: ClientConfig; onConnectionChange: (threadId
     else if (name === "/logout" && parts[0] === "codex") {
       try {
         const result = await api.logoutCodex(parts.includes("confirm"))
-        if (result.reset_threads && thread()) setInference(await api.threadInference(thread()!.thread_id))
+        if (result.reset_threads) setInference(await api.inferencePreference())
         setError(result.disconnected ? "Codex signed out." : "Codex was not connected.")
       } catch (cause) {
-        setError(`${message(cause)} Use /logout codex confirm to reset Codex conversations.`)
+        setError(`${message(cause)} Use /logout codex confirm to reset the global Codex selection.`)
       }
     } else if (name === "/cancel") await cancelActive()
     else if (name === "/logs") {

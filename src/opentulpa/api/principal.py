@@ -84,6 +84,16 @@ _CAPABILITY_ROUTE_SCOPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         CapabilityAPIScope.AGENT_RUN_REPLAY.value,
     ),
     (
+        "GET",
+        re.compile(r"^/v2/inference/selection$"),
+        CapabilityAPIScope.AGENT_RUN_REPLAY.value,
+    ),
+    (
+        "PATCH",
+        re.compile(r"^/v2/inference/selection$"),
+        CapabilityAPIScope.AGENT_RUN_SUBMIT.value,
+    ),
+    (
         "POST",
         re.compile(r"^/v2/inference/codex/device-logins$"),
         CapabilityAPIScope.AGENT_RUN_SUBMIT.value,

@@ -69,9 +69,7 @@ class _Telegram:
         text: str,
         reply_markup: dict[str, Any] | None = None,
     ) -> list[int]:
-        self.messages.append(
-            {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
-        )
+        self.messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return [len(self.messages)]
 
     async def send_chat_action(self, *, chat_id: int, action: str = "typing") -> None:
@@ -159,20 +157,17 @@ class _Agent:
     async def ensure_thread(self, thread_id: str) -> None:
         self.ensured_threads.append(thread_id)
 
-    async def get_thread_inference(self, thread_id: str) -> dict[str, Any]:
-        del thread_id
+    async def get_owner_inference(self) -> dict[str, Any]:
         return dict(self.inference)
 
-    async def update_thread_inference(
+    async def update_owner_inference(
         self,
-        thread_id: str,
         *,
         expected_revision: int,
         selection: Mapping[str, Any],
     ) -> dict[str, Any]:
         self.inference_updates.append(
             {
-                "thread_id": thread_id,
                 "expected_revision": expected_revision,
                 "selection": dict(selection),
             }
@@ -238,11 +233,7 @@ class _Agent:
 
     async def list_notifications(self, **kwargs: Any) -> list[AgentNotification]:
         self.notification_requests.append(kwargs)
-        return [
-            item
-            for item in self.notifications
-            if item.id > int(kwargs.get("after_id") or 0)
-        ]
+        return [item for item in self.notifications if item.id > int(kwargs.get("after_id") or 0)]
 
     async def acknowledge_notification(self, notification_id: int) -> None:
         if self.fail_notification_ack:
@@ -370,9 +361,7 @@ async def test_rapid_text_messages_start_one_agent_run(
     await poll
 
     assert len(agent.starts) == 1
-    assert agent.starts[0]["text"] == "\n\n".join(
-        f"part {index}" for index in range(1, 7)
-    )
+    assert agent.starts[0]["text"] == "\n\n".join(f"part {index}" for index in range(1, 7))
     assert agent.starts[0]["source_event_id"] == "telegram:99:1"
     assert state.pending_updates() == []
     assert state.next_update_id == 7
@@ -415,14 +404,13 @@ async def test_inference_and_codex_commands_use_agent_api_without_starting_runs(
 
     assert await worker.poll_once() == 3
 
-    thread_id = state.thread_id(9)
-    assert agent.ensured_threads == [thread_id, thread_id, thread_id]
+    assert agent.ensured_threads == []
     assert agent.starts == []
     assert agent.inference_updates[0]["selection"]["reasoning_effort"] == "ultra"
     assert state.codex_login(9) == "login-1"
     assert [message["text"].splitlines()[0] for message in telegram.messages] == [
-        "Current model:",
-        "Reasoning updated:",
+        "Global model:",
+        "Global reasoning updated:",
         "Connect Codex:",
     ]
 
@@ -456,7 +444,7 @@ async def test_terminal_codex_login_status_starts_over(
 
 
 @pytest.mark.asyncio
-async def test_fresh_conversation_preserves_explicit_model_selection(tmp_path: Path) -> None:
+async def test_fresh_conversation_keeps_global_model_without_copying_it(tmp_path: Path) -> None:
     telegram = _Telegram([_message(1, text="/fresh")])
     agent = _Agent()
     selection = {
@@ -484,14 +472,8 @@ async def test_fresh_conversation_preserves_explicit_model_selection(tmp_path: P
 
     replacement_thread_id = state.thread_id(9)
     assert replacement_thread_id != current_thread_id
-    assert agent.ensured_threads == [current_thread_id, replacement_thread_id]
-    assert agent.inference_updates == [
-        {
-            "thread_id": replacement_thread_id,
-            "expected_revision": 0,
-            "selection": selection,
-        }
-    ]
+    assert agent.ensured_threads == [replacement_thread_id]
+    assert agent.inference_updates == []
     assert telegram.messages[-1]["text"] == "Started a fresh conversation."
 
 
@@ -654,12 +636,8 @@ async def test_tool_progress_flushes_throttled_text_and_finishes_cleanly(
     await worker.poll_once()
 
     assert telegram.messages[0]["text"] == "Good"
-    assert telegram.edits[0]["text"] == (
-        "Good question.\n\nWorking: Delegating work (0s)..."
-    )
-    assert telegram.edits[1]["text"] == (
-        "Good question.\n\nWorking: Finishing response (0s)..."
-    )
+    assert telegram.edits[0]["text"] == ("Good question.\n\nWorking: Delegating work (0s)...")
+    assert telegram.edits[1]["text"] == ("Good question.\n\nWorking: Finishing response (0s)...")
     assert telegram.edits[-1]["text"] == "Finished."
 
 
@@ -982,9 +960,7 @@ async def test_background_notifications_and_approvals_deliver_to_paired_owner(
         poll_timeout_seconds=1,
     )
     await restarted.recover()
-    assert [item["text"] for item in telegram.messages].count(
-        "The scheduled run is waiting."
-    ) == 1
+    assert [item["text"] for item in telegram.messages].count("The scheduled run is waiting.") == 1
 
 
 @pytest.mark.asyncio

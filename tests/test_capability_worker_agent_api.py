@@ -320,7 +320,7 @@ async def test_interface_controls_use_scoped_agent_api_routes() -> None:
             return httpx.Response(200, json={"thread_id": "thread_1"})
         if path == "/v2/inference":
             return httpx.Response(200, json={"codex": {"connected": False}})
-        if path.endswith("/inference") and request.method == "GET":
+        if path == "/v2/inference/selection" and request.method == "GET":
             return httpx.Response(
                 200,
                 json={
@@ -328,7 +328,7 @@ async def test_interface_controls_use_scoped_agent_api_routes() -> None:
                     "effective": {"provider": "api", "model": "openai/gpt-5.2"},
                 },
             )
-        if path.endswith("/inference") and request.method == "PATCH":
+        if path == "/v2/inference/selection" and request.method == "PATCH":
             assert json.loads(request.content) == {
                 "expected_revision": 0,
                 "selection": {
@@ -379,9 +379,8 @@ async def test_interface_controls_use_scoped_agent_api_routes() -> None:
     )
 
     await client.ensure_thread("thread_1")
-    current = await client.get_thread_inference("thread_1")
-    updated = await client.update_thread_inference(
-        "thread_1",
+    current = await client.get_owner_inference()
+    updated = await client.update_owner_inference(
         expected_revision=0,
         selection={"provider": "codex", "model": "gpt-5.2-codex"},
     )

@@ -76,9 +76,9 @@ _TELEGRAM_COMMANDS = [
     {"command": "start", "description": "Show connection help"},
     {"command": "fresh", "description": "Start a new conversation"},
     {"command": "regenerate", "description": "Regenerate the last response"},
-    {"command": "model", "description": "Show or select the model"},
+    {"command": "model", "description": "Show or select the global model"},
     {"command": "models", "description": "List available models"},
-    {"command": "reasoning", "description": "Set reasoning effort"},
+    {"command": "reasoning", "description": "Set global reasoning effort"},
     {"command": "codex", "description": "Connect or inspect Codex"},
     {"command": "cancel", "description": "Cancel the active run or approval edit"},
 ]
@@ -91,11 +91,10 @@ class WorkerConfigurationError(RuntimeError):
 class AgentRunClient(Protocol):
     async def ensure_thread(self, thread_id: str) -> None: ...
 
-    async def get_thread_inference(self, thread_id: str) -> dict[str, Any]: ...
+    async def get_owner_inference(self) -> dict[str, Any]: ...
 
-    async def update_thread_inference(
+    async def update_owner_inference(
         self,
-        thread_id: str,
         *,
         expected_revision: int,
         selection: Mapping[str, Any],
@@ -384,7 +383,7 @@ def _stream_preview(text: str) -> str:
     resolved = str(text or "").strip()
     if len(resolved) <= _STREAM_PREVIEW_CHARS:
         return resolved
-    return "…\n" + resolved[-(_STREAM_PREVIEW_CHARS - 2):]
+    return "…\n" + resolved[-(_STREAM_PREVIEW_CHARS - 2) :]
 
 
 def _format_progress_elapsed(seconds: float) -> str:
@@ -756,17 +755,8 @@ class TelegramInterfaceWorker:
             return
         if command == "/fresh":
             current_thread_id = self._state.thread_id(chat_id)
-            await self._agent.ensure_thread(current_thread_id)
-            current = await self._agent.get_thread_inference(current_thread_id)
             replacement_thread_id = self._state.new_thread_id(chat_id)
             await self._agent.ensure_thread(replacement_thread_id)
-            selection = current.get("selection")
-            if isinstance(selection, Mapping):
-                await self._agent.update_thread_inference(
-                    replacement_thread_id,
-                    expected_revision=0,
-                    selection=selection,
-                )
             self._state.replace_thread(
                 chat_id,
                 expected_thread_id=current_thread_id,
@@ -866,8 +856,7 @@ class TelegramInterfaceWorker:
         await self._telegram.send_message(
             chat_id=chat_id,
             text=(
-                "OpenTulpa is paired with this Telegram account. "
-                "Send a request or attach files."
+                "OpenTulpa is paired with this Telegram account. Send a request or attach files."
             ),
         )
         self._complete(update_id=update_id, source_event_id=source_event_id)
@@ -1116,7 +1105,9 @@ class TelegramInterfaceWorker:
                         rendered_text=streamer.rendered_text,
                     )
                     if event.type == "run.completed":
-                        final_text = str(event.data.get("text") or "").strip() or accumulated.strip()
+                        final_text = (
+                            str(event.data.get("text") or "").strip() or accumulated.strip()
+                        )
                         await streamer.finish(final_text or "The run completed without a message.")
                         self._complete(
                             update_id=update_id,
@@ -1386,9 +1377,7 @@ def read_secret(
     direct = environment.pop(env_name, None)
     raw_fd = environment.pop(fd_env_name, None)
     if direct is not None and raw_fd is not None:
-        raise WorkerConfigurationError(
-            f"Configure only one of {env_name} and {fd_env_name}."
-        )
+        raise WorkerConfigurationError(f"Configure only one of {env_name} and {fd_env_name}.")
     value: str | None = None
     if raw_fd is not None:
         try:
@@ -1436,10 +1425,7 @@ async def run_from_environment(
     state_path = Path(
         environment.get(
             "OPENTULPA_TELEGRAM_STATE_PATH",
-            str(
-                capability_config.get("state_path")
-                or "~/.opentulpa/telegram-worker.json"
-            ),
+            str(capability_config.get("state_path") or "~/.opentulpa/telegram-worker.json"),
         )
     )
     state = TelegramWorkerState(state_path)
@@ -1557,9 +1543,7 @@ def _bounded_environment_int(
     except ValueError as exc:
         raise WorkerConfigurationError(f"{name} must be an integer.") from exc
     if not minimum <= value <= maximum:
-        raise WorkerConfigurationError(
-            f"{name} must be between {minimum} and {maximum}."
-        )
+        raise WorkerConfigurationError(f"{name} must be between {minimum} and {maximum}.")
     return value
 
 
@@ -1572,13 +1556,9 @@ def _capability_config(environ: Mapping[str, str]) -> dict[str, Any]:
     try:
         value = json.loads(raw)
     except ValueError as exc:
-        raise WorkerConfigurationError(
-            "OPENTULPA_CAPABILITY_CONFIG must be valid JSON."
-        ) from exc
+        raise WorkerConfigurationError("OPENTULPA_CAPABILITY_CONFIG must be valid JSON.") from exc
     if not isinstance(value, dict):
-        raise WorkerConfigurationError(
-            "OPENTULPA_CAPABILITY_CONFIG must be a JSON object."
-        )
+        raise WorkerConfigurationError("OPENTULPA_CAPABILITY_CONFIG must be a JSON object.")
     allowed = {
         "agent_api_url",
         "max_attachment_bytes",
@@ -1586,9 +1566,7 @@ def _capability_config(environ: Mapping[str, str]) -> dict[str, Any]:
         "state_path",
     }
     if set(value).difference(allowed):
-        raise WorkerConfigurationError(
-            "OPENTULPA_CAPABILITY_CONFIG contains unsupported fields."
-        )
+        raise WorkerConfigurationError("OPENTULPA_CAPABILITY_CONFIG contains unsupported fields.")
     return value
 
 
@@ -1597,7 +1575,9 @@ def _config_int(config: Mapping[str, Any], name: str, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
-        raise WorkerConfigurationError(f"Capability config field {name} must be an integer.") from exc
+        raise WorkerConfigurationError(
+            f"Capability config field {name} must be an integer."
+        ) from exc
 
 
 def _approval_matches(
@@ -1609,9 +1589,10 @@ def _approval_matches(
     if record is None:
         return False
     try:
-        return int(record.get("chat_id") or 0) == chat_id and int(
-            record.get("user_id") or 0
-        ) == user_id
+        return (
+            int(record.get("chat_id") or 0) == chat_id
+            and int(record.get("user_id") or 0) == user_id
+        )
     except (TypeError, ValueError):
         return False
 
@@ -1636,12 +1617,7 @@ def _coalescible_text(
     chat = message.get("chat")
     user_id = _positive_int(sender.get("id")) if isinstance(sender, dict) else None
     chat_id = _telegram_chat_id(chat.get("id")) if isinstance(chat, dict) else None
-    if (
-        not text
-        or _command(text)[0].startswith("/")
-        or user_id is None
-        or chat_id is None
-    ):
+    if not text or _command(text)[0].startswith("/") or user_id is None or chat_id is None:
         return None
     return user_id, chat_id, text
 

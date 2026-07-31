@@ -91,6 +91,33 @@ class _Threads:
     revision: int = 0
     resets: int = 0
 
+    async def get_owner_inference(self, *, tenant_id: str) -> dict[str, Any]:
+        effective = self.selection or InferenceSelection(
+            provider="api",
+            model="kimi",
+            reasoning_effort="low",
+        )
+        return {
+            "scope": "owner",
+            "tenant_seen": tenant_id,
+            "revision": self.revision,
+            "selection": self.selection.model_dump(mode="json") if self.selection else None,
+            "effective": effective.model_dump(mode="json"),
+        }
+
+    async def update_owner_inference(
+        self,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        selection: InferenceSelection | None,
+    ) -> dict[str, Any]:
+        if expected_revision != self.revision:
+            raise RuntimeError("unexpected test revision")
+        self.revision += 1
+        self.selection = selection
+        return await self.get_owner_inference(tenant_id=tenant_id)
+
     async def get_thread_inference(
         self, *, tenant_id: str, thread_id: str
     ) -> dict[str, Any] | None:
@@ -152,13 +179,13 @@ def _client(*, trust_class: str = "owner") -> tuple[TestClient, _Inference, _Thr
     return TestClient(app), inference, threads
 
 
-def test_inference_routes_use_authenticated_tenant_and_revisioned_thread_selection() -> None:
+def test_inference_routes_use_authenticated_tenant_and_revisioned_global_selection() -> None:
     client, _, threads = _client()
 
     status = client.get("/v2/inference").json()
     models = client.get("/v2/inference/models?provider=codex&query=gpt").json()
     updated = client.patch(
-        "/v2/agent/threads/thread-1/inference",
+        "/v2/inference/selection",
         json={
             "expected_revision": 0,
             "selection": {
@@ -175,15 +202,19 @@ def test_inference_routes_use_authenticated_tenant_and_revisioned_thread_selecti
     assert models["models"][0]["id"] == "gpt-test"
     assert updated.status_code == 200
     assert updated.json()["revision"] == 1
+    assert updated.json()["scope"] == "owner"
     assert threads.selection is not None and threads.selection.provider == "codex"
     assert threads.selection.service_tier == "priority"
-    assert (
-        client.get(
-            "/v2/agent/threads/thread-1/inference",
-            headers={"x-tenant-id": "tenant-b"},
-        ).status_code
-        == 404
+    other_tenant = client.get(
+        "/v2/inference/selection",
+        headers={"x-tenant-id": "tenant-b"},
     )
+    assert other_tenant.status_code == 200
+    assert other_tenant.json()["tenant_seen"] == "tenant-b"
+
+    legacy = client.get("/v2/agent/threads/thread-1/inference")
+    assert legacy.status_code == 200
+    assert legacy.json()["revision"] == 1
 
 
 def test_device_login_is_sanitized_and_non_owner_is_denied() -> None:

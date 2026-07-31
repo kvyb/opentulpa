@@ -76,16 +76,15 @@ export class OpenTulpaApi {
     return result.models
   }
 
-  async threadInference(threadId: string): Promise<InferencePreference> {
-    return this.json(`/v2/agent/threads/${encodeURIComponent(threadId)}/inference`)
+  async inferencePreference(): Promise<InferencePreference> {
+    return this.json("/v2/inference/selection")
   }
 
-  async updateThreadInference(
-    threadId: string,
+  async updateInferencePreference(
     expectedRevision: number,
     selection: InferenceSelection | null,
   ): Promise<InferencePreference> {
-    return this.json(`/v2/agent/threads/${encodeURIComponent(threadId)}/inference`, {
+    return this.json("/v2/inference/selection", {
       method: "PATCH",
       body: JSON.stringify({ expected_revision: expectedRevision, selection }),
     })

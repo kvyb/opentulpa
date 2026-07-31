@@ -1,4 +1,4 @@
-"""Owner-only V2 APIs for conversation-scoped inference selection."""
+"""Owner-only V2 APIs for global inference selection."""
 
 from __future__ import annotations
 
@@ -23,6 +23,16 @@ from opentulpa.inference.service import (
 
 
 class ThreadInferencePort(Protocol):
+    async def get_owner_inference(self, *, tenant_id: str) -> dict[str, Any]: ...
+
+    async def update_owner_inference(
+        self,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        selection: InferenceSelection | None,
+    ) -> dict[str, Any]: ...
+
     async def get_thread_inference(
         self, *, tenant_id: str, thread_id: str
     ) -> dict[str, Any] | None: ...
@@ -98,6 +108,32 @@ def register_v2_inference_routes(
             raise HTTPException(status_code=503, detail="model discovery is unavailable") from exc
         return {"provider": provider, "models": [model.model_dump(mode="json") for model in models]}
 
+    @app.get("/v2/inference/selection")
+    async def get_owner_inference(request: Request) -> dict[str, Any]:
+        principal = await owner(request)
+        _, preferences = services()
+        return await preferences.get_owner_inference(tenant_id=principal.tenant_id)
+
+    @app.patch("/v2/inference/selection")
+    async def update_owner_inference(
+        body: ThreadInferenceUpdate,
+        request: Request,
+    ) -> dict[str, Any]:
+        principal = await owner(request, write=True)
+        _, preferences = services()
+        try:
+            return await preferences.update_owner_inference(
+                tenant_id=principal.tenant_id,
+                expected_revision=body.expected_revision,
+                selection=body.selection,
+            )
+        except InferenceConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except InferenceUnavailableError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/v2/inference/codex/device-logins", status_code=201)
     async def start_codex_login(request: Request) -> dict[str, Any]:
         principal = await owner(request, write=True)
@@ -134,7 +170,7 @@ def register_v2_inference_routes(
         if count and not reset_threads:
             raise HTTPException(
                 status_code=409,
-                detail="Codex is selected by existing conversations; confirm reset_threads",
+                detail="Codex is selected globally; confirm reset_threads",
             )
         reset = await threads.reset_codex_preferences(principal.tenant_id) if count else 0
         disconnected = inference.delete_credential(principal.tenant_id)

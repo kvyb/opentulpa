@@ -166,9 +166,7 @@ class AgentAPIClient:
         if last_event_id is not None:
             headers["Last-Event-ID"] = str(max(0, last_event_id))
         if origin_conversation_id:
-            headers["X-OpenTulpa-Origin-Conversation-ID"] = _origin_id(
-                origin_conversation_id
-            )
+            headers["X-OpenTulpa-Origin-Conversation-ID"] = _origin_id(origin_conversation_id)
         if origin_message_id:
             headers["X-OpenTulpa-Origin-Message-ID"] = _origin_id(origin_message_id)
         return headers
@@ -202,9 +200,7 @@ class AgentAPIClient:
             except ValueError:
                 pass
             suffix = f": {detail}" if detail else "."
-            raise AgentAPIError(
-                f"Agent API returned HTTP {response.status_code}{suffix}"
-            )
+            raise AgentAPIError(f"Agent API returned HTTP {response.status_code}{suffix}")
         try:
             payload = response.json()
         except ValueError as exc:
@@ -244,6 +240,24 @@ class AgentAPIClient:
 
     async def inference_status(self) -> dict[str, Any]:
         return await self._request_json("GET", "/v2/inference")
+
+    async def get_owner_inference(self) -> dict[str, Any]:
+        return await self._request_json("GET", "/v2/inference/selection")
+
+    async def update_owner_inference(
+        self,
+        *,
+        expected_revision: int,
+        selection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._request_json(
+            "PATCH",
+            "/v2/inference/selection",
+            json_body={
+                "expected_revision": max(0, int(expected_revision)),
+                "selection": dict(selection),
+            },
+        )
 
     async def list_models(
         self,
@@ -463,9 +477,7 @@ class AgentAPIClient:
             if status in {"completed", "failed", "cancelled", "interrupted"}:
                 terminal_seen_at = terminal_seen_at or loop.time()
                 if loop.time() - terminal_seen_at >= min(5, self._replay_timeout_seconds):
-                    raise AgentAPIError(
-                        "Agent API terminal state is missing its durable event."
-                    )
+                    raise AgentAPIError("Agent API terminal state is missing its durable event.")
             else:
                 terminal_seen_at = None
             await asyncio.sleep(self._replay_poll_seconds)
@@ -543,8 +555,7 @@ class AgentAPIClient:
             raise AgentAPIError("Agent API notification acknowledgement failed.") from exc
         if response.status_code != 204:
             raise AgentAPIError(
-                "Agent API notification acknowledgement returned "
-                f"HTTP {response.status_code}."
+                f"Agent API notification acknowledgement returned HTTP {response.status_code}."
             )
 
 
@@ -593,9 +604,7 @@ def _notification_approval(value: object) -> AgentNotificationApproval:
     try:
         approval_id = _required_text(value["approval_id"])
         tool_name = _required_text(value["tool_name"])
-        description = _required_text(
-            value.get("description") or "Approval required."
-        )
+        description = _required_text(value.get("description") or "Approval required.")
         raw_allowed = value["allowed_decisions"]
     except (KeyError, TypeError, ValueError) as exc:
         raise AgentAPIError("Agent API returned an invalid notification approval.") from exc

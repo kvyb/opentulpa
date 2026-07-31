@@ -524,11 +524,7 @@ def test_codex_repairs_interrupted_tool_history_at_request_boundary(
         ],
         _codex_headers={},
     )
-    outputs = [
-        item
-        for item in completed["input"]
-        if item.get("type") == "function_call_output"
-    ]
+    outputs = [item for item in completed["input"] if item.get("type") == "function_call_output"]
     assert outputs == [
         {
             "type": "function_call_output",
@@ -742,7 +738,9 @@ def test_graph_cache_separates_provider_model_effort_tier_and_is_bounded(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_thread_preference_is_revisioned_owned_and_run_plan_is_pinned(tmp_path: Path) -> None:
+async def test_owner_preference_is_global_revisioned_and_run_plan_is_pinned(
+    tmp_path: Path,
+) -> None:
     inference = _inference(tmp_path)
     service = DeepAgentService(
         api_key="api-secret",
@@ -768,13 +766,13 @@ async def test_thread_preference_is_revisioned_owned_and_run_plan_is_pinned(tmp_
             model="test-model",
             reasoning_effort="high",
         )
-        updated = await service.update_thread_inference(
+        updated = await service.update_owner_inference(
             tenant_id=context.tenant_id,
-            thread_id=context.thread_id,
             expected_revision=0,
             selection=selected,
         )
-        assert updated is not None and updated["revision"] == 1
+        assert updated["scope"] == "owner"
+        assert updated["revision"] == 1
         routine_context = AgentRunContext(
             tenant_id=context.tenant_id,
             actor_id=context.actor_id,
@@ -791,28 +789,45 @@ async def test_thread_preference_is_revisioned_owned_and_run_plan_is_pinned(tmp_
             trust_class="background",
         )
         routine_plan = await service._resolve_inference_plan(routine_context)  # noqa: SLF001
-        assert routine_plan.primary == inference.default_selection
-        with pytest.raises(InferenceConflictError):
-            await service.update_thread_inference(
+        assert routine_plan.primary == selected
+        intake_context = AgentRunContext(
+            tenant_id=context.tenant_id,
+            actor_id="public-user-1",
+            thread_id="intake-thread-1",
+            channel="telegram",
+            run_kind="intake",
+            correlation_id="intake-correlation-1",
+            origin=OriginRef(interface="telegram", source_id="public-chat-1"),
+            agent_spec=AgentSpecRef(
                 tenant_id=context.tenant_id,
-                thread_id=context.thread_id,
+                spec_id="intake",
+                revision=1,
+            ),
+            trust_class="external",
+        )
+        intake_plan = await service._resolve_inference_plan(intake_context)  # noqa: SLF001
+        assert intake_plan.primary == selected
+        with pytest.raises(InferenceConflictError):
+            await service.update_owner_inference(
+                tenant_id=context.tenant_id,
                 expected_revision=0,
                 selection=None,
             )
-        assert (
-            await service.get_thread_inference(
-                tenant_id="other-tenant",
-                thread_id=context.thread_id,
-            )
-            is None
+        other = await service.get_owner_inference(tenant_id="other-tenant")
+        assert other["revision"] == 0
+        assert other["selection"] is None
+
+        legacy = await service.get_thread_inference(
+            tenant_id=context.tenant_id,
+            thread_id=context.thread_id,
         )
+        assert legacy is not None and legacy["revision"] == 1
 
         prepared = await service._prepare_run(  # noqa: SLF001
             AgentRunRequest(context=context, text="Pinned plan")
         )
-        await service.update_thread_inference(
+        await service.update_owner_inference(
             tenant_id=context.tenant_id,
-            thread_id=context.thread_id,
             expected_revision=1,
             selection=None,
         )
@@ -822,3 +837,54 @@ async def test_thread_preference_is_revisioned_owned_and_run_plan_is_pinned(tmp_
         await service.cancel(prepared.run_id)
     finally:
         await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_latest_legacy_thread_preference_migrates_to_global_owner_scope(
+    tmp_path: Path,
+) -> None:
+    runs_path = tmp_path / "runs.db"
+
+    def build_service() -> DeepAgentService:
+        return DeepAgentService(
+            api_key="api-secret",
+            base_url="https://openrouter.ai/api/v1",
+            model_name="test-model",
+            checkpoint_db_path=tmp_path / "checkpoints.db",
+            store_db_path=tmp_path / "store.db",
+            runs_db_path=runs_path,
+            workspaces_root=tmp_path / "workspaces",
+            model=_ToolCapableTextModel(responses=["unused"]),
+            inference_service=_inference(tmp_path),
+        )
+
+    bootstrap = build_service()
+    await bootstrap.start()
+    await bootstrap.shutdown()
+
+    older = InferenceSelection(provider="codex", model="older", reasoning_effort="low")
+    latest = InferenceSelection(provider="api", model="latest", reasoning_effort="high")
+    with sqlite3.connect(runs_path) as connection:
+        connection.execute("DELETE FROM tenant_inference_preferences")
+        connection.executemany(
+            """
+            INSERT INTO thread_inference_preferences (
+                tenant_id, thread_id, revision, selection_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                ("tenant-1", "thread-older", 4, older.model_dump_json(), "2026-01-01T00:00:00Z"),
+                ("tenant-1", "thread-latest", 2, latest.model_dump_json(), "2026-01-02T00:00:00Z"),
+            ),
+        )
+
+    migrated = build_service()
+    await migrated.start()
+    try:
+        preference = await migrated.get_owner_inference(tenant_id="tenant-1")
+        assert preference["scope"] == "owner"
+        assert preference["revision"] == 1
+        assert preference["selection"]["model"] == "latest"
+        assert await migrated.codex_preference_count("tenant-1") == 0
+    finally:
+        await migrated.shutdown()
