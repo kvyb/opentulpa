@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1
 # Keep the general-purpose workspace image small while retaining the tools an
 # agent needs to inspect, modify, and fetch dependencies for ordinary source trees.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends curl git ripgrep \
+    && apt-get install --yes --no-install-recommends curl git openssh-client ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

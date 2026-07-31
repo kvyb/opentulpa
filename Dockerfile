@@ -15,7 +15,7 @@ COPY --from=railway-sandbox-bridge /usr/local/bin/node /usr/local/bin/node
 COPY --from=railway-sandbox-bridge /bridge /app/railway_sandbox_bridge
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl git util-linux \
+    && apt-get install -y --no-install-recommends curl git openssh-client util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1

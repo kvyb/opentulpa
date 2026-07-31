@@ -84,6 +84,8 @@ class RuntimeSupervisor:
         self._lock = asyncio.Lock()
         self._evolution_url: str | None = None
         self._evolution_token: str | None = None
+        self._sandbox_url: str | None = None
+        self._sandbox_token: str | None = None
 
     @property
     def endpoint(self) -> str | None:
@@ -127,6 +129,16 @@ class RuntimeSupervisor:
             raise ValueError("evolution control configuration is invalid")
         self._evolution_url = cleaned_url
         self._evolution_token = cleaned_token
+
+    def configure_sandbox_worker(self, *, base_url: str, token: str) -> None:
+        if self._child is not None:
+            raise RuntimeUnavailableError("cannot change sandbox worker while runtime is running")
+        cleaned_url = str(base_url or "").strip().rstrip("/")
+        cleaned_token = str(token or "").strip()
+        if not cleaned_url.startswith("http://") or len(cleaned_token) < 32:
+            raise ValueError("sandbox worker configuration is invalid")
+        self._sandbox_url = cleaned_url
+        self._sandbox_token = cleaned_token
 
     async def start(self, config: HostConfig) -> None:
         async with self._lock:
@@ -240,6 +252,7 @@ class RuntimeSupervisor:
                 if config.telegram_pairing_code is not None
                 else "",
                 self._evolution_token or "",
+                self._sandbox_token or "",
             )
             if value
         }
@@ -386,6 +399,13 @@ class RuntimeSupervisor:
                     "EVOLUTION_ENABLED": "true",
                     "OPENTULPA_BOOTSTRAP_EVOLUTION_URL": self._evolution_url,
                     "OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN": self._evolution_token,
+                }
+            )
+        if self._sandbox_url is not None and self._sandbox_token is not None:
+            environment.update(
+                {
+                    "OPENTULPA_SANDBOX_RPC_URL": self._sandbox_url,
+                    "OPENTULPA_SANDBOX_RPC_TOKEN": self._sandbox_token,
                 }
             )
         if config.telegram_pairing_code is not None:

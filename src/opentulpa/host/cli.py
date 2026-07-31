@@ -44,6 +44,7 @@ from opentulpa.host.models import HostConfigInput
 from opentulpa.host.runtime import RuntimeSupervisor
 from opentulpa.host.service import HostService
 from opentulpa.host.store import HostStore
+from opentulpa.sandbox.supervisor import SandboxWorkerSupervisor
 from opentulpa.secrets.host_key import load_or_create_host_cipher
 
 
@@ -134,6 +135,15 @@ def build_host_application() -> tuple[Any, str, str, Path]:
             telegram_user_id=telegram_id if telegram_token else None,
         )
     runtime = RuntimeSupervisor(project_root=project_root, data_root=data_root)
+    sandbox = SandboxWorkerSupervisor(
+        project_root=project_root,
+        data_root=data_root,
+        settings=settings,
+    )
+    runtime.configure_sandbox_worker(
+        base_url=sandbox.config.base_url,
+        token=sandbox.config.token,
+    )
     port = int(os.environ.get("PORT") or 8000)
     evolution = build_host_evolution_runtime(
         runtime=runtime,
@@ -158,6 +168,7 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         setup_token=setup_token,
         evolution_service=evolution.service if evolution is not None else None,
         evolution_token=evolution_token if evolution is not None else None,
+        sandbox_supervisor=sandbox,
     )
     return app, host, setup_token, data_root
 

@@ -66,6 +66,8 @@ _NAMED_SECRET_SCOPES: dict[str, tuple[str, ...]] = {
     "github_token": ("github.read", "github.write"),
     "gh_token": ("github.read", "github.write"),
     "browser_use_api_key": ("browser.manage",),
+    "ssh_key": ("ssh.connect",),
+    "ssh_private_key": ("ssh.connect",),
 }
 _PLACEHOLDER_VALUES = frozenset(
     {

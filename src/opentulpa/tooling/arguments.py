@@ -361,6 +361,27 @@ class SecretHandleRevokeArguments(RequiredIdempotencyArguments):
     expected_revision: int = Field(ge=1)
 
 
+class SandboxSshDiagnosticArguments(ToolArguments):
+    secret_id: ProtocolSlug = Field(
+        description="Tenant-owned secret handle containing an SSH private key.",
+    )
+    host: str = Field(
+        min_length=1,
+        max_length=253,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,252}$",
+    )
+    user: str = Field(
+        default="root",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+    )
+    port: int = Field(default=22, ge=1, le=65_535)
+    command: str = Field(min_length=1, max_length=20_000)
+    timeout_seconds: int = Field(default=60, ge=1, le=600)
+    secret_type: Literal["private_key"] = "private_key"
+
+
 CapabilityName = Annotated[
     str,
     StringConstraints(
@@ -576,6 +597,7 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "trigger_spec_rollback": TriggerSpecRollbackArguments,
         "secret_handle_list": SecretHandleListArguments,
         "secret_handle_revoke": SecretHandleRevokeArguments,
+        "sandbox_ssh_diagnostic": SandboxSshDiagnosticArguments,
         "capability_list": CapabilityListArguments,
         "capability_seed_bundled": CapabilitySeedBundledArguments,
         "capability_test": CapabilityTestArguments,

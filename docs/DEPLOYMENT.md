@@ -1,5 +1,13 @@
 # Deployment
 
+OpenTulpa's default production shape is **Host + Sandbox Worker + Data**.
+The stable host starts or binds a private sandbox worker before reporting readiness.
+If the sandbox canary fails, `/healthz` returns `503` and `/_host` shows the failed
+check. A deployed bot is not operational unless shell execution and SSH diagnostics
+can reach the sandbox. Repository work and source evolution remain sandboxed through
+the existing reviewed execution paths and are the next surfaces to converge onto this
+worker API.
+
 OpenTulpa has three explicit host shapes:
 
 - **Host** is the default. It starts before model configuration and owns setup, owner
@@ -38,11 +46,11 @@ The launcher installs only the lean core unless `OPENTULPA_EXTRAS` is set. Use
 `documents`, `research`, and `hosted-sandbox`; managed installation bakes the same
 selection into the reviewed runtime base.
 
-Tenant shell tools need an isolated OCI engine because `TenantContainerBackend` never
-executes commands directly on the application host. Direct startup auto-detects
-rootless Podman/Docker and recognizes Docker Desktop or OrbStack's macOS VM boundary.
-If none is available, chat starts with shell execution disabled. Managed mode never
-uses that degraded path and additionally requires:
+Tenant shell tools must go through a sandbox. The default stable host starts a
+private sandbox worker automatically and refuses health if the worker cannot execute
+its canary. Local/VPS installs may use rootless Podman/Docker internally, while
+Railway-compatible Linux containers use the bundled restricted process worker with
+`setpriv`, `prlimit`, and a secret-free workspace. Managed mode additionally requires:
 
 - a rootless Docker or Podman engine available to the bootstrap;
 - a persistent canonical Git checkout;
@@ -332,7 +340,7 @@ Install only what the deployment uses:
 | `integrations` | Composio SDK and LangChain provider | Tenant-owned SaaS connections after an environment key or encrypted owner-chat key is configured |
 | `documents` | PDF, workbook, and encoding parsers | Additional file-analysis formats |
 | `research` | Crawl4AI | Richer content extraction; bounded built-in extraction remains available without it |
-| `hosted-sandbox` | Daytona and its Deep Agents backend | Optional hosted repository workspaces; local repository isolation remains the default |
+| `hosted-sandbox` | Hosted workspace adapters such as Daytona | Optional remote repository workspaces; the mandatory sandbox worker remains the default |
 | `bundled` | All of the above | Convenience image for a full adapter set |
 
 Examples:
@@ -344,14 +352,13 @@ uv sync --no-dev --extra browser
 ```env
 BROWSER_USE_API_KEY=...  # required when browser tools are enabled
 COMPOSIO_API_KEY=...     # optional SaaS integration provider
-DAYTONA_API_KEY=...      # optional hosted repository sandboxes
 GITHUB_TOKEN=...         # optional private checkout or direct-Git publishing fallback
 ```
 
 The environment variables remain suitable for unattended bootstrap. An authenticated
 owner may instead send `COMPOSIO_API_KEY=<value>` in chat; credential ingress stores it
 as `secret://composio_api_key`, and the trusted adapter hot-loads it without restarting.
-The same ingress accepts `DAYTONA_API_KEY=<value>` and `GITHUB_TOKEN=<value>`.
+The same ingress accepts `GITHUB_TOKEN=<value>`.
 No optional adapter receives credentials through model-visible arguments. Browser and
 Composio actions execute without per-call approval after normal authorization checks.
 Browser navigation requires explicit allowed domains and rejects direct private and
@@ -363,11 +370,12 @@ nor connected-account credentials are mounted or exported into sandbox processes
 
 ## Docker Compose And Railway
 
-The included `docker-compose.yml` and `railway.toml` start the stable host plus its
-Deep Agents child. The image bundles a secret-free source seed and fixed evaluation
-dependencies. On first boot the host creates persistent Git lineage; source commands
-run as an unprivileged UID with no inherited credentials, while the stable host alone
-commits, evaluates, activates, health-checks, and rolls back the child.
+The included `docker-compose.yml` and `railway.toml` start the stable host, its
+private sandbox worker, and the replaceable Deep Agents child. The image bundles a
+secret-free source seed, SSH client, and fixed evaluation dependencies. On first boot
+the host creates persistent Git lineage; sandbox commands run with no inherited
+credentials, while the stable host alone commits, evaluates, activates,
+health-checks, and rolls back the child.
 
 For Docker Compose:
 
@@ -378,20 +386,20 @@ docker compose up --build
 Persist the volume mounted at `/app/opentulpa_data` and set
 `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
 
-For Railway, configure:
+For Railway, configure only the durable data root and any unattended credentials:
 
 - `OPENTULPA_DATA_ROOT=/app/opentulpa_data` with a persistent volume;
 - optionally `OPENAI_COMPATIBLE_API_KEY` and `OPENTULPA_OWNER_TOKEN` for unattended boot.
 
 Without an owner token, read the one-time pairing code from the first startup log and
 claim the deployment at `/_host`. Configure Telegram there; polling needs no webhook.
-Repository work requires no sandbox credential. Local machines use a rootless OCI engine when
-available. A compatible Linux container running as root with `setpriv` and `prlimit` uses the
-bundled unprivileged process backend automatically; commands receive no host environment or service
-credentials, run under fixed resource limits, and are serialized across workspaces. The checkout
-persists on the OpenTulpa volume. This process boundary is intended for a single-active-process,
-owner-operated deployment; choose the explicit `daytona` provider for stronger VM isolation,
-multi-replica operation, or a workspace lifecycle independent of the OpenTulpa volume.
+Repository work requires no user-provided sandbox credential. A compatible Linux
+container running as root with `setpriv`, `prlimit`, and `ssh` starts the mandatory
+sandbox worker automatically; commands receive no host environment or service
+credentials, run under fixed resource limits, and are serialized across workspaces.
+The checkout persists on the OpenTulpa volume. This process boundary is intended for
+a single-active-process, owner-operated deployment; advanced remote VM workspace
+providers remain optional and are not part of the default Railway setup.
 
 An active tenant-owned Composio GitHub connection can publish a verified single-commit workspace
 through GitHub's Git Data API without exposing OAuth to the sandbox. `GITHUB_TOKEN` is needed only

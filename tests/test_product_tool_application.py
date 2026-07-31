@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from deepagents.backends.protocol import ExecuteResponse
+from pydantic import SecretStr
 
 from opentulpa.application.product_tools import ProductToolApplication
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.persistence.idempotency import IdempotencyStore
 from opentulpa.repositories.providers import RepositorySandboxUnavailableError
+from opentulpa.secrets.models import SecretHandle, SecretState
 from opentulpa.specs import AgentSpecRef, OriginRef
 from opentulpa.tooling.adapters import (
     ProductToolApplicationError,
@@ -52,6 +56,15 @@ class _IdempotencyPort(_Port):
         self.calls.append(("execute", kwargs))
         value = invoke()
         return await value if inspect.isawaitable(value) else value
+
+
+class _SandboxExecutionPort:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def execute(self, **kwargs: Any) -> ExecuteResponse:
+        self.calls.append(kwargs)
+        return ExecuteResponse(output="ssh ok", exit_code=0, truncated=False)
 
 
 def _application(**overrides: Any) -> tuple[ProductToolApplication, dict[str, Any]]:
@@ -638,6 +651,76 @@ async def test_schedule_list_filters_disabled_and_save_passes_typed_write_and_id
     assert save_call[1]["write"].name == "Morning reminder"
     assert saved.data["id"] == "new-schedule"
     assert "tenant_id" not in saved.data
+
+
+@pytest.mark.asyncio
+async def test_sandbox_ssh_diagnostic_mounts_secret_handle_without_plaintext_command() -> None:
+    private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-key\n-----END OPENSSH PRIVATE KEY-----"
+    handle = SecretHandle(
+        tenant_id="tenant-a",
+        id="ssh_private_key",
+        revision=2,
+        name="ssh_private_key",
+        state=SecretState.ACTIVE,
+        scopes=("ssh.connect",),
+        created_at=datetime(2026, 7, 31, tzinfo=UTC),
+        created_by="owner-1",
+    )
+    secret_handles = _Port(
+        get=handle,
+        resolve_for_sandbox=SecretStr(private_key),
+    )
+    sandbox_execution = _SandboxExecutionPort()
+    application, _ = _application(
+        secret_handles=secret_handles,
+        sandbox_execution=sandbox_execution,
+    )
+
+    result = await application.sandbox_ssh_diagnostic(
+        _invocation(
+            "sandbox_ssh_diagnostic",
+            {
+                "secret_id": "ssh_private_key",
+                "host": "178.214.97.1",
+                "user": "root",
+                "port": 22,
+                "command": "ss -tn | wc -l",
+                "timeout_seconds": 30,
+                "secret_type": "private_key",
+            },
+            idempotency_key=None,
+        )
+    )
+
+    assert result.data == {
+        "host": "178.214.97.1",
+        "user": "root",
+        "port": 22,
+        "exit_code": 0,
+        "output": "ssh ok",
+        "truncated": False,
+    }
+    assert secret_handles.calls == [
+        ("get", {"tenant_id": "tenant-a", "secret_id": "ssh_private_key"}),
+        (
+            "resolve_for_sandbox",
+            {
+                "tenant_id": "tenant-a",
+                "actor_id": "owner-1",
+                "secret_id": "ssh_private_key",
+                "scope": "ssh.connect",
+                "mount_type": "ssh_private_key",
+            },
+        ),
+    ]
+    sandbox_call = sandbox_execution.calls[0]
+    assert sandbox_call["tenant_id"] == "tenant-a"
+    assert sandbox_call["timeout"] == 30
+    assert private_key not in sandbox_call["command"]
+    assert "ssh -i \"$OPENTULPA_SSH_IDENTITY\"" in sandbox_call["command"]
+    assert "root@178.214.97.1" in sandbox_call["command"]
+    assert sandbox_call["secret_files"][0].content == private_key
+    assert sandbox_call["secret_files"][0].env == "OPENTULPA_SSH_IDENTITY"
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from pydantic import SecretStr
 
 from opentulpa.secrets.models import SecretHandle, SecretState
 from opentulpa.secrets.vault import (
+    SecretGrantError,
     SecretVault,
     SecretVaultConflictError,
     SecretVaultNotFoundError,
@@ -37,6 +38,34 @@ class SecretVaultService:
 
     def get(self, *, tenant_id: str, secret_id: str) -> SecretHandle | None:
         return self._vault.get_handle(tenant_id=tenant_id, secret_id=secret_id)
+
+    def resolve_for_sandbox(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        secret_id: str,
+        scope: str,
+        mount_type: str,
+    ) -> SecretStr:
+        """Redeem one tenant secret for a trusted one-shot sandbox mount."""
+
+        del actor_id
+        if str(mount_type or "").strip() not in {"ssh_private_key"}:
+            raise SecretGrantError("sandbox secret mount type is unsupported")
+        grant = self._vault.issue_grant(
+            tenant_id=tenant_id,
+            secret_id=secret_id,
+            capability_id="sandbox_ssh_diagnostic",
+            scopes=(scope,),
+            ttl_seconds=60,
+        )
+        material = self._vault.redeem_grant(
+            token=grant.token,
+            capability_id="sandbox_ssh_diagnostic",
+            scope=scope,
+        )
+        return material.value
 
     def create_pending(
         self,

@@ -209,6 +209,11 @@ class ProductToolApplication(Protocol):
         invocation: ProductToolInvocation,
     ) -> ProductToolOutput: ...
 
+    async def sandbox_ssh_diagnostic(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput: ...
+
     async def capability_list(
         self,
         invocation: ProductToolInvocation,
@@ -475,15 +480,18 @@ def _description(spec: ToolSpec) -> str:
             "Inspect source self-update state. available reports whether self-update is usable; "
             "active and session_active report only whether an editable candidate session exists."
         ),
+        "sandbox_ssh_diagnostic": (
+            "Run one SSH diagnostic command from the sandbox using an opaque stored secret handle. "
+            "Never provide plaintext credentials."
+        ),
     }.get(spec.name)
     if description is None:
         action = spec.name.replace("_", " ")
         description = f"{action.capitalize()} for the authenticated OpenTulpa tenant."
-    approval = (
-        "policy (recursive forced removal only)"
-        if spec.approval is ApprovalMode.POLICY
-        else spec.approval.value
-    )
+    if spec.name == "source_shell":
+        approval = "policy (recursive forced removal only)"
+    else:
+        approval = "policy" if spec.approval is ApprovalMode.POLICY else spec.approval.value
     return (
         f"{description} "
         f"Effect: {spec.effect.value}; approval: {approval}; "

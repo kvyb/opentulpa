@@ -68,6 +68,18 @@ main { width: min(1040px, calc(100% - 48px)); margin: 0 auto; flex: 1; }
 h1 { font-size: clamp(36px, 6vw, 68px); line-height: 1.02; letter-spacing: -.065em; margin: 0 0 24px; font-weight: 580; }
 .lede { color: #a0a0a0; font-size: 15px; max-width: 680px; margin: 0; }
 
+.status-panel {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  margin: -24px 0 34px;
+  padding: 14px 16px;
+}
+.status-panel.ready { border-color: rgba(120, 184, 146, .45); }
+.status-panel.failed { border-color: rgba(224, 108, 117, .72); background: rgba(224, 108, 117, .06); }
+.status-panel span { display: block; color: var(--green); font-size: 10px; letter-spacing: .13em; margin-bottom: 7px; }
+.status-panel.failed span { color: var(--red); }
+.status-panel p { color: var(--muted); margin: 0; font-size: 12px; }
+
 .command-panel { display: grid; grid-template-columns: 62px 1fr; border-top: 1px solid var(--border); padding: 32px 0 46px; }
 .line-number { color: #444; font-size: 11px; padding-top: 4px; }
 .panel-body { min-width: 0; }

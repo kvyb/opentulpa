@@ -18,6 +18,7 @@ from opentulpa.deep_agent.service import DeepAgentService
 from opentulpa.integrations.browser_use_cloud import BrowserUseCloudSessionProvider
 from opentulpa.mcp import SQLiteMCPAuditSink, SQLiteMCPIdempotencyStore
 from opentulpa.notifications import TriggerNotificationSink
+from opentulpa.sandbox.client import SandboxWorkerExecutionProvider
 from opentulpa.secrets.host_key import load_or_create_host_cipher
 from opentulpa.tooling import TOOL_SPECS
 
@@ -377,13 +378,35 @@ def test_direct_runtime_resolves_configured_sandbox_to_local_image_id(
     ]
 
 
-def test_direct_runtime_keeps_chat_available_when_sandbox_is_unavailable(
+def test_direct_runtime_fails_closed_when_sandbox_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def unavailable(**_: Any) -> str:
         raise RuntimeError("configured OCI engine must operate in rootless mode")
 
+    monkeypatch.setattr(main_module, "resolve_local_oci_image", unavailable)
+    monkeypatch.setattr(
+        main_module.RestrictedProcessExecutionProvider,
+        "supported",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="requires a healthy sandbox worker"):
+        main_module._sandbox_execution_configuration(  # noqa: SLF001
+            project_root=tmp_path,
+            settings=_settings(tmp_path),
+        )
+
+
+def test_direct_runtime_allows_missing_sandbox_only_in_explicit_dev_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(**_: Any) -> str:
+        raise RuntimeError("configured OCI engine must operate in rootless mode")
+
+    monkeypatch.setenv("OPENTULPA_DEV_ALLOW_NO_SANDBOX", "1")
     monkeypatch.setattr(main_module, "resolve_local_oci_image", unavailable)
     monkeypatch.setattr(
         main_module.RestrictedProcessExecutionProvider,
@@ -435,6 +458,15 @@ def test_direct_railway_runtime_uses_hosted_sandbox_provider(
         "environment-id",
     )
     monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "app-environment-id")
+    bridge = tmp_path / "bridge" / "bridge.mjs"
+    bridge.parent.mkdir()
+    bridge.write_text("", encoding="utf-8")
+    (bridge.parent / "node_modules" / "railway").mkdir(parents=True)
+    (bridge.parent / "node_modules" / "railway" / "package.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH", str(bridge))
 
     image, execution = main_module._sandbox_execution_configuration(  # noqa: SLF001
         project_root=tmp_path,
@@ -444,6 +476,25 @@ def test_direct_railway_runtime_uses_hosted_sandbox_provider(
     assert image == "opentulpa-tenant-sandbox:test"
     assert isinstance(execution, RailwaySandboxExecutionProvider)
     assert execution._environment_id == "environment-id"  # noqa: SLF001
+
+
+def test_direct_runtime_uses_mandatory_sandbox_worker_when_wired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "OPENTULPA_SANDBOX_RPC_URL",
+        "http://127.0.0.1:8787/internal/v1/sandbox",
+    )
+    monkeypatch.setenv("OPENTULPA_SANDBOX_RPC_TOKEN", "s" * 48)
+
+    image, execution = main_module._sandbox_execution_configuration(  # noqa: SLF001
+        project_root=tmp_path,
+        settings=_settings(tmp_path),
+    )
+
+    assert image == "opentulpa-tenant-sandbox:test"
+    assert isinstance(execution, SandboxWorkerExecutionProvider)
 
 
 def test_explicit_railway_runtime_fails_when_project_credentials_are_incomplete(

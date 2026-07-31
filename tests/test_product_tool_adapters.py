@@ -127,11 +127,10 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
         properties = schema.get("properties", {})
         spec = TOOL_SPEC_BY_NAME[tool.name]
         assert f"Effect: {spec.effect.value}" in tool.description
-        approval = (
-            "policy (recursive forced removal only)"
-            if tool.name == "source_shell"
-            else "auto"
-        )
+        if tool.name == "source_shell":
+            approval = "policy (recursive forced removal only)"
+        else:
+            approval = "policy" if spec.approval.value == "policy" else "auto"
         assert f"approval: {approval}" in tool.description
         assert f"execution: {spec.execution.value}" in tool.description
         assert "runtime" not in properties

@@ -26,6 +26,24 @@ function setRuntime(status) {
   $("runtime-label").textContent = `RUNTIME ${String(status || "stopped").toUpperCase()}`;
 }
 
+function setSandbox(sandbox) {
+  const panel = $("sandbox-panel");
+  if (!panel) return;
+  const ok = Boolean(sandbox?.ok);
+  const checks = sandbox?.checks || {};
+  const failed = Object.entries(checks)
+    .filter(([, passed]) => !passed)
+    .map(([name]) => name);
+  panel.classList.remove("hidden", "failed", "ready");
+  panel.classList.add(ok ? "ready" : "failed");
+  $("sandbox-state").textContent = ok
+    ? `SANDBOX READY / ${String(sandbox?.tier || "UNKNOWN").toUpperCase()}`
+    : "SANDBOX FAILED";
+  $("sandbox-detail").textContent = ok
+    ? "Shell and SSH diagnostics can use sandbox execution."
+    : `${sandbox?.error || "Sandbox worker is unavailable."}${failed.length ? ` Failed checks: ${failed.join(", ")}.` : ""}`;
+}
+
 function showAuth(status) {
   $("auth-panel").classList.remove("hidden");
   const needsClaim = !status.claimed;
@@ -40,6 +58,7 @@ function showAuth(status) {
 function render(status) {
   current = status;
   setRuntime(status.runtime.status);
+  setSandbox(status.sandbox);
   if (!status.authenticated) {
     showAuth(status);
     $("config-panel").classList.add("hidden");

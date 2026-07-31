@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 import re
+import shlex
+import threading
 from builtins import list as list_type
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, is_dataclass
@@ -15,14 +18,15 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from opentulpa.integrations.tenant_composio import ComposioProviderError
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.repositories.providers import RepositorySandboxError
 from opentulpa.repositories.service import RepositoryWorkspaceError
+from opentulpa.sandbox.client import SandboxSecretFileMount
 from opentulpa.schedules.models import ScheduleWrite
-from opentulpa.secrets.models import SecretHandle
+from opentulpa.secrets.models import SecretHandle, SecretState
 from opentulpa.specs.models import AgentSpecWrite, TriggerSpec, TriggerSpecWrite
 from opentulpa.specs.protocol import AgentSpecRef
 from opentulpa.tooling.adapters import (
@@ -62,6 +66,9 @@ _SECRET_KEY_RE = re.compile(
 )
 _PUBLIC_SECRET_METADATA_KEYS = frozenset({"secret_scopes"})
 _PROFILE_FIELDS = frozenset({"directive_text", "locale", "utc_offset"})
+_SANDBOX_SSH_SECRET_SCOPES = ("ssh.connect", "credential.use")
+_SSH_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,252}\Z")
+_SSH_USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 
 
 class ProfilePort(Protocol):
@@ -330,6 +337,16 @@ class SecretHandlePort(Protocol):
 
     def get(self, *, tenant_id: str, secret_id: str) -> Any: ...
 
+    def resolve_for_sandbox(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        secret_id: str,
+        scope: str,
+        mount_type: str,
+    ) -> SecretStr: ...
+
     def revoke(
         self,
         *,
@@ -337,6 +354,19 @@ class SecretHandlePort(Protocol):
         actor_id: str,
         secret_id: str,
         expected_revision: int,
+    ) -> Any: ...
+
+
+class SandboxExecutionPort(Protocol):
+    def execute(
+        self,
+        *,
+        tenant_id: str,
+        command: str,
+        timeout: int,
+        workspace: Path | None = None,
+        cancel_event: threading.Event | None = None,
+        secret_files: tuple[SandboxSecretFileMount, ...] = (),
     ) -> Any: ...
 
 
@@ -697,6 +727,44 @@ def _assert_connection_owned(value: Any, tenant_id: str) -> None:
         )
 
 
+def _secret_material(value: Any) -> SecretStr:
+    if isinstance(value, SecretStr):
+        return value
+    return SecretStr(str(value or ""))
+
+
+def _ssh_target(*, host: str, user: str) -> str:
+    clean_host = str(host or "").strip()
+    clean_user = str(user or "").strip()
+    if _SSH_HOST_RE.fullmatch(clean_host) is None:
+        raise ProductToolApplicationError(
+            "invalid_request",
+            "The SSH host is invalid.",
+        )
+    if _SSH_USER_RE.fullmatch(clean_user) is None:
+        raise ProductToolApplicationError(
+            "invalid_request",
+            "The SSH user is invalid.",
+        )
+    return f"{clean_user}@{clean_host}"
+
+
+def _sandbox_ssh_command(
+    *,
+    target: str,
+    port: int,
+    remote_command: str,
+) -> str:
+    return (
+        "mkdir -p .ssh && chmod 700 .ssh && "
+        "ssh -i \"$OPENTULPA_SSH_IDENTITY\" "
+        "-o IdentitiesOnly=yes "
+        "-o UserKnownHostsFile=\"$PWD/.ssh/known_hosts\" "
+        "-o StrictHostKeyChecking=accept-new "
+        f"-p {int(port)} {shlex.quote(target)} -- {shlex.quote(remote_command)}"
+    )
+
+
 async def _resolve(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await cast(Awaitable[Any], value)
@@ -727,6 +795,7 @@ class ProductToolApplication:
         agent_specs: AgentSpecPort | None = None,
         trigger_specs: TriggerSpecPort | None = None,
         secret_handles: SecretHandlePort | None = None,
+        sandbox_execution: SandboxExecutionPort | None = None,
         capabilities: CapabilityPort | None = None,
         on_trigger_spec_changed: Callable[[TriggerSpec], Any] | None = None,
     ) -> None:
@@ -748,6 +817,7 @@ class ProductToolApplication:
         self._agent_specs = agent_specs
         self._trigger_specs = trigger_specs
         self._secret_handles = secret_handles
+        self._sandbox_execution = sandbox_execution
         self._capabilities = capabilities
         self._on_trigger_spec_changed = on_trigger_spec_changed
 
@@ -803,6 +873,18 @@ class ProductToolApplication:
                 "Secret handle management is unavailable in this deployment.",
             )
         return self._secret_handles
+
+    def _require_sandbox_execution(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> SandboxExecutionPort:
+        if invocation.context.run_kind != "owner" or self._sandbox_execution is None:
+            raise ProductToolApplicationError(
+                "capability_unavailable",
+                "Sandbox shell execution is unavailable in this deployment.",
+                retryable=True,
+            )
+        return self._sandbox_execution
 
     def _require_capabilities(self, invocation: ProductToolInvocation) -> CapabilityPort:
         if invocation.context.run_kind != "owner" or self._capabilities is None:
@@ -1704,6 +1786,108 @@ class ProductToolApplication:
                 expected_revision=int(invocation.arguments["expected_revision"]),
             ),
             project=_public_secret_handle,
+        )
+
+    async def sandbox_ssh_diagnostic(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput:
+        sandbox = self._require_sandbox_execution(invocation)
+        secret_service = self._require_secret_handles(invocation)
+        if str(invocation.arguments.get("secret_type") or "").strip() != "private_key":
+            raise ProductToolApplicationError(
+                "invalid_request",
+                "Only SSH private-key secret mounts are supported.",
+            )
+        secret_id = str(invocation.arguments["secret_id"])
+        handle = await self._call(
+            invocation,
+            lambda: secret_service.get(
+                tenant_id=invocation.context.tenant_id,
+                secret_id=secret_id,
+            ),
+            required=True,
+        )
+        secret_handle = (
+            handle if isinstance(handle, SecretHandle) else SecretHandle.model_validate(handle)
+        )
+        if secret_handle.state is not SecretState.ACTIVE:
+            raise ProductToolApplicationError(
+                "not_found",
+                "The requested resource was not found.",
+            )
+        scope = next(
+            (
+                candidate
+                for candidate in _SANDBOX_SSH_SECRET_SCOPES
+                if candidate in secret_handle.scopes
+            ),
+            "",
+        )
+        if not scope:
+            raise ProductToolApplicationError(
+                "invalid_request",
+                "The SSH secret handle is not scoped for sandbox SSH diagnostics.",
+            )
+        try:
+            material = await _resolve(
+                secret_service.resolve_for_sandbox(
+                    tenant_id=invocation.context.tenant_id,
+                    actor_id=invocation.context.actor_id,
+                    secret_id=secret_handle.id,
+                    scope=scope,
+                    mount_type="ssh_private_key",
+                )
+            )
+        except Exception as exc:
+            raise ProductToolApplicationError(
+                "secret_unavailable",
+                "The SSH secret handle could not be mounted.",
+            ) from exc
+        secret_value = _secret_material(material).get_secret_value()
+        host = str(invocation.arguments["host"]).strip()
+        user = str(invocation.arguments["user"]).strip()
+        target = _ssh_target(host=host, user=user)
+        command = _sandbox_ssh_command(
+            target=target,
+            port=int(invocation.arguments["port"]),
+            remote_command=str(invocation.arguments["command"]),
+        )
+        try:
+            result = await asyncio.to_thread(
+                sandbox.execute,
+                tenant_id=invocation.context.tenant_id,
+                command=command,
+                timeout=int(invocation.arguments["timeout_seconds"]),
+                secret_files=(
+                    SandboxSecretFileMount(
+                        name="id_opentulpa",
+                        content=secret_value,
+                        env="OPENTULPA_SSH_IDENTITY",
+                    ),
+                ),
+            )
+        except TypeError as exc:
+            raise ProductToolApplicationError(
+                "capability_unavailable",
+                "Sandbox secret mounts are unavailable in this deployment.",
+                retryable=True,
+            ) from exc
+        except Exception as exc:
+            raise ProductToolApplicationError(
+                "sandbox_execution_failed",
+                "The sandbox SSH diagnostic could not be executed.",
+                retryable=True,
+            ) from exc
+        return ProductToolOutput(
+            data={
+                "host": host,
+                "user": user,
+                "port": int(invocation.arguments["port"]),
+                "exit_code": int(getattr(result, "exit_code", 1)),
+                "output": str(getattr(result, "output", "")),
+                "truncated": bool(getattr(result, "truncated", False)),
+            },
         )
 
     async def capability_list(self, invocation: ProductToolInvocation) -> ProductToolOutput:
