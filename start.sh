@@ -916,10 +916,10 @@ install_tenant_sandbox_image() {
       return 0
     fi
     if process_tenant_sandbox_configured; then
-      log "tenant sandbox image build skipped; using the bundled restricted process sandbox."
+      log "tenant sandbox image build skipped; using the mandatory sandbox worker with restricted process isolation."
       return 0
     fi
-    log "tenant sandbox image build skipped; chat will start with shell execution unavailable."
+    log "tenant sandbox image build skipped; host readiness will require a sandbox worker or explicit dev bypass."
     return 0
   fi
   engine="${OPENTULPA_CONTAINER_CLI:-docker}"
@@ -1231,11 +1231,11 @@ railway_tenant_sandbox_configured() {
 
 warn_without_container_engine() {
   if process_tenant_sandbox_configured; then
-    warn "no isolated OCI engine was found; tenant and repository commands will use the bundled restricted process sandbox."
+    warn "no isolated OCI engine was found; the sandbox worker will use bundled restricted process isolation."
   elif process_repository_sandbox_available; then
-    warn "no isolated OCI engine was found; general tenant shell commands are unavailable, but repository work will use the bundled restricted process sandbox."
+    warn "no isolated OCI engine was found; repository work can use restricted process isolation, but host readiness still requires the sandbox worker canary."
   else
-    warn "no isolated OCI engine was found; chat will start but sandbox shell commands will be unavailable (tenant workspace only; source evolution uses the stable host)."
+    warn "no isolated OCI engine was found and restricted process isolation is unavailable; production host readiness will fail unless a sandbox worker is wired."
   fi
 }
 

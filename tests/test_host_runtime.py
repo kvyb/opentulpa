@@ -42,16 +42,22 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
         base_url="http://127.0.0.1:8000/bootstrap/internal/v1/evolution",
         token="e" * 48,
     )
+    runtime.configure_sandbox_worker(
+        base_url="http://127.0.0.1:8787/internal/v1/sandbox",
+        token="s" * 48,
+    )
     config = _config()
 
     environment = runtime._child_environment(config, port=8123)
     runtime._redaction_values = {
         config.api_key.get_secret_value(),
         config.internal_runtime_token.get_secret_value(),
+        "s" * 48,
     }
     runtime._append_log(
         "stderr",
-        "provider-secret-value Authorization=internal-owner-secret-value password=hunter2",
+        "provider-secret-value Authorization=internal-owner-secret-value "
+        f"password=hunter2 sandbox={'s' * 48}",
     )
 
     assert environment["OPENAI_COMPATIBLE_API_KEY"] == "provider-secret-value"
@@ -61,6 +67,8 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     assert environment["OPENTULPA_BOOTSTRAP_EVOLUTION_URL"].endswith(
         "/bootstrap/internal/v1/evolution"
     )
+    assert environment["OPENTULPA_SANDBOX_RPC_URL"].endswith("/internal/v1/sandbox")
+    assert environment["OPENTULPA_SANDBOX_RPC_TOKEN"] == "s" * 48
     assert environment["PYTHONPATH"] == str(tmp_path / "src")
     assert "TELEGRAM_BOT_TOKEN" not in environment
     assert "TELEGRAM_WEBHOOK_SECRET" not in environment
@@ -69,7 +77,8 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     assert "provider-secret-value" not in line
     assert "internal-owner-secret-value" not in line
     assert "hunter2" not in line
-    assert line.count("[redacted]") == 3
+    assert "s" * 48 not in line
+    assert line.count("[redacted]") == 4
 
     monkeypatch.delenv("OPENTULPA_OWNER_CUSTOMER_ID")
     assert runtime._child_environment(config, port=8124)["OPENTULPA_OWNER_CUSTOMER_ID"] == "owner"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -83,6 +83,7 @@ def create_host_app(
     setup_token: str | None = None,
     evolution_service: Any | None = None,
     evolution_token: str | None = None,
+    sandbox_supervisor: Any | None = None,
 ) -> FastAPI:
     """Create the immutable host surface around one mutable Deep Agents child."""
 
@@ -95,16 +96,26 @@ def create_host_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await service.start()
+        sandbox_ready = False
+        if sandbox_supervisor is not None:
+            # Keep the stable host available so /_host can report the exact sandbox failure.
+            with suppress(Exception):
+                await sandbox_supervisor.start()
+                sandbox_ready = True
+        if sandbox_ready:
+            await service.start()
         try:
             yield
         finally:
             await service.shutdown()
+            if sandbox_supervisor is not None:
+                await sandbox_supervisor.shutdown()
             await proxy_client.aclose()
 
     app = FastAPI(title="OpenTulpa Host", version="2", lifespan=lifespan)
     app.state.host_store = store
     app.state.host_service = service
+    app.state.sandbox_supervisor = sandbox_supervisor
 
     def owner_token(
         request: Request,
@@ -129,13 +140,19 @@ def create_host_app(
             raise HTTPException(status_code=401, detail="owner authentication required")
 
     @app.get("/healthz")
-    async def health() -> dict[str, Any]:
-        return {
-            "ok": True,
-            "host": "ready",
-            "runtime": service.runtime.status,
-            "configured": store.active() is not None,
-        }
+    async def health() -> JSONResponse:
+        sandbox = await _sandbox_status(sandbox_supervisor)
+        ok = bool(sandbox.get("ok"))
+        return JSONResponse(
+            status_code=200 if ok else 503,
+            content={
+                "ok": ok,
+                "host": "ready",
+                "runtime": service.runtime.status,
+                "configured": store.active() is not None,
+                "sandbox": sandbox,
+            },
+        )
 
     @app.get("/agent/healthz")
     async def agent_health() -> Response:
@@ -179,6 +196,7 @@ def create_host_app(
             "claimed": store.claimed,
             "authenticated": authenticated,
             "configured": active is not None,
+            "sandbox": await _sandbox_status(sandbox_supervisor),
             "runtime": {
                 "status": "activating" if service.activating else service.runtime.status,
                 "revision": service.runtime.revision,
@@ -230,6 +248,10 @@ def create_host_app(
         session: Annotated[str | None, Cookie(alias=HOST_SESSION_COOKIE)] = None,
     ) -> dict[str, Any]:
         require_owner(request, authorization, session)
+        try:
+            await _require_sandbox_ready(sandbox_supervisor)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Sandbox worker failed: {exc}") from exc
         try:
             config = await service.apply(body)
         except HostConfigConflictError as exc:
@@ -366,6 +388,34 @@ def _set_owner_cookie(response: Response, token: str, *, secure: bool) -> None:
         path="/",
         max_age=60 * 60 * 24 * 30,
     )
+
+
+async def _sandbox_status(sandbox_supervisor: Any | None) -> dict[str, Any]:
+    if sandbox_supervisor is None:
+        return {
+            "ok": False,
+            "step": "missing",
+            "tier": "unavailable",
+            "checks": {},
+            "error": "sandbox worker is not configured",
+        }
+    try:
+        status = await sandbox_supervisor.status()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "step": "status",
+            "tier": "unavailable",
+            "checks": {},
+            "error": str(exc or "sandbox worker failed")[:500],
+        }
+    return dict(status)
+
+
+async def _require_sandbox_ready(sandbox_supervisor: Any | None) -> None:
+    if sandbox_supervisor is None:
+        raise RuntimeError("sandbox worker is not configured")
+    await sandbox_supervisor.require_ready()
 
 
 __all__ = ["HOST_SESSION_COOKIE", "create_host_app"]

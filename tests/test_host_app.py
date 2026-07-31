@@ -55,6 +55,33 @@ class _Evolution:
         return {"active": False, "audit": audit_context}
 
 
+class _SandboxSupervisor:
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+        await self.require_ready()
+
+    async def shutdown(self) -> None:
+        self.stopped = True
+
+    async def require_ready(self) -> None:
+        if not self.ok:
+            raise RuntimeError("sandbox worker canary failed")
+
+    async def status(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "step": "ready" if self.ok else "health",
+            "tier": "test",
+            "checks": {"execute": self.ok, "ssh": self.ok},
+            "error": None if self.ok else "sandbox worker canary failed",
+        }
+
+
 def _parts(tmp_path: Path) -> tuple[HostStore, _Service]:
     store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"h" * 32))
     store.configure_setup_token("setup-token-with-enough-entropy")
@@ -64,7 +91,10 @@ def _parts(tmp_path: Path) -> tuple[HostStore, _Service]:
 def test_unconfigured_host_stays_healthy_and_redirects_chat_to_setup(tmp_path: Path) -> None:
     store, service = _parts(tmp_path)
     app = create_host_app(
-        store=store, service=service, setup_token="setup-token-with-enough-entropy"
+        store=store,
+        service=service,
+        setup_token="setup-token-with-enough-entropy",
+        sandbox_supervisor=_SandboxSupervisor(),
     )  # type: ignore[arg-type]
 
     with TestClient(app) as client:
@@ -73,6 +103,13 @@ def test_unconfigured_host_stays_healthy_and_redirects_chat_to_setup(tmp_path: P
             "host": "ready",
             "runtime": "stopped",
             "configured": False,
+            "sandbox": {
+                "ok": True,
+                "step": "ready",
+                "tier": "test",
+                "checks": {"execute": True, "ssh": True},
+                "error": None,
+            },
         }
         assert client.get("/agent/healthz").status_code == 503
         response = client.get("/", follow_redirects=False)
@@ -109,10 +146,76 @@ def test_log_cursor_resumes_same_host_and_resets_after_host_replacement() -> Non
     )
 
 
+def test_host_health_fails_closed_when_sandbox_worker_is_unavailable(tmp_path: Path) -> None:
+    store, service = _parts(tmp_path)
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=_SandboxSupervisor(ok=False),
+    )
+
+    with TestClient(app) as client:
+        health = client.get("/healthz")
+        status = client.get("/_host/api/status").json()
+        assert service.started is False
+
+    assert health.status_code == 503
+    assert health.json()["ok"] is False
+    assert health.json()["sandbox"]["checks"] == {"execute": False, "ssh": False}
+    assert status["sandbox"]["ok"] is False
+
+
+def test_host_lifespan_does_not_start_runtime_when_sandbox_start_fails(
+    tmp_path: Path,
+) -> None:
+    store, service = _parts(tmp_path)
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=_SandboxSupervisor(ok=False),
+    )
+
+    with TestClient(app):
+        assert service.started is False
+
+
+def test_owner_config_activation_is_blocked_when_sandbox_worker_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    store, service = _parts(tmp_path)
+    store.claim(
+        setup_token="setup-token-with-enough-entropy",
+        owner_token="owner-token-with-at-least-thirty-two-characters",
+    )
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=_SandboxSupervisor(ok=False),
+    )
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/_host/api/config",
+            headers={"Authorization": "Bearer owner-token-with-at-least-thirty-two-characters"},
+            json={
+                "api_key": "provider-secret",
+                "model": "moonshotai/kimi-k3",
+                "base_url": "https://openrouter.ai/api/v1",
+            },
+        )
+
+    assert response.status_code == 503
+    assert "Sandbox worker failed" in response.json()["detail"]
+    assert service.applied is None
+
+
 def test_remote_claim_requires_setup_token_and_sets_owner_session(tmp_path: Path) -> None:
     store, service = _parts(tmp_path)
     app = create_host_app(
-        store=store, service=service, setup_token="setup-token-with-enough-entropy"
+        store=store,
+        service=service,
+        setup_token="setup-token-with-enough-entropy",
+        sandbox_supervisor=_SandboxSupervisor(),
     )  # type: ignore[arg-type]
 
     with TestClient(app) as client:
@@ -128,6 +231,7 @@ def test_remote_claim_requires_setup_token_and_sets_owner_session(tmp_path: Path
         status = client.get("/_host/api/status").json()
         assert status["claimed"] is True
         assert status["authenticated"] is True
+        assert status["sandbox"]["ok"] is True
         assert client.get("/_host/api/logs").json() == {
             "stream_id": "stream-current",
             "logs": [],
@@ -140,7 +244,11 @@ def test_owner_can_activate_first_config_without_exposing_secrets(tmp_path: Path
         setup_token="setup-token-with-enough-entropy",
         owner_token="owner-token-with-at-least-thirty-two-characters",
     )
-    app = create_host_app(store=store, service=service)  # type: ignore[arg-type]
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=_SandboxSupervisor(),
+    )
 
     with TestClient(app) as client:
         assert (
@@ -173,6 +281,7 @@ def test_evolution_control_route_is_registered_before_runtime_proxy(tmp_path: Pa
         service=service,  # type: ignore[arg-type]
         evolution_service=_Evolution(),
         evolution_token=token,
+        sandbox_supervisor=_SandboxSupervisor(),
     )
 
     with TestClient(app) as client:

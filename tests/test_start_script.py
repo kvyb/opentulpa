@@ -571,7 +571,9 @@ def test_start_script_does_not_open_browser_for_public_server() -> None:
     assert "open http://127.0.0.1:8000/ after the server is healthy" not in result.stdout
 
 
-def test_direct_start_without_container_engine_keeps_chat_available(tmp_path: Path) -> None:
+def test_direct_start_without_container_engine_warns_that_readiness_will_fail(
+    tmp_path: Path,
+) -> None:
     script = tmp_path / "start.sh"
     script.write_text((REPO_ROOT / "start.sh").read_text(encoding="utf-8"), encoding="utf-8")
     script.chmod(0o755)
@@ -591,10 +593,10 @@ def test_direct_start_without_container_engine_keeps_chat_available(tmp_path: Pa
     )
 
     assert result.returncode == 0
-    assert "chat will start but sandbox shell commands will be unavailable" in result.stderr
+    assert "production host readiness will fail unless a sandbox worker is wired" in result.stderr
 
 
-def test_direct_start_reports_restricted_process_sandbox_when_available(
+def test_direct_start_reports_restricted_process_sandbox_worker_when_available(
     tmp_path: Path,
 ) -> None:
     script = tmp_path / "start.sh"
@@ -616,8 +618,7 @@ def test_direct_start_reports_restricted_process_sandbox_when_available(
     )
 
     assert result.returncode == 0
-    assert "tenant and repository commands will use" in result.stderr
-    assert "restricted process sandbox" in result.stderr
+    assert "sandbox worker will use bundled restricted process isolation" in result.stderr
     assert "shell commands will be unavailable" not in result.stderr
 
 

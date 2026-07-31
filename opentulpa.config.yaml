@@ -33,7 +33,6 @@ sandbox_timeout_seconds: 60
 sandbox_max_output_bytes: 512000
 sandbox_max_file_bytes: 10485760
 sandbox_max_workspace_entries: 20000
-sandbox_provider: auto
 railway_sandbox_idle_timeout_minutes: 30
 railway_sandbox_max_sync_bytes: 33554432
 

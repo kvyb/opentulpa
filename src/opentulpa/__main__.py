@@ -127,6 +127,7 @@ from opentulpa.repositories.providers import (
 from opentulpa.repositories.routing import RepositoryRoutingSandbox
 from opentulpa.repositories.service import RepositoryWorkspaceService
 from opentulpa.repositories.store import RepositoryWorkspaceStore
+from opentulpa.sandbox.client import SandboxWorkerExecutionProvider
 from opentulpa.schedules.service import ScheduleService
 from opentulpa.secrets import (
     SecretIngressService,
@@ -300,6 +301,11 @@ def _sandbox_execution_configuration(
     }
     sandbox_url = str(os.environ.get("OPENTULPA_BOOTSTRAP_SANDBOX_URL") or "").strip()
     sandbox_token = str(os.environ.get("OPENTULPA_BOOTSTRAP_SANDBOX_TOKEN") or "").strip()
+    worker_url = str(os.environ.get("OPENTULPA_SANDBOX_RPC_URL") or "").strip()
+    worker_token = str(os.environ.get("OPENTULPA_SANDBOX_RPC_TOKEN") or "").strip()
+    dev_allow_no_sandbox = str(
+        os.environ.get("OPENTULPA_DEV_ALLOW_NO_SANDBOX") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
     if managed and release_mode == "production":
         if not sandbox_url or not sandbox_token:
             raise RuntimeError("managed production requires the stable sandbox execution service")
@@ -319,6 +325,20 @@ def _sandbox_execution_configuration(
         if sandbox_url or sandbox_token:
             raise RuntimeError("staging releases cannot receive sandbox execution authority")
         return settings.sandbox_image, None
+    if worker_url or worker_token:
+        if not worker_url or not worker_token:
+            raise RuntimeError(
+                "sandbox worker execution requires both OPENTULPA_SANDBOX_RPC_URL and "
+                "OPENTULPA_SANDBOX_RPC_TOKEN"
+            )
+        return settings.sandbox_image, SandboxWorkerExecutionProvider(
+            base_url=worker_url,
+            token=worker_token,
+            max_response_bytes=settings.sandbox_max_output_bytes + 65_536,
+            max_archive_bytes=settings.railway_sandbox_max_sync_bytes,
+            max_archive_entries=settings.sandbox_max_workspace_entries,
+            max_file_bytes=settings.sandbox_max_file_bytes,
+        )
     if sandbox_url or sandbox_token:
         raise RuntimeError("stable sandbox credentials are valid only in a managed release")
     provider = settings.sandbox_provider
@@ -373,8 +393,13 @@ def _sandbox_execution_configuration(
                 ),
                 max_workspace_bytes=settings.railway_sandbox_max_sync_bytes,
             )
-        logger.warning("tenant sandbox shell is unavailable: %s", exc)
-        return settings.sandbox_image, _UnavailableSandboxExecutionProvider()
+        if dev_allow_no_sandbox:
+            logger.warning("tenant sandbox shell is unavailable in explicit dev mode: %s", exc)
+            return settings.sandbox_image, _UnavailableSandboxExecutionProvider()
+        raise RuntimeError(
+            "OpenTulpa requires a healthy sandbox worker or local sandbox backend. "
+            "Start through the stable host or set OPENTULPA_DEV_ALLOW_NO_SANDBOX=1 for dev-only chat."
+        ) from exc
     return image, None
 
 
