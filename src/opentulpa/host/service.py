@@ -55,6 +55,14 @@ class HostService:
                 except Exception:
                     return
             return
+        if self._bootstrap_config is not None and self._bootstrap_config.expected_revision == active.revision:
+            try:
+                await self.apply(self._bootstrap_config)
+                return
+            except Exception:
+                active = self.store.active()
+                if active is None:
+                    return
         try:
             await self.runtime.start(active)
         except Exception:

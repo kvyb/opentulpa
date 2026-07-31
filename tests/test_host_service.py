@@ -104,6 +104,37 @@ async def test_host_prepares_evolution_before_runtime_and_starts_it_afterward(
 
 
 @pytest.mark.asyncio
+async def test_host_start_applies_bootstrap_overlay_when_active_config_lacks_telegram(
+    tmp_path: Path,
+) -> None:
+    store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"b" * 32))
+    first = store.stage(HostConfigInput(api_key=SecretStr("provider-secret")))
+    first = store.activate(first.revision)
+    runtime = _Runtime()
+    service = _Service(store=store, runtime=runtime)
+    service._bootstrap_config = HostConfigInput(  # noqa: SLF001
+        expected_revision=first.revision,
+        base_url=first.base_url,
+        model=first.model,
+        telegram_bot_token=SecretStr("123:telegram-secret"),
+        telegram_user_id=7,
+    )
+
+    await service.start()
+
+    active = store.active()
+    assert active is not None
+    assert active.revision == first.revision + 1
+    assert active.api_key.get_secret_value() == "provider-secret"
+    assert active.telegram_bot_token == SecretStr("123:telegram-secret")
+    assert active.telegram_user_id == 7
+    assert runtime.current is not None
+    assert runtime.current.revision == active.revision
+    assert runtime.replacements == [active.revision]
+    assert service.configured_revisions == [active.revision]
+
+
+@pytest.mark.asyncio
 async def test_failed_candidate_keeps_previous_revision_and_runtime(tmp_path: Path) -> None:
     store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"s" * 32))
     first = store.stage(HostConfigInput(api_key=SecretStr("first-secret")))

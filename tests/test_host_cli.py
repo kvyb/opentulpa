@@ -130,6 +130,15 @@ def test_server_origin_and_pairing_code_are_pasteable(tmp_path: Path) -> None:
     assert code.count("-") == 2
 
 
+def test_telegram_bootstrap_from_environment_uses_first_numeric_allowed_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:telegram-secret")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "7,8")
+
+    assert cli._telegram_bootstrap_from_environment() == ("123:telegram-secret", 7)  # noqa: SLF001
+
+
 def test_native_tui_receives_credentials_only_through_inherited_pipe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

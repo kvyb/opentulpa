@@ -111,28 +111,33 @@ def build_host_application() -> tuple[Any, str, str, Path]:
     )
     store.configure_setup_token(setup_token)
     host = str(os.environ.get("HOST") or "127.0.0.1").strip()
-    owner_token = str(os.environ.get("OPENTULPA_OWNER_TOKEN") or "").strip()
+    owner_token = str(
+        os.environ.get("OPENTULPA_OWNER_TOKEN") or os.environ.get("OPENTULPA_WEB_TOKEN") or ""
+    ).strip()
     if not owner_token and host in {"127.0.0.1", "localhost", "::1"}:
         owner_token = _private_token(data_root / "bootstrap" / "owner.token")
     if owner_token and not store.claimed:
         store.claim(setup_token=setup_token, owner_token=owner_token)
 
     api_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY") or "").strip()
-    telegram_token = str(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    telegram_ids = str(os.environ.get("TELEGRAM_ALLOWED_USER_IDS") or "").strip()
-    telegram_id = None
-    if telegram_ids:
-        first = telegram_ids.split(",", 1)[0].strip()
-        if first.isdigit() and int(first) > 0:
-            telegram_id = int(first)
+    telegram_token, telegram_id = _telegram_bootstrap_from_environment()
     bootstrap = None
-    if api_key and store.active() is None:
+    active = store.active()
+    if api_key and active is None:
         bootstrap = HostConfigInput(
             api_key=SecretStr(api_key),
             base_url=settings.openai_compatible_base_url,
             model=settings.llm_model,
             telegram_bot_token=SecretStr(telegram_token) if telegram_token else None,
             telegram_user_id=telegram_id if telegram_token else None,
+        )
+    elif active is not None and active.telegram_bot_token is None and telegram_token and telegram_id:
+        bootstrap = HostConfigInput(
+            expected_revision=active.revision,
+            base_url=active.base_url,
+            model=active.model,
+            telegram_bot_token=SecretStr(telegram_token),
+            telegram_user_id=telegram_id,
         )
     runtime = RuntimeSupervisor(project_root=project_root, data_root=data_root)
     sandbox = SandboxWorkerSupervisor(
@@ -171,6 +176,17 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         sandbox_supervisor=sandbox,
     )
     return app, host, setup_token, data_root
+
+
+def _telegram_bootstrap_from_environment() -> tuple[str, int | None]:
+    token = str(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    ids = str(os.environ.get("TELEGRAM_ALLOWED_USER_IDS") or "").strip()
+    if not ids:
+        return token, None
+    first = ids.split(",", 1)[0].strip()
+    if first.isdigit() and int(first) > 0:
+        return token, int(first)
+    return token, None
 
 
 def serve(*, public_url: str | None = None) -> None:
