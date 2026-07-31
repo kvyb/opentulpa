@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import shlex
 import sys
 import tarfile
@@ -10,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from opentulpa.application.product_tools import _sandbox_ssh_command
 from opentulpa.core.config import Settings
 from opentulpa.sandbox.client import SandboxWorkerCanary, SandboxWorkerHealth
 from opentulpa.sandbox.supervisor import SandboxWorkerSupervisor
@@ -342,6 +344,99 @@ async def test_sandbox_worker_secret_mounts_are_one_shot_and_redacted(
     assert execution.json()["output"] == "[redacted]"
     assert "super-secret-private-key" not in archive.text
     assert ".opentulpa_secret_mounts" not in _tar_member_names(archive.json()["archive"])
+
+
+@pytest.mark.asyncio
+async def test_sandbox_worker_executes_password_ssh_without_creating_dot_ssh(
+    tmp_path: Path,
+) -> None:
+    binary_root = tmp_path / "bin"
+    binary_root.mkdir()
+    fake_ssh = binary_root / "ssh"
+    fake_ssh.write_text(
+        "#!/bin/sh\n"
+        'provided="$("$SSH_ASKPASS" "password:")"\n'
+        'test "$provided" = "dummy-password" || exit 7\n'
+        "printf authenticated\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o700)
+    app = create_sandbox_worker_app(service=_service(tmp_path), token=TOKEN)
+    transport = httpx.ASGITransport(app=app)
+    command = _sandbox_ssh_command(
+        target="root@example.test",
+        port=22,
+        remote_command="uptime",
+        secret_type="password",
+    )
+    command = command.replace(" ssh ", f" {shlex.quote(str(fake_ssh))} ", 1)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://sandbox") as client:
+        created = await client.post(
+            "/internal/v1/sandbox/workspaces",
+            headers=_headers(),
+            json={"kind": "scratch", "tenant_id": "tenant-a"},
+        )
+        workspace_id = created.json()["workspace_id"]
+        execution = await client.post(
+            f"/internal/v1/sandbox/workspaces/{workspace_id}/execute",
+            headers=_headers(),
+            json={
+                "command": command,
+                "timeout": 5,
+                "secret_files": [
+                    {
+                        "name": "ssh_password",
+                        "content": "dummy-password",
+                        "env": "OPENTULPA_SSH_PASSWORD_FILE",
+                    }
+                ],
+            },
+        )
+        archive = await client.get(
+            f"/internal/v1/sandbox/workspaces/{workspace_id}/archive",
+            headers=_headers(),
+        )
+
+    assert execution.status_code == 200
+    assert execution.json() == {
+        "output": "authenticated",
+        "exit_code": 0,
+        "truncated": False,
+    }
+    members = _tar_member_names(archive.json()["archive"])
+    assert all(".ssh" not in member for member in members)
+    assert all("opentulpa-ssh" not in member for member in members)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_worker_logs_sensitive_path_policy_failures(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_sandbox_worker_app(service=_service(tmp_path), token=TOKEN)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://sandbox") as client:
+        created = await client.post(
+            "/internal/v1/sandbox/workspaces",
+            headers=_headers(),
+            json={"kind": "scratch", "tenant_id": "tenant-a"},
+        )
+        workspace_id = created.json()["workspace_id"]
+        with caplog.at_level(logging.WARNING, logger="opentulpa.sandbox.worker"):
+            execution = await client.post(
+                f"/internal/v1/sandbox/workspaces/{workspace_id}/execute",
+                headers=_headers(),
+                json={
+                    "command": "mkdir -p .ssh && printf marker > .ssh/known_hosts",
+                    "timeout": 5,
+                },
+            )
+
+    assert execution.status_code == 503
+    assert "workspace tree contains sensitive paths" in caplog.text
+    assert "marker" not in caplog.text
 
 
 def _tar_archive_with_symlink() -> str:

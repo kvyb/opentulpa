@@ -720,6 +720,8 @@ async def test_sandbox_ssh_diagnostic_mounts_secret_handle_without_plaintext_com
     assert sandbox_call["timeout"] == 30
     assert private_key not in sandbox_call["command"]
     assert "ssh -i \"$OPENTULPA_SSH_IDENTITY\"" in sandbox_call["command"]
+    assert 'UserKnownHostsFile="$PWD/.opentulpa-ssh-known-hosts"' in sandbox_call["command"]
+    assert 'UserKnownHostsFile="$PWD/.ssh/' not in sandbox_call["command"]
     assert "root@178.214.97.1" in sandbox_call["command"]
     assert sandbox_call["secret_files"][0].content == private_key
     assert sandbox_call["secret_files"][0].env == "OPENTULPA_SSH_IDENTITY"
@@ -828,7 +830,9 @@ def test_password_ssh_command_reads_only_the_mounted_askpass_file(tmp_path: Path
     assert completed.returncode == 0
     assert completed.stdout == "authenticated"
     assert "fake-password-for-test" not in command
+    assert not (workspace / ".ssh").exists()
     assert not (workspace / ".opentulpa-ssh-askpass").exists()
+    assert not (workspace / ".opentulpa-ssh-known-hosts").exists()
 
 
 @pytest.mark.asyncio

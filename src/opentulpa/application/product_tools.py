@@ -756,22 +756,24 @@ def _sandbox_ssh_command(
     remote_command: str,
     secret_type: str,
 ) -> str:
-    setup = "mkdir -p .ssh && chmod 700 .ssh && "
+    known_hosts = ".opentulpa-ssh-known-hosts"
+    setup = f"umask 077 && : > {known_hosts} && "
     common_options = (
-        "-o UserKnownHostsFile=\"$PWD/.ssh/known_hosts\" "
+        f"-o UserKnownHostsFile=\"$PWD/{known_hosts}\" "
         "-o StrictHostKeyChecking=accept-new "
     )
     destination = f"-p {int(port)} {shlex.quote(target)} -- {shlex.quote(remote_command)}"
     if secret_type == "private_key":
         return (
-            f"{setup}ssh -i \"$OPENTULPA_SSH_IDENTITY\" "
-            f"-o IdentitiesOnly=yes {common_options}{destination}"
+            f"{setup}{{ ssh -i \"$OPENTULPA_SSH_IDENTITY\" "
+            f"-o IdentitiesOnly=yes {common_options}{destination}; "
+            f"status=$?; rm -f {known_hosts}; exit $status; }}"
         )
     if secret_type == "password":
         helper = ".opentulpa-ssh-askpass"
         helper_body = 'exec /bin/cat -- "$OPENTULPA_SSH_PASSWORD_FILE"'
         return (
-            f"{setup}umask 077 && "
+            f"{setup}"
             f"printf '%s\\n' '#!/bin/sh' {shlex.quote(helper_body)} > {helper} && "
             f"chmod 700 {helper} && {{ "
             "DISPLAY=opentulpa SSH_ASKPASS_REQUIRE=force "
@@ -782,7 +784,8 @@ def _sandbox_ssh_command(
             "-o KbdInteractiveAuthentication=yes "
             "-o PreferredAuthentications=password,keyboard-interactive "
             "-o NumberOfPasswordPrompts=1 "
-            f"{common_options}{destination}; status=$?; rm -f {helper}; exit $status; }}"
+            f"{common_options}{destination}; status=$?; "
+            f"rm -f {helper} {known_hosts}; exit $status; }}"
         )
     raise ProductToolApplicationError(
         "invalid_request",

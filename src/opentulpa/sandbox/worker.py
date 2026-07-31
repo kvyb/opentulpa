@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import logging
 import os
 import re
 import secrets
@@ -27,6 +28,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
 from opentulpa.deep_agent.sandbox import TenantContainerPolicy
 from opentulpa.evolution.sandbox import CandidateProcessBackend
+
+logger = logging.getLogger(__name__)
 
 _WORKSPACE_ID_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}\Z")
 _WORKSPACE_KIND_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -550,6 +553,7 @@ def create_sandbox_worker_app(*, service: SandboxWorkerService, token: str) -> F
                 secret_files=body.secret_files,
             )
         except (OSError, SandboxWorkerError, ValueError) as exc:
+            logger.warning("sandbox worker execution failed: %s", exc)
             raise HTTPException(status_code=503, detail="sandbox execution is unavailable") from exc
         return SandboxExecuteResult(
             output=result.output,
