@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -20,6 +22,7 @@ from opentulpa.host.service import HostActivationError, HostService
 from opentulpa.host.store import HostConfigConflictError, HostStore
 
 HOST_SESSION_COOKIE = "opentulpa_host_session"
+_SANDBOX_START_RETRY_SECONDS = 5.0
 _HOP_HEADERS = frozenset(
     {
         "connection",
@@ -96,17 +99,37 @@ def create_host_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        sandbox_ready = False
+        runtime_started = False
+        retry_task: asyncio.Task[None] | None = None
+
+        async def start_runtime_when_sandbox_ready(*, retry: bool) -> None:
+            nonlocal runtime_started
+            if sandbox_supervisor is None:
+                return
+            while not runtime_started:
+                try:
+                    await sandbox_supervisor.start()
+                    await service.start()
+                    runtime_started = True
+                    return
+                except Exception:
+                    if not retry:
+                        raise
+                    await asyncio.sleep(_sandbox_start_retry_seconds())
+
         if sandbox_supervisor is not None:
             # Keep the stable host available so /_host can report the exact sandbox failure.
-            with suppress(Exception):
-                await sandbox_supervisor.start()
-                sandbox_ready = True
-        if sandbox_ready:
-            await service.start()
+            try:
+                await start_runtime_when_sandbox_ready(retry=False)
+            except Exception:
+                retry_task = asyncio.create_task(start_runtime_when_sandbox_ready(retry=True))
         try:
             yield
         finally:
+            if retry_task is not None:
+                retry_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await retry_task
             await service.shutdown()
             if sandbox_supervisor is not None:
                 await sandbox_supervisor.shutdown()
@@ -416,6 +439,17 @@ async def _require_sandbox_ready(sandbox_supervisor: Any | None) -> None:
     if sandbox_supervisor is None:
         raise RuntimeError("sandbox worker is not configured")
     await sandbox_supervisor.require_ready()
+
+
+def _sandbox_start_retry_seconds() -> float:
+    value = str(os.environ.get("OPENTULPA_SANDBOX_START_RETRY_SECONDS") or "").strip()
+    if not value:
+        return _SANDBOX_START_RETRY_SECONDS
+    try:
+        parsed = float(value)
+    except ValueError:
+        return _SANDBOX_START_RETRY_SECONDS
+    return max(0.01, min(300.0, parsed))
 
 
 __all__ = ["HOST_SESSION_COOKIE", "create_host_app"]

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from opentulpa.core.config import Settings
+from opentulpa.sandbox.client import SandboxWorkerCanary, SandboxWorkerHealth
 from opentulpa.sandbox.supervisor import SandboxWorkerSupervisor
 from opentulpa.sandbox.worker import (
     DevProcessEngine,
@@ -68,6 +69,37 @@ def test_sandbox_supervisor_worker_environment_excludes_app_secrets(
 
 
 @pytest.mark.asyncio
+async def test_sandbox_supervisor_status_uses_cached_canary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_SANDBOX_RPC_URL", "http://127.0.0.1:1/internal/v1/sandbox")
+    monkeypatch.setenv("OPENTULPA_SANDBOX_RPC_TOKEN", "s" * 48)
+    supervisor = SandboxWorkerSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        settings=Settings(_env_file=None),
+    )
+    supervisor._last_canary = SandboxWorkerCanary(  # noqa: SLF001
+        ok=True,
+        step="ready",
+        health=SandboxWorkerHealth(
+            ok=True,
+            tier="test",
+            checks={"execute": True, "ssh": True},
+        ),
+    )
+
+    assert await supervisor.status() == {
+        "ok": True,
+        "step": "ready",
+        "tier": "test",
+        "checks": {"execute": True, "ssh": True},
+        "error": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_sandbox_worker_api_requires_private_token(tmp_path: Path) -> None:
     app = create_sandbox_worker_app(service=_service(tmp_path), token=TOKEN)
     transport = httpx.ASGITransport(app=app)
@@ -108,6 +140,36 @@ async def test_sandbox_worker_executes_in_workspace_and_preserves_files(tmp_path
     assert created.status_code == 201
     assert first.json() == {"output": "hello", "exit_code": 0, "truncated": False}
     assert second.json() == {"output": "hello", "exit_code": 0, "truncated": False}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_worker_allows_git_metadata_inside_workspace(tmp_path: Path) -> None:
+    app = create_sandbox_worker_app(service=_service(tmp_path), token=TOKEN)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://sandbox") as client:
+        created = await client.post(
+            "/internal/v1/sandbox/workspaces",
+            headers=_headers(),
+            json={"kind": "scratch", "tenant_id": "tenant-a"},
+        )
+        workspace_id = created.json()["workspace_id"]
+        execution = await client.post(
+            f"/internal/v1/sandbox/workspaces/{workspace_id}/execute",
+            headers=_headers(),
+            json={
+                "command": "mkdir -p repo/.git && printf ok > repo/.git/config && cat repo/.git/config",
+                "timeout": 5,
+            },
+        )
+        archive = await client.get(
+            f"/internal/v1/sandbox/workspaces/{workspace_id}/archive",
+            headers=_headers(),
+        )
+
+    assert execution.status_code == 200
+    assert execution.json()["output"] == "ok"
+    assert "./repo/.git/config" in _tar_member_names(archive.json()["archive"])
 
 
 @pytest.mark.asyncio

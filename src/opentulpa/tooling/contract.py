@@ -331,6 +331,13 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         ToolEffect.DELETE,
         idempotency=IdempotencyMode.REQUIRED,
     ),
+    _tool(
+        "sandbox_ssh_diagnostic",
+        "sandbox",
+        ToolEffect.EXECUTE,
+        approval=ApprovalMode.POLICY,
+        timeout_seconds=660,
+    ),
     _tool("capability_list", "capabilities", ToolEffect.READ),
     _tool(
         "capability_seed_bundled",

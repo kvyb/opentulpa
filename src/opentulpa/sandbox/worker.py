@@ -39,7 +39,6 @@ _SENSITIVE_COMPONENTS = frozenset(
     {
         ".aws",
         ".docker",
-        ".git",
         ".gnupg",
         ".kube",
         ".netrc",

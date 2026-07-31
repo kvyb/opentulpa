@@ -412,7 +412,7 @@ async def test_secret_tools_only_list_and_revoke_safe_handles(tmp_path: Path) ->
 
 
 def test_secret_tool_schemas_have_no_plaintext_ingress() -> None:
-    for name in ("secret_handle_list", "secret_handle_revoke"):
+    for name in ("secret_handle_list", "secret_handle_revoke", "sandbox_ssh_diagnostic"):
         schema = OPERATION_ARGUMENT_SCHEMAS[name].model_json_schema()
         serialized = json.dumps(schema).lower()
         assert '"value"' not in serialized

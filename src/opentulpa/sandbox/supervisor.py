@@ -7,6 +7,7 @@ import os
 import secrets
 import socket
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from opentulpa.sandbox.client import (
     SandboxWorkerExecutionProvider,
     SandboxWorkerHealth,
 )
+
+_DEFAULT_HEALTH_INTERVAL_SECONDS = 15.0
 
 
 def _private_token(path: Path) -> str:
@@ -86,6 +89,15 @@ class SandboxWorkerSupervisor:
             max_file_bytes=settings.sandbox_max_file_bytes,
         )
         self._last_canary: SandboxWorkerCanary | None = None
+        self._start_lock = asyncio.Lock()
+        self._canary_lock = asyncio.Lock()
+        self._monitor_task: asyncio.Task[None] | None = None
+        self._health_interval_seconds = _positive_float_env(
+            "OPENTULPA_SANDBOX_HEALTH_INTERVAL_SECONDS",
+            default=_DEFAULT_HEALTH_INTERVAL_SECONDS,
+            minimum=1.0,
+            maximum=300.0,
+        )
 
     @property
     def config(self) -> SandboxRuntimeConfig:
@@ -100,40 +112,54 @@ class SandboxWorkerSupervisor:
         return self._last_canary
 
     async def start(self) -> None:
-        if self._managed_process and self._process is None:
-            self._process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "opentulpa.sandbox.worker",
-                cwd=self._project_root,
-                env=self._worker_environment(),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+        await self._ensure_managed_process()
         await self.require_ready()
+        self._ensure_monitor()
 
     async def require_ready(self) -> None:
-        deadline = asyncio.get_running_loop().time() + 30
-        last: SandboxWorkerCanary | None = None
-        while asyncio.get_running_loop().time() < deadline:
-            if self._process is not None and self._process.returncode is not None:
-                break
-            last = await asyncio.to_thread(self._client.canary)
-            self._last_canary = last
-            if last.ok:
-                return
-            if last.health is not None and last.health.tier != "unavailable":
-                break
-            await asyncio.sleep(0.25)
-        detail = _canary_summary(last or self._client.canary())
+        await self._ensure_managed_process()
+        async with self._canary_lock:
+            deadline = asyncio.get_running_loop().time() + 30
+            last: SandboxWorkerCanary | None = None
+            while asyncio.get_running_loop().time() < deadline:
+                if self._process is not None and self._process.returncode is not None:
+                    last = _unavailable_canary(
+                        step="process",
+                        error="sandbox worker process exited",
+                        checks={"reachable": False},
+                    )
+                    self._last_canary = last
+                    break
+                last = await asyncio.to_thread(self._client.canary)
+                self._last_canary = last
+                if last.ok:
+                    return
+                if last.health is not None and last.health.tier != "unavailable":
+                    break
+                await asyncio.sleep(0.25)
+            detail = _canary_summary(last or self._client.canary())
         raise RuntimeError(f"sandbox worker failed readiness: {detail}")
 
     async def status(self) -> dict[str, object]:
-        canary = await asyncio.to_thread(self._client.canary)
-        self._last_canary = canary
+        if self._process is not None and self._process.returncode is not None:
+            self._last_canary = _unavailable_canary(
+                step="process",
+                error="sandbox worker process exited",
+                checks={"reachable": False},
+            )
+        canary = self._last_canary or _unavailable_canary(
+            step="startup",
+            error="sandbox worker readiness has not completed",
+        )
         return _canary_payload(canary)
 
     async def shutdown(self) -> None:
+        task = self._monitor_task
+        self._monitor_task = None
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         process = self._process
         self._process = None
         if process is None or process.returncode is not None:
@@ -144,6 +170,55 @@ class SandboxWorkerSupervisor:
         except TimeoutError:
             process.kill()
             await process.wait()
+
+    async def _ensure_managed_process(self) -> None:
+        if not self._managed_process:
+            return
+        async with self._start_lock:
+            if self._process is not None and self._process.returncode is None:
+                return
+            self._process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "opentulpa.sandbox.worker",
+                cwd=self._project_root,
+                env=self._worker_environment(),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+    def _ensure_monitor(self) -> None:
+        task = self._monitor_task
+        if task is None or task.done():
+            self._monitor_task = asyncio.create_task(self._monitor())
+
+    async def _monitor(self) -> None:
+        while True:
+            await asyncio.sleep(self._health_interval_seconds)
+            if (
+                self._managed_process
+                and self._process is not None
+                and self._process.returncode is not None
+            ):
+                self._last_canary = _unavailable_canary(
+                    step="process",
+                    error="sandbox worker process exited",
+                    checks={"reachable": False},
+                )
+                with suppress(Exception):
+                    await self.start()
+                continue
+            async with self._canary_lock:
+                canary = await asyncio.to_thread(self._client.canary)
+                self._last_canary = canary
+            if (
+                self._managed_process
+                and not canary.ok
+                and canary.health is not None
+                and canary.health.tier == "unavailable"
+            ):
+                with suppress(Exception):
+                    await self.start()
 
     def _worker_environment(self) -> dict[str, str]:
         root = self._data_root / "sandbox_worker"
@@ -199,6 +274,42 @@ def _canary_summary(canary: SandboxWorkerCanary | None) -> str:
     if failed:
         return f"{payload['step']} failed checks: {', '.join(failed)}"
     return str(payload.get("error") or f"{payload['step']} failed")
+
+
+def _unavailable_canary(
+    *,
+    step: str,
+    error: str,
+    checks: dict[str, bool] | None = None,
+) -> SandboxWorkerCanary:
+    return SandboxWorkerCanary(
+        ok=False,
+        step=step,
+        health=SandboxWorkerHealth(
+            ok=False,
+            tier="unavailable",
+            checks=checks or {},
+            error=error,
+        ),
+        error=error,
+    )
+
+
+def _positive_float_env(
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = str(os.environ.get(name) or "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
 
 
 def _free_local_port() -> int:

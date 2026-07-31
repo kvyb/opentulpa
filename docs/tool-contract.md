@@ -86,6 +86,7 @@ The registry below is the complete model-visible product surface. Deep Agents bu
 | `trigger_spec_rollback` | `trigger_specs` | `authorize` | `auto` | `required` | `sync` | 30s |
 | `secret_handle_list` | `secrets` | `read` | `auto` | `none` | `sync` | 30s |
 | `secret_handle_revoke` | `secrets` | `delete` | `auto` | `required` | `sync` | 30s |
+| `sandbox_ssh_diagnostic` | `sandbox` | `execute` | `policy` | `none` | `sync` | 660s |
 | `capability_list` | `capabilities` | `read` | `auto` | `none` | `sync` | 30s |
 | `capability_seed_bundled` | `capabilities` | `create` | `auto` | `derived` | `sync` | 30s |
 | `capability_test` | `capabilities` | `execute` | `auto` | `none` | `sync` | 600s |

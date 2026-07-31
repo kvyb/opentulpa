@@ -223,6 +223,25 @@ def test_ingress_supports_named_multiline_secret_blocks(tmp_path: Path) -> None:
     _assert_absent_from_database(vault, private_key)
 
 
+def test_ingress_scopes_ssh_private_key_blocks_for_sandbox_connect(tmp_path: Path) -> None:
+    ingress, _ = _ingress(tmp_path)
+    private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "not-a-real-private-key-for-tests\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f'<secret name="SSH_PRIVATE_KEY">\n{private_key}\n</secret>',
+    )
+
+    assert result.text == "secret://ssh_private_key"
+    assert result.handles[0].id == "ssh_private_key"
+    assert result.handles[0].scopes == ("ssh.connect",)
+
+
 def test_ingress_ignores_named_placeholders(tmp_path: Path) -> None:
     ingress, vault = _ingress(tmp_path)
 

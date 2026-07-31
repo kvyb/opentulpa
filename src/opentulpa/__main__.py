@@ -1251,6 +1251,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             agent_specs=agent_specs,
             trigger_specs=trigger_specs,
             secret_handles=secret_vault,
+            sandbox_execution=sandbox_execution,
             on_trigger_spec_changed=trigger_dispatcher.upsert,
             capabilities=capabilities,
             evolution_owner_tenant_id=owner_tenant_id,

@@ -11,6 +11,7 @@ from opentulpa.secrets import (
     SecretGrantError,
     SecretState,
     SecretVault,
+    SecretVaultService,
 )
 
 NOW = datetime(2026, 7, 20, 12, tzinfo=UTC)
@@ -122,3 +123,32 @@ def test_secret_plaintext_requires_scoped_one_time_capability_grant(tmp_path: Pa
             capability_id="telegram",
             scopes=("browser.control",),
         )
+
+
+def test_secret_service_resolves_one_shot_sandbox_mount_material(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    service = SecretVaultService(vault)
+    pending = vault.create_pending(
+        tenant_id="tenant-a",
+        secret_id="ssh_private_key",
+        name="ssh_private_key",
+        scopes=("ssh.connect",),
+        created_by="owner",
+    )
+    vault.fulfill(
+        tenant_id="tenant-a",
+        secret_id=pending.id,
+        expected_revision=1,
+        value="private-key",
+        updated_by="owner",
+    )
+
+    material = service.resolve_for_sandbox(
+        tenant_id="tenant-a",
+        actor_id="owner",
+        secret_id=pending.id,
+        scope="ssh.connect",
+        mount_type="ssh_private_key",
+    )
+
+    assert material.get_secret_value() == "private-key"

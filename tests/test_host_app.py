@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,12 +57,17 @@ class _Evolution:
 
 
 class _SandboxSupervisor:
-    def __init__(self, *, ok: bool = True) -> None:
+    def __init__(self, *, ok: bool = True, failures_before_ready: int = 0) -> None:
         self.ok = ok
+        self.failures_before_ready = failures_before_ready
         self.started = False
         self.stopped = False
+        self.start_attempts = 0
+        self.status_calls = 0
+        self.require_ready_calls = 0
 
     async def start(self) -> None:
+        self.start_attempts += 1
         self.started = True
         await self.require_ready()
 
@@ -69,16 +75,28 @@ class _SandboxSupervisor:
         self.stopped = True
 
     async def require_ready(self) -> None:
+        self.require_ready_calls += 1
+        if self.failures_before_ready > 0:
+            self.failures_before_ready -= 1
+            raise RuntimeError("sandbox worker canary failed")
         if not self.ok:
             raise RuntimeError("sandbox worker canary failed")
 
     async def status(self) -> dict[str, Any]:
+        self.status_calls += 1
         return {
-            "ok": self.ok,
-            "step": "ready" if self.ok else "health",
+            "ok": self.ok and self.failures_before_ready <= 0,
+            "step": "ready" if self.ok and self.failures_before_ready <= 0 else "health",
             "tier": "test",
-            "checks": {"execute": self.ok, "ssh": self.ok},
-            "error": None if self.ok else "sandbox worker canary failed",
+            "checks": {
+                "execute": self.ok and self.failures_before_ready <= 0,
+                "ssh": self.ok and self.failures_before_ready <= 0,
+            },
+            "error": (
+                None
+                if self.ok and self.failures_before_ready <= 0
+                else "sandbox worker canary failed"
+            ),
         }
 
 
@@ -165,6 +183,25 @@ def test_host_health_fails_closed_when_sandbox_worker_is_unavailable(tmp_path: P
     assert status["sandbox"]["ok"] is False
 
 
+def test_host_health_uses_cached_sandbox_status(tmp_path: Path) -> None:
+    store, service = _parts(tmp_path)
+    sandbox = _SandboxSupervisor()
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=sandbox,
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/_host/api/status").json()["sandbox"]["ok"] is True
+
+    assert sandbox.start_attempts == 1
+    assert sandbox.require_ready_calls == 1
+    assert sandbox.status_calls == 3
+
+
 def test_host_lifespan_does_not_start_runtime_when_sandbox_start_fails(
     tmp_path: Path,
 ) -> None:
@@ -177,6 +214,28 @@ def test_host_lifespan_does_not_start_runtime_when_sandbox_start_fails(
 
     with TestClient(app):
         assert service.started is False
+
+
+def test_host_lifespan_starts_runtime_after_sandbox_recovers(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_SANDBOX_START_RETRY_SECONDS", "0.01")
+    store, service = _parts(tmp_path)
+    sandbox = _SandboxSupervisor(failures_before_ready=1)
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=sandbox,
+    )
+
+    with TestClient(app):
+        deadline = time.monotonic() + 1.0
+        while not service.started and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service.started is True
+
+    assert sandbox.start_attempts >= 2
 
 
 def test_owner_config_activation_is_blocked_when_sandbox_worker_is_unavailable(
