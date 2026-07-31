@@ -18,6 +18,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl git openssh-client util-linux \
     && rm -rf /var/lib/apt/lists/*
 
+RUN getent group 65532 >/dev/null || printf '%s\n' 'opentulpa-sandbox:x:65532:' >> /etc/group \
+    && getent passwd 65532 >/dev/null || printf '%s\n' 'opentulpa-sandbox:x:65532:65532:OpenTulpa Sandbox:/tmp:/bin/false' >> /etc/passwd
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy

@@ -32,14 +32,28 @@ _PROCESS_SANDBOX_EXECUTION_LOCK = threading.RLock()
 def _default_process_identity() -> tuple[int, int]:
     """Use a real unprivileged passwd entry so tools like OpenSSH can start."""
 
-    for name in ("opentulpa-sandbox", "nobody"):
+    for name in ("opentulpa-sandbox",):
         try:
             entry = pwd.getpwnam(name)
         except KeyError:
             continue
         if entry.pw_uid > 0 and entry.pw_gid > 0:
             return int(entry.pw_uid), int(entry.pw_gid)
-    for uid in (65_534, 65_532):
+    for uid in (65_532,):
+        try:
+            entry = pwd.getpwuid(uid)
+        except KeyError:
+            continue
+        if entry.pw_uid > 0 and entry.pw_gid > 0:
+            return int(entry.pw_uid), int(entry.pw_gid)
+    for name in ("nobody",):
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            continue
+        if entry.pw_uid > 0 and entry.pw_gid > 0:
+            return int(entry.pw_uid), int(entry.pw_gid)
+    for uid in (65_534,):
         try:
             entry = pwd.getpwuid(uid)
         except KeyError:
