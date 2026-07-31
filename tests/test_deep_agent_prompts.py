@@ -86,6 +86,8 @@ def test_owner_prompt_uses_handle_based_secret_ingress() -> None:
     assert "`SERVICE_API_KEY=<value>`" in OWNER_PROMPT
     assert "`SERVICE_TOKEN=<value>`" in OWNER_PROMPT
     assert '`<secret name="SERVICE_CREDENTIAL">...</secret>`' in OWNER_PROMPT
+    assert '<secret name="SSH_PRIVATE_KEY">' in OWNER_PROMPT
+    assert "never use unnamed or redacted secret tags" in OWNER_PROMPT
     assert "`secret://<handle_id>`" in OWNER_PROMPT
     assert "`COMPOSIO_API_KEY=<value>`" in OWNER_PROMPT
     assert "Never send the owner to a separate host UI, CLI" in OWNER_PROMPT

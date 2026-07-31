@@ -242,6 +242,62 @@ def test_ingress_scopes_ssh_private_key_blocks_for_sandbox_connect(tmp_path: Pat
     assert result.handles[0].scopes == ("ssh.connect",)
 
 
+def test_ingress_infers_malformed_openssh_secret_block_for_sandbox_connect(
+    tmp_path: Path,
+) -> None:
+    ingress, vault = _ingress(tmp_path)
+    private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "not-a-real-private-key-for-tests\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"Store this:\n<secret [redacted]\n{private_key}\n</secret>\nThen connect.",
+    )
+
+    assert result.text == "Store this:\nsecret://ssh_private_key\nThen connect."
+    assert result.handles[0].id == "ssh_private_key"
+    assert result.handles[0].scopes == ("ssh.connect",)
+    _assert_absent_from_database(vault, private_key)
+
+
+def test_ingress_supports_bare_multiline_secret_name(tmp_path: Path) -> None:
+    ingress, _ = _ingress(tmp_path)
+    private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "not-a-real-private-key-for-tests\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"<secret SSH_PRIVATE_KEY>\n{private_key}\n</secret>",
+    )
+
+    assert result.text == "secret://ssh_private_key"
+    assert result.handles[0].id == "ssh_private_key"
+    assert result.handles[0].scopes == ("ssh.connect",)
+
+
+def test_ingress_ignores_unnamed_unrecognized_secret_blocks(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    text = "<secret [redacted]\nthis-is-not-a-recognized-secret-block\n</secret>"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=text,
+    )
+
+    assert result.text == text
+    assert result.handles == ()
+    assert vault.list_handles(tenant_id="tenant-a") == []
+
+
 def test_ingress_ignores_named_placeholders(tmp_path: Path) -> None:
     ingress, vault = _ingress(tmp_path)
 

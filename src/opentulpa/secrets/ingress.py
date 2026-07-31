@@ -46,11 +46,28 @@ class _Match:
     pattern: _CredentialPattern
 
 
-_NAMED_SECRET_BLOCK_RE = re.compile(
-    r"""<secret\s+name=["'](?P<name>[A-Za-z][A-Za-z0-9_-]{0,63})["']\s*>"""
+_SECRET_TAG_BLOCK_RE = re.compile(
+    r"""<secret(?P<attrs>(?:\s[^>]*)?)>"""
     r"(?P<value>.*?)"
     r"</secret\s*>",
     flags=re.IGNORECASE | re.DOTALL,
+)
+_SECRET_LINE_BLOCK_RE = re.compile(
+    r"""^[ \t]*<secret(?P<attrs>[^\n>]*)\r?\n"""
+    r"(?P<value>.*?)"
+    r"\r?\n[ \t]*</secret\s*>",
+    flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_SECRET_NAME_ATTR_RE = re.compile(
+    r"""(?:^|\s)name\s*=\s*(?:"(?P<double>[A-Za-z][A-Za-z0-9_-]{0,63})"|"""
+    r"""'(?P<single>[A-Za-z][A-Za-z0-9_-]{0,63})'|"""
+    r"""(?P<bare>[A-Za-z][A-Za-z0-9_-]{0,63}))(?=\s|$)""",
+    flags=re.IGNORECASE,
+)
+_SECRET_BARE_NAME_RE = re.compile(r"^\s*(?P<name>[A-Za-z][A-Za-z0-9_-]{0,63})\s*$")
+_OPENSSH_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN OPENSSH PRIVATE KEY-----.*-----END OPENSSH PRIVATE KEY-----",
+    flags=re.DOTALL,
 )
 _NAMED_SECRET_ASSIGNMENT_RE = re.compile(
     r"""(?<![A-Za-z0-9_])"""
@@ -226,39 +243,92 @@ class SecretIngressService:
     def _named_matches(text: str) -> list[_Match]:
         matches: list[_Match] = []
         occupied: list[tuple[int, int]] = []
-        for expression, block in (
-            (_NAMED_SECRET_BLOCK_RE, True),
-            (_NAMED_SECRET_ASSIGNMENT_RE, False),
-        ):
+        for expression in (_SECRET_TAG_BLOCK_RE, _SECRET_LINE_BLOCK_RE):
             for match in expression.finditer(text):
-                start, end = match.span() if block else match.span("value")
+                start, end = match.span()
                 if any(start < used_end and end > used_start for used_start, used_end in occupied):
                     continue
-                plaintext = match.group("value")
-                if block:
-                    plaintext = plaintext.strip("\r\n")
-                normalized_name = SecretIngressService._normalize_name(match.group("name"))
+                plaintext = match.group("value").strip("\r\n")
+                normalized_name = SecretIngressService._secret_block_name(
+                    attrs=match.group("attrs"),
+                    plaintext=plaintext,
+                )
+                if not normalized_name:
+                    continue
                 if not SecretIngressService._is_secret_value(plaintext):
                     continue
                 occupied.append((start, end))
                 matches.append(
-                    _Match(
+                    SecretIngressService._match_for_secret_block(
+                        expression=expression,
                         start=start,
                         end=end,
                         plaintext=plaintext,
-                        pattern=_CredentialPattern(
-                            kind=f"named:{normalized_name}",
-                            handle_id=normalized_name,
-                            name=normalized_name,
-                            scopes=_NAMED_SECRET_SCOPES.get(
-                                normalized_name,
-                                ("credential.use",),
-                            ),
-                            expression=expression,
-                        ),
+                        normalized_name=normalized_name,
                     )
                 )
+        for match in _NAMED_SECRET_ASSIGNMENT_RE.finditer(text):
+            start, end = match.span("value")
+            if any(start < used_end and end > used_start for used_start, used_end in occupied):
+                continue
+            plaintext = match.group("value")
+            normalized_name = SecretIngressService._normalize_name(match.group("name"))
+            if not SecretIngressService._is_secret_value(plaintext):
+                continue
+            occupied.append((start, end))
+            matches.append(
+                SecretIngressService._match_for_secret_block(
+                    expression=_NAMED_SECRET_ASSIGNMENT_RE,
+                    start=start,
+                    end=end,
+                    plaintext=plaintext,
+                    normalized_name=normalized_name,
+                )
+            )
         return matches
+
+    @staticmethod
+    def _match_for_secret_block(
+        *,
+        expression: re.Pattern[str],
+        start: int,
+        end: int,
+        plaintext: str,
+        normalized_name: str,
+    ) -> _Match:
+        return _Match(
+            start=start,
+            end=end,
+            plaintext=plaintext,
+            pattern=_CredentialPattern(
+                kind=f"named:{normalized_name}",
+                handle_id=normalized_name,
+                name=normalized_name,
+                scopes=_NAMED_SECRET_SCOPES.get(
+                    normalized_name,
+                    ("credential.use",),
+                ),
+                expression=expression,
+            ),
+        )
+
+    @staticmethod
+    def _secret_block_name(*, attrs: str, plaintext: str) -> str:
+        match = _SECRET_NAME_ATTR_RE.search(attrs or "")
+        if match is not None:
+            return SecretIngressService._normalize_name(
+                match.group("double") or match.group("single") or match.group("bare") or ""
+            )
+        bare = _SECRET_BARE_NAME_RE.fullmatch(attrs or "")
+        if bare is not None:
+            return SecretIngressService._normalize_name(bare.group("name"))
+        return SecretIngressService._infer_secret_name(plaintext)
+
+    @staticmethod
+    def _infer_secret_name(plaintext: str) -> str:
+        if _OPENSSH_PRIVATE_KEY_RE.search(str(plaintext or "")):
+            return "ssh_private_key"
+        return ""
 
     @staticmethod
     def _normalize_name(value: str) -> str:
