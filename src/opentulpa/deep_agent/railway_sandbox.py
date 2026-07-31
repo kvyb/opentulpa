@@ -68,6 +68,9 @@ class RailwaySandboxExecutionProvider:
             / "bridge.mjs"
         )
         default_bridge = packaged_bridge if packaged_bridge.is_file() else source_bridge
+        stable_bridge = str(
+            os.environ.get("OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH") or ""
+        ).strip()
         self._token = safe_token
         self._environment_id = safe_environment
         self._max_output_bytes = int(max_output_bytes)
@@ -75,7 +78,9 @@ class RailwaySandboxExecutionProvider:
         self._max_workspace_entries = int(max_workspace_entries)
         self._max_file_bytes = int(max_file_bytes)
         self._idle_timeout_minutes = int(idle_timeout_minutes)
-        self._bridge_path = Path(bridge_path or default_bridge).expanduser().resolve()
+        self._bridge_path = Path(
+            bridge_path or stable_bridge or default_bridge
+        ).expanduser().resolve()
         self._node_binary = str(node_binary or "node").strip() or "node"
         if runner is None:
             if not self._bridge_path.is_file():

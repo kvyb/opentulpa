@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import secrets
@@ -19,6 +20,8 @@ from pydantic import BaseModel, ConfigDict
 
 from opentulpa.host.models import HostConfig
 from opentulpa.persistence.tenant_namespace import tenant_namespace_label
+
+logger = logging.getLogger(__name__)
 
 _SECRET_LINE = re.compile(
     r"(?i)(api[_-]?key|authorization|bot[_-]?token|secret|password)(\s*[:=]\s*)(\S+)"
@@ -61,6 +64,8 @@ class RuntimeSupervisor:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._project_root = project_root.resolve()
+        bridge_path = self._project_root / "railway_sandbox_bridge" / "bridge.mjs"
+        self._railway_sandbox_bridge = bridge_path.resolve() if bridge_path.is_file() else None
         self._data_root = data_root.resolve()
         self._startup_timeout = startup_timeout_seconds
         self._shutdown_timeout = shutdown_timeout_seconds
@@ -269,6 +274,7 @@ class RuntimeSupervisor:
             self._status = "failed"
             self._error = self._safe_error(exc)
             self._append_log("host", f"runtime failed: {self._error}")
+            logger.error("child runtime failed: %s", self._error)
             raise RuntimeUnavailableError(self._error) from exc
         self._status = "ready"
         self._append_log("host", f"runtime revision {config.revision} is ready")
@@ -352,6 +358,7 @@ class RuntimeSupervisor:
             "TELEGRAM_WEBHOOK_SECRET",
             "PUBLIC_BASE_URL",
             "RAILWAY_PUBLIC_DOMAIN",
+            "OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH",
         ):
             environment.pop(key, None)
         environment.update(
@@ -369,6 +376,10 @@ class RuntimeSupervisor:
                 "PYTHONPATH": str(source_root / "src"),
             }
         )
+        if self._railway_sandbox_bridge is not None:
+            environment["OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH"] = str(
+                self._railway_sandbox_bridge
+            )
         if self._evolution_url is not None and self._evolution_token is not None:
             environment.update(
                 {

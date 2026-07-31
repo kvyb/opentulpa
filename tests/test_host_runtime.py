@@ -77,6 +77,36 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 
 
 @pytest.mark.asyncio
+async def test_evolved_runtime_uses_stable_host_railway_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = tmp_path / "railway_sandbox_bridge" / "bridge.mjs"
+    bridge.parent.mkdir()
+    bridge.write_text("", encoding="utf-8")
+    candidate_root = tmp_path / "candidate"
+    package = candidate_root / "src" / "opentulpa"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv(
+        "OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH",
+        "/untrusted/inherited/bridge.mjs",
+    )
+    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+
+    runtime.set_project_root(candidate_root)
+    environment = runtime._child_environment(
+        _config(),
+        port=8123,
+        project_root=candidate_root,
+    )
+
+    assert environment["PYTHONPATH"] == str(candidate_root / "src")
+    assert environment["OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH"] == str(bridge)
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_host_seeds_owner_identity_in_runtime_telegram_state(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     runtime = RuntimeSupervisor(project_root=tmp_path, data_root=data_root)
