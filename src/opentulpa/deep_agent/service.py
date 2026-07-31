@@ -251,6 +251,10 @@ def _safe_failure_cause(error: BaseException) -> str:
     return cause
 
 
+def _public_text(value: Any) -> str:
+    return str(redact_for_langfuse(str(value or "")))
+
+
 def _failure_diagnostic(error: BaseException, *, phase: str) -> dict[str, str]:
     traceback = error.__traceback__
     location = "unknown"
@@ -3338,6 +3342,7 @@ class DeepAgentService:
     ) -> str:
         db = self._require_runs_db()
         now = utc_now_iso()
+        public_request_text = _public_text(request_text)
         async with self._run_event_lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -3393,7 +3398,7 @@ class DeepAgentService:
                     (
                         context.tenant_id,
                         context.thread_id,
-                        self._thread_title(request_text),
+                        self._thread_title(public_request_text),
                         str(context.channel),
                         now,
                         now,
@@ -3430,7 +3435,7 @@ class DeepAgentService:
                         request_digest,
                         dynamic_generation,
                         dynamic_digest,
-                        request_text,
+                        public_request_text,
                         json.dumps(list(file_ids), ensure_ascii=False),
                         (inference_plan or self._default_inference_plan()).model_dump_json(),
                     ),
@@ -3615,9 +3620,10 @@ class DeepAgentService:
     ) -> bool:
         fields = ["updated_at = ?"]
         values: list[Any] = [utc_now_iso()]
+        safe_final_text = _public_text(final_text) if final_text is not None else None
         for column, value in (
             ("status", status),
-            ("final_text", final_text),
+            ("final_text", safe_final_text),
             ("error", error),
         ):
             if value is not None:
@@ -3674,6 +3680,7 @@ class DeepAgentService:
 
         timestamp = utc_now_iso()
         safe_data = cast("dict[str, Any]", redact_for_langfuse(event_data))
+        safe_final_text = _public_text(final_text) if final_text is not None else None
         db = self._require_runs_db()
         async with self._run_event_lock:
             await db.execute("BEGIN IMMEDIATE")
@@ -3694,7 +3701,7 @@ class DeepAgentService:
                 values: list[Any] = [status, sequence, timestamp]
                 if final_text is not None:
                     fields.append("final_text = ?")
-                    values.append(final_text)
+                    values.append(safe_final_text)
                 if error is not None:
                     fields.append("error = ?")
                     values.append(error)

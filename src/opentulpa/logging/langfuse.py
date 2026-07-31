@@ -42,6 +42,10 @@ _INLINE_SECRET_VALUE_RE = re.compile(
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&]+)",
     re.IGNORECASE,
 )
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
 _LANGFUSE_ENV_RE = re.compile(r"[^a-z0-9-_]+")
 _MAX_STRING_CHARS = 12_000
 _MAX_SEQUENCE_ITEMS = 50
@@ -112,6 +116,7 @@ def _redact_string(value: str) -> str:
     text = _INLINE_BEARER_RE.sub(r"\1[redacted]", text)
     text = _INLINE_SECRET_ASSIGNMENT_RE.sub(r"\1[redacted]", text)
     text = _INLINE_SECRET_VALUE_RE.sub(r"\1[redacted]", text)
+    text = _PRIVATE_KEY_BLOCK_RE.sub("[redacted-private-key]", text)
     if len(text) > _MAX_STRING_CHARS:
         return f"{text[:_MAX_STRING_CHARS]}...[truncated {len(text) - _MAX_STRING_CHARS} chars]"
     return text

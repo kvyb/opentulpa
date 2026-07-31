@@ -598,3 +598,18 @@ def test_redaction_covers_secrets_embedded_in_generic_strings() -> None:
     assert "environment-secret" not in redacted
     assert "quoted secret" not in redacted
     assert redacted.count("[redacted]") >= 4
+
+
+def test_redaction_covers_private_key_blocks() -> None:
+    raw = (
+        "Do not repeat this:\n"
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "not-a-real-private-key-for-tests\n"
+        "-----END OPENSSH PRIVATE KEY-----\n"
+        "Done."
+    )
+
+    redacted = redact_for_langfuse(raw)
+
+    assert redacted == "Do not repeat this:\n[redacted-private-key]\nDone."
+    assert "not-a-real-private-key-for-tests" not in redacted

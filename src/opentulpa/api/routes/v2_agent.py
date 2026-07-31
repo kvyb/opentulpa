@@ -214,8 +214,8 @@ def _public_snapshot(snapshot: AgentRunSnapshot) -> dict[str, Any]:
         "run_id": snapshot.run_id,
         "status": snapshot.status,
         "thread_id": snapshot.context.thread_id,
-        "final_text": snapshot.final_text,
-        "error": snapshot.error,
+        "final_text": redact_for_langfuse(snapshot.final_text),
+        "error": redact_for_langfuse(snapshot.error),
         "pending_approvals": [
             _public_approval(approval)
             for approval in snapshot.approvals

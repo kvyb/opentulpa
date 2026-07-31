@@ -299,6 +299,49 @@ def test_start_run_injects_principal_context_and_streams_normalized_sse() -> Non
     assert events[1][1]["data"] == {"text": "Hello", "api_key": "[redacted]"}
 
 
+def test_agent_events_and_snapshots_redact_private_key_blocks() -> None:
+    private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "not-a-real-private-key-for-tests\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+
+    class PrivateKeyService(_FakeAgentService):
+        async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
+            self.requests.append(request)
+            yield _event("run.started", 1, {"thread_id": request.context.thread_id})
+            yield _event("run.completed", 2, {"text": f"Here it is:\n{private_key}"})
+
+    service = PrivateKeyService()
+    snapshot = _snapshot(status="completed")
+    service.snapshots["run_123"] = AgentRunSnapshot(
+        run_id=snapshot.run_id,
+        context=snapshot.context,
+        status=snapshot.status,
+        final_text=f"Here it is:\n{private_key}",
+        approvals=snapshot.approvals,
+        created_at=snapshot.created_at,
+        updated_at=snapshot.updated_at,
+    )
+    client, _ = _client(service)
+
+    response = client.post(
+        "/v2/agent/runs",
+        headers={"x-tenant-id": "tenant-a", "x-actor-id": "actor-7"},
+        json={"thread_id": "thread-7", "text": "Help me", "file_ids": []},
+    )
+    snapshot_response = client.get(
+        "/v2/agent/runs/run_123",
+        headers={"x-tenant-id": "tenant-a", "x-actor-id": "actor-7"},
+    )
+
+    events = _sse_payloads(response.text)
+    assert events[-1][1]["data"]["text"] == "Here it is:\n[redacted-private-key]"
+    assert snapshot_response.json()["final_text"] == "Here it is:\n[redacted-private-key]"
+    assert private_key not in response.text
+    assert private_key not in snapshot_response.text
+
+
 def test_thread_routes_are_server_owned_and_tenant_scoped() -> None:
     client, service = _client()
     headers = {"x-tenant-id": "tenant-a", "x-actor-id": "actor-1"}
