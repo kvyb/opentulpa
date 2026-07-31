@@ -712,7 +712,10 @@ def test_process_repository_backend_runs_git_without_host_credentials(
     )
 
     assert result.exit_code == 0
-    assert result.output == "65532|unset|unset"
+    uid, smoke_secret, composio_secret = result.output.split("|")
+    assert uid != "0"
+    assert smoke_secret == "unset"
+    assert composio_secret == "unset"
     assert (checkout / "README.md").read_text(encoding="utf-8") == "after\n"
     assert private_root.stat().st_mode & 0o777 == 0o700
 

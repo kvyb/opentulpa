@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import pwd
 import re
 import shlex
 import shutil
@@ -26,6 +27,26 @@ _IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}\Z")
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RESOURCE_RE = re.compile(r"[1-9][0-9]*(?:\.[0-9]+)?(?:[kmgt]i?|b)?\Z", re.I)
 _PROCESS_SANDBOX_EXECUTION_LOCK = threading.RLock()
+
+
+def _default_process_identity() -> tuple[int, int]:
+    """Use a real unprivileged passwd entry so tools like OpenSSH can start."""
+
+    for name in ("opentulpa-sandbox", "nobody"):
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            continue
+        if entry.pw_uid > 0 and entry.pw_gid > 0:
+            return int(entry.pw_uid), int(entry.pw_gid)
+    for uid in (65_534, 65_532):
+        try:
+            entry = pwd.getpwuid(uid)
+        except KeyError:
+            continue
+        if entry.pw_uid > 0 and entry.pw_gid > 0:
+            return int(entry.pw_uid), int(entry.pw_gid)
+    return 65_532, 65_532
 
 
 def _force_remove_container(container_cli: str, container_name: str) -> None:
@@ -531,13 +552,17 @@ class CandidateProcessBackend(CandidateContainerBackend):
         workspace: str | Path,
         allowed_root: str | Path,
         policy: CandidateSandboxPolicy,
-        uid: int = 65_532,
-        gid: int = 65_532,
+        uid: int | None = None,
+        gid: int | None = None,
     ) -> None:
         if not policy.network_enabled:
             raise ValueError("process source sandbox requires explicit network enablement")
         if not hasattr(os, "geteuid") or os.geteuid() != 0:
             raise RuntimeError("process source sandbox requires a root host supervisor")
+        if (uid is None) != (gid is None):
+            raise ValueError("process source sandbox identity must include both uid and gid")
+        if uid is None or gid is None:
+            uid, gid = _default_process_identity()
         if uid < 1 or gid < 1:
             raise ValueError("process source sandbox identity is invalid")
         if shutil.which("setpriv") is None or shutil.which("prlimit") is None:

@@ -194,7 +194,10 @@ def test_candidate_process_backend_drops_identity_and_has_no_host_environment(
     )
 
     assert result.exit_code == 0
-    assert result.output == f"65532|unset|{trusted_python}"
+    uid, api_key, python_path = result.output.split("|")
+    assert uid != "0"
+    assert api_key == "unset"
+    assert python_path == trusted_python
     assert (workspace / "source.txt").read_text(encoding="utf-8") == "after\n"
     assert workspace.stat().st_uid == 0
     assert (workspace / "source.txt").stat().st_uid == 0
