@@ -190,6 +190,31 @@ def test_bridge_environment_does_not_inherit_host_secrets(
     assert "telegram-secret" not in str(environment)
 
 
+def test_provider_uses_stable_host_bridge_from_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = tmp_path / "stable-bridge" / "bridge.mjs"
+    bridge.parent.mkdir()
+    bridge.write_text("", encoding="utf-8")
+    dependency = bridge.parent / "node_modules" / "railway"
+    dependency.mkdir(parents=True)
+    (dependency / "package.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH", str(bridge))
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/node")
+
+    provider = RailwaySandboxExecutionProvider(
+        token="project-token",
+        environment_id="environment-id",
+        max_output_bytes=4_096,
+        max_workspace_archive_bytes=1_000_000,
+        max_workspace_entries=100,
+        max_file_bytes=100_000,
+    )
+
+    assert provider._bridge_path == bridge  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_tenant_backend_cancels_remote_provider_without_committing_workspace(
     tmp_path: Path,
