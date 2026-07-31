@@ -754,14 +754,39 @@ def _sandbox_ssh_command(
     target: str,
     port: int,
     remote_command: str,
+    secret_type: str,
 ) -> str:
-    return (
-        "mkdir -p .ssh && chmod 700 .ssh && "
-        "ssh -i \"$OPENTULPA_SSH_IDENTITY\" "
-        "-o IdentitiesOnly=yes "
+    setup = "mkdir -p .ssh && chmod 700 .ssh && "
+    common_options = (
         "-o UserKnownHostsFile=\"$PWD/.ssh/known_hosts\" "
         "-o StrictHostKeyChecking=accept-new "
-        f"-p {int(port)} {shlex.quote(target)} -- {shlex.quote(remote_command)}"
+    )
+    destination = f"-p {int(port)} {shlex.quote(target)} -- {shlex.quote(remote_command)}"
+    if secret_type == "private_key":
+        return (
+            f"{setup}ssh -i \"$OPENTULPA_SSH_IDENTITY\" "
+            f"-o IdentitiesOnly=yes {common_options}{destination}"
+        )
+    if secret_type == "password":
+        helper = ".opentulpa-ssh-askpass"
+        helper_body = 'exec /bin/cat -- "$OPENTULPA_SSH_PASSWORD_FILE"'
+        return (
+            f"{setup}umask 077 && "
+            f"printf '%s\\n' '#!/bin/sh' {shlex.quote(helper_body)} > {helper} && "
+            f"chmod 700 {helper} && {{ "
+            "DISPLAY=opentulpa SSH_ASKPASS_REQUIRE=force "
+            f"SSH_ASKPASS=\"$PWD/{helper}\" ssh "
+            "-o BatchMode=no "
+            "-o PubkeyAuthentication=no "
+            "-o PasswordAuthentication=yes "
+            "-o KbdInteractiveAuthentication=yes "
+            "-o PreferredAuthentications=password,keyboard-interactive "
+            "-o NumberOfPasswordPrompts=1 "
+            f"{common_options}{destination}; status=$?; rm -f {helper}; exit $status; }}"
+        )
+    raise ProductToolApplicationError(
+        "invalid_request",
+        "The SSH secret type is invalid.",
     )
 
 
@@ -1794,10 +1819,11 @@ class ProductToolApplication:
     ) -> ProductToolOutput:
         sandbox = self._require_sandbox_execution(invocation)
         secret_service = self._require_secret_handles(invocation)
-        if str(invocation.arguments.get("secret_type") or "").strip() != "private_key":
+        secret_type = str(invocation.arguments.get("secret_type") or "private_key").strip()
+        if secret_type not in {"password", "private_key"}:
             raise ProductToolApplicationError(
                 "invalid_request",
-                "Only SSH private-key secret mounts are supported.",
+                "The SSH secret type is invalid.",
             )
         secret_id = str(invocation.arguments["secret_id"])
         handle = await self._call(
@@ -1836,7 +1862,7 @@ class ProductToolApplication:
                     actor_id=invocation.context.actor_id,
                     secret_id=secret_handle.id,
                     scope=scope,
-                    mount_type="ssh_private_key",
+                    mount_type=f"ssh_{secret_type}",
                 )
             )
         except Exception as exc:
@@ -1852,20 +1878,27 @@ class ProductToolApplication:
             target=target,
             port=int(invocation.arguments["port"]),
             remote_command=str(invocation.arguments["command"]),
+            secret_type=secret_type,
         )
+        if secret_type == "private_key":
+            secret_file = SandboxSecretFileMount(
+                name="id_opentulpa",
+                content=secret_value,
+                env="OPENTULPA_SSH_IDENTITY",
+            )
+        else:
+            secret_file = SandboxSecretFileMount(
+                name="ssh_password",
+                content=secret_value,
+                env="OPENTULPA_SSH_PASSWORD_FILE",
+            )
         try:
             result = await asyncio.to_thread(
                 sandbox.execute,
                 tenant_id=invocation.context.tenant_id,
                 command=command,
                 timeout=int(invocation.arguments["timeout_seconds"]),
-                secret_files=(
-                    SandboxSecretFileMount(
-                        name="id_opentulpa",
-                        content=secret_value,
-                        env="OPENTULPA_SSH_IDENTITY",
-                    ),
-                ),
+                secret_files=(secret_file,),
             )
         except TypeError as exc:
             raise ProductToolApplicationError(

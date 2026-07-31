@@ -89,9 +89,10 @@ secret handles. Changed capability code must go through the OpenTulpa source wor
 Telegram worker pairs once with `/start <code>`; unless configured otherwise, the code is the last
 eight characters of the bot token already supplied through secret ingress.
 
-Credentials enter through this owner chat. If missing, ask `SERVICE_API_KEY=<value>`,
-`SERVICE_TOKEN=<value>`, or `<secret name="SERVICE_CREDENTIAL">...</secret>`; for SSH private keys
-use `<secret name="SSH_PRIVATE_KEY">...</secret>` and never use unnamed or redacted secret tags.
+Credentials enter here. Ask `SERVICE_API_KEY=<value>`,
+`SERVICE_TOKEN=<value>`, or `<secret name="SERVICE_CREDENTIAL">...</secret>`. For SSH, use
+`<secret name="SSH_PRIVATE_KEY">...</secret>` or `<secret name="SSH_PASSWORD">...</secret>` with
+matching `secret_type`; never put credentials in commands or use unnamed/redacted secret tags.
 Ingress replaces it with `secret://<handle_id>`; use that handle and never echo, persist, or request
 the plaintext again.
 Never send the owner to a separate host UI, CLI, environment file, or administrator for secret

@@ -363,7 +363,7 @@ class SecretHandleRevokeArguments(RequiredIdempotencyArguments):
 
 class SandboxSshDiagnosticArguments(ToolArguments):
     secret_id: ProtocolSlug = Field(
-        description="Tenant-owned secret handle containing an SSH private key.",
+        description="Tenant-owned secret handle containing an SSH private key or password.",
     )
     host: str = Field(
         min_length=1,
@@ -379,7 +379,7 @@ class SandboxSshDiagnosticArguments(ToolArguments):
     port: int = Field(default=22, ge=1, le=65_535)
     command: str = Field(min_length=1, max_length=20_000)
     timeout_seconds: int = Field(default=60, ge=1, le=600)
-    secret_type: Literal["private_key"] = "private_key"
+    secret_type: Literal["private_key", "password"] = "private_key"
 
 
 CapabilityName = Annotated[

@@ -152,3 +152,32 @@ def test_secret_service_resolves_one_shot_sandbox_mount_material(tmp_path: Path)
     )
 
     assert material.get_secret_value() == "private-key"
+
+
+def test_secret_service_resolves_one_shot_ssh_password_mount(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    service = SecretVaultService(vault)
+    pending = vault.create_pending(
+        tenant_id="tenant-a",
+        secret_id="ssh_password",
+        name="ssh_password",
+        scopes=("ssh.connect",),
+        created_by="owner",
+    )
+    vault.fulfill(
+        tenant_id="tenant-a",
+        secret_id=pending.id,
+        expected_revision=1,
+        value="test-password",
+        updated_by="owner",
+    )
+
+    material = service.resolve_for_sandbox(
+        tenant_id="tenant-a",
+        actor_id="owner",
+        secret_id=pending.id,
+        scope="ssh.connect",
+        mount_type="ssh_password",
+    )
+
+    assert material.get_secret_value() == "test-password"

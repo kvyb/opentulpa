@@ -51,7 +51,7 @@ class SecretVaultService:
         """Redeem one tenant secret for a trusted one-shot sandbox mount."""
 
         del actor_id
-        if str(mount_type or "").strip() not in {"ssh_private_key"}:
+        if str(mount_type or "").strip() not in {"ssh_password", "ssh_private_key"}:
             raise SecretGrantError("sandbox secret mount type is unsupported")
         grant = self._vault.issue_grant(
             tenant_id=tenant_id,

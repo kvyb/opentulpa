@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import os
+import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +12,7 @@ import pytest
 from deepagents.backends.protocol import ExecuteResponse
 from pydantic import SecretStr
 
-from opentulpa.application.product_tools import ProductToolApplication
+from opentulpa.application.product_tools import ProductToolApplication, _sandbox_ssh_command
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.persistence.idempotency import IdempotencyStore
@@ -721,6 +723,112 @@ async def test_sandbox_ssh_diagnostic_mounts_secret_handle_without_plaintext_com
     assert "root@178.214.97.1" in sandbox_call["command"]
     assert sandbox_call["secret_files"][0].content == private_key
     assert sandbox_call["secret_files"][0].env == "OPENTULPA_SSH_IDENTITY"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_ssh_diagnostic_mounts_password_for_askpass_only() -> None:
+    password = "unique password 'with shell symbols' $HOME"
+    handle = SecretHandle(
+        tenant_id="tenant-a",
+        id="ssh_password",
+        revision=2,
+        name="ssh_password",
+        state=SecretState.ACTIVE,
+        scopes=("ssh.connect",),
+        created_at=datetime(2026, 7, 31, tzinfo=UTC),
+        created_by="owner-1",
+    )
+    secret_handles = _Port(
+        get=handle,
+        resolve_for_sandbox=SecretStr(password),
+    )
+    sandbox_execution = _SandboxExecutionPort()
+    application, _ = _application(
+        secret_handles=secret_handles,
+        sandbox_execution=sandbox_execution,
+    )
+
+    result = await application.sandbox_ssh_diagnostic(
+        _invocation(
+            "sandbox_ssh_diagnostic",
+            {
+                "secret_id": "ssh_password",
+                "host": "13928983",
+                "user": "root",
+                "port": 22,
+                "command": "uptime",
+                "timeout_seconds": 30,
+                "secret_type": "password",
+            },
+            idempotency_key=None,
+        )
+    )
+
+    assert result.data["exit_code"] == 0
+    assert secret_handles.calls[-1] == (
+        "resolve_for_sandbox",
+        {
+            "tenant_id": "tenant-a",
+            "actor_id": "owner-1",
+            "secret_id": "ssh_password",
+            "scope": "ssh.connect",
+            "mount_type": "ssh_password",
+        },
+    )
+    sandbox_call = sandbox_execution.calls[0]
+    assert password not in sandbox_call["command"]
+    assert "root@13928983" in sandbox_call["command"]
+    assert "SSH_ASKPASS_REQUIRE=force" in sandbox_call["command"]
+    assert "BatchMode=no" in sandbox_call["command"]
+    assert "PubkeyAuthentication=no" in sandbox_call["command"]
+    assert "PasswordAuthentication=yes" in sandbox_call["command"]
+    assert "NumberOfPasswordPrompts=1" in sandbox_call["command"]
+    assert "ssh -i" not in sandbox_call["command"]
+    assert sandbox_call["secret_files"][0].content == password
+    assert sandbox_call["secret_files"][0].env == "OPENTULPA_SSH_PASSWORD_FILE"
+
+
+def test_password_ssh_command_reads_only_the_mounted_askpass_file(tmp_path: Path) -> None:
+    binary_root = tmp_path / "bin"
+    binary_root.mkdir()
+    fake_ssh = binary_root / "ssh"
+    fake_ssh.write_text(
+        "#!/bin/sh\n"
+        'provided="$("$SSH_ASKPASS" "password:")"\n'
+        'expected="$(cat "$OPENTULPA_SSH_PASSWORD_FILE")"\n'
+        'test "$provided" = "$expected" || exit 7\n'
+        "printf authenticated\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o700)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    password_file = tmp_path / "mounted-password"
+    password_file.write_text("fake-password-for-test", encoding="utf-8")
+    password_file.chmod(0o600)
+    command = _sandbox_ssh_command(
+        target="root@example.test",
+        port=22,
+        remote_command="uptime",
+        secret_type="password",
+    )
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=workspace,
+        env={
+            "PATH": f"{binary_root}{os.pathsep}{os.defpath}",
+            "OPENTULPA_SSH_PASSWORD_FILE": str(password_file),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "authenticated"
+    assert "fake-password-for-test" not in command
+    assert not (workspace / ".opentulpa-ssh-askpass").exists()
 
 
 @pytest.mark.asyncio

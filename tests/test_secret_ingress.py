@@ -242,6 +242,22 @@ def test_ingress_scopes_ssh_private_key_blocks_for_sandbox_connect(tmp_path: Pat
     assert result.handles[0].scopes == ("ssh.connect",)
 
 
+def test_ingress_encrypts_short_ssh_password_for_sandbox_connect(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    password = "p@55"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f'<secret name="SSH_PASSWORD">{password}</secret>',
+    )
+
+    assert result.text == "secret://ssh_password"
+    assert result.handles[0].id == "ssh_password"
+    assert result.handles[0].scopes == ("ssh.connect",)
+    _assert_absent_from_database(vault, password)
+
+
 def test_ingress_infers_malformed_openssh_secret_block_for_sandbox_connect(
     tmp_path: Path,
 ) -> None:

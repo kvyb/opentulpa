@@ -421,6 +421,16 @@ def test_secret_tool_schemas_have_no_plaintext_ingress() -> None:
         assert '"token"' not in serialized
         assert "tenant_id" not in serialized
 
+    ssh = OPERATION_ARGUMENT_SCHEMAS["sandbox_ssh_diagnostic"].model_validate(
+        {
+            "secret_id": "ssh_password",
+            "host": "13928983",
+            "command": "uptime",
+            "secret_type": "password",
+        }
+    )
+    assert ssh.secret_type == "password"
+
 
 @pytest.mark.asyncio
 async def test_control_tools_are_owner_only_and_fail_closed_on_leaky_secret_ports(

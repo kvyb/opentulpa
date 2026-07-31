@@ -481,8 +481,8 @@ def _description(spec: ToolSpec) -> str:
             "active and session_active report only whether an editable candidate session exists."
         ),
         "sandbox_ssh_diagnostic": (
-            "Run one SSH diagnostic command from the sandbox using an opaque stored secret handle. "
-            "Never provide plaintext credentials."
+            "Run one SSH command from the sandbox using an opaque stored private-key or password "
+            "secret handle. Never provide plaintext credentials."
         ),
     }.get(spec.name)
     if description is None:

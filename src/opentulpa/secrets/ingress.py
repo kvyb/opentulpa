@@ -84,6 +84,7 @@ _NAMED_SECRET_SCOPES: dict[str, tuple[str, ...]] = {
     "gh_token": ("github.read", "github.write"),
     "browser_use_api_key": ("browser.manage",),
     "ssh_key": ("ssh.connect",),
+    "ssh_password": ("ssh.connect",),
     "ssh_private_key": ("ssh.connect",),
 }
 _PLACEHOLDER_VALUES = frozenset(
@@ -255,7 +256,10 @@ class SecretIngressService:
                 )
                 if not normalized_name:
                     continue
-                if not SecretIngressService._is_secret_value(plaintext):
+                if not SecretIngressService._is_secret_value(
+                    plaintext,
+                    min_bytes=1 if normalized_name == "ssh_password" else 8,
+                ):
                     continue
                 occupied.append((start, end))
                 matches.append(
@@ -273,7 +277,10 @@ class SecretIngressService:
                 continue
             plaintext = match.group("value")
             normalized_name = SecretIngressService._normalize_name(match.group("name"))
-            if not SecretIngressService._is_secret_value(plaintext):
+            if not SecretIngressService._is_secret_value(
+                plaintext,
+                min_bytes=1 if normalized_name == "ssh_password" else 8,
+            ):
                 continue
             occupied.append((start, end))
             matches.append(
@@ -339,10 +346,10 @@ class SecretIngressService:
         return normalized[:64]
 
     @staticmethod
-    def _is_secret_value(value: str) -> bool:
+    def _is_secret_value(value: str, *, min_bytes: int = 8) -> bool:
         clean = str(value or "").strip()
         return (
-            8 <= len(clean.encode("utf-8")) <= 1_048_576
+            min_bytes <= len(clean.encode("utf-8")) <= 1_048_576
             and clean.casefold() not in _PLACEHOLDER_VALUES
             and not clean.startswith("secret://")
         )
