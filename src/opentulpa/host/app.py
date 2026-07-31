@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from opentulpa.host.store import HostConfigConflictError, HostStore
 
 HOST_SESSION_COOKIE = "opentulpa_host_session"
 _SANDBOX_START_RETRY_SECONDS = 5.0
+logger = logging.getLogger(__name__)
 _HOP_HEADERS = frozenset(
     {
         "connection",
@@ -112,7 +114,8 @@ def create_host_app(
                     await service.start()
                     runtime_started = True
                     return
-                except Exception:
+                except Exception as exc:
+                    logger.warning("sandbox worker startup failed: %s", exc)
                     if not retry:
                         raise
                     await asyncio.sleep(_sandbox_start_retry_seconds())

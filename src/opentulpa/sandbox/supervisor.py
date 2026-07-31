@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import socket
@@ -19,6 +20,7 @@ from opentulpa.sandbox.client import (
 )
 
 _DEFAULT_HEALTH_INTERVAL_SECONDS = 15.0
+logger = logging.getLogger(__name__)
 
 
 def _private_token(path: Path) -> str:
@@ -138,6 +140,7 @@ class SandboxWorkerSupervisor:
                     break
                 await asyncio.sleep(0.25)
             detail = _canary_summary(last or self._client.canary())
+        logger.warning("sandbox worker failed readiness: %s", detail)
         raise RuntimeError(f"sandbox worker failed readiness: {detail}")
 
     async def status(self) -> dict[str, object]:
@@ -183,8 +186,6 @@ class SandboxWorkerSupervisor:
                 "opentulpa.sandbox.worker",
                 cwd=self._project_root,
                 env=self._worker_environment(),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
             )
 
     def _ensure_monitor(self) -> None:

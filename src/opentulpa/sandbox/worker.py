@@ -152,6 +152,7 @@ class RestrictedProcessEngine:
 
     def health_checks(self) -> dict[str, bool]:
         return {
+            "process_backend": self._provider is not None,
             "linux_root": bool(
                 os.name == "posix"
                 and hasattr(os, "geteuid")
@@ -275,6 +276,7 @@ class SandboxWorkerService:
     def health(self) -> SandboxHealthResult:
         checks = self._engine.health_checks()
         canary = False
+        canary_error: str | None = None
         if checks and all(checks.values()):
             with tempfile.TemporaryDirectory(prefix="opentulpa-sandbox-health-", dir=self._root) as tmp:
                 workspace = Path(tmp)
@@ -287,13 +289,27 @@ class SandboxWorkerService:
                     result.exit_code == 0
                     and result.output.strip() == "opentulpa-sandbox-ready"
                 )
+                if not canary:
+                    output = str(result.output or "").strip()
+                    canary_error = (
+                        f"sandbox worker canary command failed with exit {result.exit_code}"
+                    )
+                    if output:
+                        canary_error = f"{canary_error}: {output[:300]}"
         checks["execute"] = canary
         ok = all(checks.values())
+        if ok:
+            error = None
+        elif canary_error:
+            error = canary_error
+        else:
+            failed = ", ".join(name for name, passed in checks.items() if not passed)
+            error = f"sandbox worker failed checks: {failed}" if failed else "sandbox worker canary failed"
         return SandboxHealthResult(
             ok=ok,
             tier=self._engine.tier,
             checks=checks,
-            error=None if ok else "sandbox worker canary failed",
+            error=error,
         )
 
     def create_workspace(self, *, kind: str, tenant_id: str) -> SandboxWorkspaceResult:
