@@ -407,6 +407,13 @@ class Settings(BaseSettings):
             "If unset, OpenTulpa derives it automatically from the public base URL."
         ),
     )
+    composio_profile_scope: str | None = Field(
+        default=None,
+        description=(
+            "Optional stable namespace for Composio user profiles. Set this per deployment "
+            "when multiple OpenTulpa deployments share one Composio API key."
+        ),
+    )
     langfuse_public_key: str | None = Field(
         default=None,
         description="Optional Langfuse public key. Langfuse stays disabled unless public key, secret key, and base URL are set.",

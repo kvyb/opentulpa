@@ -523,6 +523,33 @@ def _resolve_public_base_url() -> str:
     return resolve_public_base_url()
 
 
+def _clean_composio_scope_part(value: object) -> str:
+    return str(value or "").strip().strip("/").replace(":", "_")
+
+
+def _default_composio_profile_scope(explicit: object = None) -> str | None:
+    configured = _clean_composio_scope_part(explicit)
+    if configured:
+        return configured
+    service_id = _clean_composio_scope_part(os.environ.get("RAILWAY_SERVICE_ID"))
+    if service_id:
+        return f"railway-service_{service_id}"
+    public_url = _clean_composio_scope_part(
+        os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    )
+    if public_url:
+        return f"url_{public_url}"
+    service_name = _clean_composio_scope_part(os.environ.get("RAILWAY_SERVICE_NAME"))
+    environment = _clean_composio_scope_part(
+        os.environ.get("RAILWAY_ENVIRONMENT_ID")
+        or os.environ.get("RAILWAY_ENVIRONMENT_NAME")
+        or os.environ.get("RAILWAY_ENVIRONMENT")
+    )
+    if service_name and environment:
+        return f"railway_{environment}_{service_name}"
+    return None
+
+
 def _ensure_telegram_webhook_secret(settings: Settings) -> str:
     secret = str(settings.telegram_webhook_secret or "").strip()
     if secret:
@@ -982,6 +1009,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         raw_composio = ComposioService(
             api_key=str(settings.composio_api_key or ""),
             default_callback_url=settings.composio_default_callback_url,
+            profile_scope=_default_composio_profile_scope(settings.composio_profile_scope),
             api_key_provider=composio_api_key_from_vault,
         )
         tenant_composio = TenantComposioService(

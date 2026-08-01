@@ -149,6 +149,14 @@ class _PartialInstagramComposioService(ComposioService):
         }
 
 
+class _ConnectedAccount:
+    id = "acct_1"
+    status = "ACTIVE"
+    user_id = "deployment_a:shared_code"
+    toolkit = None
+    auth_config = None
+
+
 def test_composio_hot_loads_and_rotates_a_vault_backed_api_key(monkeypatch) -> None:
     keys: list[str] = []
     active = {"value": ""}
@@ -287,6 +295,60 @@ def test_instagram_send_retries_without_reply_to_message_id_on_invalid_mid() -> 
     assert service.calls[0]["arguments"]["reply_to_message_id"] == "mid_1"
     assert "reply_to_message_id" not in service.calls[1]["arguments"]
     assert result["data"]["retried_without_reply_to_message_id"] is True
+
+
+def test_execute_tool_scopes_composio_user_id_by_profile_scope() -> None:
+    service = _FakeComposioService(api_key="test-key", profile_scope="deployment_a")
+
+    service.execute_tool(
+        customer_id="shared_code",
+        tool_slug="GITHUB_CREATE_REPO",
+        arguments={"name": "example"},
+    )
+
+    assert service.calls[0]["user_id"] == "deployment_a:shared_code"
+
+
+def test_execute_tool_keeps_legacy_user_id_without_profile_scope() -> None:
+    service = _FakeComposioService(api_key="test-key")
+
+    service.execute_tool(
+        customer_id="shared_code",
+        tool_slug="GITHUB_CREATE_REPO",
+        arguments={"name": "example"},
+    )
+
+    assert service.calls[0]["user_id"] == "shared_code"
+
+
+def test_list_connected_accounts_uses_scoped_composio_user_id(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def list_connected_accounts(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(items=[], next_cursor=None)
+
+    monkeypatch.setattr(
+        ComposioService,
+        "_sdk",
+        lambda self: SimpleNamespace(
+            connected_accounts=SimpleNamespace(list=list_connected_accounts)
+        ),
+    )
+    service = ComposioService(api_key="test-key", profile_scope="deployment_a")
+
+    result = service.list_connected_accounts(customer_id="shared_code")
+
+    assert calls[0]["user_ids"] == ["deployment_a:shared_code"]
+    assert result["customer_id"] == "shared_code"
+
+
+def test_connected_account_serialization_hides_internal_profile_scope() -> None:
+    service = ComposioService(api_key="test-key", profile_scope="deployment_a")
+
+    result = service._serialize_connected_account(_ConnectedAccount())  # noqa: SLF001
+
+    assert result["user_id"] == "shared_code"
 
 
 def test_list_instagram_conversations_skips_unreadable_threads() -> None:

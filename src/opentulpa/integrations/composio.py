@@ -30,6 +30,11 @@ def _normalize_toolkit_slug(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def _normalize_profile_scope(value: str | None) -> str | None:
+    scope = str(value or "").strip()
+    return scope or None
+
+
 def _coerce_toolkit_list(values: list[str] | None) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -167,6 +172,7 @@ class ComposioService:
 
     api_key: str
     default_callback_url: str | None = None
+    profile_scope: str | None = None
     api_key_provider: Callable[[], str] | None = field(default=None, repr=False)
     _client: Any | None = field(default=None, init=False, repr=False)
     _client_key_digest: str | None = field(default=None, init=False, repr=False)
@@ -175,6 +181,7 @@ class ComposioService:
     def __post_init__(self) -> None:
         self.api_key = str(self.api_key or "").strip()
         self.default_callback_url = str(self.default_callback_url or "").strip() or None
+        self.profile_scope = _normalize_profile_scope(self.profile_scope)
 
     @property
     def enabled(self) -> bool:
@@ -197,6 +204,7 @@ class ComposioService:
             "callback_url_configured": bool(resolved_callback),
             "default_callback_url": self.default_callback_url,
             "resolved_callback_url": resolved_callback,
+            "profile_scope_configured": bool(self.profile_scope),
         }
 
     def _resolved_api_key(self) -> str:
@@ -229,6 +237,23 @@ class ComposioService:
                 self._client_key_digest = key_digest
             return self._client
 
+    def _composio_user_id(self, customer_id: str) -> str:
+        customer = str(customer_id or "").strip()
+        if not customer:
+            raise ValueError("customer_id is required")
+        if not self.profile_scope:
+            return customer
+        return f"{self.profile_scope}:{customer}"
+
+    def _public_customer_id_from_composio_user_id(self, user_id: str) -> str:
+        safe_user_id = str(user_id or "").strip()
+        if not self.profile_scope:
+            return safe_user_id
+        prefix = f"{self.profile_scope}:"
+        if safe_user_id.startswith(prefix):
+            return safe_user_id[len(prefix) :]
+        return safe_user_id
+
     def _session(
         self,
         *,
@@ -237,10 +262,7 @@ class ComposioService:
         connected_accounts: dict[str, str] | None = None,
         toolkits: list[str] | None = None,
     ) -> Any:
-        customer = str(customer_id or "").strip()
-        if not customer:
-            raise ValueError("customer_id is required")
-        kwargs: dict[str, Any] = {"user_id": customer}
+        kwargs: dict[str, Any] = {"user_id": self._composio_user_id(customer_id)}
         if manage_connections is not None:
             kwargs["manage_connections"] = bool(manage_connections)
         normalized_accounts = {
@@ -402,7 +424,7 @@ class ComposioService:
         limit: int = 50,
     ) -> dict[str, Any]:
         response = self._sdk().connected_accounts.list(
-            user_ids=[str(customer_id).strip()],
+            user_ids=[self._composio_user_id(customer_id)],
             toolkit_slugs=_coerce_toolkit_list(toolkits) or None,
             statuses=_coerce_status_list(statuses) or None,
             limit=max(1, min(int(limit), 100)),
@@ -540,7 +562,7 @@ class ComposioService:
             slug=safe_slug,
             arguments=safe_arguments,
             connected_account_id=str(connected_account_id or "").strip() or None,
-            user_id=str(customer_id or "").strip(),
+            user_id=self._composio_user_id(customer_id),
             text=str(text or "").strip() or None,
         )
         result, retried = self._retry_instagram_send_without_reply_to(
@@ -600,7 +622,7 @@ class ComposioService:
             slug=tool_slug,
             arguments=retry_arguments,
             connected_account_id=str(connected_account_id or "").strip() or None,
-            user_id=str(customer_id or "").strip(),
+            user_id=self._composio_user_id(customer_id),
             text=str(text or "").strip() or None,
         ), True
 
@@ -681,14 +703,14 @@ class ComposioService:
             ),
         )
 
-    @staticmethod
-    def _serialize_connected_account(item: Any) -> dict[str, Any]:
+    def _serialize_connected_account(self, item: Any) -> dict[str, Any]:
         auth_config = getattr(item, "auth_config", None)
         toolkit = getattr(item, "toolkit", None)
+        user_id = str(getattr(item, "user_id", "") or "")
         return {
             "id": str(getattr(item, "id", "") or getattr(item, "nanoid", "") or ""),
             "status": str(getattr(item, "status", "") or ""),
-            "user_id": str(getattr(item, "user_id", "") or ""),
+            "user_id": self._public_customer_id_from_composio_user_id(user_id),
             "toolkit_slug": str(getattr(toolkit, "slug", "") or ""),
             "toolkit_name": str(getattr(toolkit, "name", "") or ""),
             "auth_config_id": str(getattr(auth_config, "id", "") or "") or None,
