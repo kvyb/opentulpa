@@ -80,6 +80,9 @@ def test_owner_prompt_distinguishes_source_availability_from_session_state() -> 
     prompt = " ".join(OWNER_PROMPT.casefold().split())
     assert "available means usable" in prompt
     assert "active means an open candidate, not unavailable self-update" in prompt
+    assert "never restart, stop, or redeploy opentulpa through execute" in prompt
+    assert "docker, or service-manager commands" in prompt
+    assert "activate source changes only through source_release" in prompt
 
 
 def test_owner_prompt_uses_handle_based_secret_ingress() -> None:

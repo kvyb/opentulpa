@@ -112,6 +112,11 @@ request now. Reuse existing conversation and tool results; do not repeat tool ca
 external side effects that may already have executed. If there is no preceding owner request, say
 that briefly."""
 _PUBLIC_RUN_CANCELLED_MESSAGE = "The agent run was cancelled before completion."
+_PUBLIC_RUN_INTERRUPTED_BY_RESTART_MESSAGE = (
+    "OpenTulpa restarted while this agent run was active. The in-flight run was stopped, "
+    "and tool or shell actions were not replayed automatically. Send the request again if "
+    "you still want it done."
+)
 _PUBLIC_CAPABILITY_CHANGED_MESSAGE = (
     "The approved capability changed before the agent run could continue."
 )
@@ -366,7 +371,7 @@ class _DenyToolsMiddleware(AgentMiddleware):
 
 
 class _ShellCommandPolicyMiddleware(AgentMiddleware):
-    """Reject shell calls whose destructive behavior cannot be classified safely."""
+    """Reject shell calls that are ambiguous or bypass restart-safe source release."""
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
         tool_call = request.tool_call
@@ -380,8 +385,9 @@ class _ShellCommandPolicyMiddleware(AgentMiddleware):
         ):
             return ToolMessage(
                 content=(
-                    "This shell command uses syntax that cannot be classified safely. "
-                    "Use a literal command without dynamic executable or option construction."
+                    "This shell command is not permitted because it cannot be classified safely "
+                    "or it invokes a blocked Docker lifecycle command. Use a literal safe "
+                    "command, or use source_release for self-updates."
                 ),
                 tool_call_id=str(tool_call.get("id", "rejected-shell-call")),
                 name=name,
@@ -3576,9 +3582,12 @@ class DeepAgentService:
         run_ids = [str(row["run_id"]) for row in await cursor.fetchall()]
         await cursor.close()
         for run_id in run_ids:
-            await self._cancel_with_event(run_id, allowed_statuses={"running"})
+            await self._fail_restart_interrupted_run(run_id, allowed_statuses={"running"})
         if run_ids:
-            logger.warning("Cancelled %s stale Deep Agent run(s) during startup", len(run_ids))
+            logger.warning(
+                "Marked %s stale Deep Agent run(s) as interrupted by restart during startup",
+                len(run_ids),
+            )
 
     async def _recover_pending_resumes(self) -> None:
         db = self._require_runs_db()
@@ -3654,6 +3663,8 @@ class DeepAgentService:
             )
 
     async def _finalize_abandoned_run(self, run_id: str) -> None:
+        if self._shutting_down:
+            return
         cleanup = asyncio.create_task(self._cancel_running_run(run_id))
         try:
             await asyncio.shield(cleanup)
@@ -3721,6 +3732,27 @@ class DeepAgentService:
                 "retryable": False,
             },
             error=_PUBLIC_RUN_CANCELLED_MESSAGE,
+        )
+        if event is not None:
+            await self._observe_run(run_id)
+
+    async def _fail_restart_interrupted_run(
+        self,
+        run_id: str,
+        *,
+        allowed_statuses: set[str],
+    ) -> None:
+        event = await self._transition_with_event(
+            run_id,
+            allowed_statuses=allowed_statuses,
+            status="failed",
+            event_type="run.failed",
+            event_data={
+                "code": "agent_run_interrupted_by_restart",
+                "message": _PUBLIC_RUN_INTERRUPTED_BY_RESTART_MESSAGE,
+                "retryable": True,
+            },
+            error=_PUBLIC_RUN_INTERRUPTED_BY_RESTART_MESSAGE,
         )
         if event is not None:
             await self._observe_run(run_id)

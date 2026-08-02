@@ -880,6 +880,55 @@ async def test_recovery_replays_from_durable_sequence_without_new_run(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_recovery_displays_restart_interrupted_run_and_completes_update(
+    tmp_path: Path,
+) -> None:
+    telegram = _Telegram()
+    agent = _Agent()
+    message = "OpenTulpa restarted while this agent run was active. Try again."
+    agent.replay_events = [
+        _event(
+            "run.failed",
+            3,
+            {
+                "code": "agent_run_interrupted_by_restart",
+                "message": message,
+                "retryable": True,
+            },
+        )
+    ]
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    state.save_pending_run(
+        source_event_id="telegram:99:5",
+        update_id=5,
+        run_id="run_1",
+        chat_id=9,
+        sequence=2,
+        accumulated_text="partial",
+        response_message_id=41,
+        rendered_text="partial",
+    )
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=TelegramWorkerState(tmp_path / "worker.json"),
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.recover()
+
+    assert telegram.edits[-1] == {
+        "chat_id": 9,
+        "message_id": 41,
+        "text": message,
+        "reply_markup": None,
+    }
+    assert TelegramWorkerState(tmp_path / "worker.json").pending_runs() == []
+
+
+@pytest.mark.asyncio
 async def test_recovery_processes_an_update_accepted_before_worker_restart(
     tmp_path: Path,
 ) -> None:

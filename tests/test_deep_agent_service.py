@@ -1909,11 +1909,45 @@ async def test_startup_reconciles_orphaned_running_runs(tmp_path: Path) -> None:
         await second.shutdown()
 
     assert snapshot is not None
-    assert snapshot.status == "cancelled"
-    assert snapshot.error == "The agent run was cancelled before completion."
+    assert snapshot.status == "failed"
+    assert snapshot.error.startswith("OpenTulpa restarted while this agent run was active.")
     assert [event.type for event in events] == ["run.failed"]
     assert events[0].sequence == 1
-    assert events[0].data["code"] == "agent_run_cancelled"
+    assert events[0].data["code"] == "agent_run_interrupted_by_restart"
+    assert events[0].data["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_leaves_active_runs_for_restart_reconciliation(
+    tmp_path: Path,
+) -> None:
+    first = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await first.start()
+    graph = _BlockingGraph()
+    first._graphs["owner"] = graph  # noqa: SLF001
+    stream = cast(
+        AsyncGenerator[Any, None],
+        first.stream(AgentRunRequest(context=_context(), text="Work across restart")),
+    )
+    try:
+        started = await anext(stream)
+        await asyncio.wait_for(graph.entered.wait(), timeout=1)
+        await first.shutdown()
+    finally:
+        await stream.aclose()
+
+    second = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    await second.start()
+    try:
+        snapshot = await second.get_run(started.run_id)
+        events = [event async for event in second.events(started.run_id)]
+    finally:
+        await second.shutdown()
+
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert [event.type for event in events][-1] == "run.failed"
+    assert events[-1].data["code"] == "agent_run_interrupted_by_restart"
 
 
 @pytest.mark.asyncio
