@@ -35,7 +35,7 @@ _DOCKER_LONG_OPTIONS = frozenset({"debug", "help", "tls", "tlsverify", "version"
 _DOCKER_LONG_OPTIONS_WITH_VALUE = frozenset(
     {"config", "context", "host", "log-level", "tlscacert", "tlscert", "tlskey"}
 )
-_COMPOSE_SHORT_OPTIONS = frozenset()
+_COMPOSE_SHORT_OPTIONS: frozenset[str] = frozenset()
 _COMPOSE_SHORT_OPTIONS_WITH_VALUE = frozenset({"f", "p"})
 _COMPOSE_LONG_OPTIONS = frozenset({"compatibility", "dry-run", "help", "verbose", "version"})
 _COMPOSE_LONG_OPTIONS_WITH_VALUE = frozenset(
@@ -67,16 +67,16 @@ _WATCH_LONG_OPTIONS = frozenset(
 )
 _WATCH_LONG_OPTIONS_WITH_VALUE = frozenset({"interval"})
 _SETSID_SHORT_OPTIONS = frozenset({"c", "f", "w"})
-_SETSID_SHORT_OPTIONS_WITH_VALUE = frozenset()
+_SETSID_SHORT_OPTIONS_WITH_VALUE: frozenset[str] = frozenset()
 _SETSID_LONG_OPTIONS = frozenset({"ctty", "fork", "wait"})
-_SETSID_LONG_OPTIONS_WITH_VALUE = frozenset()
-_STDBUF_SHORT_OPTIONS = frozenset()
+_SETSID_LONG_OPTIONS_WITH_VALUE: frozenset[str] = frozenset()
+_STDBUF_SHORT_OPTIONS: frozenset[str] = frozenset()
 _STDBUF_SHORT_OPTIONS_WITH_VALUE = frozenset({"e", "i", "o"})
-_STDBUF_LONG_OPTIONS = frozenset()
+_STDBUF_LONG_OPTIONS: frozenset[str] = frozenset()
 _STDBUF_LONG_OPTIONS_WITH_VALUE = frozenset({"error", "input", "output"})
-_NICE_SHORT_OPTIONS = frozenset()
+_NICE_SHORT_OPTIONS: frozenset[str] = frozenset()
 _NICE_SHORT_OPTIONS_WITH_VALUE = frozenset({"n"})
-_NICE_LONG_OPTIONS = frozenset()
+_NICE_LONG_OPTIONS: frozenset[str] = frozenset()
 _NICE_LONG_OPTIONS_WITH_VALUE = frozenset({"adjustment"})
 _SUDO_SHORT_OPTIONS = frozenset({"A", "b", "E", "e", "H", "K", "k", "n", "P", "S", "V", "v"})
 _SUDO_SHORT_OPTIONS_WITH_VALUE = frozenset(
@@ -343,10 +343,10 @@ def _classify_env_arguments(arguments: list[str | None]) -> ShellCommandDisposit
                 return ShellCommandDisposition.REJECT
             split_string = remaining.pop(0)
         elif argument.startswith("--"):
-            option, separator, value = argument[2:].partition("=")
+            option, separator, option_value = argument[2:].partition("=")
             if option == "split-string":
                 if separator:
-                    split_string = value
+                    split_string = option_value
                 elif remaining and remaining[0] is not None:
                     split_string = remaining.pop(0)
                 else:
@@ -373,6 +373,8 @@ def _classify_env_arguments(arguments: list[str | None]) -> ShellCommandDisposit
                 if not remaining or remaining[0] is None:
                     return ShellCommandDisposition.REJECT
                 value = remaining.pop(0)
+                if value is None:
+                    return ShellCommandDisposition.REJECT
                 if flag == "S":
                     split_string = value
                 break
@@ -507,7 +509,10 @@ def _classify_command_string_options(
         if argument in {"-c", "--command", "--session-command"}:
             if index + 1 >= len(arguments) or arguments[index + 1] is None:
                 return True, ShellCommandDisposition.REJECT
-            command = arguments[index + 1]
+            next_argument = arguments[index + 1]
+            if next_argument is None:
+                return True, ShellCommandDisposition.REJECT
+            command = next_argument
         elif argument.startswith(("--command=", "--session-command=")):
             command = argument.partition("=")[2]
         elif argument.startswith("-") and not argument.startswith("--") and "c" in argument[1:]:
@@ -515,7 +520,10 @@ def _classify_command_string_options(
                 return True, ShellCommandDisposition.REJECT
             if index + 1 >= len(arguments) or arguments[index + 1] is None:
                 return True, ShellCommandDisposition.REJECT
-            command = arguments[index + 1]
+            next_argument = arguments[index + 1]
+            if next_argument is None:
+                return True, ShellCommandDisposition.REJECT
+            command = next_argument
         if not command:
             continue
         handled = True

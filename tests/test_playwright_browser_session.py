@@ -116,6 +116,7 @@ async def test_cloud_cdp_session_exposes_browser_protocol() -> None:
         cdp_url="wss://cdp.browser-use.example/session",
         allowed_domains=["example.com"],
         playwright_factory=lambda: _FakePlaywrightManager(playwright),
+        host_resolver=_HostResolver(),
     )
 
     await session.start()

@@ -2,9 +2,25 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import TracebackType
+from typing import Literal
 
 SQLITE_CONNECT_TIMEOUT_SECONDS = 10.0
 SQLITE_BUSY_TIMEOUT_MS = 10_000
+
+
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+        return False
 
 
 def connect_sqlite(
@@ -22,6 +38,7 @@ def connect_sqlite(
         db_path,
         check_same_thread=check_same_thread,
         timeout=timeout_seconds,
+        factory=_ClosingConnection,
     )
     if row_factory is not None:
         conn.row_factory = row_factory

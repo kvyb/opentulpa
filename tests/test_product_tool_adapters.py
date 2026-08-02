@@ -119,8 +119,12 @@ async def _invoke_through_tool_node(
 def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> None:
     application, _ = _application()
     tools = build_product_tools(application)
+    rebuilt_tools = build_product_tools(application)
 
     assert tuple(tool.name for tool in tools) == tuple(spec.name for spec in TOOL_SPECS)
+    assert tuple(tool.args_schema for tool in rebuilt_tools) == tuple(
+        tool.args_schema for tool in tools
+    )
     assert set(OPERATION_ARGUMENT_SCHEMAS) == set(TOOL_SPEC_BY_NAME)
     for tool in tools:
         schema = tool.tool_call_schema.model_json_schema()

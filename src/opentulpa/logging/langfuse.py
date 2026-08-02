@@ -921,13 +921,18 @@ class LangfuseTracer:
                 flush()
 
     def shutdown(self) -> None:
-        client = self._client_or_none()
+        client = self._client
+        if client is None:
+            return
         shutdown = getattr(client, "shutdown", None)
         if callable(shutdown):
             with suppress(Exception):
                 shutdown()
             return
-        self.flush()
+        flush = getattr(client, "flush", None)
+        if callable(flush):
+            with suppress(Exception):
+                flush()
 
 
 def create_langfuse_tracer(

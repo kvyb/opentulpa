@@ -595,7 +595,7 @@ class DaytonaRepositoryProvider:
 
     def _client(self, tenant_id: str) -> tuple[Any, str]:
         self._require_dependencies()
-        from daytona import Daytona, DaytonaConfig
+        from daytona import Daytona, DaytonaConfig  # type: ignore[import-not-found]
 
         token = self._token(tenant_id)
         digest = hashlib.sha256(token.encode()).hexdigest()
@@ -653,7 +653,9 @@ class DaytonaRepositoryProvider:
 
     def backend(self, workspace: RepositoryWorkspace) -> SandboxBackendProtocol:
         self._require_dependencies()
-        from langchain_daytona import DaytonaSandbox  # type: ignore[import-untyped]
+        from langchain_daytona import (  # type: ignore[import-not-found, import-untyped]
+            DaytonaSandbox,
+        )
 
         provider_id = str(workspace.provider_workspace_id or "")
         if not provider_id:

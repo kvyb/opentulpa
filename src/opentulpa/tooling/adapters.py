@@ -9,6 +9,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -456,7 +457,12 @@ async def _execute_product_tool(
 
 
 def _runtime_schema(spec: ToolSpec) -> type[BaseModel]:
-    arguments_schema = OPERATION_ARGUMENT_SCHEMAS[spec.name]
+    return _runtime_schema_for_name(spec.name)
+
+
+@cache
+def _runtime_schema_for_name(name: str) -> type[BaseModel]:
+    arguments_schema = OPERATION_ARGUMENT_SCHEMAS[name]
     return create_model(
         f"{arguments_schema.__name__}Runtime",
         __base__=arguments_schema,

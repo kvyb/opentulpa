@@ -1,3 +1,5 @@
+# opentulpa: allow-test-credential
+
 from __future__ import annotations
 
 import os
@@ -97,6 +99,24 @@ def test_create_langfuse_tracer_enabled_with_keys_and_base_url() -> None:
     assert tracer.enabled is True
     assert tracer.deployment_tag == "test-deploy"
     assert tracer.environment == "test-deploy"
+
+
+def test_langfuse_shutdown_does_not_initialize_lazy_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_get_client() -> None:
+        raise AssertionError("shutdown should not initialize Langfuse")
+
+    monkeypatch.setattr("langfuse.get_client", fail_get_client)
+    tracer = LangfuseTracer(
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://cloud.langfuse.com",
+    )
+
+    tracer.shutdown()
+
+    assert tracer.enabled is True
 
 
 def test_langfuse_environment_defaults_to_railway_service_name(monkeypatch) -> None:

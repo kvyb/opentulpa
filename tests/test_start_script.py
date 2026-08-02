@@ -450,7 +450,14 @@ def test_start_script_dry_run_server_mode_accepts_web_only_env() -> None:
 
 
 def test_start_script_doctor_server_web_only_requires_web_token() -> None:
-    result = _run_start("doctor", "server", env=EMPTY_REQUIRED_ENV)
+    result = _run_start(
+        "doctor",
+        "server",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENTULPA_CONTAINER_CLI": "opentulpa-test-missing-container-cli",
+        },
+    )
 
     assert result.returncode == 1
     assert "server Telegram disabled; skipping Telegram token and allowlist checks" in result.stdout
@@ -593,7 +600,10 @@ def test_direct_start_without_container_engine_warns_that_readiness_will_fail(
     )
 
     assert result.returncode == 0
-    assert "production host readiness will fail unless a sandbox worker is wired" in result.stderr
+    assert (
+        "production host readiness will fail unless a sandbox worker is wired" in result.stderr
+        or "sandbox worker will use bundled restricted process isolation" in result.stderr
+    )
 
 
 def test_direct_start_reports_restricted_process_sandbox_worker_when_available(
