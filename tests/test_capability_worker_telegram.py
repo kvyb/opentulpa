@@ -444,9 +444,13 @@ async def test_terminal_codex_login_status_starts_over(
 
 
 @pytest.mark.asyncio
-async def test_fresh_conversation_keeps_global_model_without_copying_it(tmp_path: Path) -> None:
+async def test_fresh_conversation_rotates_without_precreating_thread(tmp_path: Path) -> None:
+    class _FailingEnsureAgent(_Agent):
+        async def ensure_thread(self, thread_id: str) -> None:
+            raise AssertionError(f"/fresh must not pre-create thread {thread_id}")
+
     telegram = _Telegram([_message(1, text="/fresh")])
-    agent = _Agent()
+    agent = _FailingEnsureAgent()
     selection = {
         "provider": "codex",
         "model": "gpt-5.5",
@@ -472,7 +476,7 @@ async def test_fresh_conversation_keeps_global_model_without_copying_it(tmp_path
 
     replacement_thread_id = state.thread_id(9)
     assert replacement_thread_id != current_thread_id
-    assert agent.ensured_threads == [replacement_thread_id]
+    assert agent.ensured_threads == []
     assert agent.inference_updates == []
     assert telegram.messages[-1]["text"] == "Started a fresh conversation."
 

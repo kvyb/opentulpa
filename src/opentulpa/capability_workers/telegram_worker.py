@@ -756,7 +756,6 @@ class TelegramInterfaceWorker:
         if command == "/fresh":
             current_thread_id = self._state.thread_id(chat_id)
             replacement_thread_id = self._state.new_thread_id(chat_id)
-            await self._agent.ensure_thread(replacement_thread_id)
             self._state.replace_thread(
                 chat_id,
                 expected_thread_id=current_thread_id,
