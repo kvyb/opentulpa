@@ -361,9 +361,10 @@ class RuntimeSupervisor:
     ) -> dict[str, str]:
         source_root = project_root or self._project_root
         environment = os.environ.copy()
+        host_port = str(environment.get("PORT") or "").strip()
         internal_agent_api_url = str(
             environment.get("OPENTULPA_INTERNAL_AGENT_API_URL") or ""
-        ).strip() or f"http://127.0.0.1:{port}"
+        ).strip() or f"http://127.0.0.1:{host_port or port}"
         owner_customer_id = (
             str(environment.get("OPENTULPA_OWNER_CUSTOMER_ID") or "").strip() or "owner"
         )

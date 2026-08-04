@@ -37,6 +37,7 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "host-telegram-token")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "host-webhook-secret")
     monkeypatch.setenv("OPENTULPA_OWNER_CUSTOMER_ID", "opentulpa-gf")
+    monkeypatch.setenv("PORT", "9000")
     monkeypatch.setenv(
         "OPENTULPA_INTERNAL_AGENT_API_URL",
         "http://host.docker.internal:8000",
@@ -92,7 +93,13 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     fallback_environment = runtime._child_environment(config, port=8124)
     assert fallback_environment["OPENTULPA_OWNER_CUSTOMER_ID"] == "owner"
     assert fallback_environment["OPENTULPA_INTERNAL_AGENT_API_URL"] == (
-        "http://127.0.0.1:8124"
+        "http://127.0.0.1:9000"
+    )
+    monkeypatch.delenv("PORT")
+    assert runtime._child_environment(config, port=8125)[
+        "OPENTULPA_INTERNAL_AGENT_API_URL"
+    ] == (
+        "http://127.0.0.1:8125"
     )
     await runtime.shutdown()
 
