@@ -15,7 +15,7 @@ COPY --from=railway-sandbox-bridge /usr/local/bin/node /usr/local/bin/node
 COPY --from=railway-sandbox-bridge /bridge /app/railway_sandbox_bridge
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl git openssh-client util-linux \
+    && apt-get install -y --no-install-recommends curl ffmpeg git openssh-client util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 RUN getent group 65532 >/dev/null || printf '%s\n' 'opentulpa-sandbox:x:65532:' >> /etc/group \

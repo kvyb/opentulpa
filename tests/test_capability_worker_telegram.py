@@ -782,6 +782,38 @@ async def test_attachment_is_downloaded_and_uploaded_before_agent_run(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_voice_message_is_uploaded_for_server_side_transcription(tmp_path: Path) -> None:
+    update = _message(4, text="")
+    update["message"].pop("text")
+    update["message"]["voice"] = {
+        "file_id": "tg_voice",
+        "file_unique_id": "voice-unique",
+        "mime_type": "audio/ogg",
+        "file_size": 120,
+    }
+    telegram = _Telegram([update])
+    agent = _Agent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    await worker.poll_once()
+
+    assert telegram.downloads[0].file_id == "tg_voice"
+    assert agent.uploads[0]["filename"] == "voice-unique.ogg"
+    assert agent.uploads[0]["kind"] == "voice"
+    assert agent.uploads[0]["mime_type"] == "audio/ogg"
+    assert agent.starts[0]["file_ids"] == ["file_1"]
+    assert agent.starts[0]["text"] == "Please inspect and respond to the attached files."
+
+
+@pytest.mark.asyncio
 async def test_approval_buttons_are_durable_and_callback_resumes_via_api(tmp_path: Path) -> None:
     telegram = _Telegram([_message(1, text="send the email")])
     agent = _Agent()

@@ -28,6 +28,7 @@ from opentulpa.deep_agent import (
     DeepAgentService,
     TenantDynamicToolRegistry,
 )
+from opentulpa.deep_agent.audio import AudioTranscription
 from opentulpa.deep_agent.contracts import (
     AgentRunCheckpointConflictError,
     AgentRunIdempotencyConflictError,
@@ -91,6 +92,22 @@ class _AttachmentResolver:
         self.reads.append((tenant_id, file_id))
         resolved = self.records.get((tenant_id, file_id))
         return resolved[1] if resolved is not None else None
+
+
+class _AudioTranscriber:
+    def __init__(self) -> None:
+        self.inputs: list[bytes] = []
+        self.closed = False
+
+    async def transcribe(self, raw_bytes: bytes) -> AudioTranscription:
+        self.inputs.append(raw_bytes)
+        return AudioTranscription(
+            mp3_bytes=b"normalized-mp3",
+            transcript="Please schedule the meeting tomorrow.",
+        )
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class _FailingGraph:
@@ -698,6 +715,7 @@ def _service(
     agent_specs: AgentSpecStore | None = None,
     dynamic_tools: TenantDynamicToolRegistry | None = None,
     attachment_resolver: Any | None = None,
+    audio_transcriber: Any | None = None,
     execution_backend: Any | None = None,
     workspace_backend: Any | None = None,
 ) -> DeepAgentService:
@@ -716,6 +734,7 @@ def _service(
         agent_specs=agent_specs,
         dynamic_tools=dynamic_tools,
         attachment_resolver=attachment_resolver,
+        audio_transcriber=audio_transcriber,
         execution_backend=execution_backend,
         workspace_backend=workspace_backend,
     )
@@ -941,6 +960,60 @@ def test_zip_attachment_is_extracted_into_owner_sandbox_as_raw_files(tmp_path: P
     assert (attachment_root / "extracted/assets/pixel.bin").read_bytes() == b"\x00\xff"
     assert "ordinary files" in notes[0]
     assert "/workspace/.opentulpa/attachments/run-test/zip-1/extracted/" in notes[0]
+    assert isinstance(content, list)
+    assert notes[0] in content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_voice_attachment_is_transcribed_and_staged_as_mp3(tmp_path: Path) -> None:
+    resolver = _AttachmentResolver(
+        {
+            ("tenant-1", "voice-1"): (
+                {
+                    "kind": "voice",
+                    "original_filename": "telegram-voice.ogg",
+                    "mime_type": "audio/ogg",
+                    "text_excerpt": "",
+                },
+                b"telegram-ogg",
+            )
+        }
+    )
+    transcriber = _AudioTranscriber()
+    service = _service(
+        tmp_path,
+        _ToolCapableTextModel(responses=["unused"]),
+        attachment_resolver=resolver,
+        audio_transcriber=transcriber,
+    )
+    request = AgentRunRequest(
+        context=_context(),
+        text="Please handle this voice note",
+        file_ids=("voice-1",),
+    )
+
+    notes = await service._stage_audio_attachments(request, "run-audio")  # noqa: SLF001
+    content = service._request_content(  # noqa: SLF001
+        request,
+        workspace_attachments=notes,
+    )
+
+    tenant_digest = hashlib.sha256(b"tenant-1").hexdigest()[:24]
+    mp3_path = (
+        tmp_path
+        / "workspaces"
+        / tenant_digest
+        / ".opentulpa"
+        / "attachments"
+        / "run-audio"
+        / "voice-1"
+        / "telegram-voice.mp3"
+    )
+    assert transcriber.inputs == [b"telegram-ogg"]
+    assert mp3_path.read_bytes() == b"normalized-mp3"
+    assert "Received audio file: /workspace/.opentulpa/attachments/" in notes[0]
+    assert "Transcript of the received audio" in notes[0]
+    assert "Please schedule the meeting tomorrow." in notes[0]
     assert isinstance(content, list)
     assert notes[0] in content[0]["text"]
 

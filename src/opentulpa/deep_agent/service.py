@@ -45,6 +45,7 @@ from pydantic import SecretStr
 
 from opentulpa.core.ids import new_short_id
 from opentulpa.deep_agent.attachments import extract_zip_files
+from opentulpa.deep_agent.audio import AudioTranscriber, AudioTranscriptionError
 from opentulpa.deep_agent.contracts import (
     AgentApproval,
     AgentApprovalStatus,
@@ -677,6 +678,7 @@ class DeepAgentService:
         workspace_backend: Any | None = None,
         run_observer: AgentRunObserver | None = None,
         attachment_resolver: AgentAttachmentResolver | None = None,
+        audio_transcriber: AudioTranscriber | None = None,
         provider_fallback_models: Sequence[Any] = (),
         inference_service: InferenceService | None = None,
         graph_cache_limit: int = 48,
@@ -705,6 +707,7 @@ class DeepAgentService:
         self._workspace_backend = workspace_backend
         self._run_observer = run_observer
         self._attachment_resolver = attachment_resolver
+        self._audio_transcriber = audio_transcriber
         self._provider_fallback_models = tuple(provider_fallback_models)
         self._inference = inference_service
         self._graph_cache_limit = max(8, int(graph_cache_limit))
@@ -901,6 +904,9 @@ class DeepAgentService:
             await self._checkpoint_conn.close()
             self._checkpoint_conn = None
             self._checkpointer = None
+        if self._audio_transcriber is not None:
+            with suppress(Exception):
+                await self._audio_transcriber.aclose()
 
     async def run(self, request: AgentRunRequest) -> AgentRunSnapshot:
         run_id = ""
@@ -988,13 +994,17 @@ class DeepAgentService:
                 request,
                 prepared.run_id,
             )
+            audio_attachments = await self._stage_audio_attachments(
+                request,
+                prepared.run_id,
+            )
             graph_input = {
                 "messages": [
                     {
                         "role": "user",
                         "content": self._request_content(
                             request,
-                            workspace_attachments=workspace_attachments,
+                            workspace_attachments=(*workspace_attachments, *audio_attachments),
                         ),
                     }
                 ]
@@ -4249,6 +4259,69 @@ class DeepAgentService:
                     f" {skipped_count} unsafe, unreadable, or oversized entries were skipped."
                 )
             notes.append(note)
+        return tuple(notes)
+
+    async def _stage_audio_attachments(
+        self,
+        request: AgentRunRequest,
+        run_id: str,
+    ) -> tuple[str, ...]:
+        resolver = self._attachment_resolver
+        transcriber = self._audio_transcriber
+        if (
+            resolver is None
+            or transcriber is None
+            or not request.file_ids
+            or request.context.run_kind != AgentRunKind.OWNER.value
+        ):
+            return ()
+
+        notes: list[str] = []
+        for file_id in request.file_ids:
+            record = resolver.get_file(request.context.tenant_id, file_id)
+            if record is None:
+                continue
+            kind = str(record.get("kind") or "").strip().casefold()
+            mime_type = str(record.get("mime_type") or "").strip().casefold()
+            if kind not in {"audio", "voice"} and not mime_type.startswith("audio/"):
+                continue
+            raw_bytes = await asyncio.to_thread(
+                resolver.read_file_bytes,
+                request.context.tenant_id,
+                file_id,
+            )
+            if raw_bytes is None:
+                notes.append(f"Received audio file {file_id}; transcription was unavailable.")
+                continue
+            try:
+                result = await transcriber.transcribe(raw_bytes)
+            except AudioTranscriptionError:
+                logger.warning("Audio attachment transcription failed", exc_info=True)
+                notes.append(f"Received audio file {file_id}; transcription was unavailable.")
+                continue
+
+            slot = self._safe_workspace_component(file_id, fallback="audio")
+            filename = self._safe_workspace_component(
+                str(record.get("original_filename") or "audio"),
+                fallback="audio",
+            )
+            stem = filename.rsplit(".", 1)[0] or "audio"
+            audio_path = (
+                f"/workspace/.opentulpa/attachments/{run_id}/{slot}/{stem}.mp3"
+            )
+            uploaded, _failed = await asyncio.to_thread(
+                self._upload_workspace_files,
+                request.context,
+                [(audio_path, result.mp3_bytes)],
+            )
+            if audio_path in uploaded:
+                label = f"Received audio file: {audio_path}"
+            else:
+                label = f"Received audio file {file_id}; its MP3 could not be stored in sandbox."
+            notes.append(
+                f"{label}\nTranscript of the received audio:\n"
+                f"<audio-transcript>\n{result.transcript}\n</audio-transcript>"
+            )
         return tuple(notes)
 
     def _upload_workspace_files(

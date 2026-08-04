@@ -61,6 +61,7 @@ from opentulpa.core.config import (
     get_settings,
 )
 from opentulpa.core.public_urls import resolve_public_base_url
+from opentulpa.deep_agent.audio import OpenRouterAudioTranscriber
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
 from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
@@ -1328,6 +1329,11 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             execution_backend=execution_backend,
             workspace_backend=workspace_backend,
             attachment_resolver=file_vault,
+            audio_transcriber=OpenRouterAudioTranscriber(
+                api_key=api_key,
+                base_url=settings.openai_compatible_base_url,
+                max_mp3_bytes=settings.sandbox_max_file_bytes,
+            ),
             provider_fallback_models=provider_fallback_models,
             inference_service=inference,
         )
