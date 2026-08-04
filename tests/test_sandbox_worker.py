@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
 import shlex
+import socket
 import sys
 import tarfile
 from pathlib import Path
@@ -114,6 +116,13 @@ async def test_sandbox_supervisor_starts_module_worker_process(
         data_root=tmp_path / "data",
         settings=Settings(_env_file=None),
     )
+    port = int(supervisor.config.base_url.split(":", 2)[2].split("/", 1)[0])
+    if os.name == "posix":
+        with (
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as competitor,
+            pytest.raises(OSError),
+        ):
+            competitor.bind(("127.0.0.1", port))
 
     try:
         await supervisor.start()

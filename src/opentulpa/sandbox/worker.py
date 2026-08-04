@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -622,14 +623,55 @@ def main() -> None:
     host = str(os.environ.get("HOST") or "127.0.0.1").strip()
     port = int(os.environ.get("PORT") or os.environ.get("OPENTULPA_SANDBOX_PORT") or 8787)
     app = create_sandbox_worker_app(service=build_default_worker_service(), token=token)
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
-        ws="none",
-        timeout_graceful_shutdown=10,
+    listener = _inherited_listener(host=host, port=port)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+            ws="none",
+            timeout_graceful_shutdown=10,
+        )
     )
+    try:
+        server.run(sockets=[listener] if listener is not None else None)
+    finally:
+        if listener is not None:
+            listener.close()
+
+
+def _inherited_listener(*, host: str, port: int) -> socket.socket | None:
+    raw_descriptor = str(os.environ.get("OPENTULPA_SANDBOX_LISTEN_FD") or "").strip()
+    if not raw_descriptor:
+        return None
+    try:
+        descriptor = int(raw_descriptor)
+    except ValueError as exc:
+        raise SystemExit("OPENTULPA_SANDBOX_LISTEN_FD must be an integer") from exc
+    if descriptor < 0:
+        raise SystemExit("OPENTULPA_SANDBOX_LISTEN_FD must be non-negative")
+    listener: socket.socket | None = None
+    try:
+        listener = socket.socket(fileno=descriptor)
+        address = listener.getsockname()
+        valid = (
+            listener.family == socket.AF_INET
+            and isinstance(address, tuple)
+            and address == (host, port)
+        )
+        if not valid:
+            raise OSError(
+                "listener does not match the configured loopback endpoint "
+                f"(family={listener.family!s}, address={address!r})"
+            )
+    except OSError as exc:
+        if listener is not None:
+            with suppress(OSError):
+                listener.close()
+        raise SystemExit(f"OPENTULPA_SANDBOX_LISTEN_FD is invalid: {exc}") from exc
+    assert listener is not None
+    return listener
 
 
 def _shell_quote(value: str) -> str:

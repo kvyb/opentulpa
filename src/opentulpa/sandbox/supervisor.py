@@ -61,6 +61,7 @@ class SandboxWorkerSupervisor:
         self._project_root = project_root.resolve()
         self._data_root = data_root.resolve()
         self._settings = settings
+        self._listen_socket: socket.socket | None = None
         configured_url = str(os.environ.get("OPENTULPA_SANDBOX_RPC_URL") or "").strip()
         configured_token = str(os.environ.get("OPENTULPA_SANDBOX_RPC_TOKEN") or "").strip()
         if configured_url or configured_token:
@@ -75,7 +76,11 @@ class SandboxWorkerSupervisor:
             self._managed_process = False
         else:
             token = _private_token(data_root / "bootstrap" / "sandbox-worker.token")
-            port = _free_local_port()
+            if os.name == "posix":
+                self._listen_socket = _reserved_local_listener()
+                port = int(self._listen_socket.getsockname()[1])
+            else:  # pragma: no cover - Windows subprocesses cannot inherit pass_fds.
+                port = _free_local_port()
             self._config = SandboxRuntimeConfig(
                 base_url=f"http://127.0.0.1:{port}/internal/v1/sandbox",
                 token=token,
@@ -165,14 +170,17 @@ class SandboxWorkerSupervisor:
                 await task
         process = self._process
         self._process = None
-        if process is None or process.returncode is not None:
-            return
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=10)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        listener = self._listen_socket
+        self._listen_socket = None
+        if listener is not None:
+            listener.close()
 
     async def _ensure_managed_process(self) -> None:
         if not self._managed_process:
@@ -180,12 +188,28 @@ class SandboxWorkerSupervisor:
         async with self._start_lock:
             if self._process is not None and self._process.returncode is None:
                 return
+            environment = self._worker_environment()
+            listener = self._listen_socket
+            if listener is None:
+                self._process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "opentulpa.sandbox.worker",
+                    cwd=self._project_root,
+                    env=environment,
+                )
+                return
+            descriptor = listener.fileno()
+            if descriptor < 0:
+                raise RuntimeError("sandbox worker listener is closed")
+            environment["OPENTULPA_SANDBOX_LISTEN_FD"] = str(descriptor)
             self._process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
                 "opentulpa.sandbox.worker",
                 cwd=self._project_root,
-                env=self._worker_environment(),
+                env=environment,
+                pass_fds=(descriptor,),
             )
 
     def _ensure_monitor(self) -> None:
@@ -317,6 +341,18 @@ def _free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+def _reserved_local_listener() -> socket.socket:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+    except OSError:
+        listener.close()
+        raise
+    return listener
 
 
 __all__ = ["SandboxRuntimeConfig", "SandboxWorkerSupervisor"]
