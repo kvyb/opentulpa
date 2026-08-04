@@ -1,3 +1,4 @@
+# opentulpa: allow-test-credential
 from __future__ import annotations
 
 import subprocess
@@ -8,6 +9,7 @@ import pytest
 from opentulpa.evolution.workspace import (
     GitCandidateError,
     GitCandidateWorkspace,
+    candidate_content_contains_secret,
     candidate_path_is_promotable,
     candidate_path_is_runtime_overlay,
 )
@@ -246,6 +248,15 @@ def test_candidate_allows_explicit_test_credential_fixture(tmp_path: Path) -> No
 
     assert commit.promotion_eligible is True
     manager.remove(workspace)
+
+
+def test_secret_ingress_source_is_not_mistaken_for_credential_material() -> None:
+    path = Path(__file__).resolve().parents[1] / "src" / "opentulpa" / "secrets" / "ingress.py"
+
+    assert candidate_content_contains_secret(
+        "src/opentulpa/secrets/ingress.py",
+        path.read_bytes(),
+    ) is False
 
 
 def test_candidate_commit_disables_repository_git_hooks(tmp_path: Path) -> None:

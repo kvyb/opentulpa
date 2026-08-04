@@ -1,3 +1,4 @@
+# opentulpa: allow-test-credential
 from __future__ import annotations
 
 import inspect

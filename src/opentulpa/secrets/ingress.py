@@ -66,7 +66,9 @@ _SECRET_NAME_ATTR_RE = re.compile(
 )
 _SECRET_BARE_NAME_RE = re.compile(r"^\s*(?P<name>[A-Za-z][A-Za-z0-9_-]{0,63})\s*$")
 _OPENSSH_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN OPENSSH PRIVATE KEY-----.*-----END OPENSSH PRIVATE KEY-----",
+    r"-----BEGIN OPENSSH "
+    r"PRIVATE KEY-----.*-----END OPENSSH "
+    r"PRIVATE KEY-----",
     flags=re.DOTALL,
 )
 _NAMED_SECRET_ASSIGNMENT_RE = re.compile(
