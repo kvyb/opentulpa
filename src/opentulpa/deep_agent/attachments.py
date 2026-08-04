@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import stat
 from dataclasses import dataclass
 from io import BytesIO
@@ -10,6 +11,14 @@ from zipfile import BadZipFile, ZipFile, ZipInfo
 
 MAX_ZIP_ENTRIES = 512
 MAX_ZIP_EXPANDED_BYTES = 128 * 1024 * 1024
+
+
+def safe_workspace_component(value: str, *, fallback: str) -> str:
+    """Return one bounded filename component safe for attachment staging."""
+
+    basename = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip(".-")[:120]
+    return safe or fallback
 
 
 @dataclass(frozen=True, slots=True)

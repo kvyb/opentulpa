@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
+from opentulpa.deep_agent.attachments import safe_workspace_component
 from opentulpa.tooling.contract import AgentRunContext, AgentRunKind
 
 DEFAULT_TRANSCRIPTION_MODEL = "google/gemini-3.1-flash-lite"
+DEFAULT_MAX_CONCURRENT_TRANSCRIPTIONS = 2
 _MAX_TRANSCRIPT_CHARS = 100_000
 _TRANSCRIPTION_PROMPT = (
     "Transcribe the spoken audio faithfully in its original language. Return only the "
@@ -42,11 +44,14 @@ class AudioTranscriber(Protocol):
     async def aclose(self) -> None: ...
 
 
-AudioConverter = Callable[..., bytes]
 WorkspaceUploader = Callable[
     [AgentRunContext, list[tuple[str, bytes]]],
     tuple[set[str], set[str]],
 ]
+
+
+class AudioConverter(Protocol):
+    def __call__(self, raw_bytes: bytes, *, max_output_bytes: int) -> bytes: ...
 
 
 class VoiceAttachmentResolver(Protocol):
@@ -86,8 +91,9 @@ def convert_audio_to_mp3(raw_bytes: bytes, *, max_output_bytes: int) -> bytes:
                 "pipe:1",
             ],
             input=raw_bytes,
-            capture_output=True,
             check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             timeout=90,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -118,8 +124,8 @@ class OpenRouterAudioTranscriber:
         safe_model = str(model or "").strip()
         if not safe_key:
             raise ValueError("OpenRouter API key is required for audio transcription")
-        if not safe_base_url.startswith(("https://", "http://")):
-            raise ValueError("audio transcription base URL must use HTTP or HTTPS")
+        if not _is_openrouter_base_url(safe_base_url):
+            raise ValueError("audio transcription requires the OpenRouter API endpoint")
         if not safe_model:
             raise ValueError("audio transcription model is required")
         if max_mp3_bytes < 1:
@@ -198,10 +204,14 @@ class VoiceAttachmentProcessor:
         attachment_resolver: VoiceAttachmentResolver,
         transcriber: AudioTranscriber,
         workspace_uploader: WorkspaceUploader,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENT_TRANSCRIPTIONS,
     ) -> None:
+        if max_concurrency < 1:
+            raise ValueError("voice processing concurrency must be positive")
         self._attachment_resolver = attachment_resolver
         self._transcriber = transcriber
         self._workspace_uploader = workspace_uploader
+        self._capacity = asyncio.Semaphore(max_concurrency)
 
     async def aclose(self) -> None:
         await self._transcriber.aclose()
@@ -225,42 +235,79 @@ class VoiceAttachmentProcessor:
             mime_type = str(record.get("mime_type") or "").strip().casefold()
             if kind not in {"audio", "voice"} and not mime_type.startswith("audio/"):
                 continue
-            raw_bytes = await asyncio.to_thread(
-                self._attachment_resolver.read_file_bytes,
-                context.tenant_id,
-                file_id,
-            )
-            if raw_bytes is None:
-                notes.append(f"Received audio file {file_id}; transcription was unavailable.")
-                continue
-            try:
-                result = await self._transcriber.transcribe(raw_bytes)
-            except AudioTranscriptionError:
-                logger.warning("Voice attachment transcription failed", exc_info=True)
-                notes.append(f"Received audio file {file_id}; transcription was unavailable.")
-                continue
-
-            slot = _safe_workspace_component(file_id, fallback="audio")
-            filename = _safe_workspace_component(
-                str(record.get("original_filename") or "audio"),
-                fallback="audio",
-            )
-            stem = filename.rsplit(".", 1)[0] or "audio"
-            audio_path = f"/workspace/.opentulpa/attachments/{run_id}/{slot}/{stem}.mp3"
-            uploaded, _failed = await asyncio.to_thread(
-                self._workspace_uploader,
-                context,
-                [(audio_path, result.mp3_bytes)],
-            )
-            if audio_path in uploaded:
-                label = f"Received audio file: {audio_path}"
-            else:
-                label = f"Received audio file {file_id}; its MP3 could not be stored in sandbox."
-            notes.append(
-                f"{label}\nTranscript of the received audio:\n"
-                f"<audio-transcript>\n{result.transcript}\n</audio-transcript>"
-            )
+            async with self._capacity:
+                notes.append(
+                    await self._process_attachment(
+                        context=context,
+                        file_id=file_id,
+                        record=record,
+                        run_id=run_id,
+                    )
+                )
         return tuple(notes)
+
+    async def _process_attachment(
+        self,
+        *,
+        context: AgentRunContext,
+        file_id: str,
+        record: dict[str, Any],
+        run_id: str,
+    ) -> str:
+        raw_bytes = await asyncio.to_thread(
+            self._attachment_resolver.read_file_bytes,
+            context.tenant_id,
+            file_id,
+        )
+        if raw_bytes is None:
+            return f"Received audio file {file_id}; transcription was unavailable."
+        try:
+            result = await self._transcriber.transcribe(raw_bytes)
+        except AudioTranscriptionError:
+            logger.warning("Voice attachment transcription failed", exc_info=True)
+            return f"Received audio file {file_id}; transcription was unavailable."
+
+        slot = safe_workspace_component(file_id, fallback="audio")
+        filename = safe_workspace_component(
+            str(record.get("original_filename") or "audio"),
+            fallback="audio",
+        )
+        stem = filename.rsplit(".", 1)[0] or "audio"
+        audio_path = f"/workspace/.opentulpa/attachments/{run_id}/{slot}/{stem}.mp3"
+        uploaded, _failed = await asyncio.to_thread(
+            self._workspace_uploader,
+            context,
+            [(audio_path, result.mp3_bytes)],
+        )
+        if audio_path in uploaded:
+            label = f"Received audio file: {audio_path}"
+        else:
+            label = f"Received audio file {file_id}; its MP3 could not be stored in sandbox."
+        return (
+            f"{label}\nTranscript of the received audio:\n"
+            f"<audio-transcript>\n{result.transcript}\n</audio-transcript>"
+        )
+
+
+def build_openrouter_audio_transcriber(
+    *,
+    api_key: str,
+    base_url: str,
+    max_mp3_bytes: int,
+) -> OpenRouterAudioTranscriber | None:
+    """Build the OpenRouter-only transcriber or explicitly disable the feature."""
+
+    if not _is_openrouter_base_url(base_url):
+        logger.warning(
+            "Voice transcription is disabled because the configured inference endpoint "
+            "is not OpenRouter"
+        )
+        return None
+    return OpenRouterAudioTranscriber(
+        api_key=api_key,
+        base_url=base_url,
+        max_mp3_bytes=max_mp3_bytes,
+    )
 
 
 def _response_text(payload: Any) -> str:
@@ -284,7 +331,6 @@ def _response_text(payload: Any) -> str:
     )
 
 
-def _safe_workspace_component(value: str, *, fallback: str) -> str:
-    basename = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip(".-")[:120]
-    return safe or fallback
+def _is_openrouter_base_url(value: str) -> bool:
+    parsed = urlsplit(str(value or "").strip())
+    return parsed.scheme == "https" and parsed.hostname == "openrouter.ai"

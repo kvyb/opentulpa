@@ -71,7 +71,7 @@ from opentulpa.deep_agent.sandbox import (
     TenantSandboxBackend,
 )
 from opentulpa.deep_agent.service import DeepAgentService, build_openrouter_chat_model
-from opentulpa.deep_agent.voice import OpenRouterAudioTranscriber
+from opentulpa.deep_agent.voice import build_openrouter_audio_transcriber
 from opentulpa.evolution.sandbox import resolve_local_oci_image
 from opentulpa.files.analysis import FileAnalysisService
 from opentulpa.inference.service import InferenceService
@@ -1329,7 +1329,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             execution_backend=execution_backend,
             workspace_backend=workspace_backend,
             attachment_resolver=file_vault,
-            audio_transcriber=OpenRouterAudioTranscriber(
+            audio_transcriber=build_openrouter_audio_transcriber(
                 api_key=api_key,
                 base_url=settings.openai_compatible_base_url,
                 max_mp3_bytes=settings.sandbox_max_file_bytes,

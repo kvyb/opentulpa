@@ -44,7 +44,7 @@ from langgraph.types import Command
 from pydantic import SecretStr
 
 from opentulpa.core.ids import new_short_id
-from opentulpa.deep_agent.attachments import extract_zip_files
+from opentulpa.deep_agent.attachments import extract_zip_files, safe_workspace_component
 from opentulpa.deep_agent.contracts import (
     AgentApproval,
     AgentApprovalStatus,
@@ -4234,8 +4234,8 @@ class DeepAgentService:
                 notes.append(f"ZIP attachment {file_id} was not extracted: {exc}.")
                 continue
 
-            slot = self._safe_workspace_component(file_id, fallback="attachment")
-            safe_filename = self._safe_workspace_component(filename, fallback="archive.zip")
+            slot = safe_workspace_component(file_id, fallback="attachment")
+            safe_filename = safe_workspace_component(filename, fallback="archive.zip")
             base_path = f"/workspace/.opentulpa/attachments/{run_id}/{slot}"
             archive_path = f"{base_path}/{safe_filename}"
             extracted_path = f"{base_path}/extracted"
@@ -4322,12 +4322,6 @@ class DeepAgentService:
         for start in range(0, len(files), batch_size):
             upload_batch(files[start : start + batch_size])
         return uploaded, failed
-
-    @staticmethod
-    def _safe_workspace_component(value: str, *, fallback: str) -> str:
-        basename = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip(".-")[:120]
-        return safe or fallback
 
     def _require_started(self) -> None:
         if not self.started:
