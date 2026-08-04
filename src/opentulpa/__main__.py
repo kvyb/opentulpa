@@ -61,7 +61,6 @@ from opentulpa.core.config import (
     get_settings,
 )
 from opentulpa.core.public_urls import resolve_public_base_url
-from opentulpa.deep_agent.audio import OpenRouterAudioTranscriber
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
 from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
@@ -72,6 +71,7 @@ from opentulpa.deep_agent.sandbox import (
     TenantSandboxBackend,
 )
 from opentulpa.deep_agent.service import DeepAgentService, build_openrouter_chat_model
+from opentulpa.deep_agent.voice import OpenRouterAudioTranscriber
 from opentulpa.evolution.sandbox import resolve_local_oci_image
 from opentulpa.files.analysis import FileAnalysisService
 from opentulpa.inference.service import InferenceService

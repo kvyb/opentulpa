@@ -28,7 +28,6 @@ from opentulpa.deep_agent import (
     DeepAgentService,
     TenantDynamicToolRegistry,
 )
-from opentulpa.deep_agent.audio import AudioTranscription
 from opentulpa.deep_agent.contracts import (
     AgentRunCheckpointConflictError,
     AgentRunIdempotencyConflictError,
@@ -40,6 +39,7 @@ from opentulpa.deep_agent.service import (
     _with_deepagents_context_budget,
     build_openrouter_chat_model,
 )
+from opentulpa.deep_agent.voice import AudioTranscription
 from opentulpa.specs import AgentSpecRef, AgentSpecStore, AgentSpecWrite, OriginRef
 from opentulpa.tooling import AgentChannel, AgentRunKind
 
@@ -992,7 +992,13 @@ async def test_voice_attachment_is_transcribed_and_staged_as_mp3(tmp_path: Path)
         file_ids=("voice-1",),
     )
 
-    notes = await service._stage_audio_attachments(request, "run-audio")  # noqa: SLF001
+    voice_processor = service._voice_processor  # noqa: SLF001
+    assert voice_processor is not None
+    notes = await voice_processor.process(
+        context=request.context,
+        file_ids=request.file_ids,
+        run_id="run-audio",
+    )
     content = service._request_content(  # noqa: SLF001
         request,
         workspace_attachments=notes,

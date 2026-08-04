@@ -8,8 +8,8 @@ from typing import Any
 import httpx
 import pytest
 
-import opentulpa.deep_agent.audio as audio_module
-from opentulpa.deep_agent.audio import (
+import opentulpa.deep_agent.voice as voice_module
+from opentulpa.deep_agent.voice import (
     DEFAULT_TRANSCRIPTION_MODEL,
     OpenRouterAudioTranscriber,
     convert_audio_to_mp3,
@@ -25,7 +25,7 @@ def test_convert_audio_to_mp3_uses_bounded_trusted_ffmpeg_arguments(
         captured.update({"argv": argv, **kwargs})
         return subprocess.CompletedProcess(argv, 0, stdout=b"mp3-bytes", stderr=b"")
 
-    monkeypatch.setattr(audio_module.subprocess, "run", run)
+    monkeypatch.setattr(voice_module.subprocess, "run", run)
 
     result = convert_audio_to_mp3(b"telegram-ogg", max_output_bytes=100)
 
