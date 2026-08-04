@@ -361,6 +361,9 @@ class RuntimeSupervisor:
     ) -> dict[str, str]:
         source_root = project_root or self._project_root
         environment = os.environ.copy()
+        internal_agent_api_url = str(
+            environment.get("OPENTULPA_INTERNAL_AGENT_API_URL") or ""
+        ).strip() or f"http://127.0.0.1:{port}"
         owner_customer_id = (
             str(environment.get("OPENTULPA_OWNER_CUSTOMER_ID") or "").strip() or "owner"
         )
@@ -384,7 +387,7 @@ class RuntimeSupervisor:
                 "LLM_MODEL": config.model,
                 "OPENTULPA_OWNER_TOKEN": config.internal_runtime_token.get_secret_value(),
                 "OPENTULPA_OWNER_CUSTOMER_ID": owner_customer_id,
-                "OPENTULPA_INTERNAL_AGENT_API_URL": f"http://127.0.0.1:{port}",
+                "OPENTULPA_INTERNAL_AGENT_API_URL": internal_agent_api_url,
                 "OPENTULPA_DYNAMIC_HOST": "1",
                 "PYTHONPATH": str(source_root / "src"),
             }
