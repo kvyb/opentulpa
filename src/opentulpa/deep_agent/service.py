@@ -44,6 +44,7 @@ from langgraph.types import Command
 from pydantic import SecretStr
 
 from opentulpa.core.ids import new_short_id
+from opentulpa.deep_agent.attachments import extract_zip_files
 from opentulpa.deep_agent.contracts import (
     AgentApproval,
     AgentApprovalStatus,
@@ -138,6 +139,7 @@ _TRACE_ABSOLUTE_PATH_RE = re.compile(
 _INLINE_IMAGE_MIME_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
 _MAX_INLINE_ATTACHMENT_BYTES = 10 * 1024 * 1024
 _MAX_INLINE_ATTACHMENTS_BYTES = 20 * 1024 * 1024
+_ZIP_MIME_TYPES = frozenset({"application/zip", "application/x-zip-compressed"})
 
 _OWNER_PRODUCT_TOOL_NAMES = frozenset(TOOL_SPEC_BY_NAME)
 _ROUTINE_PRODUCT_TOOL_NAMES = frozenset(
@@ -980,15 +982,23 @@ class DeepAgentService:
         request: AgentRunRequest,
         prepared: _PreparedRun,
     ) -> None:
-        graph_input = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": self._request_content(request),
-                }
-            ]
-        }
         try:
+            workspace_attachments = await asyncio.to_thread(
+                self._stage_zip_attachments,
+                request,
+                prepared.run_id,
+            )
+            graph_input = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": self._request_content(
+                            request,
+                            workspace_attachments=workspace_attachments,
+                        ),
+                    }
+                ]
+            }
             async with self._checkpoint_lock(prepared.checkpoint_thread_id):
                 async for _ in self._stream_graph(
                     run_id=prepared.run_id,
@@ -4085,8 +4095,15 @@ class DeepAgentService:
             )
         return text
 
-    def _request_content(self, request: AgentRunRequest) -> str | list[dict[str, Any]]:
+    def _request_content(
+        self,
+        request: AgentRunRequest,
+        *,
+        workspace_attachments: Sequence[str] = (),
+    ) -> str | list[dict[str, Any]]:
         text = self._request_text(request)
+        if workspace_attachments:
+            text = f"{text}\n\n" + "\n".join(workspace_attachments)
         resolver = self._attachment_resolver
         if resolver is None or not request.file_ids:
             return text
@@ -4158,6 +4175,136 @@ class DeepAgentService:
                     }
                 )
         return content
+
+    def _stage_zip_attachments(
+        self,
+        request: AgentRunRequest,
+        run_id: str,
+    ) -> tuple[str, ...]:
+        resolver = self._attachment_resolver
+        if (
+            resolver is None
+            or not request.file_ids
+            or request.context.run_kind != AgentRunKind.OWNER.value
+        ):
+            return ()
+
+        notes: list[str] = []
+        for file_id in request.file_ids:
+            record = resolver.get_file(request.context.tenant_id, file_id)
+            if record is None:
+                continue
+            filename = str(record.get("original_filename") or file_id)
+            mime_type = str(record.get("mime_type") or "").strip().casefold()
+            if mime_type not in _ZIP_MIME_TYPES and not filename.casefold().endswith(".zip"):
+                continue
+            raw_bytes = resolver.read_file_bytes(request.context.tenant_id, file_id)
+            if raw_bytes is None:
+                notes.append(f"ZIP attachment {file_id} could not be copied into the sandbox.")
+                continue
+            try:
+                extracted = extract_zip_files(
+                    raw_bytes,
+                    max_file_bytes=self._container_policy.max_file_bytes,
+                )
+            except ValueError as exc:
+                notes.append(f"ZIP attachment {file_id} was not extracted: {exc}.")
+                continue
+
+            slot = self._safe_workspace_component(file_id, fallback="attachment")
+            safe_filename = self._safe_workspace_component(filename, fallback="archive.zip")
+            base_path = f"/workspace/.opentulpa/attachments/{run_id}/{slot}"
+            archive_path = f"{base_path}/{safe_filename}"
+            extracted_path = f"{base_path}/extracted"
+            files = [
+                (f"{extracted_path}/{member_name}", content)
+                for member_name, content in extracted.files
+            ]
+            if len(raw_bytes) <= self._container_policy.max_file_bytes:
+                files.insert(0, (archive_path, raw_bytes))
+
+            uploaded, failed = self._upload_workspace_files(request.context, files)
+            extracted_count = sum(
+                path.startswith(f"{extracted_path}/") for path in uploaded
+            )
+            archive_note = (
+                f" Original ZIP: {archive_path}." if archive_path in uploaded else ""
+            )
+            if extracted_count:
+                note = (
+                    f"ZIP attachment {file_id} was extracted as ordinary files at "
+                    f"{extracted_path}/ ({extracted_count} files).{archive_note}"
+                )
+            else:
+                note = (
+                    f"ZIP attachment {file_id} contained no files that could be placed in the "
+                    f"sandbox.{archive_note}"
+                )
+            failed_extracted_count = sum(
+                path.startswith(f"{extracted_path}/") for path in failed
+            )
+            skipped_count = len(extracted.skipped) + failed_extracted_count
+            if skipped_count:
+                note += (
+                    f" {skipped_count} unsafe, unreadable, or oversized entries were skipped."
+                )
+            notes.append(note)
+        return tuple(notes)
+
+    def _upload_workspace_files(
+        self,
+        context: AgentRunContext,
+        files: list[tuple[str, bytes]],
+    ) -> tuple[set[str], set[str]]:
+        if not files:
+            return set(), set()
+        backend = self._workspace_backend or TenantSandboxBackend(
+            workspaces_root=self._workspaces_root,
+            policy=self._container_policy,
+            container_cli=self._container_cli,
+            persistent_files=True,
+            execution_provider=self._execution_provider,
+        )
+        uploaded: set[str] = set()
+        failed: set[str] = set()
+
+        def upload_batch(batch: list[tuple[str, bytes]]) -> None:
+            try:
+                contextual_upload = getattr(backend, "upload_files_for_context", None)
+                if callable(contextual_upload):
+                    responses = contextual_upload(
+                        tenant_id=context.tenant_id,
+                        thread_id=context.thread_id,
+                        files=batch,
+                    )
+                else:
+                    responses = backend.upload_files(batch)
+                if len(responses) != len(batch):
+                    raise RuntimeError("workspace upload returned an incomplete response")
+            except Exception:
+                if len(batch) > 1:
+                    for item in batch:
+                        upload_batch([item])
+                else:
+                    failed.add(batch[0][0])
+                    logger.warning("ZIP attachment workspace upload failed", exc_info=True)
+                return
+            for (path, _content), response in zip(batch, responses, strict=True):
+                if getattr(response, "error", None):
+                    failed.add(path)
+                else:
+                    uploaded.add(path)
+
+        batch_size = self._container_policy.max_upload_files
+        for start in range(0, len(files), batch_size):
+            upload_batch(files[start : start + batch_size])
+        return uploaded, failed
+
+    @staticmethod
+    def _safe_workspace_component(value: str, *, fallback: str) -> str:
+        basename = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", basename).strip(".-")[:120]
+        return safe or fallback
 
     def _require_started(self) -> None:
         if not self.started:

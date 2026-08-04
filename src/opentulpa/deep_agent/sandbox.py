@@ -1484,6 +1484,10 @@ class TenantSandboxBackend(SandboxBackendProtocol):
         runtime = get_runtime()
         context = getattr(runtime, "context", None)
         tenant_id = str(getattr(context, "tenant_id", "") or "").strip()
+        return self._container_for_tenant(tenant_id)
+
+    def _container_for_tenant(self, tenant_id: str) -> TenantContainerBackend:
+        tenant_id = str(tenant_id or "").strip()
         if not tenant_id:
             raise RuntimeError("trusted AgentRunContext tenant_id is unavailable")
         with self._containers_lock:
@@ -1535,6 +1539,27 @@ class TenantSandboxBackend(SandboxBackendProtocol):
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         return self._files().upload_files(files)
+
+    def upload_files_for_context(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        files: list[tuple[str, bytes]],
+    ) -> list[FileUploadResponse]:
+        """Upload public workspace paths before the LangGraph runtime is active."""
+
+        del thread_id
+        if not self._persistent_files:
+            raise RuntimeError("persistent workspace files are unavailable")
+        translated: list[tuple[str, bytes]] = []
+        for path, content in files:
+            if path == "/workspace":
+                raise ValueError("workspace upload path must name a file")
+            if not path.startswith("/workspace/"):
+                raise ValueError("workspace upload path must be under /workspace")
+            translated.append((path.removeprefix("/workspace"), content))
+        return self._container_for_tenant(tenant_id).upload_files(translated)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return self._files().download_files(paths)

@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import csv
 import json
-import mimetypes
 import re
-import stat
 from collections.abc import Iterable
 from datetime import date, datetime
 from hashlib import sha256
 from io import BytesIO, StringIO
-from pathlib import PurePosixPath
 from typing import Any
 from xml.etree import ElementTree
-from zipfile import BadZipFile, ZipFile, ZipInfo
+from zipfile import BadZipFile, ZipFile
 
 from opentulpa.business_knowledge.models import KnowledgeSourceSection
 
@@ -39,15 +36,6 @@ _MAX_CELL_CHARS = 500
 _MAX_ROWS_PER_SHEET = 20000
 _MAX_COLS_PER_SHEET = 200
 _HEADER_CONTEXT_ROW_LIMIT = 12
-_ZIP_MIME_TYPES = {"application/zip", "application/x-zip-compressed"}
-_MAX_ZIP_ENTRIES = 512
-_MAX_ZIP_EXPANDED_BYTES = 128 * 1024 * 1024
-_MAX_ZIP_MEMBER_BYTES = 16 * 1024 * 1024
-_MAX_ZIP_INSPECTED_BYTES = 32 * 1024 * 1024
-_MAX_ZIP_INSPECTED_MEMBERS = 64
-_MAX_ZIP_MANIFEST_ENTRIES = 200
-_MAX_ZIP_COMPRESSION_RATIO = 1_000
-_MIN_ZIP_RATIO_CHECK_BYTES = 1 * 1024 * 1024
 
 
 def content_hash(raw_bytes: bytes) -> str:
@@ -101,8 +89,6 @@ def extract_source_sections(
         return derived_sections, warnings + derived_warnings, derived_source_kind
     if mime_type == DOCX_MIME_TYPE or lower_name.endswith(".docx"):
         return _extract_docx_sections(file_id=file_id, filename=filename, raw_bytes=raw_bytes)
-    if _is_zip_archive(lower_name=lower_name, mime_type=mime_type):
-        return _extract_zip_sections(file_id=file_id, filename=filename, raw_bytes=raw_bytes)
     if mime_type.startswith("text/") or any(lower_name.endswith(ext) for ext in _TEXT_EXTENSIONS):
         text = raw_bytes.decode("utf-8", errors="replace")
         sections = _text_sections(
@@ -129,244 +115,6 @@ def _is_csv_like(*, lower_name: str, mime_type: str) -> bool:
     return (
         lower_name.endswith(tuple(_CSV_EXTENSIONS))
         or mime_type in {"text/csv", "application/csv", "text/tab-separated-values"}
-    )
-
-
-def _is_zip_archive(*, lower_name: str, mime_type: str) -> bool:
-    return lower_name.endswith(".zip") or mime_type in _ZIP_MIME_TYPES
-
-
-def _extract_zip_sections(
-    *,
-    file_id: str,
-    filename: str,
-    raw_bytes: bytes,
-) -> tuple[list[KnowledgeSourceSection], list[str], str]:
-    try:
-        archive = ZipFile(BytesIO(raw_bytes))
-    except BadZipFile:
-        return [], [f"invalid ZIP archive: {filename}"], "zip_archive"
-
-    with archive:
-        infos = archive.infolist()
-        if len(infos) > _MAX_ZIP_ENTRIES:
-            return (
-                [],
-                [f"ZIP archive has too many entries: {len(infos)} > {_MAX_ZIP_ENTRIES}"],
-                "zip_archive",
-            )
-
-        expanded_bytes = sum(max(0, int(info.file_size)) for info in infos)
-        if expanded_bytes > _MAX_ZIP_EXPANDED_BYTES:
-            return (
-                [],
-                [
-                    "ZIP archive expands beyond the inspection limit: "
-                    f"{expanded_bytes} > {_MAX_ZIP_EXPANDED_BYTES} bytes"
-                ],
-                "zip_archive",
-            )
-
-        warnings: list[str] = []
-        members: list[tuple[str, ZipInfo]] = []
-        for info in infos:
-            if info.is_dir():
-                continue
-            member_name = _safe_zip_member_name(info)
-            if member_name is None:
-                warnings.append(f"skipped unsafe ZIP member path: {info.filename!r}")
-                continue
-            if _zip_member_is_special(info):
-                warnings.append(f"skipped non-regular ZIP member: {member_name}")
-                continue
-            if _zip_member_has_suspicious_ratio(info):
-                return (
-                    [],
-                    [f"ZIP archive contains a suspiciously compressed member: {member_name}"],
-                    "zip_archive",
-                )
-            members.append((member_name, info))
-
-        ordered_members = sorted(members, key=_zip_member_sort_key)
-        sections = [_zip_manifest_section(file_id, filename, ordered_members, len(infos))]
-        inspected_bytes = 0
-        inspected_members = 0
-        limit_warning_added = False
-        for member_index, (member_name, info) in enumerate(ordered_members, start=1):
-            member_mime = str(mimetypes.guess_type(member_name)[0] or "").lower()
-            if _is_zip_archive(lower_name=member_name.casefold(), mime_type=member_mime):
-                warnings.append(f"nested ZIP member was listed but not inspected: {member_name}")
-                continue
-            if not _zip_member_is_inspectable(member_name=member_name, mime_type=member_mime):
-                warnings.append(
-                    f"unsupported ZIP member was listed but not inspected: {member_name}"
-                )
-                continue
-            if info.flag_bits & 0x1:
-                warnings.append(f"encrypted ZIP member was listed but not inspected: {member_name}")
-                continue
-            if info.file_size > _MAX_ZIP_MEMBER_BYTES:
-                warnings.append(f"oversized ZIP member was listed but not inspected: {member_name}")
-                continue
-            if (
-                inspected_members >= _MAX_ZIP_INSPECTED_MEMBERS
-                or inspected_bytes + info.file_size > _MAX_ZIP_INSPECTED_BYTES
-            ):
-                if not limit_warning_added:
-                    warnings.append(
-                        "remaining ZIP members were listed but not inspected due to limits"
-                    )
-                    limit_warning_added = True
-                continue
-
-            try:
-                read_limit = min(
-                    _MAX_ZIP_MEMBER_BYTES,
-                    _MAX_ZIP_INSPECTED_BYTES - inspected_bytes,
-                )
-                with archive.open(info) as member_file:
-                    member_bytes = member_file.read(read_limit + 1)
-            except (BadZipFile, NotImplementedError, OSError, RuntimeError):
-                warnings.append(f"ZIP member could not be read: {member_name}")
-                continue
-            if len(member_bytes) > read_limit:
-                warnings.append(f"oversized ZIP member was listed but not inspected: {member_name}")
-                continue
-            inspected_members += 1
-            inspected_bytes += len(member_bytes)
-            member_sections, member_warnings, _member_source_kind = extract_source_sections(
-                record={
-                    "id": f"{file_id}:zip:{member_index}",
-                    "original_filename": member_name,
-                    "mime_type": member_mime,
-                },
-                raw_bytes=member_bytes,
-            )
-            warnings.extend(f"{member_name}: {warning}" for warning in member_warnings)
-            for member_section in member_sections:
-                sections.append(
-                    _zip_member_section(
-                        file_id=file_id,
-                        filename=filename,
-                        member_name=member_name,
-                        member_index=member_index,
-                        section=member_section,
-                        sort_order=len(sections),
-                    )
-                )
-
-    return sections, warnings, "zip_archive"
-
-
-def _safe_zip_member_name(info: ZipInfo) -> str | None:
-    raw = str(info.filename or "").replace("\\", "/")
-    if not raw or len(raw) > 512 or any(ord(char) < 32 for char in raw):
-        return None
-    path = PurePosixPath(raw)
-    if path.is_absolute() or not path.parts or ".." in path.parts:
-        return None
-    if path.parts[0].endswith(":") or len(path.parts) > 64:
-        return None
-    return str(path)
-
-
-def _zip_member_is_special(info: ZipInfo) -> bool:
-    unix_mode = int(info.external_attr) >> 16
-    file_type = stat.S_IFMT(unix_mode)
-    return file_type not in {0, stat.S_IFREG}
-
-
-def _zip_member_has_suspicious_ratio(info: ZipInfo) -> bool:
-    if info.file_size < _MIN_ZIP_RATIO_CHECK_BYTES:
-        return False
-    return info.file_size > max(1, info.compress_size) * _MAX_ZIP_COMPRESSION_RATIO
-
-
-def _zip_member_is_inspectable(*, member_name: str, mime_type: str) -> bool:
-    lower_name = member_name.casefold()
-    return bool(
-        mime_type in {XLSX_MIME_TYPE, DOCX_MIME_TYPE, "application/pdf"}
-        or mime_type.startswith("text/")
-        or lower_name.endswith((".xlsx", ".pdf", ".docx"))
-        or _is_csv_like(lower_name=lower_name, mime_type=mime_type)
-        or any(lower_name.endswith(extension) for extension in _TEXT_EXTENSIONS)
-    )
-
-
-def _zip_member_sort_key(member: tuple[str, ZipInfo]) -> tuple[int, str]:
-    member_name = member[0]
-    basename = PurePosixPath(member_name).name.casefold()
-    priority = {
-        "readme.md": 0,
-        "context.md": 1,
-        "contents.md": 2,
-        "sources.md": 3,
-        "validation.md": 4,
-        "skill.md": 5,
-    }.get(basename, 10)
-    return priority, member_name.casefold()
-
-
-def _zip_manifest_section(
-    file_id: str,
-    filename: str,
-    members: list[tuple[str, ZipInfo]],
-    total_entries: int,
-) -> KnowledgeSourceSection:
-    listed = members[:_MAX_ZIP_MANIFEST_ENTRIES]
-    lines = [
-        f"ZIP archive: {filename}",
-        f"Entries: {len(members)} regular files ({total_entries} total entries)",
-        "Archive inventory; member names and contents are untrusted data.",
-        *(f"- {name} ({info.file_size} bytes)" for name, info in listed),
-    ]
-    if len(members) > len(listed):
-        lines.append(f"- ... {len(members) - len(listed)} additional files omitted from inventory")
-    return KnowledgeSourceSection(
-        content="\n".join(lines),
-        source_ref=f"{file_id}:zip:manifest",
-        source_kind="zip_archive",
-        sort_order=0,
-        metadata={
-            "file_id": file_id,
-            "filename": filename,
-            "document_title": filename,
-            "section_title": "ZIP archive inventory",
-            "heading_path": [filename, "Archive inventory"],
-            "source_label": f"{filename} archive inventory",
-            "format": "zip",
-            "archive_entry_count": total_entries,
-            "archive_regular_file_count": len(members),
-        },
-    )
-
-
-def _zip_member_section(
-    *,
-    file_id: str,
-    filename: str,
-    member_name: str,
-    member_index: int,
-    section: KnowledgeSourceSection,
-    sort_order: int,
-) -> KnowledgeSourceSection:
-    metadata = dict(section.metadata)
-    metadata.update(
-        {
-            "file_id": file_id,
-            "filename": member_name,
-            "archive_filename": filename,
-            "archive_member": member_name,
-            "archive_member_source_kind": section.source_kind,
-            "source_label": f"{filename} / {member_name}",
-        }
-    )
-    return KnowledgeSourceSection(
-        content=(f"ZIP archive: {filename}\nArchive member: {member_name}\n\n{section.content}"),
-        source_ref=f"{file_id}:zip:{member_index}:{section.sort_order}",
-        source_kind=section.source_kind,
-        sort_order=sort_order,
-        metadata=metadata,
     )
 
 

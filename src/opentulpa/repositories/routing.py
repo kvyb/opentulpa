@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
@@ -17,6 +19,11 @@ from deepagents.backends.protocol import (
 from langgraph.runtime import get_runtime
 
 from opentulpa.repositories.service import RepositoryWorkspaceService
+
+_ATTACHMENT_EXCLUDE_COMMAND = """exclude_path=$(git rev-parse --git-path info/exclude) &&
+mkdir -p "$(dirname "$exclude_path")" &&
+{ grep -qxF '.opentulpa/attachments/' "$exclude_path" 2>/dev/null ||
+  printf '%s\\n' '.opentulpa/attachments/' >> "$exclude_path"; }"""
 
 
 class RepositoryRoutingSandbox(SandboxBackendProtocol):
@@ -88,6 +95,37 @@ class RepositoryRoutingSandbox(SandboxBackendProtocol):
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         return self._files_backend().upload_files(files)
+
+    def upload_files_for_context(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        files: list[tuple[str, bytes]],
+    ) -> list[FileUploadResponse]:
+        """Upload files using trusted routing data before agent execution starts."""
+
+        repository_backend = (
+            self._repositories.backend_for_thread(tenant_id=tenant_id, thread_id=thread_id)
+            if self._route_files
+            else None
+        )
+        backend = repository_backend or self._fallback
+        if repository_backend is not None:
+            excluded = repository_backend.execute(_ATTACHMENT_EXCLUDE_COMMAND)
+            if excluded.exit_code != 0:
+                raise RuntimeError("repository attachment directory could not be excluded")
+        contextual_upload = getattr(backend, "upload_files_for_context", None)
+        if callable(contextual_upload):
+            return cast(
+                "list[FileUploadResponse]",
+                contextual_upload(
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    files=files,
+                ),
+            )
+        return backend.upload_files(files)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return self._files_backend().download_files(paths)

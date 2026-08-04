@@ -751,6 +751,15 @@ def test_runtime_router_uses_active_thread_workspace(monkeypatch: pytest.MonkeyP
     assert active.paths == []
     assert fallback.paths == ["/scratch.txt"]
 
+    router.upload_files_for_context(
+        tenant_id="tenant-1",
+        thread_id="thread-1",
+        files=[("/workspace/.opentulpa/attachments/run/file.bin", b"data")],
+    )
+
+    assert active.paths == ["/workspace/.opentulpa/attachments/run/file.bin"]
+    assert any(".opentulpa/attachments/" in command for command in active.commands)
+
 
 def test_repository_api_resolves_tenant_from_authentication(tmp_path: Any) -> None:
     service, _ = _service(tmp_path)

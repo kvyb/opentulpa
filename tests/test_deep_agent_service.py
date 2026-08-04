@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from deepagents.middleware.summarization import compute_summarization_defaults
@@ -887,6 +890,59 @@ def test_request_content_inlines_pdf_as_native_file(tmp_path: Path) -> None:
             "file_data": "data:application/pdf;base64,JVBERi1zbW9rZQ==",
         },
     }
+
+
+def test_zip_attachment_is_extracted_into_owner_sandbox_as_raw_files(tmp_path: Path) -> None:
+    output = BytesIO()
+    with ZipFile(output, mode="w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("docs/notes.txt", b"plain text")
+        archive.writestr("assets/pixel.bin", b"\x00\xff")
+    resolver = _AttachmentResolver(
+        {
+            ("tenant-1", "zip-1"): (
+                {
+                    "original_filename": "bundle.zip",
+                    "mime_type": "application/zip",
+                    "text_excerpt": "",
+                },
+                output.getvalue(),
+            )
+        }
+    )
+    service = _service(
+        tmp_path,
+        _ToolCapableTextModel(responses=["unused"]),
+        attachment_resolver=resolver,
+    )
+    request = AgentRunRequest(
+        context=_context(),
+        text="Inspect this ZIP",
+        file_ids=("zip-1",),
+    )
+
+    notes = service._stage_zip_attachments(request, "run-test")  # noqa: SLF001
+    content = service._request_content(  # noqa: SLF001
+        request,
+        workspace_attachments=notes,
+    )
+
+    tenant_digest = hashlib.sha256(b"tenant-1").hexdigest()[:24]
+    attachment_root = (
+        tmp_path
+        / "workspaces"
+        / tenant_digest
+        / ".opentulpa"
+        / "attachments"
+        / "run-test"
+        / "zip-1"
+    )
+    assert (attachment_root / "bundle.zip").read_bytes() == output.getvalue()
+    assert (attachment_root / "extracted/docs/notes.txt").read_bytes() == b"plain text"
+    assert (attachment_root / "extracted/assets/pixel.bin").read_bytes() == b"\x00\xff"
+    assert "ordinary files" in notes[0]
+    assert "/workspace/.opentulpa/attachments/run-test/zip-1/extracted/" in notes[0]
+    assert isinstance(content, list)
+    assert notes[0] in content[0]["text"]
 
 
 def test_exact_owner_regenerate_command_becomes_side_effect_safe_instruction(
