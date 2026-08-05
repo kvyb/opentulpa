@@ -243,6 +243,12 @@ class GenerationManifest(_GenerationModel):
         return self
 
 
+def generation_manifest_sha256(manifest: GenerationManifest) -> str:
+    """Return the canonical digest used as runtime-generation provenance."""
+
+    return f"sha256:{_sha256(manifest)}"
+
+
 __all__ = [
     "GenerationDescriptor",
     "GenerationIdentity",
@@ -251,4 +257,5 @@ __all__ = [
     "UPSTREAM_LINEAGE_METADATA_KEY",
     "UpstreamLineage",
     "canonical_json_bytes",
+    "generation_manifest_sha256",
 ]

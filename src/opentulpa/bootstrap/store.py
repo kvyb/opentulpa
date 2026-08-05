@@ -25,6 +25,7 @@ from opentulpa.bootstrap.models import (
     ReleaseRecord,
     utc_now,
 )
+from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 _SCHEMA_VERSION = 1
@@ -340,11 +341,25 @@ class BootstrapStore:
 
     @staticmethod
     def _same_release_artifact(first: ReleaseRecord, second: ReleaseRecord) -> bool:
+        try:
+            first_provenance = ReleaseArtifactProvenance.from_values(
+                source_commit=first.source_commit,
+                artifact_digest=first.artifact_digest,
+                manifest_digest=first.manifest_digest,
+                entrypoint=first.entrypoint,
+                metadata=first.metadata,
+            )
+            second_provenance = ReleaseArtifactProvenance.from_values(
+                source_commit=second.source_commit,
+                artifact_digest=second.artifact_digest,
+                manifest_digest=second.manifest_digest,
+                entrypoint=second.entrypoint,
+                metadata=second.metadata,
+            )
+        except (ValidationError, ValueError):
+            return False
         fields_match = (
             first.candidate_id == second.candidate_id
-            and first.source_commit == second.source_commit
-            and first.artifact_digest == second.artifact_digest
-            and first.manifest_digest == second.manifest_digest
             and first.protocol_version == second.protocol_version
             and first.agent_api_version == second.agent_api_version
             and first.control_api_version == second.control_api_version
@@ -353,22 +368,8 @@ class BootstrapStore:
             and first.drain_path == second.drain_path
             and first.ingress_path == second.ingress_path
             and first.event_path == second.event_path
-            and first.entrypoint == second.entrypoint
         )
-        provenance_keys = (
-            "artifact_kind",
-            "image_reference",
-            "generation_id",
-            "dependency_lock_hash",
-            "evaluator_fingerprint",
-            "state_contract_sha256",
-            "state_contract_digest",
-            "install_profile",
-            "controller_protocol",
-        )
-        return fields_match and all(
-            first.metadata.get(key) == second.metadata.get(key) for key in provenance_keys
-        )
+        return fields_match and first_provenance == second_provenance
 
     def get_release(self, release_id: str) -> ReleaseRecord | None:
         with self._lock, closing(self._connect()) as connection:

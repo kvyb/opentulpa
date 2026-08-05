@@ -25,7 +25,6 @@ _CONTROLLER_ENTRIES = frozenset(
         "bootstrap",
         "product",
         "runtime-generations",
-        "runtime-source-releases",
         ".runtime-generations-control",
         "bun",
         "sandbox_worker",
@@ -45,7 +44,6 @@ class HostPaths:
     control_root: Path
     product_root: Path
     generations_root: Path
-    legacy_releases_root: Path
     runtime_uid: int | None
     runtime_gid: int | None
     candidate_uid: int | None
@@ -87,15 +85,10 @@ class HostPaths:
             str(data_root / "runtime-generations"),
             label="runtime generations root",
         )
-        legacy_releases_root = _safe_absolute_path(
-            str(data_root / "runtime-source-releases"),
-            label="legacy runtime source root",
-        )
         _require_separate_roots(
             control_root,
             product_root,
             generations_root,
-            legacy_releases_root,
         )
         isolated = sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0
         if isolated and (_RUNTIME_UID == _CANDIDATE_UID or _RUNTIME_GID == _CANDIDATE_GID):
@@ -105,7 +98,6 @@ class HostPaths:
             control_root=control_root,
             product_root=product_root,
             generations_root=generations_root,
-            legacy_releases_root=legacy_releases_root,
             runtime_uid=_RUNTIME_UID if isolated else None,
             runtime_gid=_RUNTIME_GID if isolated else None,
             candidate_uid=_CANDIDATE_UID if isolated else None,
@@ -118,7 +110,6 @@ class HostPaths:
         _secure_directory(self.data_root, mode=0o711 if self.runtime_uid is not None else 0o700)
         _secure_directory(self.control_root, mode=0o700)
         _secure_directory(self.generations_root, mode=0o711)
-        _secure_directory(self.legacy_releases_root, mode=0o711)
         _secure_product_directory(self.product_root, runtime_uid=self.runtime_uid)
         self._migrate_legacy_product_entries()
         _validate_regular_tree(self.product_root)
@@ -134,7 +125,6 @@ class HostPaths:
             product_name,
             control_name,
             self.generations_root.name,
-            self.legacy_releases_root.name,
         }
         sources: list[tuple[Path, Path]] = []
         try:

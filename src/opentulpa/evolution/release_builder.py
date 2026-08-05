@@ -1,4 +1,4 @@
-"""Trusted OCI, source-overlay, and fixed-recipe Python release builders."""
+"""Trusted OCI and fixed-recipe Python release builders."""
 
 from __future__ import annotations
 
@@ -38,11 +38,11 @@ from opentulpa.evolution.generation import (
     GenerationManifest,
     StateContract,
     canonical_json_bytes,
+    generation_manifest_sha256,
 )
 from opentulpa.evolution.generation_store import (
     GenerationStore,
     GenerationStoreError,
-    runtime_tree_sha256,
 )
 from opentulpa.evolution.git_security import (
     GitSecurityError,
@@ -128,7 +128,7 @@ class OciReleaseArtifact(BaseModel):
 
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     manifest_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    artifact_kind: Literal["oci_image", "source_overlay", "python_generation"] = "oci_image"
+    artifact_kind: Literal["oci_image", "python_generation"] = "oci_image"
     image_reference: str = Field(min_length=1, max_length=300)
     entrypoint: tuple[str, ...] = Field(min_length=1, max_length=64)
 
@@ -194,26 +194,6 @@ class OciReleaseBuildPolicy:
             raise ValueError("release build context limit is too small")
         if self.max_context_entries < 100:
             raise ValueError("release build entry limit is too small")
-
-
-@dataclass(frozen=True, slots=True)
-class SourceOverlayBuildPolicy:
-    """Trusted bounds for a source overlay using the host's pinned environment."""
-
-    base_dependency_lock_hash: str
-    git_cli: str = "git"
-    entrypoint: tuple[str, ...] = ("python", "-m", "opentulpa")
-    max_tree_bytes: int = 512 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        if not _LOCK_HASH_RE.fullmatch(self.base_dependency_lock_hash):
-            raise ValueError("base_dependency_lock_hash must be a SHA-256 lockfile hash")
-        if Path(self.git_cli).name != "git" or "\x00" in self.git_cli:
-            raise ValueError("git_cli must be a Git executable")
-        if not self.entrypoint or any(not item or "\x00" in item for item in self.entrypoint):
-            raise ValueError("entrypoint must contain safe exec arguments")
-        if self.max_tree_bytes < 1024 * 1024:
-            raise ValueError("source overlay tree limit is too small")
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,128 +331,6 @@ class WheelReleaseBuildPolicy:
 
 # The explicit trusted name is retained as a descriptive alias for callers.
 TrustedWheelBuildPolicy = WheelReleaseBuildPolicy
-
-
-class TrustedSourceOverlayBuilder:
-    """Bind an evaluated commit to the immutable dependencies in the host image."""
-
-    def __init__(self, *, policy: SourceOverlayBuildPolicy) -> None:
-        self._policy = policy
-
-    async def build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
-        return await asyncio.to_thread(self._build, request)
-
-    def _build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
-        workspace = request.workspace.expanduser().resolve(strict=True)
-        if not workspace.is_dir() or workspace.is_symlink():
-            raise ReleaseBuildError("candidate build workspace is invalid")
-        if not _COMMIT_RE.fullmatch(request.base_commit) or not _COMMIT_RE.fullmatch(
-            request.source_commit
-        ):
-            raise ReleaseBuildError("candidate source commit is invalid")
-        if request.dependency_lock_hash != self._policy.base_dependency_lock_hash:
-            raise ReleaseBuildError(
-                "candidate dependency lock changed; a trusted host rebuild is required"
-            )
-        environment = {"PATH": os.environ.get("PATH", os.defpath), "HOME": "/tmp"}
-        head = self._git(workspace, "rev-parse", "--verify", "HEAD^{commit}")
-        if head.decode("ascii", errors="ignore").strip().lower() != request.source_commit:
-            raise ReleaseBuildError("candidate workspace no longer matches its evaluated commit")
-        if self._git(
-            workspace,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-        ).strip():
-            raise ReleaseBuildError("candidate workspace changed after evaluation")
-        ancestor = run_bounded_process(
-            (
-                self._policy.git_cli,
-                "-C",
-                str(workspace),
-                "merge-base",
-                "--is-ancestor",
-                request.base_commit,
-                request.source_commit,
-            ),
-            cwd=workspace,
-            env=environment,
-            timeout_seconds=30,
-            max_output_bytes=1_024,
-        )
-        if ancestor.returncode != 0 or ancestor.truncated:
-            raise ReleaseBuildError("candidate base commit is not an ancestor of evaluated source")
-        changed = self._git(
-            workspace,
-            "diff",
-            "--name-only",
-            "--no-ext-diff",
-            "--diff-filter=ACDMRTUXB",
-            "-z",
-            request.base_commit,
-            request.source_commit,
-            "--",
-        )
-        paths = tuple(
-            path for path in changed.decode("utf-8", errors="replace").split("\0") if path
-        )
-        if any(not candidate_path_is_promotable(path) for path in paths):
-            raise ReleaseBuildError(
-                "candidate changes are contribution-only and cannot enter a production release"
-            )
-        listing = self._git(
-            workspace,
-            "ls-tree",
-            "-r",
-            "-z",
-            "--full-tree",
-            request.source_commit,
-            max_output_bytes=self._policy.max_tree_bytes,
-        )
-        tree_digest = hashlib.sha256(listing).hexdigest()
-        manifest = {
-            "artifact_kind": "source_overlay",
-            "base_commit": request.base_commit,
-            "candidate_id": request.candidate_id,
-            "dependency_lock_hash": request.dependency_lock_hash,
-            "entrypoint": list(self._policy.entrypoint),
-            "evaluator_fingerprint": request.evaluator_fingerprint,
-            "evaluator_version": request.evaluator_version,
-            "protocol_version": 1,
-            "source_commit": request.source_commit,
-            "source_tree_sha256": tree_digest,
-        }
-        encoded = json.dumps(
-            manifest,
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return OciReleaseArtifact(
-            artifact_kind="source_overlay",
-            artifact_digest=f"sha256:{tree_digest}",
-            manifest_digest=f"sha256:{hashlib.sha256(encoded).hexdigest()}",
-            image_reference=f"source-overlay:{request.source_commit}",
-            entrypoint=self._policy.entrypoint,
-        )
-
-    def _git(
-        self,
-        workspace: Path,
-        *arguments: str,
-        max_output_bytes: int = 256 * 1024,
-    ) -> bytes:
-        result = run_bounded_process(
-            (self._policy.git_cli, "-C", str(workspace), *arguments),
-            cwd=workspace,
-            env={"PATH": os.environ.get("PATH", os.defpath), "HOME": "/tmp"},
-            timeout_seconds=60,
-            max_output_bytes=max_output_bytes,
-        )
-        if result.returncode != 0 or result.truncated:
-            raise ReleaseBuildError("candidate source could not be verified")
-        return result.output
 
 
 def _export_exact_git_blobs(
@@ -1170,9 +1028,7 @@ class TrustedWheelReleaseBuilder:
                         manifest=manifest,
                         runtime=runtime,
                     )
-                    expected_manifest_digest = (
-                        f"sha256:{hashlib.sha256(canonical_json_bytes(final_manifest)).hexdigest()}"
-                    )
+                    expected_manifest_digest = generation_manifest_sha256(final_manifest)
                     installed = self._store.open(
                         final_manifest.identity.generation_id,
                         expected_manifest_digest=expected_manifest_digest,
@@ -2052,60 +1908,7 @@ class TrustedWheelReleaseBuilder:
         )
         self._verify_installed_structure(generation_path, interpreter)
         self._remove_expected_venv_links(venv_path)
-        self._fsync_tree(generation_path)
-        self._seal_runtime(generation_path)
-        self._fsync_tree(generation_path)
-        runtime_digest = runtime_tree_sha256(generation_path)
-        final_manifest = manifest.model_copy(update={"runtime_tree_sha256": runtime_digest})
-        manifest_bytes = canonical_json_bytes(final_manifest)
-        self._write_file(generation_path / "manifest.json", manifest_bytes, mode=0o600)
-        (generation_path / "manifest.json").chmod(0o444)
-        self._fsync_directory(generation_path)
-        self._verify_prepublication(generation_path, final_manifest)
-        (generation_path / "BUILDING").unlink()
-        self._fsync_directory(generation_path)
-        self._write_file(generation_path / "COMPLETE", b"", mode=0o444)
-        self._fsync_directory(generation_path)
-        generation_path.chmod(0o555)
-        self._fsync_directory(generation_path)
-        self._fsync_directory(self._generations_root)
-        return final_manifest
-
-    def _verify_prepublication(
-        self,
-        generation_path: Path,
-        manifest: GenerationManifest,
-    ) -> None:
-        manifest_path = generation_path / "manifest.json"
-        try:
-            stored_manifest = GenerationManifest.model_validate_json(manifest_path.read_bytes())
-        except (OSError, ValueError) as exc:
-            raise ReleaseBuildError("staged generation manifest failed verification") from exc
-        if stored_manifest != manifest or manifest_path.read_bytes() != canonical_json_bytes(manifest):
-            raise ReleaseBuildError("staged generation manifest failed verification")
-        if runtime_tree_sha256(generation_path) != manifest.runtime_tree_sha256:
-            raise ReleaseBuildError("staged runtime tree failed verification")
-        artifacts = (
-            (
-                generation_path / manifest.descriptor.wheel_path,
-                manifest.descriptor.wheel_size_bytes,
-                manifest.identity.wheel_sha256,
-            ),
-            (
-                generation_path / manifest.descriptor.uv_lock_path,
-                manifest.descriptor.uv_lock_size_bytes,
-                manifest.identity.uv_lock_sha256,
-            ),
-        )
-        for path, expected_size, expected_hash in artifacts:
-            self._require_regular_file(path, label="staged generation artifact")
-            payload = path.read_bytes()
-            if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_hash:
-                raise ReleaseBuildError("staged generation artifact failed verification")
-        self._verify_installed_structure(
-            generation_path,
-            generation_path / manifest.descriptor.venv_path / "bin/python",
-        )
+        return self._store.publish_staged(manifest.identity.generation_id, manifest)
 
     def _copy_runtime_library(self, raw_library: str, venv_path: Path) -> None:
         if not raw_library:
@@ -2153,45 +1956,6 @@ class TrustedWheelReleaseBuilder:
         lib64 = venv_path / "lib64"
         if lib64.is_symlink() and os.readlink(lib64) == "lib":
             lib64.unlink()
-
-    def _fsync_tree(self, root: Path) -> None:
-        for path in sorted(root.rglob("*"), reverse=True):
-            metadata = path.lstat()
-            if stat.S_ISLNK(metadata.st_mode):
-                raise ReleaseBuildError("installed runtime contains a symbolic link")
-            if stat.S_ISREG(metadata.st_mode):
-                descriptor = os.open(path, os.O_RDONLY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-            elif not stat.S_ISDIR(metadata.st_mode):
-                raise ReleaseBuildError("installed runtime contains a special file")
-        for path in sorted(
-            (item for item in root.rglob("*") if item.is_dir()),
-            key=lambda item: len(item.parts),
-            reverse=True,
-        ):
-            self._fsync_directory(path)
-        self._fsync_directory(root)
-
-    @staticmethod
-    def _seal_runtime(root: Path) -> None:
-        directories: list[Path] = []
-        for path in root.rglob("*"):
-            if path.name == "BUILDING" and path.parent == root:
-                continue
-            metadata = path.lstat()
-            if stat.S_ISLNK(metadata.st_mode):
-                raise ReleaseBuildError("installed runtime contains a symbolic link")
-            if stat.S_ISREG(metadata.st_mode):
-                path.chmod(0o555 if stat.S_IMODE(metadata.st_mode) & 0o111 else 0o444)
-            elif stat.S_ISDIR(metadata.st_mode):
-                directories.append(path)
-            else:
-                raise ReleaseBuildError("installed runtime contains a special file")
-        for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
-            directory.chmod(0o555)
 
     @staticmethod
     def _artifact(installed: Any) -> OciReleaseArtifact:
@@ -2402,10 +2166,8 @@ __all__ = [
     "ReleaseBuildError",
     "ReleaseBuildRequest",
     "ReleaseBuilder",
-    "SourceOverlayBuildPolicy",
     "TrustedWheelBuildPolicy",
     "TrustedOciReleaseBuilder",
-    "TrustedSourceOverlayBuilder",
     "TrustedWheelReleaseBuilder",
     "WheelReleaseBuildPolicy",
 ]

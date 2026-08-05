@@ -18,6 +18,7 @@ from opentulpa.evolution.generation import (
     GenerationManifest,
     StateContract,
     canonical_json_bytes,
+    generation_manifest_sha256,
 )
 from opentulpa.evolution.generation_store import (
     GenerationStore,
@@ -113,6 +114,32 @@ def _installed_generation(
     return generation, manifest
 
 
+def _staged_generation(
+    generations_root: Path,
+) -> tuple[Path, GenerationManifest]:
+    generation, published_manifest = _installed_generation(generations_root)
+    generation.chmod(0o700)
+    (generation / "COMPLETE").unlink()
+    (generation / "manifest.json").unlink()
+    for path in generation.rglob("*"):
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            path.chmod(0o755)
+        elif stat.S_ISREG(metadata.st_mode):
+            path.chmod(0o755 if metadata.st_mode & 0o111 else 0o644)
+    (generation / "BUILDING").write_bytes(
+        canonical_json_bytes(
+            {
+                "nonce": "a" * 32,
+                "pid": os.getpid(),
+                "started_at": time.time(),
+            }
+        )
+    )
+    (generation / "BUILDING").chmod(0o600)
+    return generation, published_manifest.model_copy(update={"runtime_tree_sha256": "0" * 64})
+
+
 class _ExpectedProvenance(TypedDict):
     expected_manifest_digest: str
     expected_state_contract_digest: str
@@ -123,14 +150,44 @@ class _ExpectedProvenance(TypedDict):
 
 def _expected(manifest: GenerationManifest) -> _ExpectedProvenance:
     return {
-        "expected_manifest_digest": (
-            f"sha256:{hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()}"
-        ),
+        "expected_manifest_digest": generation_manifest_sha256(manifest),
         "expected_state_contract_digest": manifest.state_contract.sha256(),
         "expected_evaluator_fingerprint": manifest.identity.evaluator_fingerprint,
         "expected_install_profile": manifest.identity.install_profile,
         "controller_protocol": 1,
     }
+
+
+def test_store_owns_staged_generation_publication(tmp_path: Path) -> None:
+    root = tmp_path / "generations"
+    generation, staged_manifest = _staged_generation(root)
+    store = GenerationStore(root)
+
+    manifest = store.publish_staged(staged_manifest.identity.generation_id, staged_manifest)
+    installed = store.open(manifest.identity.generation_id, **_expected(manifest))
+
+    assert installed.manifest == manifest
+    assert manifest.runtime_tree_sha256 != "0" * 64
+    assert not (generation / "BUILDING").exists()
+    assert (generation / "COMPLETE").read_bytes() == b""
+    assert stat.S_IMODE(generation.stat().st_mode) == 0o555
+    assert stat.S_IMODE((generation / "manifest.json").stat().st_mode) == 0o444
+
+
+def test_staged_publication_fails_before_complete_on_artifact_tampering(tmp_path: Path) -> None:
+    root = tmp_path / "generations"
+    generation, staged_manifest = _staged_generation(root)
+    wheel = generation / staged_manifest.descriptor.wheel_path
+    wheel.write_bytes(b"tampered wheel")
+
+    with pytest.raises(GenerationStoreError, match="hash or size"):
+        GenerationStore(root).publish_staged(
+            staged_manifest.identity.generation_id,
+            staged_manifest,
+        )
+
+    assert (generation / "BUILDING").exists()
+    assert not (generation / "COMPLETE").exists()
 
 
 def test_store_requires_external_provenance_and_exposes_exact_paths(tmp_path: Path) -> None:

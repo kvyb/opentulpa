@@ -14,6 +14,7 @@ from opentulpa.evolution.generation import (
     StateContract,
     UpstreamLineage,
     canonical_json_bytes,
+    generation_manifest_sha256,
 )
 from opentulpa.evolution.models import Candidate
 
@@ -227,6 +228,8 @@ def test_manifest_binds_format_identity_and_artifact_metadata() -> None:
     changed_runtime = manifest.model_copy(update={"runtime_tree_sha256": "1" * 64})
     assert changed_runtime.identity.generation_id == manifest.identity.generation_id
     assert canonical_json_bytes(changed_runtime) != canonical_json_bytes(manifest)
+    assert generation_manifest_sha256(manifest).startswith("sha256:")
+    assert generation_manifest_sha256(changed_runtime) != generation_manifest_sha256(manifest)
     with pytest.raises(ValidationError):
         GenerationManifest.model_validate(
             {

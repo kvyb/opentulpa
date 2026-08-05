@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import shlex
 import shutil
 import socket
 import sys
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from opentulpa.bootstrap.evolution_runtime import TrustedSourceReleaseProvider
 from opentulpa.bootstrap.models import ReleaseRecord
 from opentulpa.core.config import Settings
 from opentulpa.evolution.evaluator import (
@@ -25,9 +22,6 @@ from opentulpa.evolution.generation import StateContract
 from opentulpa.evolution.generation_store import GenerationStore
 from opentulpa.evolution.release_builder import (
     ReleaseBuildError,
-    ReleaseBuildRequest,
-    SourceOverlayBuildPolicy,
-    TrustedSourceOverlayBuilder,
     WheelReleaseBuildPolicy,
 )
 from opentulpa.evolution.sandbox import (
@@ -40,7 +34,6 @@ from opentulpa.host import paths as host_paths_module
 from opentulpa.host.evolution import (
     HostEvolutionRuntime,
     HostReleaseActivator,
-    SourceOverlayReleaseActivator,
     seed_source_repository,
 )
 from opentulpa.host.evolution_composition import (
@@ -67,13 +60,6 @@ def _seed(tmp_path: Path) -> Path:
     (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     (root / "README.md").write_text("# Seed\n", encoding="utf-8")
     return root
-
-
-def _builder(repository: Path) -> TrustedSourceOverlayBuilder:
-    lock_hash = hashlib.sha256((repository / "uv.lock").read_bytes()).hexdigest()
-    return TrustedSourceOverlayBuilder(
-        policy=SourceOverlayBuildPolicy(base_dependency_lock_hash=lock_hash)
-    )
 
 
 def test_source_repository_import_is_persistent_and_tracks_new_bundled_source(
@@ -160,103 +146,6 @@ def test_seed_import_detects_source_mutation_during_copy(
 
     with pytest.raises(RuntimeError, match="changed while it was imported"):
         seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-
-
-@pytest.mark.asyncio
-async def test_source_overlay_builder_binds_exact_commit_and_dependency_lock(
-    tmp_path: Path,
-) -> None:
-    repository = seed_source_repository(
-        seed_root=_seed(tmp_path),
-        repository=tmp_path / "state" / "source",
-    )
-    head = _git(repository, "rev-parse", "HEAD")
-    lock_hash = hashlib.sha256((repository / "uv.lock").read_bytes()).hexdigest()
-    builder = _builder(repository)
-    request = ReleaseBuildRequest(
-        candidate_id="candidate-test",
-        workspace=repository,
-        base_commit=head,
-        source_commit=head,
-        dependency_lock_hash=lock_hash,
-        evaluator_version="test-v1",
-        evaluator_fingerprint=f"sha256:{'1' * 64}",
-    )
-
-    artifact = await builder.build(request)
-
-    assert artifact.artifact_kind == "source_overlay"
-    assert artifact.image_reference == f"source-overlay:{head}"
-    assert artifact.artifact_digest.startswith("sha256:")
-    with pytest.raises(ReleaseBuildError, match="dependency lock changed"):
-        await builder.build(replace(request, dependency_lock_hash="0" * 64))
-
-
-class _Runtime:
-    def __init__(self, root: Path, *, fail: bool = False) -> None:
-        self.project_root = root
-        self.status = "ready"
-        self.endpoint = "http://runtime.test"
-        self.fail = fail
-        self.replacements: list[Path] = []
-
-    async def replace_source(self, root: Path) -> None:
-        self.replacements.append(root)
-        if self.fail:
-            raise RuntimeUnavailableError("candidate failed")
-        self.project_root = root
-
-
-@pytest.mark.asyncio
-async def test_source_overlay_activation_materializes_and_reports_health_rollback(
-    tmp_path: Path,
-) -> None:
-    repository = seed_source_repository(
-        seed_root=_seed(tmp_path),
-        repository=tmp_path / "state" / "source",
-    )
-    builder = _builder(repository)
-    provider = TrustedSourceReleaseProvider(
-        source_repository=repository,
-        builder=builder,
-        evaluator_version="test-v1",
-        evaluator_fingerprint=f"sha256:{'2' * 64}",
-    )
-    release = await provider.build()
-    runtime = _Runtime(repository)
-    activator = SourceOverlayReleaseActivator(
-        repository=repository,
-        releases_root=tmp_path / "releases",
-        runtime=runtime,  # type: ignore[arg-type]
-    )
-
-    active = await activator.activate(
-        release,
-        activation_id="activation-ok",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-
-    assert active.status == "active"
-    assert runtime.project_root.name == release.source_commit
-    assert (runtime.project_root / "src" / "opentulpa" / "__init__.py").is_file()
-
-    failed_runtime = _Runtime(repository, fail=True)
-    failed = SourceOverlayReleaseActivator(
-        repository=repository,
-        releases_root=tmp_path / "failed-releases",
-        runtime=failed_runtime,  # type: ignore[arg-type]
-    )
-    rolled_back = await failed.activate(
-        release,
-        activation_id="activation-failed",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-    assert rolled_back.status == "rolled_back"
-    assert rolled_back.failure_code == "release_unhealthy"
 
 
 def _state_contract() -> StateContract:
@@ -349,9 +238,8 @@ def _generation_activator(
     store: _GenerationStore,
     evaluator_fingerprint_resolver: Callable[[ReleaseRecord], str] | None = None,
 ) -> HostReleaseActivator:
+    del tmp_path
     return HostReleaseActivator(
-        repository=tmp_path,
-        releases_root=tmp_path / "releases",
         runtime=runtime,  # type: ignore[arg-type]
         generation_store=store,  # type: ignore[arg-type]
         state_contract=_state_contract(),
@@ -360,6 +248,22 @@ def _generation_activator(
         install_profile="runtime",
         controller_protocol=1,
     )
+
+
+def test_host_release_activator_rejects_non_generation_artifacts(
+    tmp_path: Path,
+) -> None:
+    release = _generation_release().model_copy(
+        update={"metadata": {"artifact_kind": "oci_image"}}
+    )
+    activator = _generation_activator(
+        tmp_path,
+        runtime=_GenerationRuntime(),
+        store=_GenerationStore(),
+    )
+
+    with pytest.raises(RuntimeError, match="immutable Python generations"):
+        activator.generation_spec(release)
 
 
 @pytest.mark.asyncio

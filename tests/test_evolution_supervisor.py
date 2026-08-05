@@ -139,7 +139,11 @@ class _FakeReleaseBuilder:
         manifest = hashlib.sha256(f"manifest:{request.source_commit}".encode()).hexdigest()
         return OciReleaseArtifact(
             artifact_kind=self.artifact_kind,  # type: ignore[arg-type]
-            artifact_digest=f"sha256:{image}",
+            artifact_digest=(
+                f"sha256:{manifest}"
+                if self.artifact_kind == "python_generation"
+                else f"sha256:{image}"
+            ),
             manifest_digest=f"sha256:{manifest}",
             image_reference=(
                 f"python-generation:{manifest}"
@@ -827,7 +831,7 @@ async def _seed_active_release(
     accepted_upstream_commit: str | None,
     release_id: str = "release_seed",
     candidate_id: str = "candidate_seed",
-    artifact_kind: str = "source_overlay",
+    artifact_kind: str = "oci_image",
 ) -> Release:
     await supervisor._archive.start()
     artifact_digest = f"sha256:{hashlib.sha256(candidate_id.encode()).hexdigest()}"

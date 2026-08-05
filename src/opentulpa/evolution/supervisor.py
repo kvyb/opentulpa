@@ -52,6 +52,7 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuildRequest,
     TrustedWheelReleaseBuilder,
 )
+from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
 from opentulpa.evolution.sanitizer import (
     ContributionSanitizationError,
     sanitize_contribution_patch,
@@ -1107,7 +1108,7 @@ class EvolutionSupervisor:
         ):
             raise EvolutionSupervisorError("candidate has no verified release manifest")
         artifact_kind = str(candidate.metadata.get("artifact_kind") or "")
-        if artifact_kind not in {"oci_image", "source_overlay", "python_generation"}:
+        if artifact_kind not in {"oci_image", "python_generation"}:
             raise EvolutionSupervisorError("candidate release artifact kind is invalid")
         accepted_upstream = str(candidate.metadata.get("accepted_upstream_commit") or "")
         evaluation_input_digest = str(candidate.metadata.get("evaluation_input_digest") or "")
@@ -1163,31 +1164,28 @@ class EvolutionSupervisor:
         ):
             if key in candidate.metadata:
                 metadata[key] = candidate.metadata[key]
+        try:
+            provenance = ReleaseArtifactProvenance.from_values(
+                source_commit=str(candidate.source_commit or ""),
+                artifact_digest=str(candidate.artifact_digest or ""),
+                manifest_digest=manifest_digest,
+                entrypoint=tuple(str(item) for item in raw_entrypoint),
+                metadata=metadata,
+            )
+        except ValueError as exc:
+            raise EvolutionSupervisorError("candidate release provenance is invalid") from exc
+        metadata.update(provenance.release_metadata())
         return metadata
 
     @staticmethod
     def _release_metadata_from_release(release: Release) -> dict[str, JsonValue]:
-        return {
+        provenance = EvolutionSupervisor._release_provenance(release).release_metadata()
+        evidence = {
             key: release.metadata[key]
             for key in (
-                "artifact_kind",
                 "manifest_digest",
                 "release_entrypoint",
-                "image_reference",
-                "generation_id",
-                "dependency_lock_hash",
-                "dependency_base_id",
-                "dependency_inventory_sha256",
-                "dependency_resolver_fingerprint",
-                "dependency_site_sha256",
-                "dependency_wheelhouse_sha256",
-                "evaluation_input_digest",
                 "accepted_upstream_commit",
-                "state_contract",
-                "state_contract_sha256",
-                "state_contract_digest",
-                "install_profile",
-                "controller_protocol",
                 "base_commit",
                 "changed_paths",
                 "diff_sha256",
@@ -1198,24 +1196,43 @@ class EvolutionSupervisor:
             )
             if key in release.metadata
         }
+        return {**provenance, **evidence}
 
     @staticmethod
     def _bootstrap_release(release: Release) -> ReleaseRecord:
-        manifest_digest = str(release.metadata.get("manifest_digest") or "")
-        raw_entrypoint = release.metadata.get("release_entrypoint")
-        if not isinstance(raw_entrypoint, list):
-            raise EvolutionSupervisorError("release entrypoint is unavailable")
+        provenance = EvolutionSupervisor._release_provenance(release)
         return ReleaseRecord(
             id=release.id,
             candidate_id=release.candidate_id,
             source_commit=release.source_commit,
             artifact_digest=release.artifact_digest,
-            manifest_digest=manifest_digest,
-            entrypoint=tuple(str(item) for item in raw_entrypoint),
+            manifest_digest=provenance.manifest_digest,
+            entrypoint=provenance.entrypoint,
             metadata={
                 key: value for key, value in release.metadata.items() if key != "requested_by"
             },
         )
+
+    @staticmethod
+    def _release_provenance(release: Release) -> ReleaseArtifactProvenance:
+        raw_entrypoint = release.metadata.get("release_entrypoint")
+        if not isinstance(raw_entrypoint, list):
+            raise EvolutionSupervisorError("release entrypoint is unavailable")
+        entrypoint: list[str] = []
+        for item in raw_entrypoint:
+            if not isinstance(item, str):
+                raise EvolutionSupervisorError("release entrypoint is unavailable")
+            entrypoint.append(item)
+        try:
+            return ReleaseArtifactProvenance.from_values(
+                source_commit=release.source_commit,
+                artifact_digest=release.artifact_digest,
+                manifest_digest=str(release.metadata.get("manifest_digest") or ""),
+                entrypoint=tuple(entrypoint),
+                metadata=release.metadata,
+            )
+        except ValueError as exc:
+            raise EvolutionSupervisorError("release artifact provenance is invalid") from exc
 
     async def flush_events(self, *, limit: int = 100) -> int:
         sink = self._event_sink

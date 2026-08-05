@@ -114,10 +114,10 @@ Persist the `opentulpa_data` volume and set `OPENTULPA_DATA_ROOT=/app/opentulpa_
 It contains product state, Git lineage, release records, and the controller's external
 persistent state. Do not treat a runtime generation or candidate worktree as a backup.
 
-The root image starts the immutable `opentulpa-host` controller directly. When that image
-is used as the trusted base for legacy managed OCI releases, candidate containers use the
-same immutable controller interpreter with only the reviewed `/app/src` package overlaid.
-They do not depend on `/app/.venv` and do not execute a candidate-controlled `start.sh`.
+The root image starts the immutable `opentulpa-host` controller directly. Host releases
+execute only from sealed Python generations. Managed OCI releases are complete immutable
+images selected by digest; neither path executes a source directory, mutable `/app/.venv`,
+or candidate-controlled `start.sh`.
 
 ## Railway
 

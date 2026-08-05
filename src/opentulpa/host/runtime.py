@@ -208,9 +208,8 @@ class _OwnershipRecord(BaseModel):
     process_group: int = Field(ge=1)
     host_pid: int = Field(ge=1)
     host_birth: str = Field(min_length=1, max_length=200)
-    mode: Literal["generation", "legacy"]
-    generation_id: str | None = Field(default=None, pattern=_GENERATION_ID_PATTERN)
-    legacy_source_root: str | None = None
+    mode: Literal["generation"]
+    generation_id: str = Field(pattern=_GENERATION_ID_PATTERN)
     launch_nonce: str = Field(min_length=16, max_length=200)
     process_birth: str = Field(min_length=1, max_length=200)
     executable: str = Field(min_length=1, max_length=4_096)
@@ -218,16 +217,8 @@ class _OwnershipRecord(BaseModel):
 
     @model_validator(mode="after")
     def _coherent_identity(self) -> Self:
-        if (self.mode == "generation") != (self.generation_id is not None):
-            raise ValueError("generation ownership identity is incomplete")
-        if (self.mode == "legacy") != (self.legacy_source_root is not None):
-            raise ValueError("legacy ownership identity is incomplete")
         if not Path(self.executable).is_absolute() or "\x00" in self.executable:
             raise ValueError("owned executable must be an absolute path")
-        if self.legacy_source_root is not None and (
-            not Path(self.legacy_source_root).is_absolute() or "\x00" in self.legacy_source_root
-        ):
-            raise ValueError("owned legacy source root must be absolute")
         if any(not value or "\x00" in value or len(value) > 4_096 for value in self.argv):
             raise ValueError("owned command is invalid")
         return self
@@ -240,19 +231,14 @@ class _LaunchIntent(BaseModel):
 
     format_version: Literal[1] = 1
     host_pid: int = Field(ge=1)
-    mode: Literal["generation", "legacy"]
-    generation_id: str | None = Field(default=None, pattern=_GENERATION_ID_PATTERN)
-    legacy_source_root: str | None = None
+    mode: Literal["generation"]
+    generation_id: str = Field(pattern=_GENERATION_ID_PATTERN)
     launch_nonce: str = Field(min_length=16, max_length=200)
     executable: str = Field(min_length=1, max_length=4_096)
     argv: tuple[str, ...] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def _coherent_identity(self) -> Self:
-        if (self.mode == "generation") != (self.generation_id is not None):
-            raise ValueError("generation launch intent is incomplete")
-        if (self.mode == "legacy") != (self.legacy_source_root is not None):
-            raise ValueError("legacy launch intent is incomplete")
         if not Path(self.executable).is_absolute() or "\x00" in self.executable:
             raise ValueError("launch intent executable must be absolute")
         if any(not value or "\x00" in value or len(value) > 4_096 for value in self.argv):
@@ -262,16 +248,11 @@ class _LaunchIntent(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class _LaunchTarget:
-    generation: RuntimeGenerationSpec | None
-    project_root: Path | None
+    generation: RuntimeGenerationSpec
 
     @classmethod
     def for_generation(cls, generation: RuntimeGenerationSpec) -> _LaunchTarget:
-        return cls(generation=generation, project_root=None)
-
-    @classmethod
-    def for_source(cls, project_root: Path) -> _LaunchTarget:
-        return cls(generation=None, project_root=project_root)
+        return cls(generation=generation)
 
 
 @dataclass(slots=True)
@@ -279,9 +260,8 @@ class _Child:
     process: asyncio.subprocess.Process
     endpoint: str
     config: HostConfig
-    project_root: Path | None
-    generation: RuntimeGenerationSpec | None
-    installed_generation: InstalledGeneration | None
+    generation: RuntimeGenerationSpec
+    installed_generation: InstalledGeneration
     launch_nonce: str
     process_group: int
     process_birth: str
@@ -292,16 +272,12 @@ class _Child:
     requested_stop: bool = False
 
     @property
-    def generation_id(self) -> str | None:
-        return self.generation.generation_id if self.generation is not None else None
+    def generation_id(self) -> str:
+        return self.generation.generation_id
 
     @property
     def target(self) -> _LaunchTarget:
-        if self.generation is not None:
-            return _LaunchTarget.for_generation(self.generation)
-        if self.project_root is None:
-            raise RuntimeError("legacy child has no source identity")
-        return _LaunchTarget.for_source(self.project_root)
+        return _LaunchTarget.for_generation(self.generation)
 
 
 class RuntimeSupervisor:
@@ -316,7 +292,6 @@ class RuntimeSupervisor:
         generation_store: GenerationStore | None = None,
         generation_spec: RuntimeGenerationSpec | Mapping[str, object] | None = None,
         control_path: Path | None = None,
-        legacy_releases_root: Path | None = None,
         startup_timeout_seconds: float = 90,
         shutdown_timeout_seconds: float = 15,
         probation_seconds: float = 0,
@@ -327,7 +302,6 @@ class RuntimeSupervisor:
         max_restart_backoff_seconds: float = 5,
         child_uid: int | None = None,
         child_gid: int | None = None,
-        apply_child_identity_to_legacy: bool = False,
         process_inspector: ProcessInspector | None = None,
         process_fencer: ProcessFencer | None = None,
         descendant_inspector: DescendantInspector | None = None,
@@ -386,11 +360,6 @@ class RuntimeSupervisor:
             if control_path is not None
             else self._data_root / "bootstrap" / "runtime-child.json"
         )
-        self._legacy_releases_root = (
-            legacy_releases_root.expanduser().absolute()
-            if legacy_releases_root is not None
-            else None
-        )
         self._intent_path = self._control_path.with_name(f".{self._control_path.name}.intent")
         self._owner_lock_path = self._control_path.with_name("runtime-owner.lock")
         self._startup_timeout = startup_timeout_seconds
@@ -403,7 +372,6 @@ class RuntimeSupervisor:
         self._max_restart_backoff = max_restart_backoff_seconds
         self._child_uid = child_uid
         self._child_gid = child_gid
-        self._apply_child_identity_to_legacy = apply_child_identity_to_legacy
         self._process_inspector = process_inspector or self._inspect_process
         self._process_fencer = process_fencer
         self._uses_default_descendant_inspector = descendant_inspector is None
@@ -509,23 +477,6 @@ class RuntimeSupervisor:
         ):
             raise RuntimeUnavailableError("cannot change generation while runtime is running")
         self._selected_generation = self._coerce_generation_spec(generation)
-        self._desired_config = None
-        self._desired_target = None
-        self._unexpected_restarts = 0
-
-    def set_project_root(self, project_root: Path) -> None:
-        """Explicitly select legacy source-overlay compatibility before startup."""
-
-        if (
-            self._child is not None
-            or self._desired_running
-            or self._operation_task is not None
-            or self._watcher_task is not None
-            or self._status not in {"stopped", "failed"}
-        ):
-            raise RuntimeUnavailableError("cannot change source while runtime is running")
-        self._project_root = self._validated_project_root(project_root)
-        self._selected_generation = None
         self._desired_config = None
         self._desired_target = None
         self._unexpected_restarts = 0
@@ -645,23 +596,6 @@ class RuntimeSupervisor:
                 target = self._current_target()
                 await self._preflight_target(target)
                 await self._replace_config_locked(config, rollback=config, target=target)
-            finally:
-                self._release_operation()
-
-    async def replace_source(self, project_root: Path) -> None:
-        """Activate a legacy source overlay and restore the exact previous target on failure."""
-
-        candidate_root = self._validated_project_root(project_root)
-        async with self._lock:
-            try:
-                self._claim_operation()
-                await self._ensure_controller_ownership()
-                self._require_launch_safe()
-                await self._replace_target_locked(
-                    self._current_config(),
-                    candidate=_LaunchTarget.for_source(candidate_root),
-                    previous=self._current_target(),
-                )
             finally:
                 self._release_operation()
 
@@ -858,25 +792,19 @@ class RuntimeSupervisor:
             self._adopt_child(candidate)
 
     async def _spawn_target(self, config: HostConfig, target: _LaunchTarget) -> _Child:
-        if target.generation is not None:
-            return await self._spawn(config, generation_spec=target.generation)
-        if target.project_root is None:
-            raise RuntimeUnavailableError("runtime source identity is unavailable")
-        return await self._spawn(config, project_root=target.project_root)
+        return await self._spawn(config, generation_spec=target.generation)
 
     async def _spawn(
         self,
         config: HostConfig,
         *,
-        project_root: Path | None = None,
-        generation_spec: RuntimeGenerationSpec | None = None,
+        generation_spec: RuntimeGenerationSpec,
     ) -> _Child:
-        attempts = 2 if generation_spec is not None and self._strict_generation_readiness else 1
+        attempts = 2 if self._strict_generation_readiness else 1
         for attempt in range(1, attempts + 1):
             try:
                 return await self._spawn_attempt(
                     config,
-                    project_root=project_root,
                     generation_spec=generation_spec,
                 )
             except _ChildExitedBeforeReadyError:
@@ -892,8 +820,7 @@ class RuntimeSupervisor:
         self,
         config: HostConfig,
         *,
-        project_root: Path | None,
-        generation_spec: RuntimeGenerationSpec | None,
+        generation_spec: RuntimeGenerationSpec,
     ) -> _Child:
         port = self._free_port()
         endpoint = f"http://127.0.0.1:{port}"
@@ -922,25 +849,16 @@ class RuntimeSupervisor:
         process: asyncio.subprocess.Process | None = None
         intent_written = False
         try:
-            if generation_spec is not None:
-                installed = await self._open_generation(generation_spec)
-                source_root = None
-                cwd = self._generation_cwd(installed)
-                argv = installed.entrypoint_argv
-                if not argv or not Path(argv[0]).is_absolute():
-                    raise RuntimeUnavailableError("generation entrypoint is not absolute")
-                executable = installed.interpreter_path
-            else:
-                installed = None
-                source_root = self._validated_project_root(project_root or self._project_root)
-                cwd = source_root
-                argv = (sys.executable, "-m", "opentulpa")
-                executable = Path(sys.executable).resolve()
+            installed = await self._open_generation(generation_spec)
+            cwd = self._generation_cwd(installed)
+            argv = installed.entrypoint_argv
+            if not argv or not Path(argv[0]).is_absolute():
+                raise RuntimeUnavailableError("generation entrypoint is not absolute")
+            executable = installed.interpreter_path
 
             environment = self._child_environment(
                 config,
                 port=port,
-                project_root=source_root,
                 installed_generation=installed,
                 launch_nonce=launch_nonce,
             )
@@ -952,34 +870,26 @@ class RuntimeSupervisor:
             }
             if os.name == "posix":
                 spawn_options["start_new_session"] = True
-            spawn_argv = self._child_spawn_argv(
-                tuple(argv),
-                generation=generation_spec is not None,
-            )
+            spawn_argv = self._child_spawn_argv(tuple(argv))
             self._write_launch_intent(
                 generation=generation_spec,
-                project_root=source_root,
                 launch_nonce=launch_nonce,
                 executable=executable,
                 argv=tuple(argv),
             )
             intent_written = True
-            if generation_spec is not None:
-                store = self._generation_store
-                if store is None:
-                    raise RuntimeUnavailableError("generation storage is not configured")
-                assert installed is not None
-                with store.locked():
-                    final_generation = self._open_generation_locked(store, generation_spec)
-                    if (
-                        final_generation.entrypoint_argv != installed.entrypoint_argv
-                        or final_generation.interpreter_path != installed.interpreter_path
-                    ):
-                        raise RuntimeUnavailableError(
-                            "generation identity changed during final verification"
-                        )
-                    process = await asyncio.create_subprocess_exec(*spawn_argv, **spawn_options)
-            else:
+            store = self._generation_store
+            if store is None:
+                raise RuntimeUnavailableError("generation storage is not configured")
+            with store.locked():
+                final_generation = self._open_generation_locked(store, generation_spec)
+                if (
+                    final_generation.entrypoint_argv != installed.entrypoint_argv
+                    or final_generation.interpreter_path != installed.interpreter_path
+                ):
+                    raise RuntimeUnavailableError(
+                        "generation identity changed during final verification"
+                    )
                 process = await asyncio.create_subprocess_exec(*spawn_argv, **spawn_options)
             process_birth = self._capture_process_birth(process.pid)
             readers = tuple(
@@ -991,7 +901,6 @@ class RuntimeSupervisor:
                 process=process,
                 endpoint=endpoint,
                 config=config,
-                project_root=source_root,
                 generation=generation_spec,
                 installed_generation=installed,
                 launch_nonce=launch_nonce,
@@ -1011,7 +920,6 @@ class RuntimeSupervisor:
                     process=process,
                     endpoint=endpoint,
                     config=config,
-                    project_root=source_root,
                     generation=generation_spec,
                     installed_generation=installed,
                     launch_nonce=launch_nonce,
@@ -1035,7 +943,6 @@ class RuntimeSupervisor:
                     process=process,
                     endpoint=endpoint,
                     config=config,
-                    project_root=source_root,
                     generation=generation_spec,
                     installed_generation=installed,
                     launch_nonce=launch_nonce,
@@ -1066,10 +973,10 @@ class RuntimeSupervisor:
                 raise
             raise RuntimeUnavailableError(self._error) from exc
         self._status = "ready"
-        identity = (
-            f" generation {child.generation_id}" if child.generation_id is not None else ""
+        self._append_log(
+            "host",
+            f"runtime revision {config.revision} generation {child.generation_id} is ready",
         )
-        self._append_log("host", f"runtime revision {config.revision}{identity} is ready")
         return child
 
     async def _open_generation(self, spec: RuntimeGenerationSpec) -> InstalledGeneration:
@@ -1115,7 +1022,7 @@ class RuntimeSupervisor:
         }
         try:
             identity_matches = True
-            if child.generation is None or self._strict_generation_readiness:
+            if self._strict_generation_readiness:
                 identity = await self._client.get(
                     f"{child.endpoint}/_runtime/identity",
                     headers={"X-OpenTulpa-Launch-Nonce": child.launch_nonce},
@@ -1137,7 +1044,7 @@ class RuntimeSupervisor:
             raise _RuntimeProbeError("runtime health probe was unhealthy")
 
     def _ready_identity_matches(self, child: _Child, response: httpx.Response) -> bool:
-        if child.generation is not None and not self._strict_generation_readiness:
+        if not self._strict_generation_readiness:
             return True
         payload = response.json()
         return (
@@ -1641,11 +1548,9 @@ class RuntimeSupervisor:
         config: HostConfig,
         *,
         port: int,
-        project_root: Path | None = None,
-        installed_generation: InstalledGeneration | None = None,
+        installed_generation: InstalledGeneration,
         launch_nonce: str | None = None,
     ) -> dict[str, str]:
-        source_root = project_root or self._project_root
         inherited = os.environ
         environment = {
             key: value
@@ -1659,11 +1564,7 @@ class RuntimeSupervisor:
         owner_customer_id = (
             str(inherited.get("OPENTULPA_OWNER_CUSTOMER_ID") or "").strip() or "owner"
         )
-        executable_bin = (
-            installed_generation.interpreter_path.parent
-            if installed_generation is not None
-            else Path(sys.executable).resolve().parent
-        )
+        executable_bin = installed_generation.interpreter_path.parent
         environment.update(
             {
                 "HOST": "127.0.0.1",
@@ -1680,23 +1581,20 @@ class RuntimeSupervisor:
                 "PATH": f"{executable_bin}:{_TRUSTED_SYSTEM_PATH}",
             }
         )
-        if installed_generation is None:
-            environment["PYTHONPATH"] = str(source_root / "src")
-        else:
-            manifest = installed_generation.manifest
-            environment.update(
-                {
-                    "OPENTULPA_APPLICATION_ROOT": str(self._application_root),
-                    "OPENTULPA_GENERATION_ID": installed_generation.generation_id,
-                    "OPENTULPA_GENERATION_MANIFEST_DIGEST": installed_generation.manifest_digest,
-                    "OPENTULPA_GENERATION_SOURCE_COMMIT": manifest.identity.source_commit,
-                    "OPENTULPA_GENERATION_SOURCE_TREE_SHA256": (
-                        manifest.identity.source_tree_sha256
-                    ),
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "PYTHONNOUSERSITE": "1",
-                }
-            )
+        manifest = installed_generation.manifest
+        environment.update(
+            {
+                "OPENTULPA_APPLICATION_ROOT": str(self._application_root),
+                "OPENTULPA_GENERATION_ID": installed_generation.generation_id,
+                "OPENTULPA_GENERATION_MANIFEST_DIGEST": installed_generation.manifest_digest,
+                "OPENTULPA_GENERATION_SOURCE_COMMIT": manifest.identity.source_commit,
+                "OPENTULPA_GENERATION_SOURCE_TREE_SHA256": (
+                    manifest.identity.source_tree_sha256
+                ),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+            }
+        )
         if launch_nonce is not None:
             environment["OPENTULPA_LAUNCH_NONCE"] = launch_nonce
         if self._railway_sandbox_bridge is not None:
@@ -1752,11 +1650,7 @@ class RuntimeSupervisor:
     def _child_spawn_argv(
         self,
         argv: tuple[str, ...],
-        *,
-        generation: bool,
     ) -> tuple[str, ...]:
-        if not generation and not self._apply_child_identity_to_legacy:
-            return argv
         uid = self._child_uid
         gid = self._child_gid
         if uid is None and gid is None:
@@ -1805,19 +1699,6 @@ class RuntimeSupervisor:
     async def _preflight_target(self, target: _LaunchTarget) -> None:
         if sys.platform.startswith("linux"):
             self._enable_child_subreaper()
-        if target.generation is None:
-            if target.project_root is None:
-                raise RuntimeUnavailableError("runtime source identity is unavailable")
-            source_root = self._validated_project_root(target.project_root)
-            if self._apply_child_identity_to_legacy:
-                allowed = self._legacy_releases_root
-                if allowed is None or not self._is_relative_to(source_root, allowed):
-                    raise RuntimeUnavailableError(
-                        "isolated legacy runtime requires a trusted materialized release"
-                    )
-                self._log_isolation_mode()
-                self._require_legacy_source_safe(source_root, allowed)
-            return
         try:
             installed = await self._open_generation(target.generation)
         except Exception as exc:
@@ -1879,57 +1760,6 @@ class RuntimeSupervisor:
                 raise RuntimeUnavailableError(
                     "runtime child identity can write a protected controller or generation root"
                 )
-
-    def _require_legacy_source_safe(self, root: Path, allowed_root: Path) -> None:
-        try:
-            allowed_metadata = allowed_root.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise RuntimeUnavailableError("legacy runtime source store is unavailable") from exc
-        if (
-            stat.S_ISLNK(allowed_metadata.st_mode)
-            or not stat.S_ISDIR(allowed_metadata.st_mode)
-            or allowed_metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(allowed_metadata.st_mode) != 0o711
-            or root.parent != allowed_root
-        ):
-            raise RuntimeUnavailableError("legacy runtime source store is unsafe")
-        entries = 0
-        total_bytes = 0
-        pending = [root]
-        while pending:
-            path = pending.pop()
-            try:
-                metadata = path.lstat()
-            except OSError as exc:
-                raise RuntimeUnavailableError("legacy runtime source is unavailable") from exc
-            if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
-                raise RuntimeUnavailableError("legacy runtime source ownership is unsafe")
-            mode = stat.S_IMODE(metadata.st_mode)
-            if stat.S_ISDIR(metadata.st_mode):
-                if mode != 0o555:
-                    raise RuntimeUnavailableError("legacy runtime source directory is writable")
-                children = tuple(Path(entry.path) for entry in os.scandir(path))
-                entries += len(children)
-                if entries > 100_000:
-                    raise RuntimeUnavailableError("legacy runtime source has too many entries")
-                pending.extend(children)
-                continue
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_nlink != 1
-                or mode not in {0o444, 0o555}
-            ):
-                raise RuntimeUnavailableError("legacy runtime source file is unsafe")
-            total_bytes += metadata.st_size
-            if total_bytes > 512 * 1024 * 1024:
-                raise RuntimeUnavailableError("legacy runtime source exceeds its size limit")
-        uid = self._child_uid
-        gid = self._child_gid
-        if uid is not None and gid is not None:
-            if self._mode_allows(allowed_metadata, uid=uid, gid=gid, required=0o2):
-                raise RuntimeUnavailableError("runtime child can replace legacy releases")
-            if not self._mode_allows(allowed_metadata, uid=uid, gid=gid, required=0o1):
-                raise RuntimeUnavailableError("runtime child cannot traverse legacy releases")
 
     def _require_root_usable(self, root: Path, *, label: str) -> None:
         try:
@@ -2188,9 +2018,9 @@ class RuntimeSupervisor:
             os.close(descriptor)
 
     def _selected_target(self) -> _LaunchTarget:
-        if self._selected_generation is not None:
-            return _LaunchTarget.for_generation(self._selected_generation)
-        return _LaunchTarget.for_source(self._validated_project_root(self._project_root))
+        if self._selected_generation is None:
+            raise RuntimeUnavailableError("no immutable runtime generation is selected")
+        return _LaunchTarget.for_generation(self._selected_generation)
 
     def _current_target(self) -> _LaunchTarget:
         if self._child is not None:
@@ -2207,19 +2037,17 @@ class RuntimeSupervisor:
         raise RuntimeUnavailableError("runtime is not configured")
 
     def _select_target(self, target: _LaunchTarget) -> None:
-        if target.generation is not None:
-            self._selected_generation = target.generation
-            return
-        if target.project_root is None:
-            raise RuntimeUnavailableError("runtime source identity is unavailable")
-        self._selected_generation = None
-        self._project_root = target.project_root
+        self._selected_generation = target.generation
 
     async def _ensure_orphan_fenced(self) -> None:
         if self._ownership_checked:
             return
-        record = self._read_ownership_record()
-        intent = self._read_launch_intent()
+        try:
+            record = self._read_ownership_record()
+            intent = self._read_launch_intent()
+        except RuntimeUnavailableError:
+            self._status = "recovery_required"
+            raise
         if intent is not None and record is None:
             self._status = "recovery_required"
             raise RuntimeUnavailableError(
@@ -2408,9 +2236,8 @@ class RuntimeSupervisor:
             process_group=child.process_group,
             host_pid=os.getpid(),
             host_birth=self._capture_process_birth(os.getpid()),
-            mode="generation" if child.generation is not None else "legacy",
+            mode="generation",
             generation_id=child.generation_id,
-            legacy_source_root=str(child.project_root) if child.project_root is not None else None,
             launch_nonce=child.launch_nonce,
             process_birth=child.process_birth,
             executable=str(child.executable),
@@ -2440,17 +2267,15 @@ class RuntimeSupervisor:
     def _write_launch_intent(
         self,
         *,
-        generation: RuntimeGenerationSpec | None,
-        project_root: Path | None,
+        generation: RuntimeGenerationSpec,
         launch_nonce: str,
         executable: Path,
         argv: tuple[str, ...],
     ) -> None:
         intent = _LaunchIntent(
             host_pid=os.getpid(),
-            mode="generation" if generation is not None else "legacy",
-            generation_id=generation.generation_id if generation is not None else None,
-            legacy_source_root=str(project_root) if project_root is not None else None,
+            mode="generation",
+            generation_id=generation.generation_id,
             launch_nonce=launch_nonce,
             executable=str(executable),
             argv=argv,
@@ -2834,16 +2659,6 @@ class RuntimeSupervisor:
     def _safe_error(error: Exception) -> str:
         text = str(error or "runtime failed").strip()
         return _SECRET_LINE.sub(r"\1\2[redacted]", text)[:1_000]
-
-    @staticmethod
-    def _validated_project_root(project_root: Path) -> Path:
-        root = project_root.expanduser()
-        if root.is_symlink() or not root.is_dir():
-            raise RuntimeUnavailableError("runtime source root is unavailable")
-        resolved = root.resolve(strict=True)
-        if not (resolved / "src" / "opentulpa" / "__init__.py").is_file():
-            raise RuntimeUnavailableError("runtime source root is invalid")
-        return resolved
 
     @staticmethod
     def _coerce_generation_spec(

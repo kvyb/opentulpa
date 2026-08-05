@@ -170,10 +170,8 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         generation_store=generation_store,
         generation_spec=recovered_generation,
         control_path=paths.runtime_control_path,
-        legacy_releases_root=paths.legacy_releases_root,
         child_uid=paths.runtime_uid,
         child_gid=paths.runtime_gid,
-        apply_child_identity_to_legacy=True,
         probation_seconds=probation_seconds,
         probation_probe_interval_seconds=probation_probe_interval_seconds,
     )

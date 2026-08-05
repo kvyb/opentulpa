@@ -41,6 +41,7 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuilder,
     ReleaseBuildRequest,
 )
+from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
 from opentulpa.evolution.supervisor import EvolutionSupervisor
 from opentulpa.host.runtime import (
     RuntimeGenerationSpec,
@@ -265,13 +266,11 @@ class TrustedGenerationReleaseProvider:
 
 
 class HostReleaseActivator:
-    """Verify generations or legacy overlays and health-check them through the host."""
+    """Verify immutable generations and health-check them through the host."""
 
     def __init__(
         self,
         *,
-        repository: Path,
-        releases_root: Path,
         runtime: RuntimeSupervisor,
         generation_store: GenerationStore | None = None,
         state_contract: StateContract | None = None,
@@ -280,10 +279,6 @@ class HostReleaseActivator:
         install_profile: str = "runtime",
         controller_protocol: int | None = None,
     ) -> None:
-        self._repository = repository.expanduser().resolve(strict=True)
-        self._releases_root = releases_root.expanduser().resolve()
-        self._releases_root.mkdir(parents=True, exist_ok=True, mode=0o711)
-        self._releases_root.chmod(0o711)
         self._runtime = runtime
         self._generation_store = generation_store
         self._state_contract = state_contract
@@ -292,9 +287,6 @@ class HostReleaseActivator:
         self._install_profile = install_profile
         self._controller_protocol = controller_protocol
         self._lock = asyncio.Lock()
-
-    async def materialize(self, release: Release | ReleaseRecord) -> Path:
-        return await asyncio.to_thread(self._materialize, release)
 
     async def activate(
         self,
@@ -308,18 +300,13 @@ class HostReleaseActivator:
         del origin, reason, rollback
         async with self._lock:
             try:
-                if self.artifact_kind(release) == "python_generation":
-                    spec = self.generation_spec(release)
-                    await self.verify_generation(
-                        spec,
-                        expected_source_commit=release.source_commit,
-                    )
-                    if self._runtime.generation != spec or self._runtime.status != "ready":
-                        await self._runtime.replace_generation(spec)
-                else:
-                    source_root = await self.materialize(release)
-                    if self._runtime.project_root != source_root or self._runtime.status != "ready":
-                        await self._runtime.replace_source(source_root)
+                spec = self.generation_spec(release)
+                await self.verify_generation(
+                    spec,
+                    expected_source_commit=release.source_commit,
+                )
+                if self._runtime.generation != spec or self._runtime.status != "ready":
+                    await self._runtime.replace_generation(spec)
             except RuntimeUnavailableError:
                 if (
                     self._runtime.status == "ready"
@@ -359,49 +346,38 @@ class HostReleaseActivator:
         )
 
     def generation_spec(self, release: Release | ReleaseRecord) -> RuntimeGenerationSpec:
-        if self.artifact_kind(release) != "python_generation":
+        self.artifact_kind(release)
+        provenance = _release_artifact_provenance(release)
+        if provenance.artifact_kind != "python_generation" or provenance.generation_id is None:
             raise RuntimeError("release is not a Python generation")
         store = self._generation_store
         contract = self._state_contract
         protocol = self._controller_protocol
         if store is None or contract is None or protocol is None or not self._evaluator_fingerprint:
             raise RuntimeError("Python generation activation is not configured")
-        reference = str(release.metadata.get("image_reference") or "")
-        prefix = "python-generation:"
-        generation_id = reference.removeprefix(prefix) if reference.startswith(prefix) else ""
-        if len(generation_id) != 64 or any(character not in "0123456789abcdef" for character in generation_id):
-            raise RuntimeError("Python generation reference is invalid")
-        metadata_generation = str(release.metadata.get("generation_id") or generation_id)
-        if metadata_generation != generation_id:
-            raise RuntimeError("Python generation identity is inconsistent")
-        manifest_digest = str(
-            getattr(release, "manifest_digest", "")
-            or release.metadata.get("manifest_digest")
-            or ""
-        )
-        metadata_manifest = str(release.metadata.get("manifest_digest") or manifest_digest)
-        if metadata_manifest != manifest_digest or release.artifact_digest != manifest_digest:
-            raise RuntimeError("Python generation manifest provenance is inconsistent")
         expected_evaluator_fingerprint = self._evaluator_fingerprint
         if self._evaluator_fingerprint_resolver is not None:
             expected_evaluator_fingerprint = self._evaluator_fingerprint_resolver(release)
         if not expected_evaluator_fingerprint:
             raise RuntimeError("Python generation evaluator provenance is unavailable")
         expected_values = {
-            "evaluator_fingerprint": expected_evaluator_fingerprint,
-            "state_contract_sha256": contract.sha256(),
-            "install_profile": self._install_profile,
-            "controller_protocol": protocol,
+            "evaluator_fingerprint": (
+                provenance.evaluator_fingerprint,
+                expected_evaluator_fingerprint,
+            ),
+            "state_contract_sha256": (
+                provenance.state_contract_sha256,
+                contract.sha256(),
+            ),
+            "install_profile": (provenance.install_profile, self._install_profile),
+            "controller_protocol": (provenance.controller_protocol, protocol),
         }
-        for key, expected in expected_values.items():
-            recorded = release.metadata.get(key)
-            if recorded is not None and recorded != expected:
+        for key, (recorded, expected) in expected_values.items():
+            if recorded != expected:
                 raise RuntimeError(f"Python generation {key} provenance is inconsistent")
-        if release.metadata.get("evaluator_fingerprint") is None:
-            raise RuntimeError("Python generation evaluator provenance is unavailable")
         return RuntimeGenerationSpec(
-            generation_id=generation_id,
-            expected_manifest_digest=manifest_digest,
+            generation_id=provenance.generation_id,
+            expected_manifest_digest=provenance.manifest_digest,
             expected_state_contract_digest=contract.sha256(),
             expected_evaluator_fingerprint=expected_evaluator_fingerprint,
             expected_install_profile=self._install_profile,
@@ -433,178 +409,9 @@ class HostReleaseActivator:
     @staticmethod
     def artifact_kind(release: Release | ReleaseRecord) -> str:
         kind = str(release.metadata.get("artifact_kind") or "")
-        if kind not in {"python_generation", "source_overlay"}:
-            raise RuntimeError("release artifact kind is unsupported by the host")
+        if kind != "python_generation":
+            raise RuntimeError("host releases must be immutable Python generations")
         return kind
-
-    def _materialize(self, release: Release | ReleaseRecord) -> Path:
-        if str(release.metadata.get("artifact_kind") or "") != "source_overlay":
-            raise RuntimeError("release is not a source overlay")
-        expected_reference = f"source-overlay:{release.source_commit}"
-        if str(release.metadata.get("image_reference") or "") != expected_reference:
-            raise RuntimeError("source overlay reference is invalid")
-        listing = _git(
-            self._repository,
-            "ls-tree",
-            "-r",
-            "-z",
-            "--full-tree",
-            release.source_commit,
-            max_output_bytes=512 * 1024 * 1024,
-        ).output
-        digest = f"sha256:{hashlib.sha256(listing).hexdigest()}"
-        if digest != release.artifact_digest:
-            raise RuntimeError("source overlay digest failed verification")
-        _, common_directory = discover_git_directories(self._repository)
-        with repository_mutation_lock(common_directory):
-            target = self._releases_root / release.source_commit
-            if target.exists():
-                try:
-                    _validate_legacy_release_tree(target)
-                except RuntimeError:
-                    _remove_legacy_release_tree(self._repository, target)
-                else:
-                    return target.resolve(strict=True)
-            archive = _git(
-                self._repository,
-                "archive",
-                "--format=tar",
-                release.source_commit,
-                max_output_bytes=512 * 1024 * 1024,
-            ).output
-            _install_legacy_release_tree(
-                archive,
-                target=target,
-                releases_root=self._releases_root,
-            )
-        return target.resolve(strict=True)
-
-
-SourceOverlayReleaseActivator = HostReleaseActivator
-
-
-def _install_legacy_release_tree(
-    archive: bytes,
-    *,
-    target: Path,
-    releases_root: Path,
-) -> None:
-    staging = releases_root / f".{target.name}.{uuid4().hex}.tmp"
-    staging.mkdir(mode=0o700)
-    entries = 0
-    total_bytes = 0
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as source:
-            for member in source:
-                entries += 1
-                if entries > 100_000:
-                    raise RuntimeError("legacy source archive has too many entries")
-                relative = _safe_archive_path(member.name)
-                path = staging.joinpath(*relative.parts)
-                if member.isdir():
-                    path.mkdir(parents=True, exist_ok=False, mode=0o700)
-                    continue
-                if not member.isreg() or member.size < 0:
-                    raise RuntimeError("legacy source archive contains a link or special file")
-                total_bytes += member.size
-                if total_bytes > 512 * 1024 * 1024:
-                    raise RuntimeError("legacy source archive exceeds its size limit")
-                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                stream = source.extractfile(member)
-                if stream is None:
-                    raise RuntimeError("legacy source archive file is unavailable")
-                payload = stream.read(member.size + 1)
-                if len(payload) != member.size:
-                    raise RuntimeError("legacy source archive file size is inconsistent")
-                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, "wb") as output:
-                    output.write(payload)
-                    output.flush()
-                    os.fsync(output.fileno())
-                path.chmod(0o555 if member.mode & 0o111 else 0o444)
-        if not (staging / "src" / "opentulpa" / "__init__.py").is_file():
-            raise RuntimeError("legacy source archive has no OpenTulpa package")
-        directories = sorted(
-            (path for path in staging.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts),
-            reverse=True,
-        )
-        for directory in directories:
-            directory.chmod(0o555)
-        staging.chmod(0o555)
-        _validate_legacy_release_tree(staging)
-        os.replace(staging, target)
-        descriptor = os.open(releases_root, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    except (OSError, tarfile.TarError) as exc:
-        raise RuntimeError("legacy source archive could not be installed") from exc
-    finally:
-        if staging.exists():
-            _make_tree_removable(staging)
-            shutil.rmtree(staging)
-
-
-def _safe_archive_path(value: str) -> Path:
-    if not value or "\x00" in value or "\\" in value:
-        raise RuntimeError("legacy source archive path is invalid")
-    path = Path(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise RuntimeError("legacy source archive path is invalid")
-    return path
-
-
-def _validate_legacy_release_tree(root: Path) -> None:
-    entries = 0
-    total_bytes = 0
-    pending = [root]
-    while pending:
-        path = pending.pop()
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
-            raise RuntimeError("legacy release tree ownership is unsafe")
-        mode = stat.S_IMODE(metadata.st_mode)
-        if stat.S_ISDIR(metadata.st_mode):
-            if mode != 0o555:
-                raise RuntimeError("legacy release directory is not sealed")
-            children = tuple(Path(entry.path) for entry in os.scandir(path))
-            entries += len(children)
-            if entries > 100_000:
-                raise RuntimeError("legacy release tree has too many entries")
-            pending.extend(children)
-            continue
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or mode not in {0o444, 0o555}
-        ):
-            raise RuntimeError("legacy release file is not sealed")
-        total_bytes += metadata.st_size
-        if total_bytes > 512 * 1024 * 1024:
-            raise RuntimeError("legacy release tree exceeds its size limit")
-
-
-def _remove_legacy_release_tree(repository: Path, target: Path) -> None:
-    _git(repository, "worktree", "remove", "--force", str(target), check=False)
-    if not os.path.lexists(target):
-        return
-    metadata = target.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        target.unlink()
-        return
-    _make_tree_removable(target)
-    shutil.rmtree(target)
-
-
-def _make_tree_removable(root: Path) -> None:
-    for directory, directory_names, _ in os.walk(root, topdown=True, followlinks=False):
-        Path(directory).chmod(0o700)
-        for name in directory_names:
-            path = Path(directory) / name
-            if not path.is_symlink():
-                path.chmod(0o700)
 
 
 class HostEvolutionRuntime:
@@ -643,16 +450,12 @@ class HostEvolutionRuntime:
                 current = await self._archive.get_current_release()
         if current is None:
             raise RuntimeError("host evolution has no active source release")
-        if self._activator.artifact_kind(current) == "python_generation":
-            generation = self._activator.generation_spec(current)
-            await self._activator.verify_generation(
-                generation,
-                expected_source_commit=current.source_commit,
-            )
-            self._runtime.set_generation(generation)
-        else:
-            source_root = await self._activator.materialize(current)
-            self._runtime.set_project_root(source_root)
+        generation = self._activator.generation_spec(current)
+        await self._activator.verify_generation(
+            generation,
+            expected_source_commit=current.source_commit,
+        )
+        self._runtime.set_generation(generation)
         self._prepared = True
 
     async def start(self) -> None:
@@ -773,33 +576,36 @@ class HostEvolutionRuntime:
 
 
 def _same_release_provenance(left: Release | ReleaseRecord, right: ReleaseRecord) -> bool:
-    def manifest_digest(release: Release | ReleaseRecord) -> str:
-        return str(
-            getattr(release, "manifest_digest", "")
-            or release.metadata.get("manifest_digest")
-            or ""
-        )
+    try:
+        return _release_artifact_provenance(left) == _release_artifact_provenance(right)
+    except (ValueError, TypeError):
+        return False
 
-    def entrypoint(release: Release | ReleaseRecord) -> tuple[str, ...]:
-        recorded = getattr(release, "entrypoint", ())
-        if recorded:
-            return tuple(recorded)
-        metadata_entrypoint = release.metadata.get("release_entrypoint")
-        if isinstance(metadata_entrypoint, list):
-            values: list[str] = []
-            for value in metadata_entrypoint:
-                if not isinstance(value, str):
-                    return ()
-                values.append(value)
-            return tuple(values)
-        return ()
 
-    return (
-        left.source_commit == right.source_commit
-        and left.artifact_digest == right.artifact_digest
-        and manifest_digest(left) == manifest_digest(right)
-        and entrypoint(left) == tuple(right.entrypoint)
-        and all(left.metadata.get(key) == value for key, value in right.metadata.items())
+def _release_artifact_provenance(
+    release: Release | ReleaseRecord,
+) -> ReleaseArtifactProvenance:
+    manifest_digest = str(
+        getattr(release, "manifest_digest", "")
+        or release.metadata.get("manifest_digest")
+        or ""
+    )
+    recorded_entrypoint = getattr(release, "entrypoint", ())
+    if recorded_entrypoint:
+        entrypoint = tuple(recorded_entrypoint)
+    else:
+        raw_entrypoint = release.metadata.get("release_entrypoint")
+        if not isinstance(raw_entrypoint, list) or not all(
+            isinstance(value, str) for value in raw_entrypoint
+        ):
+            raise ValueError("release entrypoint provenance is invalid")
+        entrypoint = tuple(raw_entrypoint)
+    return ReleaseArtifactProvenance.from_values(
+        source_commit=release.source_commit,
+        artifact_digest=release.artifact_digest,
+        manifest_digest=manifest_digest,
+        entrypoint=entrypoint,
+        metadata=release.metadata,
     )
 
 
@@ -892,7 +698,7 @@ def _extract_seed_archive(archive: bytes, destination: Path) -> None:
                 entries += 1
                 if entries > 100_000:
                     raise RuntimeError("bundled Git source has too many entries")
-                relative = _safe_archive_path(member.name)
+                relative = _safe_seed_archive_path(member.name)
                 path = destination.joinpath(*relative.parts)
                 if member.isdir():
                     if path.exists():
@@ -919,6 +725,15 @@ def _extract_seed_archive(archive: bytes, destination: Path) -> None:
                 path.chmod(0o700 if member.mode & 0o111 else 0o600)
     except (OSError, tarfile.TarError) as exc:
         raise RuntimeError("bundled Git source archive could not be imported") from exc
+
+
+def _safe_seed_archive_path(value: str) -> Path:
+    if not value or "\x00" in value or "\\" in value:
+        raise RuntimeError("bundled Git source archive path is invalid")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise RuntimeError("bundled Git source archive path is invalid")
+    return path
 
 
 def _seed_tree_digest(root: Path) -> str:
@@ -1029,7 +844,6 @@ class _GitResult:
 __all__ = [
     "HostReleaseActivator",
     "HostEvolutionRuntime",
-    "SourceOverlayReleaseActivator",
     "RuntimeEvolutionEventSink",
     "TrustedGenerationReleaseProvider",
     "seed_source_repository",

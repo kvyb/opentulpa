@@ -161,17 +161,6 @@ class _TrustedHostWheelReleaseBuilder(TrustedWheelReleaseBuilder):
         return path
 
 
-class _GenerationOnlyHostReleaseActivator(HostReleaseActivator):
-    """Installed hosts never execute legacy source-overlay releases."""
-
-    @staticmethod
-    def artifact_kind(release: Any) -> str:
-        kind = HostReleaseActivator.artifact_kind(release)
-        if kind != "python_generation":
-            raise RuntimeError("installed host releases must be immutable Python generations")
-        return kind
-
-
 def build_host_evolution_runtime(
     *,
     runtime: RuntimeSupervisor,
@@ -205,12 +194,10 @@ def build_host_evolution_runtime(
         repository=evolution_root / "source",
     )
     worktrees_root = evolution_root / "worktrees"
-    releases_root = resolved_data / "runtime-source-releases"
     initial_worktrees_root = evolution_root / "initial-worktrees"
     artifacts_root = evolution_root / "artifacts"
     for root in (worktrees_root, initial_worktrees_root, artifacts_root):
         _private_directory(root)
-    _traversable_controller_directory(releases_root)
 
     store = generation_store or GenerationStore(
         resolved_data / "runtime-generations",
@@ -382,9 +369,7 @@ def build_host_evolution_runtime(
 
     lineage = GitLineage(repository, worktrees_root=worktrees_root)
     archive = EvolutionArchive(evolution_root / "archive.db")
-    activator = _GenerationOnlyHostReleaseActivator(
-        repository=repository,
-        releases_root=releases_root,
+    activator = HostReleaseActivator(
         runtime=runtime,
         generation_store=store,
         state_contract=state_contract,
@@ -584,18 +569,6 @@ def _source_seed_sha256(root: Path) -> str:
         digest.update(str(len(payload)).encode("ascii") + b"\0")
         digest.update(payload + b"\0")
     return digest.hexdigest()
-
-
-def _traversable_controller_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o711)
-    metadata = path.lstat()
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-    ):
-        raise RuntimeError("legacy runtime source root is unsafe")
-    path.chmod(0o711)
 
 
 def _packaged_state_contract() -> StateContract:
