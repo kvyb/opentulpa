@@ -27,7 +27,11 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from opentulpa.evolution.generation import GenerationManifest, canonical_json_bytes
+from opentulpa.evolution.generation import (
+    GenerationManifest,
+    canonical_json_bytes,
+    generation_manifest_sha256,
+)
 
 _GENERATION_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -322,6 +326,58 @@ class GenerationStore:
                 controller_protocol=controller_protocol,
             )
 
+    def publish_staged(
+        self,
+        generation_id: str,
+        manifest: GenerationManifest,
+    ) -> GenerationManifest:
+        """Seal, verify, and atomically publish one reserved generation."""
+
+        safe_id = _generation_id(generation_id)
+        if manifest.identity.generation_id != safe_id:
+            raise GenerationStoreError("staged generation identity does not match its reservation")
+        with self.locked():
+            generation_path = self._root / safe_id
+            _require_staged_generation(generation_path)
+            _seal_runtime_tree(generation_path)
+            _fsync_tree(generation_path)
+            final_manifest = manifest.model_copy(
+                update={"runtime_tree_sha256": runtime_tree_sha256(generation_path)}
+            )
+            manifest_bytes = canonical_json_bytes(final_manifest)
+            if not manifest_bytes or len(manifest_bytes) > self._max_manifest_bytes:
+                raise GenerationStoreError("staged generation manifest size is invalid")
+            _write_new_file(
+                generation_path / _MANIFEST_NAME,
+                manifest_bytes,
+                mode=0o444,
+                label="generation manifest",
+            )
+            generation_path.chmod(0o555)
+            _fsync_directory(generation_path)
+            self._verify_generation_contents_locked(
+                generation_path,
+                safe_id,
+                manifest_bytes,
+                expected_manifest_digest=generation_manifest_sha256(final_manifest),
+                expected_state_contract_digest=final_manifest.state_contract.sha256(),
+                expected_evaluator_fingerprint=final_manifest.identity.evaluator_fingerprint,
+                expected_install_profile=final_manifest.identity.install_profile,
+                controller_protocol=final_manifest.state_contract.runtime_protocol,
+            )
+            generation_path.chmod(0o700)
+            (generation_path / _BUILDING_NAME).unlink()
+            _write_new_file(
+                generation_path / _COMPLETE_NAME,
+                b"",
+                mode=0o444,
+                label="COMPLETE marker",
+            )
+            generation_path.chmod(0o555)
+            _fsync_directory(generation_path)
+            _fsync_directory(self._root)
+            return final_manifest
+
     def verify(
         self,
         generation_id: str,
@@ -448,6 +504,29 @@ class GenerationStore:
             manifest_bytes = stream.read(self._max_manifest_bytes + 1)
         if not manifest_bytes or len(manifest_bytes) > self._max_manifest_bytes:
             raise GenerationStoreError("generation manifest size is invalid")
+        return self._verify_generation_contents_locked(
+            generation_path,
+            safe_id,
+            manifest_bytes,
+            expected_manifest_digest=expected_manifest_digest,
+            expected_state_contract_digest=expected_state_contract_digest,
+            expected_evaluator_fingerprint=expected_evaluator_fingerprint,
+            expected_install_profile=expected_install_profile,
+            controller_protocol=controller_protocol,
+        )
+
+    def _verify_generation_contents_locked(
+        self,
+        generation_path: Path,
+        safe_id: str,
+        manifest_bytes: bytes,
+        *,
+        expected_manifest_digest: str | None,
+        expected_state_contract_digest: str | None,
+        expected_evaluator_fingerprint: str | None,
+        expected_install_profile: str | None,
+        controller_protocol: int | None,
+    ) -> InstalledGeneration:
         try:
             manifest = GenerationManifest.model_validate_json(manifest_bytes)
         except (ValidationError, ValueError) as exc:
@@ -455,7 +534,7 @@ class GenerationStore:
         canonical = canonical_json_bytes(manifest)
         if manifest_bytes != canonical:
             raise GenerationStoreError("generation manifest is not canonical")
-        manifest_digest = f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+        manifest_digest = generation_manifest_sha256(manifest)
         if manifest.identity.generation_id != safe_id:
             raise GenerationStoreError("generation directory does not match manifest identity")
         if expected_manifest_digest is not None and manifest_digest != expected_manifest_digest:
@@ -601,6 +680,118 @@ class GenerationStore:
             or metadata.st_uid not in {0, os.geteuid()}
         ):
             raise GenerationStoreError("generations root must remain trusted mode 0711")
+
+
+def _require_staged_generation(generation_path: Path) -> None:
+    _require_directory(generation_path, label="staged generation", require_read_only=False)
+    metadata = generation_path.stat(follow_symlinks=False)
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise GenerationStoreError("staged generation root is not private and controller-owned")
+    marker = _require_regular_file(
+        generation_path / _BUILDING_NAME,
+        label="BUILDING marker",
+        require_read_only=False,
+    )
+    marker_metadata = marker.stat(follow_symlinks=False)
+    if (
+        marker_metadata.st_uid != os.geteuid()
+        or marker_metadata.st_nlink != 1
+        or stat.S_IMODE(marker_metadata.st_mode) != 0o600
+    ):
+        raise GenerationStoreError("BUILDING marker is unsafe")
+    try:
+        with _open_regular_file(marker, label="BUILDING marker") as stream:
+            building = json.load(stream)
+        started_at = float(building["started_at"])
+        if (
+            not isinstance(building, dict)
+            or set(building) != {"nonce", "pid", "started_at"}
+            or building["pid"] != os.getpid()
+            or not isinstance(building["nonce"], str)
+            or re.fullmatch(r"[0-9a-f]{32}", building["nonce"]) is None
+            or not 0 < started_at <= time.time() + 60
+        ):
+            raise ValueError("invalid BUILDING marker")
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise GenerationStoreError("BUILDING marker is invalid") from exc
+    if os.path.lexists(generation_path / _MANIFEST_NAME) or os.path.lexists(
+        generation_path / _COMPLETE_NAME
+    ):
+        raise GenerationStoreError("staged generation already has publication metadata")
+
+
+def _seal_runtime_tree(root: Path) -> None:
+    directories: list[Path] = []
+    for path in root.rglob("*"):
+        if path.name == _BUILDING_NAME and path.parent == root:
+            continue
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise GenerationStoreError("installed runtime contains a symbolic link")
+        if stat.S_ISREG(metadata.st_mode):
+            if metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+                raise GenerationStoreError("installed runtime file ownership is unsafe")
+            path.chmod(0o555 if stat.S_IMODE(metadata.st_mode) & 0o111 else 0o444)
+        elif stat.S_ISDIR(metadata.st_mode):
+            if metadata.st_uid != os.geteuid():
+                raise GenerationStoreError("installed runtime directory ownership is unsafe")
+            directories.append(path)
+        else:
+            raise GenerationStoreError("installed runtime contains a special file")
+    for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        directory.chmod(0o555)
+
+
+def _fsync_tree(root: Path) -> None:
+    for path in sorted(root.rglob("*"), reverse=True):
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise GenerationStoreError("installed runtime contains a symbolic link")
+        if stat.S_ISREG(metadata.st_mode):
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise GenerationStoreError("installed runtime contains a special file")
+    for path in sorted(
+        (item for item in root.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        _fsync_directory(path)
+    _fsync_directory(root)
+
+
+def _write_new_file(path: Path, payload: bytes, *, mode: int, label: str) -> None:
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written < 1:
+                raise OSError(f"{label} write made no progress")
+            remaining = remaining[written:]
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise GenerationStoreError(f"{label} could not be published") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _absolute_without_symlinks(path: Path, *, label: str) -> Path:

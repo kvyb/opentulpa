@@ -38,8 +38,8 @@ mutation while immutable serving continues.
 Docker Compose requires the documented rootful capabilities and relaxed confinement for
 the namespace sandbox. Treat that as a hardened-production consideration, not as a
 general-purpose container hardening profile. See [Deployment](docs/DEPLOYMENT.md).
-The image starts the immutable host controller directly; managed OCI candidates use its
-trusted interpreter and a reviewed source overlay rather than a mutable `/app/.venv`.
+The image starts the immutable host controller directly. Host releases execute only from
+sealed Python generations; managed OCI releases execute only from immutable image digests.
 
 ## How self-evolution works
 

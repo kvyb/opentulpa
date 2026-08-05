@@ -23,8 +23,10 @@ runtime does not replace conversations, memories, skills, databases, or tenant w
 
 Each generation is identified by content and environment inputs including the exact Git
 commit/tree, wheel, lockfile, evaluator fingerprint, Python runtime, state contract, and
-runtime tree hash. The installer builds the wheel and virtualenv at the generation's final
-path, verifies it, and makes it read-only for serving. Python venvs are not portable;
+runtime tree hash. The generation contract owns canonical serialization, identity, and
+manifest digesting. `GenerationStore` alone seals the assembled tree, computes its runtime
+hash, writes and verifies the manifest, and transitions `BUILDING` to `COMPLETE`; builders
+cannot publish generations directly. Python venvs are not portable;
 their path and interpreter layout are part of the target installation. See the
 [Python venv documentation](https://docs.python.org/3/library/venv.html).
 
@@ -32,7 +34,9 @@ The stable launcher/controller generation remains present while runtime generati
 change. `controller/current` names the active controller generation and
 `controller/previous` retains the exact prior generation for operator recovery. Release
 records similarly retain current and previous serving releases plus the HostConfig needed
-to recreate them.
+to recreate them. Evolution releases, bootstrap release aliases, and host activation share
+one typed immutable artifact-provenance contract rather than selecting trusted metadata
+through independent key lists.
 
 ## Dependency Bases
 
@@ -67,7 +71,8 @@ the candidate workspace, product data, controller state, or other resolver stagi
 Source mutation starts in a detached Git candidate worktree. The candidate workspace is
 not the serving source tree and is not reused as the source for a later serving process.
 The controller commits the exact candidate bytes, evaluates that commit, and builds a new
-wheel/venv generation from it.
+wheel/venv generation from it. The runtime supervisor accepts only a verified generation
+identity; it has no source-directory launch target or source-overlay activation path.
 
 Instance, upstream, and accepted-upstream lineage are native Git refs. Upstream changes
 are merged with Git's native merge base, index stages, `MERGE_HEAD`, and conflict paths.

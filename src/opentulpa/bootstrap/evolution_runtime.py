@@ -30,31 +30,17 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuildRequest,
     TrustedWheelReleaseBuilder,
 )
+from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
 from opentulpa.evolution.supervisor import EvolutionSupervisor
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40,64}\Z")
 _GENERATION_REFERENCE_RE = re.compile(r"python-generation:([0-9a-f]{64})\Z")
-_RELEASE_PROVENANCE_KEYS = (
-    "artifact_kind",
-    "image_reference",
-    "generation_id",
-    "dependency_lock_hash",
-    "evaluation_input_digest",
-    "accepted_upstream_commit",
-    "state_contract",
-    "state_contract_sha256",
-    "state_contract_digest",
-    "install_profile",
-    "controller_protocol",
-)
-
-
 class InitialReleaseProvider(Protocol):
     async def build(self) -> ReleaseRecord: ...
 
 
 class TrustedSourceReleaseProvider:
-    """Build the canonical checkout through the same trusted source-overlay recipe."""
+    """Build the canonical checkout through its configured immutable recipe."""
 
     def __init__(
         self,
@@ -94,6 +80,8 @@ class TrustedSourceReleaseProvider:
             )
         )
         accepted_upstream = await self._accepted_upstream(source_commit)
+        if artifact.artifact_kind not in {"oci_image", "python_generation"}:
+            raise RuntimeError("trusted builder returned a mutable release artifact")
         generation = _GENERATION_REFERENCE_RE.fullmatch(artifact.image_reference)
         if artifact.artifact_kind == "python_generation" and generation is None:
             raise RuntimeError("trusted builder returned an invalid Python generation identity")
@@ -282,11 +270,16 @@ class ManagedEvolutionRuntime:
     async def _seed_initial_lineage(self, release: ReleaseRecord) -> None:
         candidate = await self._archive.get_candidate(release.candidate_id)
         empty_diff_sha256 = hashlib.sha256(b"").hexdigest()
-        release_provenance = {
-            key: release.metadata[key]
-            for key in _RELEASE_PROVENANCE_KEYS
-            if key in release.metadata
-        }
+        release_provenance = ReleaseArtifactProvenance.from_values(
+            source_commit=release.source_commit,
+            artifact_digest=release.artifact_digest,
+            manifest_digest=release.manifest_digest,
+            entrypoint=release.entrypoint,
+            metadata=release.metadata,
+        ).release_metadata()
+        accepted_upstream = release.metadata.get("accepted_upstream_commit")
+        if accepted_upstream is not None:
+            release_provenance["accepted_upstream_commit"] = accepted_upstream
         fingerprint = str(release.metadata.get("evaluator_fingerprint") or release.manifest_digest)
         evaluator_version = str(
             release.metadata.get("evaluator_version") or "bootstrap-trusted-install-v1"

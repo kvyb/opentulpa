@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import platform
 import signal
 import stat
@@ -10,7 +11,6 @@ import sysconfig
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -279,7 +279,6 @@ def _fake_child(
         process=cast(asyncio.subprocess.Process, child_process),
         endpoint="http://127.0.0.1:8123",
         config=_config(),
-        project_root=None,
         generation=spec,
         installed_generation=installed,
         launch_nonce=launch_nonce,
@@ -332,7 +331,13 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
         "OPENTULPA_INTERNAL_AGENT_API_URL",
         "http://host.docker.internal:8000",
     )
-    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+    installed, spec = _fake_generation(tmp_path)
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        generation_store=_RecordingGenerationStore(installed),  # type: ignore[arg-type]
+        generation_spec=spec,
+    )
     runtime.configure_evolution_control(
         base_url="http://127.0.0.1:8000/bootstrap/internal/v1/evolution",
         token="e" * 48,
@@ -343,7 +348,11 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     )
     config = _config()
 
-    environment = runtime._child_environment(config, port=8123)
+    environment = runtime._child_environment(
+        config,
+        port=8123,
+        installed_generation=installed,
+    )
     runtime._redaction_values = {
         config.api_key.get_secret_value(),
         config.internal_runtime_token.get_secret_value(),
@@ -367,7 +376,7 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
     )
     assert environment["OPENTULPA_SANDBOX_RPC_URL"].endswith("/internal/v1/sandbox")
     assert environment["OPENTULPA_SANDBOX_RPC_TOKEN"] == "s" * 48
-    assert environment["PYTHONPATH"] == str(tmp_path / "src")
+    assert "PYTHONPATH" not in environment
     assert "TELEGRAM_BOT_TOKEN" not in environment
     assert "TELEGRAM_WEBHOOK_SECRET" not in environment
     line = runtime.logs()[0].text
@@ -380,13 +389,21 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 
     monkeypatch.delenv("OPENTULPA_OWNER_CUSTOMER_ID")
     monkeypatch.delenv("OPENTULPA_INTERNAL_AGENT_API_URL")
-    fallback_environment = runtime._child_environment(config, port=8124)
+    fallback_environment = runtime._child_environment(
+        config,
+        port=8124,
+        installed_generation=installed,
+    )
     assert fallback_environment["OPENTULPA_OWNER_CUSTOMER_ID"] == "owner"
     assert fallback_environment["OPENTULPA_INTERNAL_AGENT_API_URL"] == (
         "http://127.0.0.1:9000"
     )
     monkeypatch.delenv("PORT")
-    assert runtime._child_environment(config, port=8125)[
+    assert runtime._child_environment(
+        config,
+        port=8125,
+        installed_generation=installed,
+    )[
         "OPENTULPA_INTERNAL_AGENT_API_URL"
     ] == (
         "http://127.0.0.1:8125"
@@ -395,31 +412,32 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 
 
 @pytest.mark.asyncio
-async def test_evolved_runtime_uses_stable_host_railway_bridge(
+async def test_generation_runtime_uses_stable_host_railway_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bridge = tmp_path / "railway_sandbox_bridge" / "bridge.mjs"
     bridge.parent.mkdir()
     bridge.write_text("", encoding="utf-8")
-    candidate_root = tmp_path / "candidate"
-    package = candidate_root / "src" / "opentulpa"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
+    installed, spec = _fake_generation(tmp_path)
     monkeypatch.setenv(
         "OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH",
         "/untrusted/inherited/bridge.mjs",
     )
-    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        generation_store=_RecordingGenerationStore(installed),  # type: ignore[arg-type]
+        generation_spec=spec,
+    )
 
-    runtime.set_project_root(candidate_root)
     environment = runtime._child_environment(
         _config(),
         port=8123,
-        project_root=candidate_root,
+        installed_generation=installed,
     )
 
-    assert environment["PYTHONPATH"] == str(candidate_root / "src")
+    assert "PYTHONPATH" not in environment
     assert environment["OPENTULPA_RAILWAY_SANDBOX_BRIDGE_PATH"] == str(bridge)
     await runtime.shutdown()
 
@@ -428,62 +446,24 @@ async def test_evolved_runtime_uses_stable_host_railway_bridge(
 async def test_host_passes_telegram_owner_identity_without_writing_child_state(
     tmp_path: Path,
 ) -> None:
-    data_root = tmp_path / "data"
-    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=data_root)
+    installed, spec = _fake_generation(tmp_path)
+    data_root = tmp_path / "runtime-data"
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=data_root,
+        generation_store=_RecordingGenerationStore(installed),  # type: ignore[arg-type]
+        generation_spec=spec,
+    )
 
-    environment = runtime._child_environment(_config(), port=8123)
+    environment = runtime._child_environment(
+        _config(),
+        port=8123,
+        installed_generation=installed,
+    )
 
     assert environment["OPENTULPA_TELEGRAM_OWNER_ID"] == "7"
     assert not data_root.exists()
     await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_unhealthy_source_swap_restores_previous_runtime(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    previous_root = tmp_path / "previous"
-    candidate_root = tmp_path / "candidate"
-    for root in (previous_root, candidate_root):
-        package = root / "src" / "opentulpa"
-        package.mkdir(parents=True)
-        (package / "__init__.py").write_text("", encoding="utf-8")
-    runtime = RuntimeSupervisor(project_root=previous_root, data_root=tmp_path / "data")
-    previous = SimpleNamespace(
-        project_root=previous_root,
-        config=_config(),
-        generation=None,
-        target=runtime_module._LaunchTarget.for_source(previous_root),
-    )
-    runtime._child = previous  # type: ignore[assignment]
-    spawned: list[Path] = []
-
-    async def stop_child(child: Any) -> None:
-        assert child is previous
-
-    async def spawn(config: HostConfig, *, project_root: Path | None = None) -> Any:
-        del config
-        assert project_root is not None
-        spawned.append(project_root)
-        if project_root == candidate_root:
-            raise RuntimeUnavailableError("candidate is unhealthy")
-        return previous
-
-    def adopt(child: Any) -> None:
-        runtime._child = child
-
-    monkeypatch.setattr(runtime, "_stop_child", stop_child)
-    monkeypatch.setattr(runtime, "_spawn", spawn)
-    monkeypatch.setattr(runtime, "_adopt_child", adopt)
-
-    with pytest.raises(RuntimeUnavailableError, match="candidate is unhealthy"):
-        await runtime.replace_source(candidate_root)
-
-    assert spawned == [candidate_root, previous_root]
-    assert runtime._child is previous
-    assert runtime.project_root == previous_root
-    runtime._child = None
 
 
 def test_generation_spec_is_strict_persistable_and_constructible_from_release_metadata(
@@ -512,6 +492,71 @@ def test_generation_spec_is_strict_persistable_and_constructible_from_release_me
         RuntimeGenerationSpec.model_validate({**persisted, "controller_protocol": "1"})
     with pytest.raises(ValidationError):
         RuntimeGenerationSpec.model_validate({**persisted, "unexpected": True})
+
+
+@pytest.mark.asyncio
+async def test_runtime_refuses_to_start_without_an_immutable_generation(tmp_path: Path) -> None:
+    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+
+    with pytest.raises(RuntimeUnavailableError, match="no immutable runtime generation"):
+        await runtime.start(_config())
+
+    assert runtime.status == "stopped"
+    assert runtime.endpoint is None
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_kind", ["ownership", "intent"])
+async def test_legacy_runtime_control_records_fail_closed(
+    tmp_path: Path,
+    record_kind: str,
+) -> None:
+    control_path = tmp_path / "control" / "runtime-child.json"
+    path = (
+        control_path
+        if record_kind == "ownership"
+        else control_path.with_name(f".{control_path.name}.intent")
+    )
+    path.parent.mkdir(mode=0o700)
+    payload: dict[str, object] = {
+        "format_version": 1,
+        "host_pid": 1,
+        "mode": "legacy",
+        "generation_id": None,
+        "legacy_source_root": "/tmp/legacy-source",
+        "launch_nonce": "legacy-launch-nonce-00000000",
+        "executable": "/usr/bin/python3",
+        "argv": ["/usr/bin/python3", "-m", "opentulpa"],
+    }
+    if record_kind == "ownership":
+        payload.update(
+            {
+                "pid": 2,
+                "process_group": 2,
+                "host_birth": "legacy-host-birth",
+                "process_birth": "legacy-process-birth",
+            }
+        )
+    path.write_text(json.dumps(payload), encoding="ascii")
+    path.chmod(0o600)
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        control_path=control_path,
+    )
+
+    message = (
+        "runtime ownership record is invalid"
+        if record_kind == "ownership"
+        else "runtime launch intent is invalid"
+    )
+    with pytest.raises(RuntimeUnavailableError, match=message):
+        await runtime._ensure_controller_ownership()
+
+    assert runtime.status == "recovery_required"
+    runtime._release_owner_lock()
+    await runtime._client.aclose()
 
 
 @pytest.mark.asyncio
@@ -636,47 +681,6 @@ async def test_generation_launch_uses_exact_entrypoint_external_cwd_and_clean_en
     assert runtime.generation_id == spec.generation_id
     assert runtime.endpoint is not None
     assert any("integrity-only same-UID mode" in entry.text for entry in runtime.logs())
-    await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_legacy_launch_retains_source_interpreter_pythonpath_and_cwd(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "legacy-source"
-    package = source / "src" / "opentulpa"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    runtime = RuntimeSupervisor(
-        project_root=source,
-        data_root=tmp_path / "data",
-        control_path=tmp_path / "control" / "runtime-child.json",
-    )
-    process = _FakeProcess()
-    launch: dict[str, Any] = {}
-
-    async def create_process(*argv: str, **options: Any) -> _FakeProcess:
-        launch["argv"] = argv
-        launch["options"] = options
-        return process
-
-    async def terminate(child: Any) -> None:
-        child.process.exit(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(runtime, "_wait_ready", lambda child: asyncio.sleep(0))
-    monkeypatch.setattr(runtime, "_terminate_child_process_group", terminate)
-    monkeypatch.setattr(runtime, "_capture_process_birth", lambda pid: f"test:{pid}")
-
-    await runtime.start(_config())
-
-    assert launch["argv"] == (sys.executable, "-m", "opentulpa")
-    assert launch["options"]["cwd"] == source
-    assert launch["options"]["env"]["PYTHONPATH"] == str(source / "src")
-    assert "user" not in launch["options"]
-    assert "group" not in launch["options"]
-    assert runtime.generation_id is None
     await runtime.shutdown()
 
 
@@ -821,121 +825,6 @@ async def test_failed_generation_candidate_restores_exact_previous_generation(
     assert runtime.generation == previous_spec
     assert runtime._child.generation == previous_spec
     assert runtime.status == "ready"
-    runtime._child = None
-    await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_failed_generation_candidate_restores_previous_source_target(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_root = tmp_path / "runtime-source-releases" / "previous"
-    package = source_root / "src" / "opentulpa"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    candidate_installed, candidate_spec = _fake_generation(tmp_path, "b")
-    runtime = RuntimeSupervisor(
-        project_root=source_root,
-        data_root=tmp_path / "data",
-        generation_store=_RecordingGenerationStore(candidate_installed),  # type: ignore[arg-type]
-    )
-    previous = SimpleNamespace(
-        config=_config(),
-        target=runtime_module._LaunchTarget.for_source(source_root),
-    )
-    runtime._child = previous  # type: ignore[assignment]
-    runtime._status = "ready"
-    launches: list[Any] = []
-
-    async def preflight(target: Any) -> None:
-        del target
-
-    async def stop_child(child: Any) -> None:
-        assert child is previous
-
-    async def spawn_target(config: HostConfig, target: Any) -> Any:
-        del config
-        launches.append(target)
-        if target.generation is not None:
-            raise RuntimeUnavailableError("generation candidate is unhealthy")
-        return previous
-
-    def adopt(child: Any) -> None:
-        runtime._child = child
-        runtime._status = "ready"
-
-    monkeypatch.setattr(runtime, "_preflight_target", preflight)
-    monkeypatch.setattr(runtime, "_stop_child", stop_child)
-    monkeypatch.setattr(runtime, "_spawn_target", spawn_target)
-    monkeypatch.setattr(runtime, "_adopt_child", adopt)
-
-    with pytest.raises(RuntimeUnavailableError, match="generation candidate is unhealthy"):
-        await runtime.replace_generation(candidate_spec)
-
-    assert launches == [
-        runtime_module._LaunchTarget.for_generation(candidate_spec),
-        runtime_module._LaunchTarget.for_source(source_root),
-    ]
-    assert runtime.generation is None
-    assert runtime.project_root == source_root
-    assert runtime._child is previous
-    runtime._child = None
-    await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_failed_source_candidate_restores_previous_generation_target(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    previous_installed, previous_spec = _fake_generation(tmp_path, "a")
-    candidate_root = tmp_path / "candidate"
-    package = candidate_root / "src" / "opentulpa"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    runtime = RuntimeSupervisor(
-        project_root=tmp_path,
-        data_root=tmp_path / "data",
-        generation_store=_RecordingGenerationStore(previous_installed),  # type: ignore[arg-type]
-        generation_spec=previous_spec,
-    )
-    previous = _fake_child(previous_installed, previous_spec)
-    runtime._child = previous
-    runtime._status = "ready"
-    launches: list[Any] = []
-
-    async def preflight(target: Any) -> None:
-        del target
-
-    async def stop_child(child: Any) -> None:
-        assert child is previous
-
-    async def spawn_target(config: HostConfig, target: Any) -> Any:
-        del config
-        launches.append(target)
-        if target.project_root is not None:
-            raise RuntimeUnavailableError("source candidate is unhealthy")
-        return _fake_child(previous_installed, previous_spec)
-
-    def adopt(child: Any) -> None:
-        runtime._child = child
-        runtime._status = "ready"
-
-    monkeypatch.setattr(runtime, "_preflight_target", preflight)
-    monkeypatch.setattr(runtime, "_stop_child", stop_child)
-    monkeypatch.setattr(runtime, "_spawn_target", spawn_target)
-    monkeypatch.setattr(runtime, "_adopt_child", adopt)
-
-    with pytest.raises(RuntimeUnavailableError, match="source candidate is unhealthy"):
-        await runtime.replace_source(candidate_root)
-
-    assert launches == [
-        runtime_module._LaunchTarget.for_source(candidate_root),
-        runtime_module._LaunchTarget.for_generation(previous_spec),
-    ]
-    assert runtime.generation == previous_spec
-    assert runtime._child.generation == previous_spec
     runtime._child = None
     await runtime.shutdown()
 
@@ -1481,7 +1370,7 @@ async def test_generation_child_identity_defaults_and_configuration_are_strict(
         lambda: Path("/usr/bin/setpriv"),
     )
 
-    spawn_argv = runtime._child_spawn_argv(("/runtime/python", "-m", "opentulpa"), generation=True)
+    spawn_argv = runtime._child_spawn_argv(("/runtime/python", "-m", "opentulpa"))
 
     assert spawn_argv == (
         "/usr/bin/setpriv",
@@ -1494,11 +1383,6 @@ async def test_generation_child_identity_defaults_and_configuration_are_strict(
         "--no-new-privs",
         "--",
         "/runtime/python",
-        "-m",
-        "opentulpa",
-    )
-    assert runtime._child_spawn_argv(("python", "-m", "opentulpa"), generation=False) == (
-        "python",
         "-m",
         "opentulpa",
     )
@@ -2272,7 +2156,6 @@ async def test_launch_intent_and_missing_nonce_both_fail_closed(
     )
     owner._write_launch_intent(
         generation=spec,
-        project_root=None,
         launch_nonce="launch-intent-incomplete-00000000",
         executable=installed.interpreter_path,
         argv=installed.entrypoint_argv,
@@ -2568,7 +2451,6 @@ async def test_absent_leader_without_descendants_clears_stale_ownership_and_inte
     owner._write_ownership_record(stale)
     owner._write_launch_intent(
         generation=spec,
-        project_root=None,
         launch_nonce=stale.launch_nonce,
         executable=stale.executable,
         argv=stale.argv,

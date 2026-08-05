@@ -42,6 +42,8 @@ def _release() -> ReleaseRecord:
         manifest_digest=f"sha256:{'c' * 64}",
         entrypoint=("./start.sh", "run", "server"),
         metadata={
+            "artifact_kind": "oci_image",
+            "image_reference": f"registry.example/opentulpa@sha256:{'b' * 64}",
             "dependency_lock_hash": "d" * 64,
             "evaluator_fingerprint": f"sha256:{'e' * 64}",
             "evaluator_version": "test-evaluator-v2",

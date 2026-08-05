@@ -42,7 +42,7 @@ Use this checklist for every product tool or external adapter.
 ## Mutable Capabilities
 
 - Bind activation to an immutable manifest revision, content digest, and passing deterministic test result.
-- In managed production, launch every source-overlay worker through the stable lease-fenced rootless OCI authority; mount only capability `/state`, never product `/workspace`, source, databases, credentials, or a container socket.
+- In managed production, launch every immutable worker image through the stable lease-fenced rootless OCI authority; mount only capability `/state`, never product `/workspace`, source, databases, credentials, or a container socket.
 - Permit reviewed subprocess workers only in direct development, and state that direct mode has no safe self-replacement or stable rollback.
 - Give a worker only scoped, revocable Agent API credentials and declared secret handles; never an owner token.
 - Record the exact config, secret-handle revisions, worker protocol, permissions, and network policy in the activation generation.
