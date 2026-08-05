@@ -735,6 +735,7 @@ class DeepAgentService:
         self._pending_resume_tasks: set[asyncio.Task[None]] = set()
         self._pending_resume_ids: set[str] = set()
         self._shutting_down = False
+        self._standby = False
 
     @property
     def model_name(self) -> str:
@@ -748,12 +749,25 @@ class DeepAgentService:
     def started(self) -> bool:
         return bool(self._graphs and self._runs_db is not None)
 
+    @property
+    def standby(self) -> bool:
+        return self._standby
+
     def healthy(self) -> bool:
-        return self.started
+        return self.started or self._standby
+
+    async def start_standby(self) -> None:
+        """Become probe-ready without opening or reconciling durable run ownership."""
+
+        if self.started or self._standby:
+            return
+        self._shutting_down = False
+        self._standby = True
 
     async def start(self, *, recover_pending_resumes: bool = True) -> None:
         if self.started:
             return
+        self._standby = False
         self._shutting_down = False
         for path in (self._checkpoint_db_path, self._store_db_path, self._runs_db_path):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -886,6 +900,7 @@ class DeepAgentService:
 
     async def shutdown(self) -> None:
         self._shutting_down = True
+        self._standby = False
         active_tasks = tuple(self._active_run_tasks.values())
         for task in active_tasks:
             task.cancel()

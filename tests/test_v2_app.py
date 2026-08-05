@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
-from fastapi import Request
+import httpx
+import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
+from opentulpa import __main__ as main_module
 from opentulpa.api.app import create_app
+from opentulpa.bootstrap.models import IngressEnvelope, OutboxEvent
+from opentulpa.core.release_runtime import release_consumers_enabled
+from opentulpa.evolution.models import EvolutionEvent
 
 
 @dataclass(frozen=True)
@@ -16,37 +25,67 @@ class _Principal:
 
 
 class _AsyncLifecycle:
-    def __init__(self, name: str, events: list[str]) -> None:
+    def __init__(
+        self,
+        name: str,
+        events: list[str],
+        *,
+        fail_at: str | None = None,
+        shutdown_started: asyncio.Event | None = None,
+        finish_shutdown: asyncio.Event | None = None,
+    ) -> None:
         self.name = name
         self.events = events
+        self.fail_at = fail_at
+        self.shutdown_started = shutdown_started
+        self.finish_shutdown = finish_shutdown
         self.started = False
 
     def healthy(self) -> bool:
         return self.started
 
+    async def start_standby(self) -> None:
+        self.events.append(f"start:{self.name}:standby")
+        if self.fail_at == self.name:
+            raise RuntimeError(f"failed:{self.name}")
+        self.started = True
+
     async def start(self, *, recover_pending_resumes: bool = True) -> None:
         if self.name == "agent" and not recover_pending_resumes:
             self.events.append("start:agent:recovery-deferred")
+            if self.fail_at == self.name:
+                raise RuntimeError(f"failed:{self.name}")
             self.started = True
             return
         self.events.append(f"start:{self.name}")
+        if self.fail_at == self.name:
+            raise RuntimeError(f"failed:{self.name}")
         self.started = True
 
     async def recover_pending_resumes(self) -> None:
         self.events.append(f"recover:{self.name}")
+        if self.fail_at == "recovery":
+            raise RuntimeError("failed:recovery")
 
     async def shutdown(self) -> None:
         self.events.append(f"stop:{self.name}")
+        if self.shutdown_started is not None:
+            self.shutdown_started.set()
+        if self.finish_shutdown is not None:
+            await self.finish_shutdown.wait()
         self.started = False
 
 
 class _SyncDispatcher:
-    def __init__(self, name: str, events: list[str]) -> None:
+    def __init__(self, name: str, events: list[str], *, fail_at: str | None = None) -> None:
         self.name = name
         self.events = events
+        self.fail_at = fail_at
 
     def start(self) -> None:
         self.events.append(f"start:{self.name}")
+        if self.fail_at == self.name:
+            raise RuntimeError(f"failed:{self.name}")
 
     def shutdown(self, *, wait: bool = True) -> None:
         assert wait is True
@@ -79,12 +118,29 @@ class _TelegramClient:
         self.events.append("stop:telegram")
 
 
-def _app(events: list[str], *, with_capability_service: bool = False) -> Any:
-    agent = _AsyncLifecycle("agent", events)
-    jobs = _AsyncLifecycle("jobs", events)
-    intake = _AsyncLifecycle("intake", events)
-    trigger_dispatcher = _SyncDispatcher("triggers", events)
-    intake_dispatcher = _SyncDispatcher("intake-poller", events)
+def _app(
+    events: list[str],
+    *,
+    with_capability_service: bool = False,
+    with_evolution_service: bool = False,
+    fail_at: str | None = None,
+    agent_shutdown_started: asyncio.Event | None = None,
+    finish_agent_shutdown: asyncio.Event | None = None,
+    startup_callback: Any | None = None,
+    startup_callback_timeout_seconds: float = 20.0,
+    notification_service: Any | None = None,
+) -> Any:
+    agent = _AsyncLifecycle(
+        "agent",
+        events,
+        fail_at=fail_at,
+        shutdown_started=agent_shutdown_started,
+        finish_shutdown=finish_agent_shutdown,
+    )
+    jobs = _AsyncLifecycle("jobs", events, fail_at=fail_at)
+    intake = _AsyncLifecycle("intake", events, fail_at=fail_at)
+    trigger_dispatcher = _SyncDispatcher("triggers", events, fail_at=fail_at)
+    intake_dispatcher = _SyncDispatcher("intake-poller", events, fail_at=fail_at)
 
     def principal(_: Request) -> _Principal:
         return _Principal()
@@ -103,10 +159,18 @@ def _app(events: list[str], *, with_capability_service: bool = False) -> Any:
         browser_service=cast(Any, _CloseOnly("browser", events)),
         telegram_client=cast(Any, _TelegramClient(events)),
         capability_service=(
-            cast(Any, _AsyncLifecycle("capabilities", events))
+            cast(Any, _AsyncLifecycle("capabilities", events, fail_at=fail_at))
             if with_capability_service
             else None
         ),
+        evolution_service=(
+            cast(Any, _AsyncLifecycle("evolution", events, fail_at=fail_at))
+            if with_evolution_service
+            else None
+        ),
+        notification_service=notification_service,
+        startup_callback=startup_callback,
+        startup_callback_timeout_seconds=startup_callback_timeout_seconds,
     )
 
 
@@ -118,6 +182,8 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
     assert "/healthz" in paths
     assert "/" in paths
     assert "/agent/healthz" in paths
+    assert "/_runtime/identity" in paths
+    assert "/_runtime/evolution-events" in paths
     assert "/v2/agent/runs" in paths
     assert "/v2/files" in paths
     assert "/v2/integrations" in paths
@@ -126,14 +192,32 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
     assert "/webhook/telegram" in paths
     assert "/webhook/composio/callback" in paths
     assert all(
-        path in {"/", "/healthz", "/agent/healthz"}
+        path
+        in {
+            "/",
+            "/healthz",
+            "/agent/healthz",
+            "/_runtime/identity",
+            "/_runtime/evolution-events",
+        }
         or path.startswith("/v2/")
         or path in {"/webhook/telegram", "/webhook/composio/callback"}
         for path in paths
     )
 
     with TestClient(app) as client:
-        assert client.get("/healthz").json()["status"] == "ok"
+        health = client.get("/healthz")
+        assert health.status_code == 200
+        health_body = health.json()
+        expected_health = {
+            "status": "ok",
+            "lifecycle": "ready",
+            "consumers_enabled": True,
+            "generation_id": None,
+        }
+        assert {key: health_body[key] for key in expected_health} == expected_health
+        assert "launch_nonce" not in health_body
+        assert health_body["started_at"]
         agent_health = client.get("/agent/healthz")
         assert agent_health.status_code == 200
         assert agent_health.json()["backend"] == "deepagents"
@@ -146,12 +230,99 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
         assert landing.headers["cache-control"] == "no-store"
 
 
+def test_private_evolution_event_route_requires_exact_child_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Notifications:
+        def __init__(self) -> None:
+            self.published: list[dict[str, Any]] = []
+
+        def publish(self, **values: Any) -> None:
+            self.published.append(values)
+
+    nonce = "private-event-launch-nonce-0000"
+    token = "private-event-owner-token"
+    notifications = Notifications()
+    monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", nonce)
+    monkeypatch.setenv("OPENTULPA_OWNER_TOKEN", token)
+    event = EvolutionEvent(
+        event_key="candidate:candidate-1:failed",
+        event_type="candidate.failed",
+        candidate_id="candidate-1",
+        origin={
+            "tenant_id": "tenant-a",
+            "channel": "web",
+            "correlation_id": "correlation-1",
+        },
+        payload={"status": "failed"},
+    )
+
+    with TestClient(_app([], notification_service=notifications)) as client:
+        assert client.post(
+            "/_runtime/evolution-events",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-OpenTulpa-Launch-Nonce": "wrong-nonce-0000000000",
+            },
+            content=event.model_dump_json(),
+        ).status_code == 401
+        assert client.post(
+            "/_runtime/evolution-events",
+            headers={
+                "Authorization": "Bearer wrong-token",
+                "X-OpenTulpa-Launch-Nonce": nonce,
+            },
+            content=event.model_dump_json(),
+        ).status_code == 401
+        delivered = client.post(
+            "/_runtime/evolution-events",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-OpenTulpa-Launch-Nonce": nonce,
+            },
+            content=event.model_dump_json(),
+        )
+
+    assert delivered.status_code == 204
+    assert len(notifications.published) == 1
+    assert notifications.published[0]["tenant_id"] == "tenant-a"
+
+
+def test_probation_child_rejects_private_evolution_event_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nonce = "probation-event-launch-nonce-000"
+    token = "probation-event-owner-token"
+    monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", nonce)
+    monkeypatch.setenv("OPENTULPA_OWNER_TOKEN", token)
+    monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", "true")
+    event = EvolutionEvent(
+        event_key="candidate:candidate-1:failed",
+        event_type="candidate.failed",
+        candidate_id="candidate-1",
+        payload={"status": "failed"},
+    )
+
+    with TestClient(_app([], notification_service=object())) as client:
+        response = client.post(
+            "/_runtime/evolution-events",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-OpenTulpa-Launch-Nonce": nonce,
+            },
+            content=event.model_dump_json(),
+        )
+
+    assert response.status_code == 409
+
+
 def test_v2_app_owns_service_lifespan_in_dependency_order() -> None:
     events: list[str] = []
 
     with TestClient(_app(events)):
         assert events == [
-            "start:agent",
+            "start:agent:recovery-deferred",
+            "recover:agent",
             "start:jobs",
             "start:intake",
             "start:triggers",
@@ -159,18 +330,19 @@ def test_v2_app_owns_service_lifespan_in_dependency_order() -> None:
         ]
 
     assert events == [
-        "start:agent",
+        "start:agent:recovery-deferred",
+        "recover:agent",
         "start:jobs",
         "start:intake",
         "start:triggers",
         "start:intake-poller",
         "stop:intake-poller",
         "stop:triggers",
-        "stop:browser",
         "stop:intake",
         "stop:jobs",
         "stop:agent",
         "stop:telegram",
+        "stop:browser",
     ]
 
 
@@ -180,13 +352,479 @@ def test_v2_app_restores_capabilities_before_resuming_approved_runs() -> None:
     with TestClient(_app(events, with_capability_service=True)):
         assert events == [
             "start:agent:recovery-deferred",
-            "start:jobs",
-            "start:intake",
             "start:capabilities",
             "recover:agent",
+            "start:jobs",
+            "start:intake",
             "start:triggers",
             "start:intake-poller",
         ]
+
+
+def test_generation_health_echoes_exact_runtime_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    generation_id = "a" * 64
+    launch_nonce = "exact launch nonce value"
+    monkeypatch.setenv("OPENTULPA_GENERATION_ID", generation_id)
+    monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", launch_nonce)
+    events: list[str] = []
+
+    with TestClient(_app(events)) as client:
+        for path in ("/healthz", "/agent/healthz"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.json()["generation_id"] == generation_id
+            assert "launch_nonce" not in response.json()
+        assert client.get("/_runtime/identity").status_code == 401
+        assert (
+            client.get(
+                "/_runtime/identity",
+                headers={"X-OpenTulpa-Launch-Nonce": f"{launch_nonce}-wrong"},
+            ).status_code
+            == 401
+        )
+        identity = client.get(
+            "/_runtime/identity",
+            headers={"X-OpenTulpa-Launch-Nonce": launch_nonce},
+        )
+        assert identity.status_code == 200
+        assert identity.json() == {
+            "generation_id": generation_id,
+            "launch_nonce": launch_nonce,
+        }
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        ({"OPENTULPA_GENERATION_ID": "a" * 64}, "launch nonce"),
+        (
+            {
+                "OPENTULPA_GENERATION_MANIFEST_DIGEST": "b" * 64,
+                "OPENTULPA_LAUNCH_NONCE": "n" * 32,
+            },
+            "identity",
+        ),
+        (
+            {
+                "OPENTULPA_GENERATION_ID": f"{'a' * 64} ",
+                "OPENTULPA_LAUNCH_NONCE": "n" * 32,
+            },
+            "identity",
+        ),
+        (
+            {
+                "OPENTULPA_GENERATION_ID": "a" * 64,
+                "OPENTULPA_LAUNCH_NONCE": "short",
+            },
+            "launch nonce",
+        ),
+    ],
+)
+def test_generation_mode_rejects_missing_or_invalid_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    for name in (
+        "OPENTULPA_GENERATION_ID",
+        "OPENTULPA_GENERATION_MANIFEST_DIGEST",
+        "OPENTULPA_GENERATION_SOURCE_COMMIT",
+        "OPENTULPA_GENERATION_SOURCE_TREE_SHA256",
+        "OPENTULPA_LAUNCH_NONCE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError, match=message):
+        _app([])
+
+
+@pytest.mark.asyncio
+async def test_health_readiness_before_during_drain_and_after_lifespan() -> None:
+    events: list[str] = []
+    shutdown_started = asyncio.Event()
+    finish_shutdown = asyncio.Event()
+    app = _app(
+        events,
+        agent_shutdown_started=shutdown_started,
+        finish_agent_shutdown=finish_shutdown,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        before = await client.get("/healthz")
+        assert before.status_code == 503
+        assert before.json()["lifecycle"] == "starting"
+
+        lifespan = app.router.lifespan_context(app)
+        await lifespan.__aenter__()
+        ready = await client.get("/healthz")
+        assert ready.status_code == 200
+        assert ready.json()["lifecycle"] == "ready"
+
+        shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+        await shutdown_started.wait()
+        draining = await client.get("/healthz")
+        assert draining.status_code == 503
+        assert draining.json()["lifecycle"] == "stopping"
+
+        finish_shutdown.set()
+        await shutdown
+        stopped = await client.get("/healthz")
+        assert stopped.status_code == 503
+        assert stopped.json()["lifecycle"] == "stopped"
+
+
+def test_consumer_disabled_probation_starts_no_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", " YeS ")
+    events: list[str] = []
+    app = _app(
+        events,
+        with_capability_service=True,
+        with_evolution_service=True,
+    )
+
+    with TestClient(app) as client:
+        assert events == ["start:agent:standby"]
+        health = client.get("/healthz")
+        assert health.status_code == 200
+        assert health.json()["consumers_enabled"] is False
+
+    assert events == ["start:agent:standby", "stop:agent"]
+
+
+def test_consumer_disabled_partial_standby_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", "true")
+    events: list[str] = []
+    app = _app(events, fail_at="agent")
+
+    with pytest.raises(RuntimeError, match="failed:agent"), TestClient(app):
+        pass
+
+    assert events == ["start:agent:standby", "stop:agent"]
+    assert app.state.lifecycle_status == "failed"
+
+
+def test_normal_startup_restores_before_recovery_and_producers() -> None:
+    events: list[str] = []
+
+    with TestClient(
+        _app(
+            events,
+            with_capability_service=True,
+            with_evolution_service=True,
+        )
+    ):
+        assert events == [
+            "start:agent:recovery-deferred",
+            "start:capabilities",
+            "start:evolution",
+            "recover:agent",
+            "start:jobs",
+            "start:intake",
+            "start:triggers",
+            "start:intake-poller",
+        ]
+
+    assert events[-9:] == [
+        "stop:intake-poller",
+        "stop:triggers",
+        "stop:intake",
+        "stop:jobs",
+        "stop:agent",
+        "stop:telegram",
+        "stop:browser",
+        "stop:evolution",
+        "stop:capabilities",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "expected"),
+    [
+        ("agent", ["start:agent:recovery-deferred", "stop:agent"]),
+        (
+            "capabilities",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "stop:agent",
+                "stop:capabilities",
+            ],
+        ),
+        (
+            "evolution",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "start:evolution",
+                "stop:agent",
+                "stop:evolution",
+                "stop:capabilities",
+            ],
+        ),
+        (
+            "recovery",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "start:evolution",
+                "recover:agent",
+                "stop:agent",
+                "stop:evolution",
+                "stop:capabilities",
+            ],
+        ),
+        (
+            "jobs",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "start:evolution",
+                "recover:agent",
+                "start:jobs",
+                "stop:jobs",
+                "stop:agent",
+                "stop:browser",
+                "stop:evolution",
+                "stop:capabilities",
+            ],
+        ),
+        (
+            "intake",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "start:evolution",
+                "recover:agent",
+                "start:jobs",
+                "start:intake",
+                "stop:intake",
+                "stop:jobs",
+                "stop:agent",
+                "stop:telegram",
+                "stop:browser",
+                "stop:evolution",
+                "stop:capabilities",
+            ],
+        ),
+        (
+            "triggers",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "start:evolution",
+                "recover:agent",
+                "start:jobs",
+                "start:intake",
+                "start:triggers",
+                "stop:triggers",
+                "stop:intake",
+                "stop:jobs",
+                "stop:agent",
+                "stop:telegram",
+                "stop:browser",
+                "stop:evolution",
+                "stop:capabilities",
+            ],
+        ),
+        (
+            "intake-poller",
+            [
+                "start:agent:recovery-deferred",
+                "start:capabilities",
+                "start:evolution",
+                "recover:agent",
+                "start:jobs",
+                "start:intake",
+                "start:triggers",
+                "start:intake-poller",
+                "stop:intake-poller",
+                "stop:triggers",
+                "stop:intake",
+                "stop:jobs",
+                "stop:agent",
+                "stop:telegram",
+                "stop:browser",
+                "stop:evolution",
+                "stop:capabilities",
+            ],
+        ),
+    ],
+)
+def test_partial_start_failure_cleans_attempted_boundaries_in_shutdown_phases(
+    fail_at: str,
+    expected: list[str],
+) -> None:
+    events: list[str] = []
+    app = _app(
+        events,
+        with_capability_service=True,
+        with_evolution_service=True,
+        fail_at=fail_at,
+    )
+
+    with pytest.raises(RuntimeError, match=f"failed:{fail_at}"), TestClient(app):
+        pass
+
+    assert app.state.lifecycle_status == "failed"
+    assert events == expected
+
+
+def test_probation_composition_does_not_construct_source_evolution_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", "true")
+    monkeypatch.setenv("OPENTULPA_BOOTSTRAP_EVOLUTION_URL", "http://127.0.0.1:9000")
+    monkeypatch.setenv("OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN", "e" * 48)
+
+    client = main_module._build_evolution_client(
+        project_root=tmp_path,
+        settings=cast(Any, SimpleNamespace(evolution_enabled=True)),
+    )
+
+    assert client is None
+    assert release_consumers_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["0", "false", "NO", " Off "])
+def test_consumer_toggle_accepts_explicit_false_values(value: str) -> None:
+    assert release_consumers_enabled({"OPENTULPA_DISABLE_CONSUMERS": value}) is True
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", " On "])
+def test_consumer_toggle_accepts_explicit_true_values(value: str) -> None:
+    assert release_consumers_enabled({"OPENTULPA_DISABLE_CONSUMERS": value}) is False
+
+
+def test_consumer_toggle_rejects_malformed_explicit_values() -> None:
+    with pytest.raises(RuntimeError, match="explicit boolean"):
+        release_consumers_enabled({"OPENTULPA_DISABLE_CONSUMERS": "sometimes"})
+
+
+def test_main_validates_generation_identity_before_runtime_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def runtime_paths() -> Any:
+        nonlocal called
+        called = True
+        raise AssertionError("runtime paths must not be resolved")
+
+    monkeypatch.setenv("OPENTULPA_GENERATION_ID", "a" * 64)
+    monkeypatch.delenv("OPENTULPA_LAUNCH_NONCE", raising=False)
+    monkeypatch.setattr(
+        main_module.RuntimePaths,
+        "from_environment",
+        runtime_paths,
+    )
+
+    with pytest.raises(RuntimeError, match="launch nonce"):
+        main_module.main()
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_probation_release_control_rejects_ingress_and_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Agent:
+        calls = 0
+
+        def healthy(self) -> bool:
+            return True
+
+        async def run(self, request: Any) -> None:
+            del request
+            self.calls += 1
+
+    class Capabilities:
+        async def healthy(self) -> bool:
+            return True
+
+    agent = Agent()
+    monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", "true")
+    monkeypatch.setenv("OPENTULPA_RELEASE_ID", "release-probation")
+    monkeypatch.setenv("OPENTULPA_CONTROL_TOKEN", "c" * 48)
+    service = main_module._build_release_control_service(
+        agent_service=cast(Any, agent),
+        resolve_agent_spec=lambda *_: object(),
+        secret_ingress=cast(Any, lambda **_: "sanitized"),
+        notifications=cast(Any, object()),
+        capabilities=cast(Any, Capabilities()),
+    )
+    assert service is not None
+    assert service.ingress_handler is None
+    assert service.event_handler is None
+
+    envelope = IngressEnvelope(
+        tenant_id="tenant",
+        thread_id="thread",
+        channel="owner",
+        idempotency_key="ingress-key",
+        payload={"text": "must not run"},
+    )
+    event = OutboxEvent(
+        event_key="event-key",
+        event_type="release.completed",
+        payload={},
+    )
+    with pytest.raises(HTTPException) as ingress_error:
+        await service.accept_ingress(envelope, idempotency_key=envelope.idempotency_key)
+    with pytest.raises(HTTPException) as event_error:
+        await service.accept_event(event, idempotency_key=event.event_key)
+
+    assert ingress_error.value.status_code == 503
+    assert event_error.value.status_code == 503
+    assert agent.calls == 0
+
+
+def test_startup_callback_runs_after_producers_and_failure_is_best_effort() -> None:
+    events: list[str] = []
+
+    async def callback() -> None:
+        events.append("startup-callback")
+        raise RuntimeError("bounded callback failure")
+
+    with TestClient(_app(events, startup_callback=callback)) as client:
+        assert events[-1] == "startup-callback"
+        assert client.get("/healthz").status_code == 200
+
+    assert events[-6:] == [
+        "stop:triggers",
+        "stop:intake",
+        "stop:jobs",
+        "stop:agent",
+        "stop:telegram",
+        "stop:browser",
+    ]
+
+
+def test_startup_callback_is_time_bounded() -> None:
+    events: list[str] = []
+
+    async def callback() -> None:
+        events.append("startup-callback")
+        await asyncio.Event().wait()
+
+    with TestClient(
+        _app(
+            events,
+            startup_callback=callback,
+            startup_callback_timeout_seconds=0.001,
+        )
+    ) as client:
+        assert client.get("/healthz").status_code == 200
+        assert events[-1] == "startup-callback"
+
+    assert "stop:agent" in events
 
 
 def test_composio_callback_escapes_provider_query_values() -> None:

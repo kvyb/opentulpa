@@ -283,10 +283,92 @@ class BootstrapStore:
                     ),
                 )
                 connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        return release
+
+    def add_release_alias(
+        self,
+        release: ReleaseRecord,
+        *,
+        artifact_release_id: str,
+    ) -> ReleaseRecord:
+        """Persist a new release identity for one exact previously trusted artifact."""
+
+        source_id = self._identifier(artifact_release_id, field="artifact_release_id")
+        payload = self._json(release)
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT payload_json FROM bootstrap_releases WHERE id = ?", (release.id,)
+                ).fetchone()
+                if existing is not None:
+                    current = self._model(existing["payload_json"], ReleaseRecord)
+                    if current != release:
+                        raise BootstrapConflictError("release id is bound to another artifact")
+                    connection.commit()
+                    return current
+                source_row = connection.execute(
+                    "SELECT payload_json FROM bootstrap_releases WHERE id = ?", (source_id,)
+                ).fetchone()
+                if source_row is None:
+                    raise BootstrapConflictError("release alias source is unavailable")
+                source = self._model(source_row["payload_json"], ReleaseRecord)
+                if not self._same_release_artifact(source, release):
+                    raise BootstrapConflictError("release alias changed artifact provenance")
+                connection.execute(
+                    """
+                    INSERT INTO bootstrap_releases (
+                        id, artifact_digest, source_commit, created_at, payload_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        release.id,
+                        release.artifact_digest,
+                        release.source_commit,
+                        release.created_at.isoformat(),
+                        payload,
+                    ),
+                )
+                connection.commit()
                 return release
             except BaseException:
                 connection.rollback()
                 raise
+
+    @staticmethod
+    def _same_release_artifact(first: ReleaseRecord, second: ReleaseRecord) -> bool:
+        fields_match = (
+            first.candidate_id == second.candidate_id
+            and first.source_commit == second.source_commit
+            and first.artifact_digest == second.artifact_digest
+            and first.manifest_digest == second.manifest_digest
+            and first.protocol_version == second.protocol_version
+            and first.agent_api_version == second.agent_api_version
+            and first.control_api_version == second.control_api_version
+            and first.control_port == second.control_port
+            and first.health_path == second.health_path
+            and first.drain_path == second.drain_path
+            and first.ingress_path == second.ingress_path
+            and first.event_path == second.event_path
+            and first.entrypoint == second.entrypoint
+        )
+        provenance_keys = (
+            "artifact_kind",
+            "image_reference",
+            "generation_id",
+            "dependency_lock_hash",
+            "evaluator_fingerprint",
+            "state_contract_sha256",
+            "state_contract_digest",
+            "install_profile",
+            "controller_protocol",
+        )
+        return fields_match and all(
+            first.metadata.get(key) == second.metadata.get(key) for key in provenance_keys
+        )
 
     def get_release(self, release_id: str) -> ReleaseRecord | None:
         with self._lock, closing(self._connect()) as connection:

@@ -134,6 +134,52 @@ async def test_evolution_sink_delivers_failure_to_original_owner_thread(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "status", "expected_text"),
+    [
+        ("build.preparing", "preparing", "Preparing and testing a new OpenTulpa build."),
+        ("build.switching", "switching", "Switching to the new OpenTulpa build now."),
+        ("promotion.active", "active", "The new OpenTulpa build is active."),
+        (
+            "promotion.failed",
+            "failed",
+            "The new build failed; OpenTulpa kept or restored the previous build.",
+        ),
+    ],
+)
+async def test_evolution_sink_explains_build_transition(
+    tmp_path: Path,
+    event_type: str,
+    status: str,
+    expected_text: str,
+) -> None:
+    store = NotificationStore(tmp_path / f"{event_type}.db")
+    sink = EvolutionNotificationSink(NotificationService(store))
+
+    await sink.deliver(
+        EvolutionEvent(
+            event_key=f"transition:{event_type}",
+            event_type=event_type,
+            candidate_id="candidate-1",
+            origin={
+                "tenant_id": "tenant-a",
+                "thread_id": "owner-thread",
+                "correlation_id": "correlation-1",
+                "channel": "web",
+            },
+            payload={"status": status},
+        )
+    )
+
+    notification = store.list_unacked(
+        tenant_id="tenant-a",
+        consumer_id="web:owner",
+    )[0]
+    assert notification.text == expected_text
+    assert notification.thread_id == "owner-thread"
+
+
+@pytest.mark.asyncio
 async def test_system_owned_evolution_and_bootstrap_events_are_consumed_without_guessing_tenant(
     tmp_path: Path,
 ) -> None:

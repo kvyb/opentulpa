@@ -75,19 +75,20 @@ class BootstrapReleaseActivator:
         existing = self._supervisor.store.get_activation(activation_id)
         if existing is None:
             if rollback:
-                queued = await self._supervisor.request_rollback(
-                    origin=origin,
-                    reason=reason,
-                    activation_id=activation_id,
-                )
-            else:
-                queued = await self._supervisor.request_activation(
+                rollback_target = str(release.metadata.get("rollback_target") or "")
+                if not rollback_target:
+                    raise RuntimeError("synthetic rollback release has no historical target")
+                self._supervisor.store.add_release_alias(
                     release,
-                    origin=origin,
-                    reason=reason,
-                    kind=ActivationKind.DEPLOY,
-                    activation_id=activation_id,
+                    artifact_release_id=rollback_target,
                 )
+            queued = await self._supervisor.request_activation(
+                release,
+                origin=origin,
+                reason=reason,
+                kind=ActivationKind.ROLLBACK if rollback else ActivationKind.DEPLOY,
+                activation_id=activation_id,
+            )
         else:
             queued = existing
             if queued.target_release_id != release.id:

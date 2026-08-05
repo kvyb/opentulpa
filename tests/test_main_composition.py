@@ -11,6 +11,7 @@ from opentulpa.bootstrap.capability_worker_api import CapabilityWorkerClient
 from opentulpa.bootstrap.evolution_api import EvolutionClient
 from opentulpa.bootstrap.sandbox_api import SandboxExecutionClient
 from opentulpa.capabilities import SubprocessWorkerHost
+from opentulpa.capability_workers.state import TelegramWorkerState
 from opentulpa.core.config import Settings
 from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
 from opentulpa.deep_agent.railway_sandbox import RailwaySandboxExecutionProvider
@@ -56,6 +57,59 @@ def test_resolve_path_is_project_relative_and_preserves_absolute_paths(tmp_path:
     ).resolve()
     absolute = (tmp_path / "elsewhere" / "runs.db").resolve()
     assert main_module._resolve_path(tmp_path / "project", absolute) == absolute
+
+
+def test_dynamic_child_owns_telegram_identity_seeding_and_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir(mode=0o700)
+    capability_state_root = data_root / ".opentulpa" / "deepagents" / "capability_state"
+    monkeypatch.setenv("OPENTULPA_TELEGRAM_OWNER_ID", "7")
+
+    main_module._seed_dynamic_host_telegram_identity(
+        data_root=data_root,
+        capability_state_root=capability_state_root,
+        tenant_id="owner",
+    )
+
+    state_path = next(capability_state_root.glob("*/telegram.json"))
+    assert TelegramWorkerState(state_path).paired_identity() == (7, 7)
+    assert state_path.stat().st_mode & 0o777 == 0o600
+
+    monkeypatch.setenv("OPENTULPA_TELEGRAM_OWNER_ID", "")
+    main_module._seed_dynamic_host_telegram_identity(
+        data_root=data_root,
+        capability_state_root=capability_state_root,
+        tenant_id="owner",
+    )
+
+    assert not state_path.exists()
+
+
+def test_dynamic_child_storage_parents_are_private_before_telegram_seeding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / ".opentulpa"
+    deepagents_root = data_root / "deepagents"
+    artifacts_root = deepagents_root / "artifacts"
+    for directory in (data_root, deepagents_root, artifacts_root):
+        main_module._private_runtime_directory(directory)
+    capability_state_root = deepagents_root / "capability_state"
+    capability_state_root.mkdir(mode=0o700)
+    monkeypatch.setenv("OPENTULPA_TELEGRAM_OWNER_ID", "")
+
+    main_module._seed_dynamic_host_telegram_identity(
+        data_root=data_root,
+        capability_state_root=capability_state_root,
+        tenant_id="owner",
+    )
+
+    assert data_root.stat().st_mode & 0o777 == 0o700
+    assert deepagents_root.stat().st_mode & 0o777 == 0o700
+    assert artifacts_root.stat().st_mode & 0o777 == 0o700
 
 
 def test_missing_model_key_fails_before_creating_storage(
@@ -158,6 +212,9 @@ def test_build_application_composes_only_v2_product_services(
     assert (
         app.state.intake_draft_service._store.db_path
         == tmp_path / "runtime" / "intake_drafts.db"
+    )
+    assert app.state.notifications._store.db_path == (  # noqa: SLF001
+        tmp_path / ".opentulpa" / "notifications.db"
     )
     capability_host = app.state.capability_service._workers._host  # noqa: SLF001
     assert isinstance(capability_host, SubprocessWorkerHost)

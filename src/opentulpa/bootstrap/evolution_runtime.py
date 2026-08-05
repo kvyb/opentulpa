@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -14,6 +15,7 @@ from pydantic import JsonValue
 from opentulpa.bootstrap.models import OutboxEvent, ReleaseOrigin, ReleaseRecord
 from opentulpa.bootstrap.supervisor import BootstrapSupervisor
 from opentulpa.evolution.archive import EvolutionArchive
+from opentulpa.evolution.lineage import GitLineage, GitLineageError
 from opentulpa.evolution.models import (
     Candidate,
     CandidateStatus,
@@ -23,10 +25,28 @@ from opentulpa.evolution.models import (
     Release,
 )
 from opentulpa.evolution.process import run_bounded_process
-from opentulpa.evolution.release_builder import ReleaseBuilder, ReleaseBuildRequest
+from opentulpa.evolution.release_builder import (
+    ReleaseBuilder,
+    ReleaseBuildRequest,
+    TrustedWheelReleaseBuilder,
+)
 from opentulpa.evolution.supervisor import EvolutionSupervisor
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40,64}\Z")
+_GENERATION_REFERENCE_RE = re.compile(r"python-generation:([0-9a-f]{64})\Z")
+_RELEASE_PROVENANCE_KEYS = (
+    "artifact_kind",
+    "image_reference",
+    "generation_id",
+    "dependency_lock_hash",
+    "evaluation_input_digest",
+    "accepted_upstream_commit",
+    "state_contract",
+    "state_contract_sha256",
+    "state_contract_digest",
+    "install_profile",
+    "controller_protocol",
+)
 
 
 class InitialReleaseProvider(Protocol):
@@ -44,17 +64,23 @@ class TrustedSourceReleaseProvider:
         evaluator_version: str,
         evaluator_fingerprint: str,
         git_cli: str = "git",
+        lineage: GitLineage | None = None,
     ) -> None:
         self._source = source_repository.expanduser().resolve()
         self._builder = builder
         self._evaluator_version = str(evaluator_version or "").strip()
         self._evaluator_fingerprint = str(evaluator_fingerprint or "").strip()
         self._git_cli = git_cli
+        self._lineage = lineage
 
     async def build(self) -> ReleaseRecord:
         source_commit = self._source_commit()
         lock_hash = self._lock_hash()
         empty_diff_sha256 = hashlib.sha256(b"").hexdigest()
+        evaluation_input_sha256 = self._evaluation_input_sha256(
+            source_commit=source_commit,
+            dependency_lock_hash=lock_hash,
+        )
         artifact = await self._builder.build(
             ReleaseBuildRequest(
                 candidate_id=f"bootstrap_{source_commit[:16]}",
@@ -64,8 +90,37 @@ class TrustedSourceReleaseProvider:
                 dependency_lock_hash=lock_hash,
                 evaluator_version=self._evaluator_version,
                 evaluator_fingerprint=self._evaluator_fingerprint,
+                evaluation_input_sha256=evaluation_input_sha256,
             )
         )
+        accepted_upstream = await self._accepted_upstream(source_commit)
+        generation = _GENERATION_REFERENCE_RE.fullmatch(artifact.image_reference)
+        if artifact.artifact_kind == "python_generation" and generation is None:
+            raise RuntimeError("trusted builder returned an invalid Python generation identity")
+        artifact_metadata: dict[str, JsonValue] = {
+            "artifact_kind": artifact.artifact_kind,
+            "image_reference": artifact.image_reference,
+            **(
+                {"generation_id": generation.group(1)}
+                if artifact.artifact_kind == "python_generation" and generation is not None
+                else {}
+            ),
+            **(
+                {"accepted_upstream_commit": accepted_upstream}
+                if accepted_upstream is not None
+                else {}
+            ),
+        }
+        if isinstance(self._builder, TrustedWheelReleaseBuilder):
+            policy = self._builder._policy
+            artifact_metadata.update(
+                {
+                    "state_contract": policy.state_contract.model_dump(mode="json"),
+                    "state_contract_sha256": policy.state_contract.sha256(),
+                    "install_profile": policy.install_profile,
+                    "controller_protocol": policy.state_contract.runtime_protocol,
+                }
+            )
         suffix = artifact.artifact_digest.removeprefix("sha256:")[:20]
         return ReleaseRecord(
             id=f"release_initial_{suffix}",
@@ -75,10 +130,10 @@ class TrustedSourceReleaseProvider:
             manifest_digest=artifact.manifest_digest,
             entrypoint=artifact.entrypoint,
             metadata={
-                "artifact_kind": artifact.artifact_kind,
-                "image_reference": artifact.image_reference,
+                **artifact_metadata,
                 "initial": True,
                 "dependency_lock_hash": lock_hash,
+                "evaluation_input_digest": f"sha256:{evaluation_input_sha256}",
                 "evaluator_version": self._evaluator_version,
                 "evaluator_fingerprint": self._evaluator_fingerprint,
                 "base_commit": source_commit,
@@ -86,6 +141,35 @@ class TrustedSourceReleaseProvider:
                 "diff_sha256": empty_diff_sha256,
             },
         )
+
+    def _evaluation_input_sha256(
+        self,
+        *,
+        source_commit: str,
+        dependency_lock_hash: str | None,
+    ) -> str:
+        payload = (
+            f"{source_commit}:{dependency_lock_hash or 'none'}:"
+            f"{self._evaluator_version}:{self._evaluator_fingerprint}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def _accepted_upstream(self, source_commit: str) -> str | None:
+        lineage = self._lineage
+        if lineage is None:
+            return None
+        try:
+            upstream = await asyncio.to_thread(lineage.resolve_ref, lineage.upstream_ref)
+            accepted = await asyncio.to_thread(lineage.merge_base, source_commit, upstream)
+            in_source, in_upstream = await asyncio.gather(
+                asyncio.to_thread(lineage.is_ancestor, accepted, source_commit),
+                asyncio.to_thread(lineage.is_ancestor, accepted, upstream),
+            )
+        except GitLineageError as exc:
+            raise RuntimeError("initial release source lineage is invalid") from exc
+        if not in_source or not in_upstream:
+            raise RuntimeError("initial release accepted upstream is invalid")
+        return accepted
 
     def _source_commit(self) -> str:
         result = run_bounded_process(
@@ -198,10 +282,16 @@ class ManagedEvolutionRuntime:
     async def _seed_initial_lineage(self, release: ReleaseRecord) -> None:
         candidate = await self._archive.get_candidate(release.candidate_id)
         empty_diff_sha256 = hashlib.sha256(b"").hexdigest()
+        release_provenance = {
+            key: release.metadata[key]
+            for key in _RELEASE_PROVENANCE_KEYS
+            if key in release.metadata
+        }
         fingerprint = str(release.metadata.get("evaluator_fingerprint") or release.manifest_digest)
         evaluator_version = str(
             release.metadata.get("evaluator_version") or "bootstrap-trusted-install-v1"
         )
+        expected_lock_hash = str(release.metadata.get("dependency_lock_hash") or "") or None
         if candidate is None:
             candidate = await self._archive.create_candidate(
                 Candidate(
@@ -209,9 +299,7 @@ class ManagedEvolutionRuntime:
                     base_commit=release.source_commit,
                     requested_improvement="Trusted initial release installed by bootstrap",
                     source_commit=release.source_commit,
-                    dependency_lock_hash=(
-                        str(release.metadata.get("dependency_lock_hash") or "") or None
-                    ),
+                    dependency_lock_hash=expected_lock_hash,
                     artifact_digest=release.artifact_digest,
                     evaluator_fingerprint=fingerprint,
                     metadata={
@@ -221,15 +309,35 @@ class ManagedEvolutionRuntime:
                         "diff_sha256": str(
                             release.metadata.get("diff_sha256") or empty_diff_sha256
                         ),
+                        **release_provenance,
                         "bootstrap_initial": True,
                     },
                 )
             )
         if (
-            candidate.source_commit != release.source_commit
+            candidate.base_commit != release.source_commit
+            or candidate.source_commit != release.source_commit
+            or candidate.dependency_lock_hash != expected_lock_hash
             or candidate.artifact_digest != release.artifact_digest
+            or candidate.evaluator_fingerprint != fingerprint
         ):
             raise RuntimeError("initial evolution lineage conflicts with the serving release")
+        existing_report = candidate.evaluation_report
+        if existing_report is not None and (
+            existing_report.candidate_id != candidate.id
+            or existing_report.source_commit != release.source_commit
+            or existing_report.artifact_digest != release.artifact_digest
+            or existing_report.evaluator_fingerprint != fingerprint
+            or existing_report.evaluator_version != evaluator_version
+            or not existing_report.passed
+            or not any(
+                check.name == "bootstrap.initial_release"
+                and check.required
+                and check.passed
+                for check in existing_report.checks
+            )
+        ):
+            raise RuntimeError("initial evolution evaluation conflicts with the serving release")
         expected_diff_sha256 = str(release.metadata.get("diff_sha256") or empty_diff_sha256)
         raw_release_paths = release.metadata.get("changed_paths")
         expected_changed_paths: list[JsonValue] = (
@@ -243,6 +351,7 @@ class ManagedEvolutionRuntime:
             ("release_entrypoint", list(release.entrypoint)),
             ("changed_paths", expected_changed_paths),
             ("diff_sha256", expected_diff_sha256),
+            *tuple(release_provenance.items()),
         ):
             existing = candidate.metadata.get(key)
             if existing is not None and existing != expected:
@@ -253,6 +362,7 @@ class ManagedEvolutionRuntime:
             "release_entrypoint": list(release.entrypoint),
             "changed_paths": expected_changed_paths,
             "diff_sha256": expected_diff_sha256,
+            **release_provenance,
             "bootstrap_initial": True,
         }
         if bound_metadata != candidate.metadata:
@@ -260,7 +370,7 @@ class ManagedEvolutionRuntime:
                 candidate.model_copy(update={"metadata": bound_metadata}),
                 expected_revision=candidate.revision,
             )
-        if candidate.evaluation_report is None:
+        if existing_report is None:
             report = EvaluationReport(
                 candidate_id=candidate.id,
                 source_commit=release.source_commit,
@@ -315,6 +425,7 @@ class ManagedEvolutionRuntime:
                 "evaluation_summary": evaluation_report.summary,
                 "evaluator_fingerprint": evaluation_report.evaluator_fingerprint,
                 "evaluator_version": evaluation_report.evaluator_version,
+                **release_provenance,
                 "activation_state": "active",
                 "bootstrap_initial": True,
             },

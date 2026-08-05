@@ -3,13 +3,18 @@ from __future__ import annotations
 import json
 import os
 import platform
+from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from opentulpa.client.config import Connection
+from opentulpa.evolution.generation_store import GenerationStore
+from opentulpa.evolution.models import Release
 from opentulpa.host import cli
+from opentulpa.host.paths import HostPathError, HostPaths
 
 
 def _client_factory(
@@ -139,6 +144,35 @@ def test_telegram_bootstrap_from_environment_uses_first_numeric_allowed_id(
     assert cli._telegram_bootstrap_from_environment() == ("123:telegram-secret", 7)  # noqa: SLF001
 
 
+def test_runtime_probation_environment_defaults_and_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENTULPA_RUNTIME_PROBATION_SECONDS", raising=False)
+    monkeypatch.delenv("OPENTULPA_RUNTIME_PROBATION_PROBE_INTERVAL_SECONDS", raising=False)
+    assert cli._runtime_probation_settings() == (30, 1)  # noqa: SLF001
+    monkeypatch.setenv("OPENTULPA_RUNTIME_PROBATION_SECONDS", "4.5")
+    monkeypatch.setenv("OPENTULPA_RUNTIME_PROBATION_PROBE_INTERVAL_SECONDS", "0.25")
+    assert cli._runtime_probation_settings() == (4.5, 0.25)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("OPENTULPA_RUNTIME_PROBATION_SECONDS", "-1"),
+        ("OPENTULPA_RUNTIME_PROBATION_SECONDS", "nan"),
+        ("OPENTULPA_RUNTIME_PROBATION_PROBE_INTERVAL_SECONDS", "0"),
+    ],
+)
+def test_runtime_probation_environment_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeError, match=name):
+        cli._runtime_probation_settings()  # noqa: SLF001
+
+
 def test_native_tui_receives_credentials_only_through_inherited_pipe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -236,3 +270,374 @@ def test_source_checkout_prefers_its_built_tui_over_an_installed_copy(
     monkeypatch.setattr(cli, "_tui_protocol", lambda _: "2")
 
     assert cli._ensure_tui_binary() == local_binary  # noqa: SLF001
+
+
+def test_host_paths_provision_separate_control_generation_and_product_roots(
+    tmp_path: Path,
+) -> None:
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(tmp_path / "data")})
+
+    paths.provision()
+    paths.provision()
+
+    assert paths.control_root.stat().st_mode & 0o777 == 0o700
+    assert paths.generations_root.stat().st_mode & 0o777 == 0o711
+    assert paths.product_root.stat().st_mode & 0o777 == 0o700
+    assert paths.runtime_control_path.parent == paths.control_root
+    assert paths.notification_store_path == paths.product_root / ".opentulpa/notifications.db"
+
+
+def test_host_paths_migrate_known_legacy_product_entries(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    legacy = data_root / ".opentulpa" / "deepagents"
+    legacy.mkdir(parents=True)
+    (legacy / "store.db").write_bytes(b"state")
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(data_root)})
+
+    paths.provision()
+
+    assert not (data_root / ".opentulpa").exists()
+    assert (paths.product_root / ".opentulpa/deepagents/store.db").read_bytes() == b"state"
+
+
+def test_host_paths_honor_safe_control_and_product_overrides(tmp_path: Path) -> None:
+    paths = HostPaths.from_environment(
+        {
+            "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+            "OPENTULPA_CONTROL_ROOT": str(tmp_path / "controller"),
+            "OPENTULPA_PRODUCT_ROOT": str(tmp_path / "mutable-product"),
+        }
+    )
+
+    paths.provision()
+
+    assert paths.control_root == tmp_path / "controller"
+    assert paths.product_root == tmp_path / "mutable-product"
+    assert paths.runtime_control_path.parent == tmp_path / "controller"
+
+
+@pytest.mark.parametrize("unsafe", ["unknown", "symlink"])
+def test_host_paths_reject_ambiguous_or_linked_legacy_entries(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    if unsafe == "unknown":
+        (data_root / "mystery.db").write_bytes(b"unknown")
+    else:
+        (data_root / ".opentulpa").symlink_to(tmp_path)
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(data_root)})
+
+    with pytest.raises(HostPathError, match="symbolic-link|unknown ambiguous"):
+        paths.provision()
+
+
+def test_host_application_root_uses_package_resources_without_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_module = tmp_path / "site-packages" / "opentulpa" / "host" / "cli.py"
+    installed_module.parent.mkdir(parents=True)
+    monkeypatch.setattr(cli, "__file__", str(installed_module))
+    monkeypatch.delenv("OPENTULPA_SOURCE_ROOT", raising=False)
+    monkeypatch.delenv("OPENTULPA_INSTALL_ASSETS_ROOT", raising=False)
+
+    root = cli._host_application_root()  # noqa: SLF001
+
+    assert (root / "resources" / "release_contract.json").is_file()
+    assert not cli._is_source_checkout(root)  # noqa: SLF001
+
+
+def test_installed_host_without_generation_inputs_fails_before_host_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(tmp_path / "data")})
+    paths.provision()
+    installed_root = tmp_path / "site-packages" / "opentulpa"
+    installed_root.mkdir(parents=True)
+    monkeypatch.setenv("OPENTULPA_SOURCE_SEED_ROOT", str(tmp_path / "missing-source"))
+    monkeypatch.setenv("OPENTULPA_TRUSTED_WHEELHOUSE", str(tmp_path / "missing-wheels"))
+    generation_store = GenerationStore(
+        paths.generations_root,
+        control_root=paths.control_root / "evolution" / "generation-store",
+        quarantine_root=paths.control_root / "evolution" / "generation-quarantine",
+    )
+
+    with pytest.raises(cli.HostInstallRequiredError) as error:
+        cli._require_installed_host_dependencies(  # noqa: SLF001
+            installed_root,
+            settings=type("Settings", (), {"evolution_enabled": True})(),
+            paths=paths,
+            generation_store=generation_store,
+        )
+
+    assert error.value.status == "install_required"
+    assert not (paths.control_root / "host.db").exists()
+    assert cli.HOST_GENERATION_DEPENDENCIES == {
+        "source_seed": "/opt/opentulpa-source",
+        "wheelhouse": "/opt/opentulpa-wheelhouse",
+    }
+
+
+def test_host_startup_cleans_incomplete_generations_before_dependency_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_DATA_ROOT", str(tmp_path / "data"))
+    cleaned: list[Path] = []
+    monkeypatch.setattr(
+        GenerationStore,
+        "cleanup_incomplete",
+        lambda self: cleaned.append(self.root) or (),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_require_installed_host_dependencies",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            cli.HostInstallRequiredError("configured test stop")
+        ),
+    )
+
+    with pytest.raises(cli.HostInstallRequiredError, match="configured test stop"):
+        cli.build_host_application()
+
+    assert cleaned == [(tmp_path / "data" / "runtime-generations").absolute()]
+
+
+def test_server_reports_installer_required_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*, public_url: str | None) -> None:
+        del public_url
+        raise cli.HostInstallRequiredError("installer inputs are missing")
+
+    monkeypatch.setattr(cli, "serve", fail)
+
+    with pytest.raises(SystemExit, match="install_required: installer inputs are missing"):
+        cli._server_command(  # noqa: SLF001
+            Namespace(host="127.0.0.1", port=8000, public_url=None)
+        )
+
+
+def test_installed_host_recovers_exact_published_current_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(tmp_path / "data")})
+    paths.provision()
+    installed_root = tmp_path / "site-packages" / "opentulpa"
+    installed_root.mkdir(parents=True)
+    monkeypatch.setenv("OPENTULPA_SOURCE_SEED_ROOT", str(tmp_path / "missing-source"))
+    monkeypatch.setenv("OPENTULPA_TRUSTED_WHEELHOUSE", str(tmp_path / "missing-wheels"))
+    generation_id = "a" * 64
+    manifest_digest = f"sha256:{'b' * 64}"
+    source_commit = "c" * 40
+    release = Release(
+        id="release-current",
+        candidate_id="candidate-current",
+        source_commit=source_commit,
+        artifact_digest=manifest_digest,
+        metadata={
+            "artifact_kind": "python_generation",
+            "image_reference": f"python-generation:{generation_id}",
+            "generation_id": generation_id,
+            "manifest_digest": manifest_digest,
+            "state_contract_sha256": "d" * 64,
+            "evaluator_fingerprint": f"sha256:{'e' * 64}",
+            "install_profile": "runtime",
+            "controller_protocol": 1,
+        },
+    )
+    pointer = paths.control_root / "evolution" / "current_release.json"
+    pointer.parent.mkdir(mode=0o700)
+    pointer.write_text(release.model_dump_json(), encoding="utf-8")
+    pointer.chmod(0o600)
+    opens: list[tuple[str, dict[str, object]]] = []
+
+    class Store:
+        def open(self, selected: str, **provenance: object) -> object:
+            opens.append((selected, provenance))
+            return SimpleNamespace(
+                manifest=SimpleNamespace(
+                    identity=SimpleNamespace(source_commit=source_commit),
+                )
+            )
+
+    recovered = cli._require_installed_host_dependencies(  # noqa: SLF001
+        installed_root,
+        settings=type("Settings", (), {"evolution_enabled": True})(),
+        paths=paths,
+        generation_store=Store(),  # type: ignore[arg-type]
+    )
+
+    assert recovered is not None
+    assert recovered.generation_id == generation_id
+    assert opens[0][0] == generation_id
+    assert opens[0][1]["expected_manifest_digest"] == manifest_digest
+
+
+def _installed_controller_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    managed_source: bool,
+) -> tuple[Path, Path]:
+    install_root = tmp_path / "install root"
+    controller = install_root / "controller"
+    controller.mkdir(parents=True)
+    source = tmp_path / "source checkout"
+    source.mkdir()
+    metadata = {
+        "format_version": 1,
+        "generation_id": "a" * 64,
+        "managed_source": managed_source,
+        "ref": "release/ref",
+        "repository": "https://example.test/opentulpa.git",
+        "source_root": str(source),
+    }
+    metadata_path = controller / "install.json"
+    metadata_path.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    metadata_path.chmod(0o600)
+    installer = controller / "installer.sh"
+    installer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    installer.chmod(0o700)
+    generation = controller / "generations" / ("b" * 64)
+    generation.mkdir(parents=True)
+    executable = generation / "bin" / "opentulpa-host"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o500)
+    (controller / "current").symlink_to(Path("generations") / generation.name)
+    monkeypatch.setenv("OPENTULPA_INSTALL_ROOT", str(install_root))
+    return controller, source
+
+
+def test_update_invokes_recorded_managed_installer_with_fetch_and_no_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller, _ = _installed_controller_metadata(tmp_path, monkeypatch, managed_source=True)
+    captured: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    result = cli._update_command(  # noqa: SLF001
+        Namespace(source=None, fetch=True, restart_local_host=False)
+    )
+
+    assert result == 0
+    assert captured["command"] == [str(controller / "installer.sh"), "--fetch"]
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert "shell" not in kwargs
+    environment = kwargs["env"]
+    assert isinstance(environment, dict)
+    assert environment["OPENTULPA_INSTALL_ROOT"] == str(controller.parent)
+    assert environment["OPENTULPA_INSTALL_REF"] == "release/ref"
+    assert f"Activated OpenTulpa controller generation {'b' * 64}." in capsys.readouterr().out
+
+
+def test_update_imports_explicit_clean_source_as_argv_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _ = _installed_controller_metadata(tmp_path, monkeypatch, managed_source=False)
+    manual = tmp_path / "manual source with spaces"
+    manual.mkdir()
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    result = cli._update_command(  # noqa: SLF001
+        Namespace(source=str(manual), fetch=False, restart_local_host=False)
+    )
+
+    assert result == 0
+    assert commands == [[str(controller / "installer.sh"), "--source", str(manual.resolve())]]
+
+
+def test_failed_update_returns_installer_status_and_keeps_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    controller, source = _installed_controller_metadata(tmp_path, monkeypatch, managed_source=False)
+    original = (controller / "current").resolve()
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(returncode=17),
+    )
+
+    result = cli._update_command(  # noqa: SLF001
+        Namespace(source=None, fetch=False, restart_local_host=False)
+    )
+
+    assert result == 17
+    assert (controller / "current").resolve() == original
+    output = capsys.readouterr()
+    assert str(source) not in output.err
+    assert "active controller was unchanged" in output.err
+
+
+def test_update_rejects_fetch_for_explicit_source_without_starting_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _installed_controller_metadata(tmp_path, monkeypatch, managed_source=True)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("installer must not run"),
+    )
+
+    result = cli._update_command(  # noqa: SLF001
+        Namespace(source=str(tmp_path / "manual"), fetch=True, restart_local_host=False)
+    )
+
+    assert result == 2
+
+
+def test_update_restart_uses_new_controller_generation_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _ = _installed_controller_metadata(tmp_path, monkeypatch, managed_source=True)
+    generation_id = "b" * 64
+    restarted: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        cli,
+        "restart_remembered_local_server",
+        lambda *, controller_executable, controller_generation_id: restarted.append(
+            (controller_executable, controller_generation_id)
+        )
+        or "http://127.0.0.1:8000",
+    )
+
+    result = cli._update_command(  # noqa: SLF001
+        Namespace(source=None, fetch=False, restart_local_host=True)
+    )
+
+    assert result == 0
+    assert restarted == [
+        (controller / "generations" / generation_id / "bin" / "opentulpa-host", generation_id)
+    ]

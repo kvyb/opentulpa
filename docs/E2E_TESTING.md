@@ -1,194 +1,162 @@
 # End-To-End Testing
 
-OpenTulpa does not maintain a second agent harness. Tests exercise the Deep Agents
-service, universal protocol, deterministic product services, interface workers, and
-immutable bootstrap directly.
+Tests exercise the real Deep Agents service, stable controller, Git lineage, immutable
+generation store, sandbox/evaluator boundary, and persistent product services. Do not
+use production credentials or irreversible external sinks in rehearsal.
 
 ## Automated Gates
 
+The default pytest configuration excludes slow tests:
+
 ```bash
 uv sync --extra dev
-uv run pytest -q
-uv run ruff check .
-uv run mypy src
+uv run --no-sync pytest -q
+```
+
+Run the excluded slow tests explicitly with:
+
+```bash
+uv run --no-sync pytest -q -o addopts='' -m slow
+```
+
+Other checks:
+
+```bash
+uv run --no-sync ruff check .
+uv run --no-sync mypy src
 git diff --check
 ```
 
-The suite covers:
+Build the dependency resolver and run its real package-index integration separately:
 
-- Deep Agent compilation, new checkpoints, memory/skills, ordered streaming, and
-  destructive-shell approval approve/edit/reject after restart;
-- generated tool schemas, hidden context, ownership, effect policy, idempotency,
-  direct-service invocation, and sanitized errors;
-- tenant sandbox mounts, paths, network, limits, and secret absence;
-- AgentSpec and TriggerSpec revisions, model/tool policy, event authentication,
-  schedules, timezones, misfires, duplicate dispatch, and restricted execution;
-- intake draft revision/token conflicts, atomic activation, deterministic decisions,
-  send-once delivery, sink retry, cursor handling, and recovery;
-- jobs, file ownership, integration ownership, SSRF protection, browser sessions,
-  capability workers, secret rotation, and Telegram;
-- persistent source worktrees, secret/path rejection, fixed kernel-contract evaluation,
-  exact full-source OCI construction, promotion persistence, bootstrap fencing,
-  staging, automatic rollback, and restart recovery;
-- migration dry-run, idempotency, counts, and checksums.
+```bash
+docker build -f docker/dependency-resolver.Dockerfile \
+  -t opentulpa-dependency-resolver-e2e .
+resolver_id=$(docker image inspect opentulpa-dependency-resolver-e2e --format '{{.Id}}')
+OPENTULPA_TEST_DEPENDENCY_RESOLVER_IMAGE="$resolver_id" \
+  uv run --no-sync pytest -q -o addopts='' \
+  tests/test_dependency_resolver.py::test_real_oci_resolver_builds_offline_dependency_base
+```
 
-Default pytest uses fake adapters or deterministic local fixtures. Live model, Telegram,
-Composio, Browser Use, and external sink calls are separate smoke tests.
+To prove the same resolved dependency is evaluated, built into a generation, activated by
+the rootful runtime, and removed by rollback, use the E2E-only image that adds a Docker CLI.
+The controller and sibling resolver exchange sealed artifacts through a dedicated named
+volume. This command assumes a local Unix engine:
 
-## Data Migration Rehearsal
+```bash
+docker build -t opentulpa-rootful-e2e .
+docker build -f docker/rootful-dependency-e2e.Dockerfile \
+  -t opentulpa-rootful-dependency-e2e .
+docker_socket=$(docker context inspect --format '{{(index .Endpoints "docker").Host}}')
+docker_socket=${docker_socket#unix://}
+resolver_volume=opentulpa-dependency-e2e
+docker volume create "$resolver_volume"
+docker run --rm \
+  --cap-add SYS_ADMIN \
+  --cap-add NET_ADMIN \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  --mount "type=bind,src=$docker_socket,dst=/var/run/docker.sock" \
+  --mount \
+    "type=volume,src=$resolver_volume,dst=/var/lib/opentulpa-dependency-resolver" \
+  --env OPENTULPA_CONTAINER_CLI=/usr/local/bin/docker \
+  --env OPENTULPA_DEPENDENCY_RESOLVER_IMAGE_DIGEST="$resolver_id" \
+  --env OPENTULPA_DEPENDENCY_RESOLVER_VOLUME="$resolver_volume" \
+  opentulpa-rootful-dependency-e2e \
+  /opt/opentulpa-install/controller/generations/image/bin/python \
+  /opt/opentulpa-source/tests/rootful_self_evolution.py
+```
 
-Use a copy of representative legacy data:
+The socket is exposed only to this dedicated controller rehearsal image. It is not present
+in the production image and is not mounted into candidate or served-runtime namespaces.
 
-1. Stop every process that can mutate the copied databases.
-2. Configure fake messaging, booking, and integration sinks.
-3. Run `opentulpa-migrate-deepagents --dry-run` and archive the count/checksum report.
-4. Run the migration without `--dry-run`.
-5. Verify profiles, files, knowledge, workflows, setup drafts, bookings, connections,
-   routines, memories, and user skills against the report.
-6. Confirm invalid routines and setup rows are reported and disabled, not guessed.
-7. Start the V2 application against the migrated copy.
-8. Restart it and verify destructive-shell approvals, jobs, specs, triggers, memory,
-   skills, and workspaces.
-9. Confirm no fake sink received duplicate writes or sends.
+Run the real rootful-Linux self-edit, cutover, failed-activation restoration, explicit
+rollback, conversation-notification, and restart rehearsal against the built image:
 
-Any product-data loss, unexpected checksum change, cross-tenant access, duplicate
-external effect, or non-resumable destructive-shell approval fails the rehearsal.
+```bash
+docker build -t opentulpa-rootful-e2e .
+docker run --rm \
+  --cap-add SYS_ADMIN \
+  --cap-add NET_ADMIN \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  opentulpa-rootful-e2e \
+  /opt/opentulpa-install/controller/generations/image/bin/python \
+  /opt/opentulpa-source/tests/rootful_self_evolution.py
+```
 
-## Universal Interface Rehearsal
+The suite covers protocol/authentication, product ownership and idempotency, checkpoints,
+approvals, interfaces, capability workers, tenant workspaces, Git candidate worktrees,
+native lineage/conflicts, wheel/venv generation integrity, staging, cutover, probation,
+rollback, and restart recovery.
 
-Exercise the local TUI first, then prove another interface uses the same state:
+## Isolation Preconditions
 
-1. Start a terminal-only deployment with no host `TELEGRAM_BOT_TOKEN`.
-2. Connect with `opentulpa connect`, submit text and an attachment, and observe ordered SSE.
-3. Trigger recursive forced removal in a disposable owner workspace and verify the TUI
-   approval can be approved, edited, and rejected. Confirm ordinary tools run directly.
-4. Paste a dedicated BotFather test token and ask OpenTulpa to enable Telegram.
-5. Verify the stored run text and traces contain only `secret://telegram_bot_token`, not
-   plaintext.
-6. Verify the Telegram manifest test is digest-bound and activation executes without
-   a per-call approval.
-7. Message the bot and verify Telegram continues the same tenant's Deep Agents context.
-   Pair the first account with `/start <last-eight-token-characters>` or the configured
-   host override.
-8. Trigger a background run and verify both web and Telegram receive their own durable
-   notification and acknowledgement state.
-9. Rotate the Telegram secret and verify the worker restarts on the new vault revision
-   without replaying old updates.
+Source mutation/evaluation tests must distinguish supported and unsupported environments.
+The strong path requires rootful Linux, trusted `bwrap`/`setpriv`/`prlimit`, permitted
+namespaces, and the required Docker Compose capabilities. Non-root Linux, macOS, blocked
+namespaces, and Railway must report source mutation unavailable while immutable serving
+tests continue to pass. Never “fix” those tests by weakening the boundary.
 
-Repeat with a host-configured webhook bot. Confirm the dynamic Telegram capability is
-blocked so only one consumer owns the bot.
+Verify that candidate and served runtime identities are distinct, that candidate commands
+cannot read controller credentials or product state, and that no candidate workspace is
+treated as serving source. Verify the exact source commit produces the exact wheel and
+final-path venv generation.
 
-## AgentSpec And Trigger Rehearsal
+## Managed Release Rehearsal
 
-1. Create an AgentSpec with a non-default configured model alias, a small tool
-   allowlist, spec-local memory, no workspace, and bounded calls/time.
-2. Activate that exact revision.
-3. Create an `At` TriggerSpec referring to it and verify one execution.
-4. Create a cron trigger in an explicit IANA timezone and exercise both DST directions.
-5. Restart before a fire and prove it still executes once.
-6. Replay the same source event ID and prove it does not execute twice.
-7. Miss a one-off and a stale cron fire and prove both are skipped.
-8. Invoke an authorized effect tool and prove the dispatcher completes without requesting
-   per-call approval.
-9. Verify web and Telegram receive one terminal notification.
+Use a copied persistent data root and fake external sinks.
 
-Also exercise `/v2/schedules` to prove its reminder and agent-job records are projections
-over the same TriggerSpec store rather than a second scheduler database.
+1. Install a reviewed controller generation and verify `current` and `previous` pointers.
+2. Initialize Git instance/upstream refs and verify native merge-base and conflict behavior.
+3. Start an immutable release and verify strict readiness before serving traffic.
+4. Create a detached candidate, make a harmless change, commit it, and verify fixed
+   evaluation and generation hashes are bound to that commit.
+5. Verify the candidate worktree is not the serving source and is not reused for runtime.
+6. Promote the generation and observe drain, old-process stop, candidate start, strict
+   readiness, live probation, and the intentional availability gap.
+7. Verify the active child does not survive normal promotion and the controller remains
+   available throughout recovery operations.
+8. Verify product state persists across promotion and that current/previous generation
+   metadata identifies exact rollback targets.
+9. Inject a probation failure and verify exact previous generation plus HostConfig rollback.
+10. Verify no product database mutation or external side effect is removed by rollback.
 
-## Managed Self-Improvement Rehearsal
+## Crash Matrix
 
-Run this against a copied release workspace and fake external sinks. Keep production
-credentials out of the evaluator and candidate environment.
+Inject controller death at each point and restart from copied persistent state:
 
-1. Build reviewed runtime/evaluator images with `./start.sh install managed`.
-2. Create and restrict a dedicated `OPENTULPA_RELEASE_EGRESS_NETWORK`.
-3. Run `./start.sh doctor managed`.
-4. Start managed mode with empty bootstrap state and verify the canonical checkout is
-   built, started with ingress disabled, health-checked, and installed as the first
-   release.
-5. Verify the gateway serves `/`, `/healthz`, `/agent/healthz`, and V2 streaming while
-   the mutable container has no source mount, bootstrap state, `.env`, secrets file, or
-   OCI socket.
-6. Ask for a harmless core or UI improvement. Verify `source_shell` creates a detached
-   worktree, can change the requested source, and resumes it on the next chat turn.
-7. Run tests in the source shell, inspect a redacted `trace_get`, and iterate after owner
-   feedback without creating another agent run loop.
-8. Call `source_release` and verify it starts without a user approval interrupt.
-9. Verify fixed public, security, and kernel-contract evaluation run without network and
-   are bound to the same source commit, lock hash, evaluator fingerprint, and OCI digest.
-10. Observe staging, old-release drain, cutover, health checks, and probation. Verify the
-    web change and the same conversation/memory after restart.
-11. Verify the origin receives the release outcome through the
-    notification stream and trusted thread event.
-12. Queue rollback and verify the previous content-addressed image and lease return.
+| Crash point | Required result |
+|---|---|
+| Staging | Staging child is discarded; current release remains serving; activation is terminally failed or safely reconciled. |
+| Activation/cutover | A partially started candidate is not trusted; previous release is restored with its exact HostConfig or safe mode is entered. |
+| Live probation | Candidate is stopped; exact previous generation and HostConfig are restored; product/external effects remain. |
+| Rollback | Recovery resumes only from durable activation state; if the previous release cannot be verified, safe mode stops forwarding. |
+| Source projection | Native Git refs and merge state are re-read; stale compare-and-swap or unresolved native conflicts fail closed without corrupting lineage. |
+| Lock recovery | The private `mkdir` install lock remains; no PID metadata or stale-lock automation is consulted. Remove it only after verifying no installer or descendant survives. |
 
-### Failure And Rollback Cases
+Also test missing previous artifacts, duplicate activation/rollback requests, dependency
+lock changes, secret/symlink/traversal/special-file candidates, invalid manifests, and
+tampered generation trees.
 
-Run separate candidates or fake-host injections for:
+## Rollback Assertions
 
-- evaluator failure before an artifact exists;
-- staging health failure before cutover;
-- drain timeout with in-flight work;
-- production health failure after cutover;
-- probation failure;
-- bootstrap restart at every persisted activation phase;
-- previous image missing during rollback;
-- duplicate destructive-shell approval and promotion requests;
-- candidate dependency-lock change;
-- candidate attempt to commit a secret, symlink, traversal path, or special file;
-- binary, secret-bearing, private-path, or oversized contribution patch.
+- Pre-cutover failure leaves the old release active.
+- Post-cutover failure stops the candidate before restoring the exact previous release.
+- Readiness is strict both before activation and during probation.
+- Rollback restores release-coupled capability state only when a valid snapshot exists.
+- Product state, messages, purchases, authorization changes, and provider writes are not
+  rewound.
+- Failed restoration enters safe mode and does not forward to an unverified process.
+- Activation records, sanitized errors, lineage, and owner notifications survive restart.
 
-Expected outcomes:
+## Local Restart And Platform Matrix
 
-- pre-cutover failure leaves the old release active;
-- post-cutover failure automatically restores the old release;
-- failed restoration enters safe mode and stops forwarding;
-- activation records and sanitized failure context survive restart;
-- the originating owner receives failure/rollback notifications;
-- the restored agent can explain the failure in the original thread using the
-  persisted trusted event, without raw logs or secrets.
+On a platform with pidfd support, verify automatic local restart signals the exact
+remembered process through pidfd and rejects identity changes. On a platform without
+pidfd, verify automatic restart fails closed and offers no numeric-PID fallback.
 
-## Interactive Self-Improvement Rehearsal
-
-1. Ask the owner agent to make a small core or interface change.
-2. Verify `source_shell` creates one detached workspace and that later chat turns resume
-   the same workspace.
-3. Have the agent edit a file, run a failing test, inspect its own `trace_get` result,
-   repair the code, and rerun the test successfully.
-4. Verify the source shell can fetch a public HTTPS URL but cannot read production data,
-   credentials, Git metadata, bootstrap state, host paths, or the container socket.
-   Verify the fixed evaluator remains offline.
-5. Call `source_release` in the originating web or Telegram conversation.
-6. Verify fixed evaluation commits and builds the exact tested bytes and that bootstrap
-   stages, drains, cuts over, and starts probation without a CLI approval.
-7. Inject a startup or probation failure and verify automatic previous-image rollback.
-8. Verify the original conversation receives the release or rollback outcome and the
-   agent can explain it using durable traces after restart.
-9. Verify a dependency-lock change is rejected and the editable workspace remains
-   available for repair.
-10. Do not include irreversible product-data migrations: image rollback deliberately
-    does not rewind product databases.
-
-This is the convergence path for independently evolved instances. Promotion of a local
-candidate and contribution to the canonical repository remain separate decisions.
-
-## Live Smoke
-
-Before resuming production consumers, verify with dedicated accounts and reversible
-actions:
-
-- `/healthz` and `/agent/healthz` return success;
-- web streams ordered events and restores pending destructive-shell approvals after refresh;
-- Telegram owner chat and attachments use the expected tenant and thread;
-- an `rm -rf` approval can be approved, edited, and rejected from web and Telegram;
-- one intake reply and one booking reach the intended sink exactly once;
-- one reminder and one restricted AgentSpec trigger execute and notify the owner;
-- Composio connection ownership and a risky invocation execute without approval;
-- a risky browser submission executes without approval;
-- tenant workspace data persists after release replacement and is invisible to another
-  tenant;
-- Langfuse contains corresponding run/model/tool traces without secrets;
-- a benign managed candidate can activate and roll back without losing context.
-
-Do not point rehearsal traffic at production customer inboxes, payment actions, or
-irreversible sinks.
+Verify immutable serving on macOS, non-root Linux, unsupported namespace environments,
+and Railway. Verify source mutation is disabled on each of them rather than silently
+falling back to a weaker isolation mode. Verify Docker Compose source mutation only with
+the documented rootful capabilities and security options.

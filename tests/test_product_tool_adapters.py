@@ -176,6 +176,22 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     assert source_status.tool_call_schema.model_json_schema()["properties"] == {}
     assert "available reports whether self-update is usable" in source_status.description
     assert "candidate session" in source_status.description
+    source_sync = next(tool for tool in tools if tool.name == "source_sync_upstream")
+    assert set(source_sync.tool_call_schema.model_json_schema()["properties"]) == {
+        "expected_active_release_id"
+    }
+    assert "configured remote main" in source_sync.description
+    source_prepare_pr = next(tool for tool in tools if tool.name == "source_prepare_pr")
+    assert set(source_prepare_pr.tool_call_schema.model_json_schema()["properties"]) == {
+        "candidate_id",
+        "expected_revision",
+        "base_ref",
+        "branch",
+        "provider",
+        "message",
+        "idempotency_key",
+    }
+    assert "repository_publish_pr" in source_prepare_pr.description
     source_shell = next(tool for tool in tools if tool.name == "source_shell")
     assert set(source_shell.tool_call_schema.model_json_schema()["properties"]) == {
         "command",

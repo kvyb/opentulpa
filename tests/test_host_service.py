@@ -81,6 +81,32 @@ class _Evolution:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_contains_runtime_after_evolution_shutdown_failure(tmp_path: Path) -> None:
+    store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"q" * 32))
+    runtime = _Runtime()
+    staged = store.stage(HostConfigInput(api_key=SecretStr("provider-secret")))
+    runtime.current = store.activate(staged.revision)
+
+    class FailingEvolution(_Evolution):
+        async def shutdown(self) -> None:
+            self.events.append("shutdown")
+            raise RuntimeError("configured evolution shutdown failure")
+
+    evolution = FailingEvolution()
+    service = HostService(
+        store=store,
+        runtime=runtime,  # type: ignore[arg-type]
+        evolution=evolution,
+    )
+
+    with pytest.raises(RuntimeError, match="configured evolution shutdown failure"):
+        await service.shutdown()
+
+    assert runtime.current is None
+    assert evolution.events == ["shutdown"]
+
+
+@pytest.mark.asyncio
 async def test_host_prepares_evolution_before_runtime_and_starts_it_afterward(
     tmp_path: Path,
 ) -> None:

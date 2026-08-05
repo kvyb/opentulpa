@@ -317,6 +317,94 @@ class RepositoryWorkspaceService:
         )
         return data
 
+    async def import_verified_patch(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        workspace_id: str,
+        patch: bytes,
+        expected_sha256: str,
+        message: str,
+    ) -> dict[str, Any]:
+        expected = str(expected_sha256 or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise RepositoryWorkspaceError("expected patch digest is invalid")
+        if not patch or len(patch) > 20 * 1024 * 1024 or b"\x00" in patch:
+            raise RepositoryWorkspaceError("contribution patch is invalid")
+        if hashlib.sha256(patch).hexdigest() != expected:
+            raise RepositoryWorkspaceError("contribution patch failed digest validation")
+        safe_message = " ".join(str(message or "").split())[:500]
+        if not safe_message:
+            raise RepositoryWorkspaceError("contribution commit message is required")
+        workspace = self._owned(tenant_id=tenant_id, workspace_id=workspace_id)
+        if workspace.status is not RepositoryWorkspaceStatus.READY:
+            raise RepositoryWorkspaceError("repository workspace is not ready")
+
+        async with self._lock(workspace.id):
+            provider = self._providers.for_workspace(workspace)
+            backend = await asyncio.to_thread(provider.backend, workspace)
+            if (await self._run(backend, "git status --porcelain=v1", timeout=60)).strip():
+                raise RepositoryWorkspaceConflictError("repository workspace is not clean")
+            if await self._git_sha(backend, "HEAD") != workspace.base_sha:
+                raise RepositoryWorkspaceConflictError("repository workspace base changed")
+            patch_name = f".opentulpa-contribution-{expected}.patch"
+            patch_path = f"/workspace/{patch_name}"
+            uploaded = await asyncio.to_thread(
+                backend.upload_files,
+                [(patch_path, patch)],
+            )
+            if len(uploaded) != 1 or uploaded[0].error:
+                raise RepositoryWorkspaceError("contribution patch could not be transferred")
+            try:
+                await self._run(
+                    backend,
+                    "git apply --index --whitespace=error-all -- "
+                    f"{self._shell_quote(patch_name)} && "
+                    "git diff --cached --check && "
+                    f"rm -- {self._shell_quote(patch_name)} && "
+                    "git commit --no-gpg-sign --no-verify -m "
+                    f"{self._shell_quote(safe_message)}",
+                    timeout=300,
+                )
+            except Exception:
+                with suppress(Exception):
+                    await self._run(
+                        backend,
+                        f"rm -f -- {self._shell_quote(patch_name)}",
+                        timeout=60,
+                    )
+                raise
+            head_sha = await self._git_sha(backend, "HEAD")
+            parent_sha = await self._git_sha(backend, "HEAD^")
+            if parent_sha != workspace.base_sha or head_sha == workspace.base_sha:
+                raise RepositoryWorkspaceError("contribution commit lineage is invalid")
+            now = utc_now()
+            workspace = workspace.model_copy(
+                update={
+                    "head_sha": head_sha,
+                    "updated_at": now,
+                    "last_used_at": now,
+                }
+            )
+            self._store.update(workspace)
+            self._store.bind(
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                workspace_id=workspace.id,
+                bound_at=now,
+            )
+            return {
+                "workspace_id": workspace.id,
+                "repository_url": workspace.repository_url.removesuffix(".git"),
+                "base_ref": workspace.base_ref,
+                "base_sha": workspace.base_sha,
+                "branch": workspace.branch,
+                "head_sha": head_sha,
+                "patch_sha256": expected,
+                "clean": True,
+            }
+
     async def close(
         self,
         *,

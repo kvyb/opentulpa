@@ -43,6 +43,15 @@ class SourceShellRequest(SourceContextRequest):
     timeout_seconds: int = Field(default=300, ge=1, le=3_600)
 
 
+class SourceSyncRequest(SourceContextRequest):
+    expected_active_release_id: str = Field(min_length=1, max_length=100)
+
+
+class SourceResolveDependenciesRequest(SourceContextRequest):
+    expected_candidate_id: str = Field(min_length=1, max_length=100)
+    expected_diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class SourceReleaseRequest(SourceContextRequest):
     idempotency_key: str = Field(min_length=1, max_length=200)
     expected_candidate_id: str = Field(min_length=1, max_length=100)
@@ -94,6 +103,27 @@ def register_evolution_control_api(
             await service.source_shell(
                 command=body.command,
                 timeout_seconds=body.timeout_seconds,
+                audit_context=body.audit_context,
+            )
+        )
+
+    @router.post("/source/sync-upstream")
+    async def source_sync_upstream(body: SourceSyncRequest) -> dict[str, Any]:
+        return dict(
+            await service.source_sync_upstream(
+                expected_active_release_id=body.expected_active_release_id,
+                audit_context=body.audit_context,
+            )
+        )
+
+    @router.post("/source/resolve-dependencies")
+    async def source_resolve_dependencies(
+        body: SourceResolveDependenciesRequest,
+    ) -> dict[str, Any]:
+        return dict(
+            await service.source_resolve_dependencies(
+                expected_candidate_id=body.expected_candidate_id,
+                expected_diff_sha256=body.expected_diff_sha256,
                 audit_context=body.audit_context,
             )
         )
@@ -256,6 +286,44 @@ class EvolutionClient:
                     "audit_context": dict(audit_context or {}),
                 },
                 timeout=httpx.Timeout(60.0, read=max(660.0, timeout_seconds + 60.0)),
+            )
+        )
+
+    async def source_sync_upstream(
+        self,
+        *,
+        expected_active_release_id: str,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._mapping(
+            await self._json(
+                "POST",
+                "/source/sync-upstream",
+                json={
+                    "expected_active_release_id": expected_active_release_id,
+                    "audit_context": dict(audit_context or {}),
+                },
+                timeout=httpx.Timeout(60.0, read=300.0),
+            )
+        )
+
+    async def source_resolve_dependencies(
+        self,
+        *,
+        expected_candidate_id: str,
+        expected_diff_sha256: str,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._mapping(
+            await self._json(
+                "POST",
+                "/source/resolve-dependencies",
+                json={
+                    "expected_candidate_id": expected_candidate_id,
+                    "expected_diff_sha256": expected_diff_sha256,
+                    "audit_context": dict(audit_context or {}),
+                },
+                timeout=httpx.Timeout(60.0, read=1_800.0),
             )
         )
 

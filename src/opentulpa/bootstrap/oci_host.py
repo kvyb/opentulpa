@@ -1076,9 +1076,10 @@ class RootlessOciReleaseHost:
             "OPENTULPA_EVENT_PATH": release.event_path,
             "OPENTULPA_DATA_ROOT": self._policy.data_mount_target,
             "OPENTULPA_MANAGED_RELEASE": "true",
-            # Never let the writable workspace or repository root shadow trusted imports.
+            # The candidate source is an immutable image layer. Never import from the
+            # writable workspace or implicitly prepend the working directory.
             "PYTHONNOUSERSITE": "1",
-            "PYTHONPATH": "",
+            "PYTHONPATH": "/app/src",
             "PYTHONSAFEPATH": "1",
         }
         if context.mode == "staging":

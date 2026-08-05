@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from opentulpa.bootstrap.host import InMemoryReleaseHost
-from opentulpa.bootstrap.models import ReleaseOrigin, ReleaseRecord
+from opentulpa.bootstrap.models import ActivationKind, ReleaseOrigin, ReleaseRecord
 from opentulpa.bootstrap.store import BootstrapStore
 from opentulpa.bootstrap.supervisor import BootstrapSupervisor, SupervisorPolicy
 from opentulpa.evolution.activation import (
@@ -127,8 +127,11 @@ async def test_bootstrap_activator_uses_verified_bootstrap_rollback(tmp_path: Pa
         )
     ).status is ReleaseActivationStatus.ACTIVE
 
+    synthetic = blue.model_copy(
+        update={"id": "release_rollback_blue", "metadata": {"rollback_target": blue.id}}
+    )
     rolled_back = await activator.activate(
-        blue,
+        synthetic,
         activation_id="rollback_blue",
         origin=_origin(),
         reason="Owner requested rollback",
@@ -136,4 +139,82 @@ async def test_bootstrap_activator_uses_verified_bootstrap_rollback(tmp_path: Pa
     )
 
     assert rolled_back.status is ReleaseActivationStatus.ACTIVE
-    assert supervisor.store.get_state().serving_release_id == blue.id
+    assert supervisor.store.get_state().serving_release_id == synthetic.id
+    rollback = supervisor.store.get_activation("rollback_blue")
+    assert rollback is not None
+    assert rollback.kind is ActivationKind.ROLLBACK
+    assert rollback.target_release_id == synthetic.id
+
+
+@pytest.mark.asyncio
+async def test_synthetic_rollback_replays_after_restart_then_allows_promotion(
+    tmp_path: Path,
+) -> None:
+    host = InMemoryReleaseHost()
+    store = BootstrapStore(tmp_path / "bootstrap.db")
+    first = BootstrapSupervisor(
+        store=store,
+        host=host,
+        policy=SupervisorPolicy(
+            drain_timeout_seconds=1,
+            stage_probe_attempts=1,
+            production_probe_attempts=1,
+            probe_interval_seconds=0,
+            probation_seconds=0,
+            probation_probe_interval_seconds=1,
+        ),
+    )
+    await first.start()
+    blue = _release("blue", "a")
+    green = _release("green", "b")
+    await first.install_initial(blue)
+    activator = BootstrapReleaseActivator(first)
+    assert (
+        await activator.activate(
+            green,
+            activation_id="promotion_green",
+            origin=_origin(),
+            reason="Owner approved",
+            rollback=False,
+        )
+    ).status is ReleaseActivationStatus.ACTIVE
+    synthetic = blue.model_copy(
+        update={
+            "id": "release_rollback_synthetic",
+            "metadata": {"rollback_target": blue.id},
+        }
+    )
+    assert (
+        await activator.activate(
+            synthetic,
+            activation_id="rollback_synthetic",
+            origin=_origin(),
+            reason="Owner requested rollback",
+            rollback=True,
+        )
+    ).status is ReleaseActivationStatus.ACTIVE
+
+    restarted = _supervisor(tmp_path, host)
+    await restarted.start()
+    replayed = await BootstrapReleaseActivator(restarted).activate(
+        synthetic,
+        activation_id="rollback_synthetic",
+        origin=_origin(),
+        reason="Owner requested rollback",
+        rollback=True,
+    )
+    red = _release("red", "c")
+    promoted = await BootstrapReleaseActivator(restarted).activate(
+        red,
+        activation_id="promotion_red",
+        origin=_origin(),
+        reason="Promote after rollback replay",
+        rollback=False,
+    )
+
+    assert replayed.status is ReleaseActivationStatus.ACTIVE
+    assert promoted.status is ReleaseActivationStatus.ACTIVE
+    assert store.get_state().serving_release_id == red.id
+    red_activation = store.get_activation("promotion_red")
+    assert red_activation is not None
+    assert red_activation.previous_release_id == synthetic.id

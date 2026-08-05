@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import html
+import inspect
 import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -10,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from opentulpa.api.routes.telegram_business import (
@@ -37,6 +40,12 @@ from opentulpa.bootstrap.release_control import (
     register_release_control_plane,
 )
 from opentulpa.core.public_urls import build_public_composio_callback_path
+from opentulpa.core.release_runtime import (
+    ReleaseRuntimeIdentity,
+    release_consumers_enabled,
+)
+from opentulpa.evolution.models import EvolutionEvent
+from opentulpa.notifications.sinks import EvolutionNotificationSink
 
 if TYPE_CHECKING:
     from opentulpa.api.routes.v2_evolution import EvolutionService
@@ -61,6 +70,7 @@ logger = logging.getLogger(__name__)
 STARTED_AT = datetime.now(UTC).isoformat()
 
 PrincipalResolver = Callable[[Request], V2Principal | Awaitable[V2Principal]]
+StartupCallback = Callable[[], None | Awaitable[None]]
 
 
 def _deployment_identity() -> dict[str, str | None]:
@@ -94,23 +104,100 @@ def _shutdown_sync(name: str, shutdown: Callable[..., None]) -> None:
         logger.exception("Failed to shut down %s", name)
 
 
-def _register_health_routes(app: FastAPI, agent_service: AgentRunService) -> None:
+def _register_health_routes(
+    app: FastAPI,
+    agent_service: AgentRunService,
+    identity: ReleaseRuntimeIdentity,
+) -> None:
+    def content(*, status: str) -> dict[str, object]:
+        return {
+            "status": status,
+            "lifecycle": app.state.lifecycle_status,
+            "consumers_enabled": app.state.consumers_enabled,
+            "generation_id": identity.generation_id,
+            **_deployment_identity(),
+        }
+
+    @app.get("/_runtime/identity", include_in_schema=False, response_model=None)
+    async def runtime_identity(request: Request) -> JSONResponse:
+        supplied = request.headers.get("X-OpenTulpa-Launch-Nonce", "")
+        if identity.launch_nonce is None or not hmac.compare_digest(
+            supplied,
+            identity.launch_nonce,
+        ):
+            return JSONResponse(status_code=401, content={"detail": "invalid runtime identity"})
+        return JSONResponse(
+            content={
+                "generation_id": identity.generation_id,
+                "launch_nonce": identity.launch_nonce,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/healthz", response_model=None)
-    async def health() -> dict[str, str | None]:
-        return {"status": "ok", **_deployment_identity()}
+    async def health() -> JSONResponse:
+        ready = app.state.lifecycle_status == "ready"
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content=content(status="ok" if ready else "unavailable"),
+        )
 
     @app.get("/agent/healthz", response_model=None)
     async def agent_health() -> JSONResponse:
-        healthy = bool(getattr(agent_service, "healthy", lambda: False)())
+        lifecycle_ready = app.state.lifecycle_status == "ready"
+        try:
+            agent_healthy = bool(getattr(agent_service, "healthy", lambda: False)())
+        except Exception:
+            logger.exception("Deep Agent health probe failed")
+            agent_healthy = False
+        healthy = lifecycle_ready and agent_healthy
         return JSONResponse(
             status_code=200 if healthy else 503,
             content={
-                "status": "ok" if healthy else "degraded",
+                **content(status="ok" if healthy else "degraded"),
                 "backend": "deepagents",
-                **_deployment_identity(),
+                "agent_healthy": agent_healthy,
             },
         )
 
+
+def _register_private_runtime_routes(
+    app: FastAPI,
+    *,
+    identity: ReleaseRuntimeIdentity,
+    internal_token: str,
+    notification_service: NotificationService | None,
+    consumers_enabled: bool,
+) -> None:
+    @app.post(
+        "/_runtime/evolution-events",
+        include_in_schema=False,
+        status_code=204,
+        response_class=Response,
+    )
+    async def evolution_event(request: Request, event: EvolutionEvent) -> Response:
+        supplied_nonce = request.headers.get("X-OpenTulpa-Launch-Nonce", "")
+        authorization = request.headers.get("Authorization", "")
+        supplied_token = (
+            authorization.removeprefix("Bearer ")
+            if authorization.startswith("Bearer ")
+            else ""
+        )
+        if (
+            identity.launch_nonce is None
+            or not internal_token
+            or not hmac.compare_digest(supplied_nonce, identity.launch_nonce)
+            or not hmac.compare_digest(supplied_token, internal_token)
+        ):
+            return Response(status_code=401)
+        if (
+            not consumers_enabled
+            or app.state.lifecycle_status != "ready"
+            or notification_service is None
+        ):
+            return Response(status_code=409)
+        await EvolutionNotificationSink(notification_service).deliver(event)
+        return Response(status_code=204)
 
 def _register_composio_callback(app: FastAPI) -> None:
     @app.get(build_public_composio_callback_path())
@@ -202,50 +289,82 @@ def create_app(
     inference_service: InferenceService | None = None,
     repository_service: RepositoryWorkspaceService | None = None,
     max_file_upload_bytes: int = 45_000_000,
+    startup_callback: StartupCallback | None = None,
+    startup_callback_timeout_seconds: float = 20.0,
 ) -> FastAPI:
     """Create the public V2 API without constructing product or runtime services."""
 
+    consumers_enabled = release_consumers_enabled()
+    runtime_identity = ReleaseRuntimeIdentity.from_environment()
+    if startup_callback_timeout_seconds <= 0:
+        raise ValueError("startup callback timeout must be positive")
+
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        consumers_enabled = str(
-            os.environ.get("OPENTULPA_DISABLE_CONSUMERS", "") or ""
-        ).strip().casefold() not in {"1", "true", "yes", "on"}
+    async def lifespan(lifespan_app: FastAPI) -> AsyncIterator[None]:
+        producers: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        agent_runtime: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        dependencies: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        startup_complete = False
+        lifespan_app.state.lifecycle_status = "starting"
         try:
-            if evolution_service is not None:
-                await evolution_service.start()
-            if capability_service is None:
-                await agent_service.start()
+            agent_runtime.append(("Deep Agent service", agent_service.shutdown))
+            if not consumers_enabled:
+                await agent_service.start_standby()
             else:
-                # Open the durable runtime first, but wait to resume approved dynamic
-                # tools until their exact persisted capability generation is restored.
+                # Open durable runtime stores first. Approval recovery must wait for
+                # the exact persisted capability generation.
                 await agent_service.start(recover_pending_resumes=False)
-            if consumers_enabled:
-                await job_service.start()
-                await intake_workflow_service.start()
                 if capability_service is not None:
+                    dependencies.append(("capability service", capability_service.shutdown))
                     await capability_service.start()
-                    await agent_service.recover_pending_resumes()
+                if evolution_service is not None:
+                    dependencies.append(("evolution client", evolution_service.shutdown))
+                    await evolution_service.start()
+                await agent_service.recover_pending_resumes()
+
+                if browser_service is not None:
+                    dependencies.append(("browser service", browser_service.shutdown))
+                producers.append(("job service", job_service.shutdown))
+                await job_service.start()
+
+                if telegram_client is not None:
+                    dependencies.append(("Telegram client", telegram_client.aclose))
+                producers.append(("intake workflow service", intake_workflow_service.shutdown))
+                await intake_workflow_service.start()
+
                 if trigger_dispatcher is not None:
+                    async def shutdown_trigger_dispatcher() -> None:
+                        _shutdown_sync("trigger dispatcher", trigger_dispatcher.shutdown)
+
+                    producers.append(("trigger dispatcher", shutdown_trigger_dispatcher))
                     trigger_dispatcher.start()
                 if intake_poll_dispatcher is not None:
+                    async def shutdown_intake_poll_dispatcher() -> None:
+                        _shutdown_sync(
+                            "intake poll dispatcher",
+                            intake_poll_dispatcher.shutdown,
+                        )
+
+                    producers.append(("intake poll dispatcher", shutdown_intake_poll_dispatcher))
                     intake_poll_dispatcher.start()
+                if startup_callback is not None:
+                    try:
+                        async with asyncio.timeout(startup_callback_timeout_seconds):
+                            result = startup_callback()
+                            if inspect.isawaitable(result):
+                                await result
+                    except Exception:
+                        logger.exception("Best-effort application startup callback failed")
+            lifespan_app.state.lifecycle_status = "ready"
+            startup_complete = True
             yield
         finally:
-            if intake_poll_dispatcher is not None:
-                _shutdown_sync("intake poll dispatcher", intake_poll_dispatcher.shutdown)
-            if trigger_dispatcher is not None:
-                _shutdown_sync("trigger dispatcher", trigger_dispatcher.shutdown)
-            if browser_service is not None:
-                await _shutdown_async("browser service", browser_service.shutdown)
-            if capability_service is not None:
-                await _shutdown_async("capability service", capability_service.shutdown)
-            await _shutdown_async("intake workflow service", intake_workflow_service.shutdown)
-            await _shutdown_async("job service", job_service.shutdown)
-            await _shutdown_async("Deep Agent service", agent_service.shutdown)
-            if evolution_service is not None:
-                await _shutdown_async("evolution supervisor", evolution_service.shutdown)
-            if telegram_client is not None:
-                await _shutdown_async("Telegram client", telegram_client.aclose)
+            # Stop routing before the first producer begins draining.
+            lifespan_app.state.lifecycle_status = "stopping"
+            for phase in (producers, agent_runtime, dependencies):
+                for name, shutdown in reversed(phase):
+                    await _shutdown_async(name, shutdown)
+            lifespan_app.state.lifecycle_status = "stopped" if startup_complete else "failed"
 
     app = FastAPI(
         title="OpenTulpa API",
@@ -255,6 +374,8 @@ def create_app(
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.state.lifecycle_status = "starting"
+    app.state.consumers_enabled = consumers_enabled
     app.state.agent_service = agent_service
     app.state.job_service = job_service
     app.state.file_vault_service = file_vault_service
@@ -282,7 +403,14 @@ def create_app(
     if release_control_service is not None:
         register_release_control_plane(app, release_control_service)
 
-    _register_health_routes(app, agent_service)
+    _register_health_routes(app, agent_service, runtime_identity)
+    _register_private_runtime_routes(
+        app,
+        identity=runtime_identity,
+        internal_token=str(os.environ.get("OPENTULPA_OWNER_TOKEN") or "").strip(),
+        notification_service=notification_service,
+        consumers_enabled=consumers_enabled,
+    )
     _register_cli_landing(app)
     register_v2_agent_routes(
         app,
@@ -319,7 +447,11 @@ def create_app(
         get_trigger_specs=lambda: trigger_spec_service,
         get_secret_vault=lambda: secret_vault_service,
         resolve_principal=resolve_principal,
-        on_trigger_changed=(trigger_dispatcher.upsert if trigger_dispatcher is not None else None),
+        on_trigger_changed=(
+            trigger_dispatcher.upsert
+            if consumers_enabled and trigger_dispatcher is not None
+            else None
+        ),
         on_trigger_deactivated=(
             (
                 lambda tenant_id, trigger_id: trigger_dispatcher.remove(
@@ -327,11 +459,13 @@ def create_app(
                     trigger_id=trigger_id,
                 )
             )
-            if trigger_dispatcher is not None
+            if consumers_enabled and trigger_dispatcher is not None
             else None
         ),
         dispatch_trigger_event=(
-            trigger_dispatcher.dispatch_event if trigger_dispatcher is not None else None
+            trigger_dispatcher.dispatch_event
+            if consumers_enabled and trigger_dispatcher is not None
+            else None
         ),
     )
     register_v2_file_routes(
@@ -357,7 +491,9 @@ def create_app(
         get_intake_workflows=lambda: intake_workflow_service,
         resolve_principal=resolve_principal,
         on_workflow_changed=(
-            intake_poll_dispatcher.upsert if intake_poll_dispatcher is not None else None
+            intake_poll_dispatcher.upsert
+            if consumers_enabled and intake_poll_dispatcher is not None
+            else None
         ),
         on_workflow_deleted=(
             (
@@ -366,7 +502,7 @@ def create_app(
                     workflow_id=workflow_id,
                 )
             )
-            if intake_poll_dispatcher is not None
+            if consumers_enabled and intake_poll_dispatcher is not None
             else None
         ),
     )
@@ -384,4 +520,4 @@ def create_app(
     return app
 
 
-__all__ = ["PrincipalResolver", "create_app"]
+__all__ = ["PrincipalResolver", "StartupCallback", "create_app"]

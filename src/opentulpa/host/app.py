@@ -133,10 +133,22 @@ def create_host_app(
                 retry_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await retry_task
-            await service.shutdown()
+            failures: list[BaseException] = []
+            try:
+                await service.shutdown()
+            except BaseException as exc:
+                failures.append(exc)
             if sandbox_supervisor is not None:
-                await sandbox_supervisor.shutdown()
-            await proxy_client.aclose()
+                try:
+                    await sandbox_supervisor.shutdown()
+                except BaseException as exc:
+                    failures.append(exc)
+            try:
+                await proxy_client.aclose()
+            except BaseException as exc:
+                failures.append(exc)
+            if failures:
+                raise failures[0]
 
     app = FastAPI(title="OpenTulpa Host", version="2", lifespan=lifespan)
     app.state.host_store = store
@@ -182,10 +194,10 @@ def create_host_app(
 
     @app.get("/agent/healthz")
     async def agent_health() -> Response:
-        if service.runtime.status != "ready" or service.activating:
+        if service.runtime.status not in {"ready", "probation"} or service.activating:
             runtime_status = "activating" if service.activating else service.runtime.status
             return JSONResponse(status_code=503, content={"ok": False, "runtime": runtime_status})
-        return JSONResponse(content={"ok": True, "runtime": "ready"})
+        return JSONResponse(content={"ok": True, "runtime": service.runtime.status})
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -357,6 +369,8 @@ def create_host_app(
         authorization: Annotated[str | None, Header()] = None,
         session: Annotated[str | None, Cookie(alias=HOST_SESSION_COOKIE)] = None,
     ) -> Response:
+        if path == "_runtime" or path.startswith("_runtime/"):
+            raise HTTPException(status_code=404, detail="Not found")
         endpoint = service.runtime.endpoint
         if service.activating:
             raise HTTPException(status_code=503, detail="OpenTulpa runtime is activating")

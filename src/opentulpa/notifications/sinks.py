@@ -20,6 +20,16 @@ if TYPE_CHECKING:
     from opentulpa.specs.models import TriggerSpec
 
 
+_EVOLUTION_EVENT_TEXT = {
+    "build.preparing": "Preparing and testing a new OpenTulpa build.",
+    "build.switching": "Switching to the new OpenTulpa build now.",
+    "promotion.active": "The new OpenTulpa build is active.",
+    "promotion.failed": "The new build failed; OpenTulpa kept or restored the previous build.",
+    "rollback.active": "The previous OpenTulpa build has been restored.",
+    "rollback.failed": "OpenTulpa could not restore the requested previous build.",
+}
+
+
 class TriggerNotificationSink:
     """Deliver scheduled and event-triggered runs through the same owner stream."""
 
@@ -91,7 +101,7 @@ class TriggerNotificationSink:
 
 
 class EvolutionNotificationSink:
-    """Translate terminal candidate and promotion events into owner notifications."""
+    """Translate evolution progress and terminal events into owner notifications."""
 
     def __init__(self, notifications: NotificationService) -> None:
         self._notifications = notifications
@@ -107,6 +117,7 @@ class EvolutionNotificationSink:
         text = str(
             payload.get("failure_message")
             or payload.get("summary")
+            or _EVOLUTION_EVENT_TEXT.get(event.event_type)
             or payload.get("status")
             or event.event_type
         ).strip()

@@ -1,0 +1,7 @@
+{
+  "controller_max": 1,
+  "controller_min": 1,
+  "product_state_schema": 1,
+  "runtime_protocol": 1,
+  "workspace_api": 1
+}

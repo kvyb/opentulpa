@@ -57,7 +57,11 @@ _TOOL_PROGRESS_LABELS = {
     "repository_open": "Opening repository",
     "repository_publish_pr": "Publishing changes",
     "repository_status": "Checking repository",
+    "source_prepare_pr": "Preparing pull request",
+    "source_release": "Switching builds",
+    "source_resolve_dependencies": "Resolving dependencies",
     "source_shell": "Inspecting source",
+    "source_sync_upstream": "Syncing upstream",
     "task": "Delegating work",
     "web_search": "Searching the web",
 }

@@ -1,0 +1,53 @@
+# OpenTulpa runtime defaults shared in-repo.
+#
+# Keep API keys and other secrets in .env or real environment variables.
+# Any values here can be overridden by:
+#   1) process environment variables
+#   2) .env entries
+
+# Core app
+host: 0.0.0.0
+port: 8000
+
+# Deep Agents persistence. Checkpoints and runs intentionally start fresh;
+# store, schedules, and intake drafts are migration destinations.
+deepagents_checkpoint_db_path: .opentulpa/deepagents/checkpoints.db
+deepagents_store_db_path: .opentulpa/deepagents/store.db
+deepagents_runs_db_path: .opentulpa/deepagents/runs.db
+deepagents_workspaces_root: .opentulpa/deepagents/workspaces
+intake_drafts_db_path: .opentulpa/deepagents/intake_drafts.db
+
+# Self-evolution is Git-native and only activates when the canonical source checkout is present.
+evolution_enabled: true
+evolution_sandbox_image: opentulpa-evolution:0.1.0
+evolution_evaluator_image: opentulpa-evolution:0.1.0
+
+# Deep Agent and sandbox limits
+agent_max_completion_tokens: 40000
+sandbox_container_cli: docker
+sandbox_image: opentulpa-tenant-sandbox:0.1.0
+sandbox_cpu_limit: "1"
+sandbox_memory_limit: 512m
+sandbox_pid_limit: 128
+sandbox_timeout_seconds: 60
+sandbox_max_output_bytes: 512000
+sandbox_max_file_bytes: 10485760
+sandbox_max_workspace_entries: 20000
+railway_sandbox_idle_timeout_minutes: 30
+railway_sandbox_max_sync_bytes: 33554432
+
+# LLM/provider configuration
+llm_model: moonshotai/kimi-k3
+llm_fallback_models:
+  - z-ai/glm-5.2
+llm_provider_order:
+  z-ai/glm-5.2:
+    - z-ai/fp8
+    - fireworks
+    - deepinfra/fp4
+model_aliases: {}
+llm_reasoning_effort: high
+business_knowledge_oracle_model: google/gemini-3.1-flash-lite-preview
+
+# Injected integration defaults
+browser_use_user_data_dir: .opentulpa/browser_profiles
