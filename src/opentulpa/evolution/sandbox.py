@@ -11,8 +11,8 @@ import shlex
 import shutil
 import stat
 import subprocess
-import tempfile
 import threading
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,40 +27,253 @@ _IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}\Z")
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RESOURCE_RE = re.compile(r"[1-9][0-9]*(?:\.[0-9]+)?(?:[kmgt]i?|b)?\Z", re.I)
 _PROCESS_SANDBOX_EXECUTION_LOCK = threading.RLock()
+_RUNTIME_UID = 65_532
+_RUNTIME_GID = 65_532
+_CANDIDATE_UID = 65_533
+_CANDIDATE_GID = 65_533
+_SYSTEM_ROOTS = (
+    Path("/usr"),
+    Path("/usr/local"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/lib"),
+    Path("/lib64"),
+)
+_SAFE_ETC_PATHS = (Path("/etc/passwd"), Path("/etc/group"), Path("/etc/nsswitch.conf"))
 
 
 def _default_process_identity() -> tuple[int, int]:
-    """Use a real unprivileged passwd entry so tools like OpenSSH can start."""
+    """Use the dedicated identity that is distinct from the served runtime."""
 
-    for name in ("opentulpa-sandbox",):
+    for name in ("opentulpa-candidate",):
         try:
             entry = pwd.getpwnam(name)
         except KeyError:
             continue
         if entry.pw_uid > 0 and entry.pw_gid > 0:
             return int(entry.pw_uid), int(entry.pw_gid)
-    for uid in (65_532,):
+    for uid in (_CANDIDATE_UID,):
         try:
             entry = pwd.getpwuid(uid)
         except KeyError:
             continue
         if entry.pw_uid > 0 and entry.pw_gid > 0:
             return int(entry.pw_uid), int(entry.pw_gid)
-    for name in ("nobody",):
-        try:
-            entry = pwd.getpwnam(name)
-        except KeyError:
-            continue
-        if entry.pw_uid > 0 and entry.pw_gid > 0:
-            return int(entry.pw_uid), int(entry.pw_gid)
-    for uid in (65_534,):
-        try:
-            entry = pwd.getpwuid(uid)
-        except KeyError:
-            continue
-        if entry.pw_uid > 0 and entry.pw_gid > 0:
-            return int(entry.pw_uid), int(entry.pw_gid)
-    return 65_532, 65_532
+    return _CANDIDATE_UID, _CANDIDATE_GID
+
+
+def _trusted_root_executable(name: str) -> tuple[Path | None, str | None]:
+    raw = shutil.which(name)
+    if raw is None:
+        return None, f"strong sandbox requires {name}"
+    path = Path(raw)
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return None, f"strong sandbox could not inspect {name}"
+    if (
+        not path.is_absolute()
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or not os.access(path, os.X_OK)
+    ):
+        return None, f"strong sandbox requires a root-owned immutable {name} executable"
+    return path, None
+
+
+def _system_mount_arguments() -> list[str]:
+    arguments: list[str] = []
+    for source in _SYSTEM_ROOTS:
+        if source.is_symlink():
+            arguments.extend(("--symlink", os.readlink(source), str(source)))
+        elif source.is_dir():
+            arguments.extend(("--ro-bind", str(source), str(source)))
+    arguments.extend(("--dir", "/etc"))
+    for source in _SAFE_ETC_PATHS:
+        if source.is_file() and not source.is_symlink():
+            arguments.extend(("--ro-bind", str(source), str(source)))
+    return arguments
+
+
+def _mount_parent_arguments(destinations: Iterable[str]) -> list[str]:
+    parents: set[str] = set()
+    for destination in destinations:
+        parts = destination.strip("/").split("/")
+        for index in range(1, len(parts)):
+            parent = "/" + "/".join(parts[:index])
+            if any(
+                parent == str(system_root) or parent.startswith(f"{system_root}/")
+                for system_root in _SYSTEM_ROOTS
+            ):
+                continue
+            parents.add(parent)
+    arguments: list[str] = []
+    for parent in sorted(parents, key=lambda value: (value.count("/"), value)):
+        arguments.extend(("--dir", parent, "--chmod", "0755", parent))
+    return arguments
+
+
+def _strong_sandbox_tools() -> tuple[Path, Path, Path] | str:
+    if platform.system() != "Linux":
+        return "strong sandbox requires Linux namespaces"
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return "strong sandbox requires a root host supervisor"
+    resolved: list[Path] = []
+    for name in ("setpriv", "bwrap", "prlimit"):
+        path, reason = _trusted_root_executable(name)
+        if reason is not None or path is None:
+            return reason or f"strong sandbox requires {name}"
+        resolved.append(path)
+    return resolved[0], resolved[1], resolved[2]
+
+
+def strong_sandbox_unavailable_reason(*, probe: bool = True) -> str | None:
+    """Return why the required root-Linux namespace sandbox cannot run."""
+
+    tools = _strong_sandbox_tools()
+    if isinstance(tools, str):
+        return tools
+    setpriv, bwrap, prlimit = tools
+    if not probe:
+        return None
+    probe_argv = _build_bubblewrap_argv(
+        setpriv=setpriv,
+        bwrap=bwrap,
+        prlimit=prlimit,
+        uid=_CANDIDATE_UID,
+        gid=_CANDIDATE_GID,
+        workspace=None,
+        workspace_read_only=True,
+        read_only_mounts=(),
+        environment={"PATH": "/usr/bin:/bin"},
+        command=("/usr/bin/true",),
+        memory_bytes=64 * 1024 * 1024,
+        pid_limit=16,
+        file_bytes=1024,
+        cpu_seconds=5,
+    )
+    try:
+        completed = subprocess.run(
+            probe_argv,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            env={},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "strong sandbox namespace probe could not run"
+    if completed.returncode != 0:
+        return (
+            "strong sandbox requires permitted bubblewrap mount, PID, and network namespaces"
+        )
+    return None
+
+
+def _build_bubblewrap_argv(
+    *,
+    setpriv: Path,
+    bwrap: Path,
+    prlimit: Path,
+    uid: int,
+    gid: int,
+    workspace: Path | None,
+    workspace_read_only: bool,
+    read_only_mounts: Sequence[tuple[Path, str]],
+    environment: Mapping[str, str],
+    command: Sequence[str],
+    memory_bytes: int,
+    pid_limit: int,
+    file_bytes: int,
+    cpu_seconds: int,
+) -> list[str]:
+    if not command or any(not value or "\x00" in value for value in command):
+        raise ValueError("sandbox command is invalid")
+    argv = [
+        str(bwrap),
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--clearenv",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/dev/shm",
+        "--chmod",
+        "1777",
+        "/dev/shm",
+        "--tmpfs",
+        "/tmp",
+        "--chmod",
+        "1777",
+        "/tmp",
+        *_system_mount_arguments(),
+    ]
+    destinations: set[str] = set()
+    validated_mounts: list[tuple[Path, str]] = []
+    for source, destination in read_only_mounts:
+        if (
+            destination == "/"
+            or not destination.startswith("/")
+            or destination.startswith("//")
+            or any(component in {"", ".", ".."} for component in destination[1:].split("/"))
+            or "\x00" in destination
+            or destination in destinations
+            or destination == "/workspace"
+            or destination.startswith("/workspace/")
+        ):
+            raise ValueError("sandbox read-only mount destination is invalid")
+        if source == Path("/"):
+            raise ValueError("sandbox cannot bind the host root")
+        destinations.add(destination)
+        validated_mounts.append((source, destination))
+    argv.extend(_mount_parent_arguments(destinations))
+    for source, destination in validated_mounts:
+        argv.extend(("--ro-bind", str(source), destination))
+    if workspace is not None:
+        argv.extend(
+            (
+                "--ro-bind" if workspace_read_only else "--bind",
+                str(workspace),
+                "/workspace",
+                "--chdir",
+                "/workspace",
+            )
+        )
+    else:
+        argv.extend(("--chdir", "/tmp"))
+    for name, value in sorted(environment.items()):
+        if not name or "\x00" in name or "=" in name or "\x00" in value:
+            raise ValueError("sandbox environment is invalid")
+        argv.extend(("--setenv", name, value))
+    argv.extend(
+        (
+            "--",
+            str(setpriv),
+            f"--reuid={uid}",
+            f"--regid={gid}",
+            "--clear-groups",
+            "--no-new-privs",
+            "--bounding-set=-all",
+            "--inh-caps=-all",
+            "--ambient-caps=-all",
+            str(prlimit),
+            f"--as={memory_bytes}:{memory_bytes}",
+            f"--nproc={pid_limit}:{pid_limit}",
+            f"--fsize={file_bytes}:{file_bytes}",
+            f"--cpu={cpu_seconds}:{cpu_seconds}",
+            "--",
+            *command,
+        )
+    )
+    return argv
 
 
 def _force_remove_container(container_cli: str, container_name: str) -> None:
@@ -548,17 +761,19 @@ class CandidateContainerBackend(LocalShellBackend):
 
 
 class CandidateProcessBackend(CandidateContainerBackend):
-    """Credential-less sandbox using one serialized, unprivileged host process."""
+    """Root-supervised bubblewrap sandbox for an untrusted source workspace."""
+
+    @staticmethod
+    def unavailable_reason() -> str | None:
+        return strong_sandbox_unavailable_reason()
+
+    @staticmethod
+    def is_supported() -> bool:
+        return CandidateProcessBackend.unavailable_reason() is None
 
     @staticmethod
     def supported() -> bool:
-        return (
-            os.name == "posix"
-            and hasattr(os, "geteuid")
-            and os.geteuid() == 0
-            and shutil.which("setpriv") is not None
-            and shutil.which("prlimit") is not None
-        )
+        return CandidateProcessBackend.is_supported()
 
     def __init__(
         self,
@@ -568,31 +783,70 @@ class CandidateProcessBackend(CandidateContainerBackend):
         policy: CandidateSandboxPolicy,
         uid: int | None = None,
         gid: int | None = None,
+        read_only_mounts: Sequence[tuple[str | Path, str]] = (),
     ) -> None:
-        if not policy.network_enabled:
-            raise ValueError("process source sandbox requires explicit network enablement")
-        if not hasattr(os, "geteuid") or os.geteuid() != 0:
-            raise RuntimeError("process source sandbox requires a root host supervisor")
+        unavailable = self.unavailable_reason()
+        if unavailable is not None:
+            raise RuntimeError(unavailable)
         if (uid is None) != (gid is None):
             raise ValueError("process source sandbox identity must include both uid and gid")
         if uid is None or gid is None:
             uid, gid = _default_process_identity()
-        if uid < 1 or gid < 1:
+        if uid < 1 or gid < 1 or uid == _RUNTIME_UID or gid == _RUNTIME_GID:
             raise ValueError("process source sandbox identity is invalid")
-        if shutil.which("setpriv") is None or shutil.which("prlimit") is None:
-            raise RuntimeError("process source sandbox requires setpriv and prlimit")
+        tools = _strong_sandbox_tools()
+        if isinstance(tools, str):
+            raise RuntimeError(tools)
+        self._setpriv, self._bwrap, self._prlimit = tools
         self._process_uid = uid
         self._process_gid = gid
+        self._read_only_mounts = tuple(
+            (self._validated_read_only_source(Path(source)), destination)
+            for source, destination in read_only_mounts
+        )
+        mounted_bins = [
+            f"{destination.rstrip('/')}/bin"
+            for source, destination in self._read_only_mounts
+            if (source / "bin").is_dir()
+        ]
+        self._sandbox_path = ":".join((*mounted_bins, "/usr/local/bin", "/usr/bin", "/bin"))
+        self._sandbox_wheelhouse = next(
+            (
+                destination
+                for source, destination in self._read_only_mounts
+                if source.name == "wheelhouse"
+            ),
+            "/wheelhouse",
+        )
         super().__init__(
             workspace=workspace,
             allowed_root=allowed_root,
             policy=policy,
             container_cli="process",
         )
-        # Every process sandbox uses the same unprivileged identity. Serializing
-        # execution prevents one workspace from being readable while another is
-        # temporarily owned by that identity.
         self._lock = _PROCESS_SANDBOX_EXECUTION_LOCK
+
+    @staticmethod
+    def _validated_read_only_source(path: Path) -> Path:
+        candidate = path.expanduser()
+        if not candidate.is_absolute() or candidate == Path("/"):
+            raise ValueError("sandbox read-only mount source is invalid")
+        current = Path(candidate.anchor)
+        for component in candidate.parts[1:]:
+            current /= component
+            try:
+                metadata = current.lstat()
+            except OSError as exc:
+                raise ValueError("sandbox read-only mount source is unavailable") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError("sandbox read-only mount source cannot contain symbolic links")
+            if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise ValueError("sandbox read-only mount source must be root-owned and immutable")
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_IMODE(metadata.st_mode) & stat.S_IXOTH:
+                raise ValueError("sandbox read-only mount source is not candidate-traversable")
+        if not candidate.is_dir() and not candidate.is_file():
+            raise ValueError("sandbox read-only mount source is invalid")
+        return candidate
 
     def execute(
         self,
@@ -610,26 +864,39 @@ class CandidateProcessBackend(CandidateContainerBackend):
         )
         memory_bytes = _resource_bytes(self._policy.memory_limit)
         file_bytes = self._policy.max_file_bytes
-        argv = (
-            "setpriv",
-            f"--reuid={self._process_uid}",
-            f"--regid={self._process_gid}",
-            "--clear-groups",
-            "--no-new-privs",
-            "prlimit",
-            f"--as={memory_bytes}:{memory_bytes}",
-            f"--nproc={self._policy.pid_limit}:{self._policy.pid_limit}",
-            f"--fsize={file_bytes}:{file_bytes}",
-            f"--cpu={effective_timeout + 5}:{effective_timeout + 5}",
-            "--",
-            "/bin/sh",
-            "-c",
-            _shell_with_group_cleanup(safe_command),
+        argv = _build_bubblewrap_argv(
+            setpriv=self._setpriv,
+            bwrap=self._bwrap,
+            prlimit=self._prlimit,
+            uid=self._process_uid,
+            gid=self._process_gid,
+            workspace=self._workspace,
+            workspace_read_only=False,
+            read_only_mounts=self._read_only_mounts,
+            environment={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "HOME": "/tmp",
+                "PATH": self._sandbox_path,
+                "PIP_CONFIG_FILE": "/dev/null",
+                "PIP_FIND_LINKS": self._sandbox_wheelhouse,
+                "PIP_NO_INDEX": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONHASHSEED": "0",
+                "TMPDIR": "/tmp",
+                "UV_FIND_LINKS": self._sandbox_wheelhouse,
+                "UV_NO_INDEX": "1",
+                "UV_OFFLINE": "1",
+            },
+            command=("/bin/sh", "-c", _shell_with_group_cleanup(safe_command)),
+            memory_bytes=memory_bytes,
+            pid_limit=self._policy.pid_limit,
+            file_bytes=file_bytes,
+            cpu_seconds=effective_timeout + 5,
         )
         with self._lock:
             backup: Path | None = None
             backup_mode = 0o700
-            private_runtime: Path | None = None
             traversal_modes: list[tuple[Path, int]] = []
             monitor_stop = threading.Event()
             workspace_invalid = threading.Event()
@@ -650,11 +917,9 @@ class CandidateProcessBackend(CandidateContainerBackend):
 
             try:
                 self._validate_tree()
-                traversal_modes = self._grant_workspace_traversal()
-                private_runtime = Path(tempfile.mkdtemp(prefix="opentulpa-process-"))
-                os.chown(private_runtime, self._process_uid, self._process_gid)
-                self._chown_workspace(self._process_uid, self._process_gid)
                 backup, backup_mode = self._recovery_copy()
+                traversal_modes = self._grant_workspace_traversal()
+                self._assign_workspace(self._process_uid, self._process_gid)
                 monitor = threading.Thread(
                     target=monitor_workspace,
                     name="opentulpa-process-candidate-quota",
@@ -664,13 +929,7 @@ class CandidateProcessBackend(CandidateContainerBackend):
                 completed = run_bounded_process(
                     argv,
                     cwd=self._workspace,
-                    env={
-                        "HOME": str(private_runtime),
-                        "PATH": os.environ.get("PATH", os.defpath),
-                        "PYTHONDONTWRITEBYTECODE": "1",
-                        "PYTHONHASHSEED": "0",
-                        "TMPDIR": str(private_runtime),
-                    },
+                    env={},
                     timeout_seconds=effective_timeout,
                     max_output_bytes=self._policy.max_output_bytes,
                     abort_event=abort_requested,
@@ -718,10 +977,8 @@ class CandidateProcessBackend(CandidateContainerBackend):
                     monitor.join(timeout=5)
                 if backup is not None:
                     shutil.rmtree(backup, ignore_errors=True)
-                if private_runtime is not None:
-                    shutil.rmtree(private_runtime, ignore_errors=True)
                 with suppress(OSError):
-                    self._chown_workspace(0, 0)
+                    self._assign_workspace(0, 0)
                 self._restore_workspace_traversal(traversal_modes)
         return ExecuteResponse(
             output=completed.output.decode("utf-8", errors="replace"),
@@ -732,20 +989,25 @@ class CandidateProcessBackend(CandidateContainerBackend):
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         return await asyncio.to_thread(self.execute, command, timeout=timeout)
 
-    def _chown_workspace(self, uid: int, gid: int) -> None:
-        os.chown(self._workspace, uid, gid)
+    def _assign_workspace(self, uid: int, gid: int) -> None:
+        os.chown(self._workspace, uid, gid, follow_symlinks=False)
+        self._workspace.chmod(0o700)
         for directory, directory_names, file_names in os.walk(
             self._workspace,
             topdown=True,
             followlinks=False,
         ):
-            for name in [*directory_names, *file_names]:
-                os.chown(
-                    Path(directory) / name,
-                    uid,
-                    gid,
-                    follow_symlinks=False,
-                )
+            for name in directory_names:
+                path = Path(directory) / name
+                os.chown(path, uid, gid, follow_symlinks=False)
+                if not path.is_symlink():
+                    path.chmod(0o700)
+            for name in file_names:
+                path = Path(directory) / name
+                metadata = path.lstat()
+                os.chown(path, uid, gid, follow_symlinks=False)
+                if not stat.S_ISLNK(metadata.st_mode):
+                    path.chmod(0o700 if stat.S_IMODE(metadata.st_mode) & 0o111 else 0o600)
 
     def _grant_workspace_traversal(self) -> list[tuple[Path, int]]:
         changed: list[tuple[Path, int]] = []
@@ -801,4 +1063,5 @@ __all__ = [
     "CandidateProcessBackend",
     "CandidateSandboxPolicy",
     "resolve_local_oci_image",
+    "strong_sandbox_unavailable_reason",
 ]

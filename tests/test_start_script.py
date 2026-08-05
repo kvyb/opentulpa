@@ -100,6 +100,31 @@ def test_default_start_needs_no_model_key_and_launches_setup_host(tmp_path: Path
     assert "required .env value(s) missing" not in result.stdout
 
 
+def test_serve_run_only_can_execute_installed_controller_without_uv(tmp_path: Path) -> None:
+    executable = tmp_path / "immutable controller" / "opentulpa-host"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    result = _run_start(
+        "serve",
+        "--run-only",
+        "--dry-run",
+        env={
+            **EMPTY_REQUIRED_ENV,
+            "OPENTULPA_CONTROLLER_EXECUTABLE": str(executable),
+            "OPENTULPA_DATA_ROOT": str(tmp_path / "data"),
+            "OPENTULPA_OPEN_BROWSER": "0",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(executable) in result.stdout
+    assert "uv run" not in result.stdout
+    assert "uv sync" not in result.stdout
+
+
 def test_serve_uses_stable_host_when_public_url_is_present(tmp_path: Path) -> None:
     result = _run_start(
         "serve",
@@ -177,15 +202,34 @@ def test_serve_does_not_persist_command_line_secrets_in_dotenv(tmp_path: Path) -
     assert "shell history" in result.stderr
 
 
-def test_container_and_railway_use_serve_entrypoint() -> None:
-    assert 'CMD ["./start.sh", "serve", "--run-only"]' in (
-        REPO_ROOT / "Dockerfile"
-    ).read_text(encoding="utf-8")
-    assert 'startCommand = "./start.sh serve --run-only"' in (
-        REPO_ROOT / "railway.toml"
-    ).read_text(encoding="utf-8")
+def test_container_and_railway_use_direct_immutable_controller() -> None:
+    executable = "/opt/opentulpa-install/controller/generations/image/bin/opentulpa-host"
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert f'CMD ["{executable}"]' in dockerfile
+    assert "uv build --wheel" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "--only-binary=:all:" in dockerfile
+    assert "--resume-retries 10" in dockerfile
+    assert "target=/root/.cache/pip" in dockerfile
+    assert "target=/root/.cache/uv" in dockerfile
+    assert dockerfile.index("uv export --frozen") < dockerfile.index("COPY src ./src")
+    assert dockerfile.index("pip download") < dockerfile.index("COPY src ./src")
+    assert "uv build --wheel --offline --no-build-isolation" in dockerfile
+    assert "uv run" not in dockerfile
+    assert "--editable" not in dockerfile
+    assert "uv sync" not in dockerfile
+    assert "COPY --from=controller-build /usr/local/bin/uv /usr/local/bin/uv" in dockerfile
+    assert "test ! -L /usr/local/bin/uv && /usr/local/bin/uv --version" in dockerfile
+    assert "ENV OPENTULPA_UV_BIN=/usr/local/bin/uv" in dockerfile
+    assert "ENV OPENTULPA_SOURCE_SEED_ROOT=/opt/opentulpa-source" in dockerfile
+    assert "ENV OPENTULPA_TRUSTED_WHEELHOUSE=" in dockerfile
+    assert "USER 65532" not in dockerfile
+    railway = (REPO_ROOT / "railway.toml").read_text(encoding="utf-8")
+    assert f'startCommand = "{executable}"' in railway
+    assert 'healthcheckPath = "/healthz"' in railway
+    assert "overlapSeconds = 0" in railway
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    assert 'command: ["./start.sh", "serve", "--run-only"]' in compose
+    assert f'command: ["{executable}"]' in compose
     assert "HOST: 0.0.0.0" in compose
     assert "OPENTULPA_DATA_ROOT: /app/opentulpa_data" in compose
 
@@ -512,7 +556,7 @@ def test_start_script_dry_run_install_only_skips_browser_cloud_extra_when_disabl
     )
 
     assert result.returncode == 0
-    assert "[start] uv sync --no-dev" in result.stdout
+    assert "[start] uv sync --frozen --no-dev" in result.stdout
     assert "--extra browser" not in result.stdout
     assert "playwright install chromium" not in result.stdout
 
@@ -521,7 +565,7 @@ def test_start_script_defaults_to_lean_core_dependencies() -> None:
     result = _run_start("install", "--dry-run")
 
     assert result.returncode == 0
-    assert "[start] uv sync --no-dev" in result.stdout
+    assert "[start] uv sync --frozen --no-dev" in result.stdout
     assert "--extra bundled" not in result.stdout
     assert "--extra browser" not in result.stdout
     assert (
@@ -709,7 +753,7 @@ def test_start_script_browser_flag_installs_only_cloud_adapter_dependencies() ->
     result = _run_start("install", "--dry-run", "--browser-use")
 
     assert result.returncode == 0
-    assert "uv sync --no-dev --extra browser" in result.stdout
+    assert "uv sync --frozen --no-dev --extra browser" in result.stdout
     assert "--extra bundled" not in result.stdout
     assert "playwright install chromium" not in result.stdout
 
@@ -722,7 +766,7 @@ def test_start_script_retains_selected_optional_adapters() -> None:
     )
 
     assert result.returncode == 0
-    assert "uv sync --no-dev --extra integrations --extra documents" in result.stdout
+    assert "uv sync --frozen --no-dev --extra integrations --extra documents" in result.stdout
 
 
 def test_start_script_bakes_selected_adapters_into_managed_runtime() -> None:
@@ -800,7 +844,7 @@ def test_start_script_missing_uv_dry_run_bootstraps_by_default_then_syncs() -> N
     assert result.returncode == 0
     assert "uv was not found in PATH; bootstrapping uv." in result.stdout
     assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in result.stdout
-    assert "[start] uv sync --no-dev" in result.stdout
+    assert "[start] uv sync --frozen --no-dev" in result.stdout
     assert "uv run --no-sync python -m opentulpa" in result.stdout
 
 

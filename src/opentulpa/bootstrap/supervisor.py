@@ -176,9 +176,14 @@ class BootstrapSupervisor:
                     origin=None,
                     payload={"release_id": release.id, "initial": True},
                 )
-            except Exception:
-                if running is not None:
-                    await self._stop_quietly(running)
+            except Exception as exc:
+                if running is not None and not await self._stop_quietly(running):
+                    self._active_handle = running
+                    await self._enter_safe_mode()
+                    raise ActivationError(
+                        "initial_release_containment_failed",
+                        "The initial release failed and could not be contained.",
+                    ) from exc
                 await self._enter_safe_mode()
                 raise
         await self.flush_outbox()
@@ -280,8 +285,9 @@ class BootstrapSupervisor:
     async def enter_safe_mode(self) -> None:
         self._require_started()
         async with self._operation_lock:
-            if self._active_handle is not None:
-                await self._stop_quietly(self._active_handle)
+            if self._active_handle is not None and await self._stop_quietly(
+                self._active_handle
+            ):
                 self._active_handle = None
             await self._enter_safe_mode()
             await self._publish(
@@ -311,8 +317,38 @@ class BootstrapSupervisor:
                     "The last-known-good release artifact is unavailable.",
                 )
             if self._active_handle is not None:
-                await self._stop_quietly(self._active_handle)
+                if not await self._stop_quietly(self._active_handle):
+                    await self._enter_safe_mode()
+                    raise ActivationError(
+                        "recovery_containment_failed",
+                        "The existing release could not be contained; safe mode remains active.",
+                    )
                 self._active_handle = None
+            recovery_release_ids = {
+                candidate_id
+                for candidate_id in (
+                    state.serving_release_id,
+                    state.last_known_good_release_id,
+                    state.previous_release_id,
+                    *(
+                        activation.target_release_id
+                        for activation in self._store.list_activations(limit=1_000)
+                    ),
+                )
+                if candidate_id is not None
+            }
+            for candidate_id in recovery_release_ids:
+                for mode in ("staging", "production"):
+                    running_candidate = await self._host.discover(candidate_id, mode=mode)
+                    if running_candidate is not None and not await self._stop_quietly(
+                        running_candidate
+                    ):
+                        await self._enter_safe_mode()
+                        raise ActivationError(
+                            "recovery_containment_failed",
+                            "An existing release could not be contained; safe mode remains active.",
+                        )
+            running: RunningRelease | None = None
             lease = self._store.begin_restore_lease(
                 release_id=release.id,
                 activation_id=None,
@@ -354,8 +390,15 @@ class BootstrapSupervisor:
                     payload={"release_id": release.id, "lease_epoch": lease.epoch},
                 )
             except Exception as exc:
+                contained = running is None or await self._stop_quietly(running)
+                self._active_handle = None if contained else running
                 await self._enter_safe_mode()
                 error = self._public_error(exc)
+                if not contained:
+                    error = ActivationError(
+                        "recovery_containment_failed",
+                        "The failed recovery process could not be contained.",
+                    )
                 raise ActivationError(error.code, error.public_message) from exc
         await self.flush_outbox()
         return lease
@@ -415,7 +458,11 @@ class BootstrapSupervisor:
                 attempts=self._policy.stage_probe_attempts,
                 code="staging_unhealthy",
             )
-            await self._host.stop(staging)
+            if not await self._stop_quietly(staging):
+                raise ActivationError(
+                    "staging_containment_failed",
+                    "The staging release could not be contained.",
+                )
             staging = None
             current = self._store.transition_activation(
                 current.id,
@@ -451,9 +498,13 @@ class BootstrapSupervisor:
                 expected=ActivationStatus.DRAINING,
                 target=ActivationStatus.STARTING,
             )
-            cutover_started = True
-            await self._host.stop(old)
+            if not await self._stop_quietly(old):
+                raise ActivationError(
+                    "active_containment_failed",
+                    "The current release could not be contained; cutover was not attempted.",
+                )
             self._active_handle = None
+            cutover_started = True
             await self._host.snapshot_state(current.id)
             state_snapshot_created = True
             lease = self._store.begin_cutover(current)
@@ -500,8 +551,13 @@ class BootstrapSupervisor:
             return current
         except Exception as exc:
             error = self._public_error(exc)
-            if staging is not None:
-                await self._stop_quietly(staging)
+            if staging is not None and not await self._stop_quietly(staging):
+                await self._enter_safe_mode()
+                return await self._fail_after_cutover(
+                    current,
+                    code="staging_containment_failed",
+                    message="The staging release could not be contained; safe mode is active.",
+                )
             if not cutover_started:
                 return await self._fail_before_cutover(
                     current,
@@ -525,8 +581,17 @@ class BootstrapSupervisor:
         code: str,
         message: str,
     ) -> ActivationRecord:
-        if production is not None:
-            await self._stop_quietly(production)
+        if production is not None and not await self._stop_quietly(production):
+            self._active_handle = production
+            await self._enter_safe_mode()
+            return await self._fail_after_cutover(
+                activation,
+                code="candidate_containment_failed",
+                message=(
+                    "The candidate could not be contained, so the previous release "
+                    "was not started. Safe mode is active."
+                ),
+            )
         self._active_handle = None
         previous_id = activation.previous_release_id
         if previous_id is None:
@@ -551,6 +616,7 @@ class BootstrapSupervisor:
             target=ActivationStatus.ROLLING_BACK,
         )
         await self._publish_activation(rolling, "rollback.started")
+        restored: RunningRelease | None = None
         try:
             if state_snapshot_created and not await self._host.restore_state(rolling.id):
                 raise ActivationError(
@@ -599,11 +665,18 @@ class BootstrapSupervisor:
             return completed
         except Exception:
             logger.exception("automatic release rollback failed: activation=%s", activation.id)
+            contained = restored is None or await self._stop_quietly(restored)
+            self._active_handle = None if contained else restored
             await self._enter_safe_mode()
             return await self._fail_after_cutover(
                 rolling,
-                code="rollback_failed",
-                message="The candidate failed and the previous release could not be restored. Safe mode is active.",
+                code="rollback_failed" if contained else "rollback_containment_failed",
+                message=(
+                    "The candidate failed and the previous release could not be restored. "
+                    "Safe mode is active."
+                    if contained
+                    else "The failed rollback process could not be contained. Safe mode is active."
+                ),
             )
 
     async def _fail_before_cutover(
@@ -748,13 +821,21 @@ class BootstrapSupervisor:
                     activation.target_release_id,
                     mode="staging",
                 )
-                if staging is not None:
-                    await self._host.stop(staging)
+                if staging is not None and not await self._stop_quietly(staging):
+                    raise RuntimeError("staging release containment failed")
             except Exception:
                 logger.exception(
                     "bootstrap could not clean an orphaned staging release: activation=%s",
                     activation.id,
                 )
+                await self._enter_safe_mode()
+                await self._publish(
+                    event_key=f"bootstrap:reconcile:staging-stop-failed:{activation.id}",
+                    event_type="bootstrap.safe_mode",
+                    origin=None,
+                    payload={"failure_code": "staging_stop_failed"},
+                )
+                return
             if activation.status in {
                 ActivationStatus.STARTING,
                 ActivationStatus.VERIFYING,
@@ -768,7 +849,8 @@ class BootstrapSupervisor:
                     )
                     if production is not None:
                         candidate_production_found.add(activation.id)
-                        await self._host.stop(production)
+                        if not await self._stop_quietly(production):
+                            raise RuntimeError("candidate release containment failed")
                 except Exception:
                     logger.exception(
                         "bootstrap could not stop an incomplete candidate release: activation=%s",
@@ -786,22 +868,39 @@ class BootstrapSupervisor:
             release_ids = {
                 release_id
                 for release_id in (
+                    state.serving_release_id,
                     state.last_known_good_release_id,
                     state.previous_release_id,
                     *(activation.target_release_id for activation in incomplete),
+                    *(
+                        activation.target_release_id
+                        for activation in self._store.list_activations(limit=1_000)
+                    ),
                 )
                 if release_id is not None
             }
             for release_id in release_ids:
-                try:
-                    running = await self._host.discover(release_id, mode="production")
-                    if running is not None:
-                        await self._host.stop(running)
-                except Exception:
-                    logger.exception(
-                        "bootstrap could not clean a release while entering safe mode: release=%s",
-                        release_id,
-                    )
+                for mode in ("staging", "production"):
+                    try:
+                        running = await self._host.discover(release_id, mode=mode)
+                        if running is not None and not await self._stop_quietly(running):
+                            raise RuntimeError("safe-mode release containment failed")
+                    except Exception:
+                        logger.exception(
+                            "bootstrap could not clean a release while entering safe mode: "
+                            "release=%s mode=%s",
+                            release_id,
+                            mode,
+                        )
+                        await self._publish(
+                            event_key=(
+                                f"bootstrap:reconcile:safe-mode-stop-failed:{release_id}:{mode}"
+                            ),
+                            event_type="bootstrap.safe_mode",
+                            origin=None,
+                            payload={"failure_code": "safe_mode_stop_failed"},
+                        )
+                        return
         cutover_incomplete = any(
             activation.status
             in {
@@ -833,10 +932,26 @@ class BootstrapSupervisor:
                     payload={"failure_code": "last_known_good_missing"},
                 )
                 return
-            if state.serving_release_id is not None:
-                running = await self._host.discover(state.serving_release_id, mode="production")
-                if running is not None:
-                    await self._stop_quietly(running)
+            possible_running = {
+                release_id
+                for release_id in (state.serving_release_id, last_good.id)
+                if release_id is not None
+            }
+            try:
+                for release_id in possible_running:
+                    running = await self._host.discover(release_id, mode="production")
+                    if running is not None and not await self._stop_quietly(running):
+                        raise RuntimeError("production release containment failed")
+            except Exception:
+                logger.exception("bootstrap could not contain production releases before recovery")
+                await self._enter_safe_mode()
+                await self._publish(
+                    event_key="bootstrap:reconcile:production-stop-failed",
+                    event_type="bootstrap.safe_mode",
+                    origin=None,
+                    payload={"failure_code": "production_stop_failed"},
+                )
+                return
             restore_candidates = tuple(
                 activation
                 for activation in incomplete
@@ -889,6 +1004,7 @@ class BootstrapSupervisor:
                 activation_id=None,
             )
             await self._notify_lease_change(restore_lease)
+            restored: RunningRelease | None = None
             try:
                 prepared = await self._host.prepare(last_good)
                 self._validate_prepared(
@@ -920,12 +1036,18 @@ class BootstrapSupervisor:
                 )
             except Exception:
                 logger.exception("bootstrap could not restore last-known-good release")
+                contained = restored is None or await self._stop_quietly(restored)
+                self._active_handle = None if contained else restored
                 await self._enter_safe_mode()
                 await self._publish(
                     event_key="bootstrap:reconcile:restore-failed",
                     event_type="bootstrap.safe_mode",
                     origin=None,
-                    payload={"failure_code": "recovery_failed"},
+                    payload={
+                        "failure_code": (
+                            "recovery_failed" if contained else "recovery_containment_failed"
+                        )
+                    },
                 )
                 return
         elif state.serving_release_id is not None:
@@ -948,6 +1070,7 @@ class BootstrapSupervisor:
                     activation_id=None,
                 )
                 await self._notify_lease_change(recovery_lease)
+                running = None
                 try:
                     prepared = await self._host.prepare(serving)
                     self._validate_prepared(
@@ -983,12 +1106,18 @@ class BootstrapSupervisor:
                     )
                 except Exception:
                     logger.exception("bootstrap could not restart the serving release")
+                    contained = running is None or await self._stop_quietly(running)
+                    self._active_handle = None if contained else running
                     await self._enter_safe_mode()
                     await self._publish(
                         event_key="bootstrap:reconcile:restart-failed",
                         event_type="bootstrap.safe_mode",
                         origin=None,
-                        payload={"failure_code": "recovery_failed"},
+                        payload={
+                            "failure_code": (
+                                "recovery_failed" if contained else "recovery_containment_failed"
+                            )
+                        },
                     )
                     return
 
@@ -1106,11 +1235,26 @@ class BootstrapSupervisor:
             )
         )
 
-    async def _stop_quietly(self, running: RunningRelease) -> None:
-        try:
-            await self._host.stop(running)
-        except Exception:
-            logger.exception("release stop failed: release=%s", running.release_id)
+    async def _stop_quietly(self, running: RunningRelease) -> bool:
+        target = running
+        for _ in range(3):
+            try:
+                await self._host.stop(target)
+            except Exception:
+                logger.exception("release stop failed: release=%s", target.release_id)
+            try:
+                surviving = await self._host.discover(target.release_id, mode=target.mode)
+            except Exception:
+                logger.exception(
+                    "release containment could not be verified: release=%s",
+                    target.release_id,
+                )
+                return False
+            if surviving is None:
+                return True
+            target = surviving
+        logger.error("release remained discoverable after containment: release=%s", running.release_id)
+        return False
 
     async def _discard_state_snapshot_quietly(self, activation_id: str) -> None:
         try:

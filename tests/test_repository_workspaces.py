@@ -189,6 +189,15 @@ class RealGitBackend(FakeBackend):
             )
         return responses
 
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        responses: list[FileUploadResponse] = []
+        for path, content in files:
+            relative = path.removeprefix("/workspace/")
+            target = self.root / relative
+            target.write_bytes(content)
+            responses.append(FileUploadResponse(path=path))
+        return responses
+
 
 class ExistingRepositoryProvider(FakeProvider):
     def __init__(self, backend: RealGitBackend) -> None:
@@ -392,6 +401,86 @@ def _composio_publish_service(
         github_api_proxy=proxy,
     )
     return service, provider, proxy, complete_content, head_sha
+
+
+@pytest.mark.asyncio
+async def test_import_verified_patch_creates_one_clean_commit_from_recorded_base(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.name", "OpenTulpa"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "opentulpa@localhost"],
+        cwd=checkout,
+        check=True,
+    )
+    (checkout / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=checkout, check=True)
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+    ).strip()
+    subprocess.run(["git", "checkout", "-qb", "opentulpa/change"], cwd=checkout, check=True)
+    patch = (
+        b"diff --git a/README.md b/README.md\n"
+        b"--- a/README.md\n"
+        b"+++ b/README.md\n"
+        b"@@ -1 +1 @@\n"
+        b"-base\n"
+        b"+evolved\n"
+    )
+    digest = hashlib.sha256(patch).hexdigest()
+    backend = RealGitBackend(checkout)
+    provider = ExistingRepositoryProvider(backend)
+    store = RepositoryWorkspaceStore(tmp_path / "repositories.db")
+    now = utc_now()
+    workspace = RepositoryWorkspace(
+        id="repo-import",
+        tenant_id="tenant-1",
+        repository_url="https://github.com/acme/project.git",
+        provider=RepositoryProvider.DAYTONA,
+        provider_workspace_id="sandbox-import",
+        base_ref="main",
+        branch="opentulpa/change",
+        base_sha=base_sha,
+        head_sha=base_sha,
+        status=RepositoryWorkspaceStatus.READY,
+        created_at=now,
+        updated_at=now,
+        last_used_at=now,
+    )
+    store.create(workspace)
+    service = RepositoryWorkspaceService(
+        store=store,
+        providers=RepositoryProviderRegistry(providers=[provider]),
+        github_token_resolver=lambda tenant_id, scope: None,
+    )
+
+    imported = await service.import_verified_patch(
+        tenant_id="tenant-1",
+        thread_id="thread-1",
+        workspace_id=workspace.id,
+        patch=patch,
+        expected_sha256=digest,
+        message="Apply tested self-evolution",
+    )
+
+    assert imported["base_sha"] == base_sha
+    assert imported["head_sha"] != base_sha
+    assert imported["patch_sha256"] == digest
+    assert (checkout / "README.md").read_text(encoding="utf-8") == "evolved\n"
+    assert subprocess.check_output(
+        ["git", "rev-list", "--count", f"{base_sha}..HEAD"],
+        cwd=checkout,
+        text=True,
+    ).strip() == "1"
+    assert subprocess.check_output(
+        ["git", "status", "--porcelain=v1"],
+        cwd=checkout,
+        text=True,
+    ).strip() == ""
 
 
 @pytest.mark.asyncio

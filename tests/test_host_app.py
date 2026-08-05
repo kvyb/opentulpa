@@ -4,9 +4,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from opentulpa.host import app as host_app_module
 from opentulpa.host.app import _resume_log_cursor, create_host_app
 from opentulpa.host.models import HostConfigInput
 from opentulpa.host.store import HostStore
@@ -98,6 +101,46 @@ class _SandboxSupervisor:
                 else "sandbox worker canary failed"
             ),
         }
+
+
+@pytest.mark.asyncio
+async def test_lifespan_attempts_sandbox_and_proxy_shutdown_after_service_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"z" * 32))
+
+    class FailingService(_Service):
+        async def shutdown(self) -> None:
+            self.started = False
+            raise RuntimeError("configured service shutdown failure")
+
+    class ProxyClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    proxies: list[ProxyClient] = []
+
+    def proxy_factory(**kwargs: object) -> ProxyClient:
+        proxy = ProxyClient(**kwargs)
+        proxies.append(proxy)
+        return proxy
+
+    monkeypatch.setattr(host_app_module.httpx, "AsyncClient", proxy_factory)
+    service = FailingService(store)
+    sandbox = _SandboxSupervisor()
+    app = create_host_app(store=store, service=service, sandbox_supervisor=sandbox)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="configured service shutdown failure"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert sandbox.stopped is True
+    assert proxies[0].closed is True
 
 
 def _parts(tmp_path: Path) -> tuple[HostStore, _Service]:
@@ -200,6 +243,46 @@ def test_host_health_uses_cached_sandbox_status(tmp_path: Path) -> None:
     assert sandbox.start_attempts == 1
     assert sandbox.require_ready_calls == 1
     assert sandbox.status_calls == 3
+
+
+def test_evolution_probation_proxy_forwards_candidate_but_activation_is_fenced(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    store, service = _parts(tmp_path)
+    service.runtime.status = "probation"
+    service.runtime.endpoint = "http://candidate.runtime:8123"
+    requests: list[httpx.Request] = []
+
+    class ResponseStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> Any:
+            yield b'{"served_by":"candidate"}'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            stream=ResponseStream(),
+        )
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(host_app_module.httpx, "AsyncClient", lambda **kwargs: upstream)
+    app = create_host_app(
+        store=store,
+        service=service,  # type: ignore[arg-type]
+        sandbox_supervisor=_SandboxSupervisor(),
+    )
+    with TestClient(app) as client:
+        proxied = client.get("/v2/agent/threads?limit=3")
+        service.activating = True
+        fenced = client.get("/v2/agent/threads?limit=4")
+    assert proxied.status_code == 200
+    assert proxied.json() == {"served_by": "candidate"}
+    assert len(requests) == 1
+    assert str(requests[0].url) == "http://candidate.runtime:8123/v2/agent/threads?limit=3"
+    assert fenced.status_code == 503
+    assert fenced.json()["detail"] == "OpenTulpa runtime is activating"
 
 
 def test_host_lifespan_does_not_start_runtime_when_sandbox_start_fails(

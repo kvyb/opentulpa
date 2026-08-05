@@ -5,14 +5,14 @@
   </picture>
 </p>
 
-No static agent harness can be great at every job. OpenTulpa aims to solve this by
-evolving its own code for your specific use cases.
+OpenTulpa is a self-hosted Deep Agents application that can evaluate and publish changes
+to its own source without replacing the stable host controller.
 
 ## Get started
 
-OpenTulpa needs Git, curl, and a model API key. The installer handles the rest.
-
-### Run locally
+OpenTulpa needs Git, curl, and a model API key. The installer builds an immutable,
+content-addressed controller wheel and virtualenv generation, then points the stable
+launcher at it.
 
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
@@ -21,67 +21,43 @@ cd opentulpa
 opentulpa
 ```
 
-Choose **Run here** and enter your model API key. OpenTulpa starts a private server on
-your computer and opens the terminal interface.
+Choose **Run here** and enter the model API key. Persistent product state is kept outside
+the installed generation. Python virtual environments are not portable, so each venv is
+built at its final path for the target machine; see the
+[Python venv documentation](https://docs.python.org/3/library/venv.html).
 
-### Use a hosted server
+## Deployment
 
-OpenTulpa is self-hosted. Run the server on Railway, with Docker, or on your own VM.
+OpenTulpa can serve immutable releases locally, in Docker Compose, or on Railway.
+Railway serves immutable installed releases but does not self-mutate their source.
+Strong source mutation and evaluation isolation is supported only on rootful Linux with
+working `bwrap` namespaces and the required Docker Compose capabilities. Unsupported
+namespace environments, non-root Linux, macOS, and Railway fail closed for source
+mutation while immutable serving continues.
 
-**Railway:** deploy this repository, attach a persistent volume at
-`/app/opentulpa_data`, and set
-`OPENTULPA_DATA_ROOT=/app/opentulpa_data`. The included
-[Railway config](railway.toml) supplies the start command and health check.
+Docker Compose requires the documented rootful capabilities and relaxed confinement for
+the namespace sandbox. Treat that as a hardened-production consideration, not as a
+general-purpose container hardening profile. See [Deployment](docs/DEPLOYMENT.md).
+The image starts the immutable host controller directly; managed OCI candidates use its
+trusted interpreter and a reviewed source overlay rather than a mutable `/app/.venv`.
 
-**Docker:**
+## How self-evolution works
 
-```bash
-git clone https://github.com/kvyb/opentulpa.git
-cd opentulpa
-cp .env.example .env
-docker compose up --build
-```
+1. The stable controller opens a detached Git candidate worktree.
+2. Native Git refs retain instance and upstream lineage; native merge state records and
+   exposes conflicts instead of inventing a parallel conflict format.
+3. On supported rootful Linux, the candidate and evaluator run with separate UIDs and
+   capability boundaries. The candidate workspace is never the serving source tree.
+4. Optional dependency proposals go through a credential-free, content-addressed OCI
+   resolver; fixed evaluation and generation building use its exact lock and wheelhouse.
+5. Promotion is a stop/start-fenced cutover with an availability gap, strict readiness,
+   and live probation. It is not standby or zero-downtime promotion.
+6. A failure restores the exact previous generation and its recorded HostConfig. Product
+   database mutations and external side effects are not rewound.
 
-Keep the `opentulpa_data` volume. It stores conversations, settings, and the agent's
-release history.
-
-Once the server is running, copy the one-time pairing code from its logs. Install the
-terminal client on your computer using the local steps above, then connect:
-
-```bash
-opentulpa connect https://your-opentulpa.example
-```
-
-Paste the pairing code when prompted. See the
-[deployment guide](docs/DEPLOYMENT.md) for domains, environment variables, and managed
-VM setup.
-
-## Details
-
-### Capabilities
-
-- The terminal, Telegram, schedules, and Agent API all talk to the same agent.
-- Conversations keep their messages, memory, skills, files, and workspaces.
-- Repository work runs in isolated checkouts. OpenTulpa can edit code, run tests, commit
-  the result, and publish that exact commit as a pull request.
-- Optional adapters add browser access, web search, Composio integrations, document
-  tools, and hosted sandboxes.
-- OpenTulpa works with OpenAI-compatible model providers and supports ChatGPT Codex
-  device login.
-
-### How self-evolution works
-
-OpenTulpa can inspect its own source code and redacted execution traces. When a change
-could help with your work:
-
-1. The agent makes the change in an isolated Git worktree.
-2. The fixed host tests the exact candidate commit.
-3. The host starts the candidate and checks that it stays healthy.
-4. If it fails, the host restores the previous healthy release.
-
-The agent can change its runtime, prompts, tools, integrations, and interfaces. It
-cannot access host credentials or release controls. The fixed host remains responsible
-for evaluation, activation, and rollback.
+The active child cannot survive normal promotion: it is drained and stopped before the
+new child starts. The stable host/controller and its `current` and `previous` generation
+references remain in place throughout.
 
 ## Documentation
 
@@ -89,6 +65,5 @@ for evaluation, activation, and rollback.
 - [Deployment](docs/DEPLOYMENT.md)
 - [Tool contract](docs/tool-contract.md)
 - [E2E testing](docs/E2E_TESTING.md)
-- [Prompt cookbook](docs/CHAT_COOKBOOK.md)
 
 MIT licensed.

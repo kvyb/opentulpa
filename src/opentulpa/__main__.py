@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import secrets
 import shutil
+import stat
 import sys
 import threading
 from dataclasses import dataclass
@@ -53,6 +55,7 @@ from opentulpa.capabilities import (
     CapabilityWorkerManager,
     SubprocessWorkerHost,
 )
+from opentulpa.capability_workers.state import TelegramWorkerState
 from opentulpa.context.customer_profiles import CustomerProfileService
 from opentulpa.context.file_vault import FileVaultService
 from opentulpa.core.config import (
@@ -60,7 +63,9 @@ from opentulpa.core.config import (
     get_openai_compatible_api_key_from_env,
     get_settings,
 )
+from opentulpa.core.paths import RuntimePaths
 from opentulpa.core.public_urls import resolve_public_base_url
+from opentulpa.core.release_runtime import ReleaseRuntimeIdentity, release_consumers_enabled
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
 from opentulpa.deep_agent.process_sandbox import RestrictedProcessExecutionProvider
@@ -259,10 +264,101 @@ def _resolve_path(project_root: Path, configured: str | Path) -> Path:
     if not path.is_absolute():
         data_root = str(os.environ.get("OPENTULPA_DATA_ROOT", "") or "").strip()
         if data_root and path.parts and path.parts[0] == ".opentulpa":
-            path = Path(data_root).expanduser() / path
+            resolved_data_root = Path(data_root).expanduser()
+            if not resolved_data_root.is_absolute():
+                resolved_data_root = project_root / resolved_data_root
+            path = resolved_data_root / path
         else:
             path = project_root / path
     return path.resolve()
+
+
+def _private_runtime_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError("runtime state directory ownership or links are unsafe")
+    path.chmod(0o700)
+
+
+def _seed_dynamic_host_telegram_identity(
+    *,
+    data_root: Path,
+    capability_state_root: Path,
+    tenant_id: str,
+) -> None:
+    raw_identity = os.environ.get("OPENTULPA_TELEGRAM_OWNER_ID")
+    if raw_identity is None:
+        return
+    state_path = (
+        capability_state_root / tenant_namespace_label(tenant_id) / "telegram.json"
+    ).absolute()
+    _require_private_child_path(data_root.absolute(), state_path.parent)
+    if os.path.lexists(state_path):
+        metadata = state_path.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise RuntimeError("Telegram state file ownership or links are unsafe")
+    cleaned = str(raw_identity).strip()
+    if not cleaned:
+        if os.path.lexists(state_path):
+            state_path.unlink()
+        return
+    if not cleaned.isdigit() or int(cleaned) < 1:
+        raise RuntimeError("dynamic host Telegram owner identity is invalid")
+    owner_id = int(cleaned)
+    state = TelegramWorkerState(state_path)
+    existing = state.paired_identity()
+    if existing is not None and existing != (owner_id, owner_id):
+        raise RuntimeError(
+            "Telegram is paired to another owner; disconnect it before changing owner ID"
+        )
+    if not state.pair(user_id=owner_id, chat_id=owner_id):
+        raise RuntimeError("Telegram owner identity could not be seeded")
+    metadata = state_path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError("Telegram state file changed during startup seeding")
+    state_path.chmod(0o600)
+
+
+def _require_private_child_path(root: Path, target: Path) -> None:
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise RuntimeError("Telegram state path escaped the product root") from None
+    current = Path(root.anchor)
+    for component in root.parts[1:]:
+        current /= component
+        if os.path.lexists(current) and stat.S_ISLNK(current.lstat().st_mode):
+            raise RuntimeError("Telegram state path has a symbolic-link ancestor")
+    relative = target.relative_to(root)
+    current = root
+    for component in relative.parts:
+        current /= component
+        if not os.path.lexists(current):
+            current.mkdir(mode=0o700)
+        metadata = current.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise RuntimeError("Telegram state directory ownership or links are unsafe")
+        current.chmod(0o700)
 
 
 def _build_evolution_client(
@@ -270,6 +366,8 @@ def _build_evolution_client(
     project_root: Path,
     settings: Settings,
 ) -> EvolutionClient | None:
+    if not release_consumers_enabled():
+        return None
     base_url = str(os.environ.get("OPENTULPA_BOOTSTRAP_EVOLUTION_URL", "") or "").strip()
     token = str(os.environ.get("OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN", "") or "").strip()
     if not settings.evolution_enabled or (not base_url and not token):
@@ -501,18 +599,30 @@ def _alias_directory_into_data_root(project_root: Path, data_root: Path, name: s
     link_path.symlink_to(target_path, target_is_directory=True)
 
 
-def _bootstrap_persistent_storage(project_root: Path, data_root: str | None) -> None:
+def _bootstrap_persistent_storage(
+    project_root: Path,
+    data_root: str | None,
+    *,
+    legacy_source_mode: bool = True,
+) -> None:
+    if not legacy_source_mode:
+        if not project_root.is_absolute():
+            raise RuntimeError("installed application root must be an absolute path")
+        try:
+            project_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"cannot create application root: {project_root}") from exc
+        if not project_root.is_dir():
+            raise RuntimeError(f"application root is not a directory: {project_root}")
     raw_root = str(data_root or "").strip()
     if not raw_root:
         return
     resolved_root = _resolve_path(project_root, raw_root)
     resolved_root.mkdir(parents=True, exist_ok=True)
-    if str(os.environ.get("OPENTULPA_MANAGED_RELEASE", "") or "").strip().casefold() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    managed_release = str(
+        os.environ.get("OPENTULPA_MANAGED_RELEASE", "") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    if managed_release or not legacy_source_mode:
         (resolved_root / ".opentulpa").mkdir(parents=True, exist_ok=True)
         (resolved_root / "tulpa_stuff").mkdir(parents=True, exist_ok=True)
         return
@@ -591,6 +701,7 @@ def _build_release_control_service(
         return None
     if not release_id or not control_token:
         raise ReleaseControlConfigurationError("managed release control environment is incomplete")
+    control_handlers_enabled = release_consumers_enabled()
 
     async def run_message(
         *,
@@ -705,9 +816,7 @@ def _build_release_control_service(
 
     async def health_components() -> dict[str, bool]:
         runtime_healthy = agent_service.healthy()
-        consumers_enabled = str(
-            os.environ.get("OPENTULPA_DISABLE_CONSUMERS", "") or ""
-        ).strip().casefold() not in {"1", "true", "yes", "on"}
+        consumers_enabled = release_consumers_enabled()
         components = {
             "runtime": runtime_healthy,
             "agent_api": runtime_healthy,
@@ -717,8 +826,8 @@ def _build_release_control_service(
 
     return ReleaseControlService.from_environment(
         health_provider=health_components,
-        ingress_handler=handle_ingress,
-        event_handler=handle_event,
+        ingress_handler=handle_ingress if control_handlers_enabled else None,
+        event_handler=handle_event if control_handlers_enabled else None,
     )
 
 
@@ -727,6 +836,8 @@ def _auto_configure_telegram_webhook(
     *,
     webhook_secret: str | None = None,
 ) -> None:
+    if not release_consumers_enabled():
+        return
     bot_token = str(settings.telegram_bot_token or "").strip()
     if not bot_token:
         return
@@ -778,6 +889,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
     """Compose product services around one Deep Agents runtime."""
 
     project_root = project_root.expanduser().resolve()
+    consumers_enabled = release_consumers_enabled()
     api_key = str(
         settings.openai_compatible_api_key or get_openai_compatible_api_key_from_env() or ""
     ).strip()
@@ -800,7 +912,8 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         data_root = _resolve_path(project_root, ".opentulpa")
         deepagents_root = data_root / "deepagents"
         artifacts_root = deepagents_root / "artifacts"
-        artifacts_root.mkdir(parents=True, exist_ok=True)
+        for directory in (data_root, deepagents_root, artifacts_root):
+            _private_runtime_directory(directory)
         agent_spec_store = AgentSpecStore(deepagents_root / "agent_specs.db")
         trigger_spec_store = TriggerSpecStore(
             deepagents_root / "trigger_specs.db",
@@ -1100,10 +1213,17 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 raise RuntimeError(f"active {spec_id} AgentSpec is unavailable")
             return ref
 
-        bot_token = str(settings.telegram_bot_token or "").strip()
+        bot_token = (
+            str(settings.telegram_bot_token or "").strip() if consumers_enabled else ""
+        )
 
         capability_state_root = deepagents_root / "capability_state"
         capability_state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _seed_dynamic_host_telegram_identity(
+            data_root=data_root,
+            capability_state_root=capability_state_root,
+            tenant_id=owner_tenant_id,
+        )
 
         def capability_config_defaults(
             tenant_id: str,
@@ -1214,11 +1334,15 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         schedules = ScheduleService(
             trigger_specs,
             resolve_agent_spec=lambda tenant_id: resolve_agent_spec(tenant_id, "routine"),
-            on_changed=trigger_dispatcher.upsert,
-            on_deleted=lambda tenant_id, trigger_id: trigger_dispatcher.remove(
-                tenant_id=tenant_id,
-                trigger_id=trigger_id,
-            ),
+            on_changed=trigger_dispatcher.upsert if consumers_enabled else None,
+            on_deleted=(
+                lambda tenant_id, trigger_id: trigger_dispatcher.remove(
+                    tenant_id=tenant_id,
+                    trigger_id=trigger_id,
+                )
+            )
+            if consumers_enabled
+            else None,
         )
         schedule_port = ScheduleProductPort(schedules=schedules)
 
@@ -1281,8 +1405,8 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             trigger_specs=trigger_specs,
             secret_handles=secret_vault,
             sandbox_execution=cast(Any, sandbox_execution),
-            on_trigger_spec_changed=trigger_dispatcher.upsert,
-            capabilities=capabilities,
+            on_trigger_spec_changed=(trigger_dispatcher.upsert if consumers_enabled else None),
+            capabilities=capabilities if consumers_enabled else None,
             evolution_owner_tenant_id=owner_tenant_id,
         )
         product_tools = build_product_tools(
@@ -1345,7 +1469,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 business=telegram_business,
                 workflows=intake_workflows,
             )
-            if telegram_business is not None
+            if consumers_enabled and telegram_business is not None
             else None
         )
         release_control = _build_release_control_service(
@@ -1377,9 +1501,9 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             agent_spec_service=agent_specs,
             trigger_spec_service=trigger_specs,
             secret_vault_service=secret_vault,
-            capability_service=capabilities,
-            trigger_dispatcher=trigger_dispatcher,
-            intake_poll_dispatcher=intake_poller,
+            capability_service=capabilities if consumers_enabled else None,
+            trigger_dispatcher=trigger_dispatcher if consumers_enabled else None,
+            intake_poll_dispatcher=intake_poller if consumers_enabled else None,
             telegram_business_relay=telegram_business_relay,
             telegram_webhook_secret=telegram_webhook_secret,
             browser_service=browser,
@@ -1390,6 +1514,15 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             notification_service=notifications,
             inference_service=inference,
             repository_service=repositories,
+            startup_callback=(
+                lambda: asyncio.to_thread(
+                    _auto_configure_telegram_webhook,
+                    settings,
+                    webhook_secret=telegram_webhook_secret,
+                )
+            )
+            if consumers_enabled
+            else None,
         )
         app.state.owner_tenant_id = owner_tenant_id
         app.state.product_application = product_application
@@ -1418,14 +1551,18 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parents[2]
-    _bootstrap_persistent_storage(project_root, os.environ.get("OPENTULPA_DATA_ROOT"))
+    ReleaseRuntimeIdentity.from_environment()
+    release_consumers_enabled()
+    runtime_paths = RuntimePaths.from_environment()
+    project_root = runtime_paths.application_root
+    if runtime_paths.data_root is not None or runtime_paths.installed_generation:
+        _bootstrap_persistent_storage(
+            project_root,
+            str(runtime_paths.persistent_root),
+            legacy_source_mode=runtime_paths.legacy_source_mode,
+        )
     settings = get_settings()
     composition = build_application(project_root=project_root, settings=settings)
-    _auto_configure_telegram_webhook(
-        settings,
-        webhook_secret=composition.telegram_webhook_secret,
-    )
     try:
         uvicorn.run(
             composition.app,

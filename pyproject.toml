@@ -3,7 +3,7 @@ name = "opentulpa"
 version = "0.1.0"
 description = "A self-hosted Deep Agents operator with explicit product and safety boundaries"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 authors = [
     { name = "kvyb", email = "you@example.com" }
 ]
@@ -93,7 +93,7 @@ migration = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -131,11 +131,14 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
+addopts = "-m 'not slow'"
 pythonpath = ["src"]
 markers = [
     "e2e: end-to-end test suite",
+    "integration: exercises integration boundaries with real local processes or artifacts",
     "live_llm: requires OPENAI_COMPATIBLE_API_KEY",
     "real_composio: may create/write real Composio-backed resources",
+    "slow: test is excluded from the fast default suite",
     "telegram: exercises telegram webhook path",
     "ingress: exercises instagram ingress/intake path",
 ]

@@ -486,6 +486,17 @@ class RepositoryPort(Protocol):
         draft: bool,
     ) -> Any: ...
 
+    async def import_verified_patch(
+        self,
+        *,
+        tenant_id: str,
+        thread_id: str,
+        workspace_id: str,
+        patch: bytes,
+        expected_sha256: str,
+        message: str,
+    ) -> Any: ...
+
 
 class EvolutionPort(Protocol):
     async def source_status(
@@ -501,6 +512,31 @@ class EvolutionPort(Protocol):
         timeout_seconds: int = 300,
         audit_context: Mapping[str, str] | None = None,
     ) -> Any: ...
+
+    async def source_sync_upstream(
+        self,
+        *,
+        expected_active_release_id: str,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> Any: ...
+
+    async def source_resolve_dependencies(
+        self,
+        *,
+        expected_candidate_id: str,
+        expected_diff_sha256: str,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> Any: ...
+
+    async def prepare_contribution(
+        self,
+        candidate_id: str,
+        *,
+        expected_revision: int | None = None,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> Any: ...
+
+    async def review_patch(self, candidate_id: str) -> Path: ...
 
     async def source_release(
         self,
@@ -2171,6 +2207,117 @@ class ProductToolApplication:
         return await self._output(
             invocation,
             lambda: evolution.source_status(
+                audit_context=self._evolution_audit_context(invocation),
+            ),
+        )
+
+    async def source_sync_upstream(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput:
+        evolution = self._require_evolution(invocation)
+        return await self._output(
+            invocation,
+            lambda: evolution.source_sync_upstream(
+                expected_active_release_id=str(
+                    invocation.arguments["expected_active_release_id"]
+                ),
+                audit_context=self._evolution_audit_context(invocation),
+            ),
+        )
+
+    async def source_prepare_pr(self, invocation: ProductToolInvocation) -> ProductToolOutput:
+        evolution = self._require_evolution(invocation)
+        repositories = self._require_repositories(invocation)
+
+        async def prepare() -> Any:
+            candidate = await _resolve(
+                evolution.prepare_contribution(
+                    candidate_id=str(invocation.arguments["candidate_id"]),
+                    expected_revision=int(invocation.arguments["expected_revision"]),
+                    audit_context=self._evolution_audit_context(invocation),
+                )
+            )
+            candidate_data = _structured(candidate, mode="python")
+            contribution = (
+                candidate_data.get("contribution")
+                if isinstance(candidate_data, Mapping)
+                else None
+            )
+            if not isinstance(contribution, Mapping) or contribution.get("sanitized") is not True:
+                raise ProductToolApplicationError(
+                    "invalid_service_response",
+                    "The source contribution was not sanitized.",
+                )
+            metadata = contribution.get("metadata")
+            digest = (
+                str(metadata.get("patch_sha256") or "").strip().lower()
+                if isinstance(metadata, Mapping)
+                else ""
+            )
+            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+                raise ProductToolApplicationError(
+                    "invalid_service_response",
+                    "The source contribution digest is invalid.",
+                )
+            patch_path = await _resolve(
+                evolution.review_patch(candidate_id=str(invocation.arguments["candidate_id"]))
+            )
+            patch = Path(patch_path).read_bytes()
+            if hashlib.sha256(patch).hexdigest() != digest:
+                raise ProductToolApplicationError(
+                    "invalid_service_response",
+                    "The source contribution changed before export.",
+                )
+            workspace = await _resolve(
+                repositories.open(
+                    tenant_id=invocation.context.tenant_id,
+                    thread_id=invocation.context.thread_id,
+                    repository_url=str(contribution["upstream_repository"]),
+                    base_ref=str(invocation.arguments["base_ref"]),
+                    branch=cast("str | None", invocation.arguments.get("branch"))
+                    or str(contribution["branch_name"]),
+                    provider=cast("str | None", invocation.arguments.get("provider")),
+                )
+            )
+            workspace_id = _resource_id(workspace, "id", "workspace_id")
+            if not workspace_id:
+                raise ProductToolApplicationError(
+                    "invalid_service_response",
+                    "The contribution repository workspace was not created.",
+                )
+            imported = await _resolve(
+                repositories.import_verified_patch(
+                    tenant_id=invocation.context.tenant_id,
+                    thread_id=invocation.context.thread_id,
+                    workspace_id=workspace_id,
+                    patch=patch,
+                    expected_sha256=digest,
+                    message=str(invocation.arguments["message"]),
+                )
+            )
+            result = dict(_structured(imported, mode="python"))
+            result.update(
+                {
+                    "candidate_id": str(invocation.arguments["candidate_id"]),
+                    "candidate_revision": int(invocation.arguments["expected_revision"]),
+                    "requires_tests_before_publish": True,
+                }
+            )
+            return result
+
+        return await self._idempotent_output(invocation, prepare)
+
+    async def source_resolve_dependencies(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput:
+        evolution = self._require_evolution(invocation)
+        return await self._output(
+            invocation,
+            lambda: evolution.source_resolve_dependencies(
+                expected_candidate_id=str(invocation.arguments["expected_candidate_id"]),
+                expected_diff_sha256=str(invocation.arguments["expected_diff_sha256"]),
                 audit_context=self._evolution_audit_context(invocation),
             ),
         )

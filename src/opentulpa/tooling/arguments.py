@@ -508,6 +508,24 @@ class SourceStatusArguments(ToolArguments):
     pass
 
 
+class SourceSyncUpstreamArguments(ToolArguments):
+    expected_active_release_id: str = Field(min_length=1, max_length=100)
+
+
+class SourcePreparePullRequestArguments(RequiredIdempotencyArguments):
+    candidate_id: str = Field(min_length=1, max_length=100)
+    expected_revision: int = Field(ge=1)
+    base_ref: str = Field(default="main", min_length=1, max_length=300)
+    branch: str | None = Field(default=None, min_length=1, max_length=250)
+    provider: Literal["auto", "local", "daytona"] = "auto"
+    message: str = Field(default="Apply tested OpenTulpa evolution", min_length=1, max_length=500)
+
+
+class SourceResolveDependenciesArguments(ToolArguments):
+    expected_candidate_id: str = Field(min_length=1, max_length=100)
+    expected_diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class SourceShellArguments(ToolArguments):
     command: str = Field(min_length=1, max_length=100_000)
     timeout_seconds: int = Field(default=300, ge=1, le=600)
@@ -614,6 +632,9 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "repository_close": RepositoryCloseArguments,
         "repository_publish_pr": RepositoryPublishPullRequestArguments,
         "source_status": SourceStatusArguments,
+        "source_sync_upstream": SourceSyncUpstreamArguments,
+        "source_prepare_pr": SourcePreparePullRequestArguments,
+        "source_resolve_dependencies": SourceResolveDependenciesArguments,
         "source_shell": SourceShellArguments,
         "source_release": SourceReleaseArguments,
         "source_rollback": SourceRollbackArguments,

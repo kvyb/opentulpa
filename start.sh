@@ -877,7 +877,7 @@ ensure_required_env() {
 
 install_python_deps() {
   ensure_uv
-  local -a arguments=(sync --no-dev)
+  local -a arguments=(sync --frozen --no-dev)
   local extra
   for extra in "${SELECTED_EXTRAS[@]-}"; do
     [[ -n "${extra}" ]] || continue
@@ -1016,6 +1016,16 @@ run_app() {
 }
 
 run_host() {
+  if [[ -n "${OPENTULPA_CONTROLLER_EXECUTABLE:-}" ]]; then
+    [[ -x "${OPENTULPA_CONTROLLER_EXECUTABLE}" ]] \
+      || die "OPENTULPA_CONTROLLER_EXECUTABLE is not executable"
+    if ((${#PASSTHRU[@]})); then
+      run_cmd "${OPENTULPA_CONTROLLER_EXECUTABLE}" "${PASSTHRU[@]}"
+    else
+      run_cmd "${OPENTULPA_CONTROLLER_EXECUTABLE}"
+    fi
+    return 0
+  fi
   ensure_uv
   if ((${#PASSTHRU[@]})); then
     run_cmd uv run --no-sync python -m opentulpa.host "${PASSTHRU[@]}"

@@ -262,7 +262,7 @@ async def test_rootless_oci_host_enforces_immutable_isolated_release_contract(
         assert "OPENTULPA_DATA_ROOT=/workspace" in config["Env"]
         assert "OPENAI_COMPATIBLE_API_KEY=not-on-command-line" in config["Env"]
         assert "PYTHONNOUSERSITE=1" in config["Env"]
-        assert "PYTHONPATH=" in config["Env"]
+        assert "PYTHONPATH=/app/src" in config["Env"]
         assert "PYTHONSAFEPATH=1" in config["Env"]
 
         await host.stop(running)

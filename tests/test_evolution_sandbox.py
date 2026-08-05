@@ -11,6 +11,7 @@ from opentulpa.evolution import sandbox as sandbox_module
 from opentulpa.evolution.process import BoundedProcessResult
 from opentulpa.evolution.sandbox import (
     CandidateContainerBackend,
+    CandidateProcessBackend,
     CandidateSandboxPolicy,
     resolve_local_oci_image,
 )
@@ -48,6 +49,149 @@ def test_candidate_sandbox_policy_rejects_unbounded_configuration() -> None:
         CandidateSandboxPolicy(image="python; unsafe")
     with pytest.raises(ValueError, match="timeout"):
         CandidateSandboxPolicy(timeout_seconds=0)
+
+
+def test_strong_process_command_has_only_explicit_mounts_and_private_namespaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "candidate"
+    controller = tmp_path / "controller-tools"
+    wheelhouse = tmp_path / "wheelhouse"
+    workspace.mkdir()
+    controller.mkdir()
+    wheelhouse.mkdir()
+    monkeypatch.setattr(
+        sandbox_module,
+        "_system_mount_arguments",
+        lambda: ["--ro-bind", "/usr", "/usr", "--dir", "/etc"],
+    )
+
+    argv = sandbox_module._build_bubblewrap_argv(  # noqa: SLF001
+        setpriv=Path("/usr/bin/setpriv"),
+        bwrap=Path("/usr/bin/bwrap"),
+        prlimit=Path("/usr/bin/prlimit"),
+        uid=65_533,
+        gid=65_533,
+        workspace=workspace,
+        workspace_read_only=False,
+        read_only_mounts=((controller, "/opt/controller-tools"), (wheelhouse, "/wheelhouse")),
+        environment={"PATH": "/controller/bin:/usr/bin:/bin", "UV_OFFLINE": "1"},
+        command=("/bin/sh", "-c", "true"),
+        memory_bytes=1024 * 1024 * 1024,
+        pid_limit=64,
+        file_bytes=1024 * 1024,
+        cpu_seconds=30,
+    )
+
+    assert argv[0] == "/usr/bin/bwrap"
+    assert {
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+    } <= set(argv)
+    shm_index = argv.index("/dev/shm")
+    assert argv[shm_index - 1 : shm_index + 5] == [
+        "--tmpfs",
+        "/dev/shm",
+        "--chmod",
+        "1777",
+        "/dev/shm",
+        "--tmpfs",
+    ]
+    command_separator = argv.index("--")
+    assert argv[command_separator + 1 : command_separator + 10] == [
+        "/usr/bin/setpriv",
+        "--reuid=65533",
+        "--regid=65533",
+        "--clear-groups",
+        "--no-new-privs",
+        "--bounding-set=-all",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "/usr/bin/prlimit",
+    ]
+    binds = [
+        tuple(argv[index : index + 3])
+        for index, value in enumerate(argv)
+        if value in {"--bind", "--ro-bind"}
+    ]
+    assert ("--bind", str(workspace), "/workspace") in binds
+    assert ("--ro-bind", str(controller), "/opt/controller-tools") in binds
+    assert ("--ro-bind", str(wheelhouse), "/wheelhouse") in binds
+    parent_index = argv.index("/opt") - 1
+    assert argv[parent_index : parent_index + 5] == [
+        "--dir",
+        "/opt",
+        "--chmod",
+        "0755",
+        "/opt",
+    ]
+    assert all(source != "/" and destination != "/" for _, source, destination in binds)
+    assert not any("product" in source or "bootstrap" in source for _, source, _ in binds)
+    assert "--share-net" not in argv
+    assert argv[argv.index("--setenv") + 1 : argv.index("--setenv") + 3] == [
+        "PATH",
+        "/controller/bin:/usr/bin:/bin",
+    ]
+
+
+@pytest.mark.parametrize("destination", ("//opt/tools", "/opt/./tools", "/opt/../tools", "/"))
+def test_bubblewrap_rejects_noncanonical_mount_destinations(
+    tmp_path: Path,
+    destination: str,
+) -> None:
+    with pytest.raises(ValueError, match="destination"):
+        sandbox_module._build_bubblewrap_argv(  # noqa: SLF001
+            setpriv=Path("/usr/bin/setpriv"),
+            bwrap=Path("/usr/bin/bwrap"),
+            prlimit=Path("/usr/bin/prlimit"),
+            uid=65_533,
+            gid=65_533,
+            workspace=tmp_path,
+            workspace_read_only=False,
+            read_only_mounts=((tmp_path, destination),),
+            environment={"PATH": "/usr/bin:/bin"},
+            command=("/bin/sh", "-c", "true"),
+            memory_bytes=1024 * 1024 * 1024,
+            pid_limit=64,
+            file_bytes=1024 * 1024,
+            cpu_seconds=30,
+        )
+
+
+def test_bubblewrap_does_not_recreate_system_mount_parents(tmp_path: Path) -> None:
+    argv = sandbox_module._build_bubblewrap_argv(  # noqa: SLF001
+        setpriv=Path("/usr/bin/setpriv"),
+        bwrap=Path("/usr/bin/bwrap"),
+        prlimit=Path("/usr/bin/prlimit"),
+        uid=65_533,
+        gid=65_533,
+        workspace=tmp_path,
+        workspace_read_only=False,
+        read_only_mounts=((tmp_path, "/usr/local/opentulpa"),),
+        environment={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+        command=("/bin/sh", "-c", "true"),
+        memory_bytes=1024 * 1024 * 1024,
+        pid_limit=64,
+        file_bytes=1024 * 1024,
+        cpu_seconds=30,
+    )
+
+    setup = argv[: argv.index("--")]
+    assert ("--dir", "/usr/local") not in zip(setup, setup[1:], strict=False)
+
+
+def test_process_backend_fails_closed_without_linux_namespaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Darwin")
+
+    assert CandidateProcessBackend.is_supported() is False
+    assert (
+        CandidateProcessBackend.unavailable_reason() == "strong sandbox requires Linux namespaces"
+    )
 
 
 @pytest.mark.parametrize(

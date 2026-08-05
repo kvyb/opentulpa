@@ -1,6 +1,7 @@
 # opentulpa: allow-test-credential
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 import subprocess
@@ -364,6 +365,15 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
             "current_release_id": "release-current",
             "rollback_target_release_id": "release-prior",
         },
+        source_sync_upstream={
+            "synced": True,
+            "candidate_id": "candidate-1",
+            "upstream_commit": "a" * 40,
+        },
+        source_resolve_dependencies={
+            "candidate_id": "candidate-1",
+            "dependency_base_id": "b" * 64,
+        },
         source_shell={
             "candidate": {
                 "id": "candidate-1",
@@ -382,6 +392,23 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
     application, ports = _application(evolution=evolution)
 
     status = await application.source_status(_invocation("source_status", {}, idempotency_key=None))
+    synced = await application.source_sync_upstream(
+        _invocation(
+            "source_sync_upstream",
+            {"expected_active_release_id": "release-current"},
+            idempotency_key=None,
+        )
+    )
+    dependencies = await application.source_resolve_dependencies(
+        _invocation(
+            "source_resolve_dependencies",
+            {
+                "expected_candidate_id": "candidate-1",
+                "expected_diff_sha256": "d" * 64,
+            },
+            idempotency_key=None,
+        )
+    )
     shell = await application.source_shell(
         _invocation(
             "source_shell",
@@ -414,6 +441,8 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
     )
 
     assert status.data["candidate_id"] == "candidate-1"
+    assert synced.data["upstream_commit"] == "a" * 40
+    assert dependencies.data["dependency_base_id"] == "b" * 64
     assert shell.data["candidate"] == {"id": "candidate-1", "status": "building"}
     assert shell.data["output"] == "tests passed"
     assert released.data["promotion"]["id"] == "promotion-1"
@@ -431,6 +460,21 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
     }
     assert evolution.calls == [
         ("source_status", {"audit_context": audit_context}),
+        (
+            "source_sync_upstream",
+            {
+                "expected_active_release_id": "release-current",
+                "audit_context": audit_context,
+            },
+        ),
+        (
+            "source_resolve_dependencies",
+            {
+                "expected_candidate_id": "candidate-1",
+                "expected_diff_sha256": "d" * 64,
+                "audit_context": audit_context,
+            },
+        ),
         (
             "source_shell",
             {
@@ -475,6 +519,75 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
                 idempotency_key=None,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_source_prepare_pr_exports_digest_bound_patch_to_clean_repository(
+    tmp_path: Path,
+) -> None:
+    patch = b"diff --git a/README.md b/README.md\n"
+    digest = hashlib.sha256(patch).hexdigest()
+    patch_path = tmp_path / "candidate.patch"
+    patch_path.write_bytes(patch)
+    evolution = _Port(
+        prepare_contribution={
+            "id": "candidate-1",
+            "revision": 7,
+            "contribution": {
+                "upstream_repository": "https://github.com/kvyb/opentulpa",
+                "branch_name": "opentulpa/candidate-1",
+                "sanitized": True,
+                "metadata": {"patch_sha256": digest},
+            },
+        },
+        review_patch=patch_path,
+    )
+    repositories = _Port(
+        open={"id": "repo-1", "tenant_id": "tenant-a"},
+        import_verified_patch={
+            "workspace_id": "repo-1",
+            "head_sha": "a" * 40,
+            "patch_sha256": digest,
+        },
+    )
+    application, ports = _application(evolution=evolution, repositories=repositories)
+
+    prepared = await application.source_prepare_pr(
+        _invocation(
+            "source_prepare_pr",
+            {
+                "candidate_id": "candidate-1",
+                "expected_revision": 7,
+                "base_ref": "main",
+                "branch": None,
+                "provider": "auto",
+                "message": "Apply tested evolution",
+            },
+            idempotency_key="prepare-pr-1",
+        )
+    )
+
+    assert prepared.data["workspace_id"] == "repo-1"
+    assert prepared.data["candidate_id"] == "candidate-1"
+    assert prepared.data["requires_tests_before_publish"] is True
+    assert evolution.calls[0][0] == "prepare_contribution"
+    assert evolution.calls[1] == ("review_patch", {"candidate_id": "candidate-1"})
+    assert repositories.calls[0] == (
+        "open",
+        {
+            "tenant_id": "tenant-a",
+            "thread_id": "thread-1",
+            "repository_url": "https://github.com/kvyb/opentulpa",
+            "base_ref": "main",
+            "branch": "opentulpa/candidate-1",
+            "provider": "auto",
+        },
+    )
+    imported = repositories.calls[1]
+    assert imported[0] == "import_verified_patch"
+    assert imported[1]["patch"] == patch
+    assert imported[1]["expected_sha256"] == digest
+    assert ports["idempotency"].calls[0][1]["operation"] == "source_prepare_pr"
 
 
 @pytest.mark.asyncio

@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import getpass
 import hashlib
 import json
+import math
 import os
 import platform
 import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from contextlib import suppress
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +26,7 @@ import httpx
 import uvicorn
 from pydantic import SecretStr
 
+import opentulpa
 from opentulpa.client.config import (
     ClientConfigError,
     Connection,
@@ -36,16 +41,32 @@ from opentulpa.client.local_server import (
     LocalServerError,
     ensure_local_server,
     is_loopback_url,
+    restart_remembered_local_server,
 )
 from opentulpa.core.config import get_settings
+from opentulpa.evolution.generation_store import GenerationStore
+from opentulpa.evolution.models import Release
 from opentulpa.host.app import create_host_app
 from opentulpa.host.evolution_composition import build_host_evolution_runtime
 from opentulpa.host.models import HostConfigInput
-from opentulpa.host.runtime import RuntimeSupervisor
+from opentulpa.host.paths import HostPaths
+from opentulpa.host.runtime import RuntimeGenerationSpec, RuntimeSupervisor
 from opentulpa.host.service import HostService
 from opentulpa.host.store import HostStore
 from opentulpa.sandbox.supervisor import SandboxWorkerSupervisor
+from opentulpa.secrets.cipher import AesGcmHostKeyCipher
 from opentulpa.secrets.host_key import load_or_create_host_cipher
+
+HOST_GENERATION_DEPENDENCIES = {
+    "source_seed": "/opt/opentulpa-source",
+    "wheelhouse": "/opt/opentulpa-wheelhouse",
+}
+
+
+class HostInstallRequiredError(RuntimeError):
+    """An installed-wheel host has no trusted inputs for its first generation."""
+
+    status = "install_required"
 
 
 def _private_token(path: Path) -> str:
@@ -89,25 +110,28 @@ def _private_pairing_code(path: Path) -> str:
 
 
 def build_host_application() -> tuple[Any, str, str, Path]:
-    configured_source = str(os.environ.get("OPENTULPA_SOURCE_ROOT") or "").strip()
-    project_root = (
-        Path(configured_source).expanduser().resolve()
-        if configured_source
-        else Path(__file__).resolve().parents[3]
-    )
+    probation_seconds, probation_probe_interval_seconds = _runtime_probation_settings()
+    paths = HostPaths.from_environment()
+    paths.provision()
+    project_root = _host_application_root()
     settings = get_settings()
-    configured_root = str(os.environ.get("OPENTULPA_DATA_ROOT") or "").strip()
-    data_root = (
-        Path(configured_root).expanduser()
-        if configured_root
-        else Path.home() / ".local" / "share" / "opentulpa"
-    ).resolve()
-    data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    setup_token = _private_pairing_code(data_root / "bootstrap" / "host-setup.token")
-    evolution_token = _private_token(data_root / "bootstrap" / "evolution.token")
+    generation_store = GenerationStore(
+        paths.generations_root,
+        control_root=paths.control_root / "evolution" / "generation-store",
+        quarantine_root=paths.control_root / "evolution" / "generation-quarantine",
+    )
+    generation_store.cleanup_incomplete()
+    recovered_generation = _require_installed_host_dependencies(
+        project_root,
+        settings=settings,
+        paths=paths,
+        generation_store=generation_store,
+    )
+    setup_token = _private_pairing_code(paths.control_root / "host-setup.token")
+    evolution_token = _private_token(paths.control_root / "evolution.token")
     store = HostStore(
-        data_root / "bootstrap" / "host.db",
-        cipher=load_or_create_host_cipher(data_root),
+        paths.control_root / "host.db",
+        cipher=_load_or_create_control_cipher(paths),
     )
     store.configure_setup_token(setup_token)
     host = str(os.environ.get("HOST") or "127.0.0.1").strip()
@@ -115,7 +139,7 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         os.environ.get("OPENTULPA_OWNER_TOKEN") or os.environ.get("OPENTULPA_WEB_TOKEN") or ""
     ).strip()
     if not owner_token and host in {"127.0.0.1", "localhost", "::1"}:
-        owner_token = _private_token(data_root / "bootstrap" / "owner.token")
+        owner_token = _private_token(paths.control_root / "owner.token")
     if owner_token and not store.claimed:
         store.claim(setup_token=setup_token, owner_token=owner_token)
 
@@ -139,10 +163,23 @@ def build_host_application() -> tuple[Any, str, str, Path]:
             telegram_bot_token=SecretStr(telegram_token),
             telegram_user_id=telegram_id,
         )
-    runtime = RuntimeSupervisor(project_root=project_root, data_root=data_root)
+    runtime = RuntimeSupervisor(
+        project_root=project_root,
+        data_root=paths.product_root,
+        application_root=paths.product_root,
+        generation_store=generation_store,
+        generation_spec=recovered_generation,
+        control_path=paths.runtime_control_path,
+        legacy_releases_root=paths.legacy_releases_root,
+        child_uid=paths.runtime_uid,
+        child_gid=paths.runtime_gid,
+        apply_child_identity_to_legacy=True,
+        probation_seconds=probation_seconds,
+        probation_probe_interval_seconds=probation_probe_interval_seconds,
+    )
     sandbox = SandboxWorkerSupervisor(
         project_root=project_root,
-        data_root=data_root,
+        data_root=paths.control_root / "sandbox-host",
         settings=settings,
     )
     runtime.configure_sandbox_worker(
@@ -150,11 +187,20 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         token=sandbox.config.token,
     )
     port = int(os.environ.get("PORT") or 8000)
-    evolution = build_host_evolution_runtime(
-        runtime=runtime,
-        data_root=data_root,
-        settings=settings,
+    evolution = (
+        build_host_evolution_runtime(
+            runtime=runtime,
+            data_root=paths.data_root,
+            control_root=paths.control_root,
+            product_root=paths.product_root,
+            generation_store=generation_store,
+            settings=settings,
+        )
+        if recovered_generation is None
+        else None
     )
+    if evolution is not None:
+        asyncio.run(evolution.prepare())
     if evolution is not None:
         runtime.configure_evolution_control(
             base_url=(f"http://127.0.0.1:{port}/bootstrap/internal/v1/evolution"),
@@ -175,7 +221,156 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         evolution_token=evolution_token if evolution is not None else None,
         sandbox_supervisor=sandbox,
     )
-    return app, host, setup_token, data_root
+    return app, host, setup_token, paths.data_root
+
+
+def _runtime_probation_settings() -> tuple[float, float]:
+    return (
+        _environment_duration("OPENTULPA_RUNTIME_PROBATION_SECONDS", default=30, allow_zero=True),
+        _environment_duration(
+            "OPENTULPA_RUNTIME_PROBATION_PROBE_INTERVAL_SECONDS",
+            default=1,
+            allow_zero=False,
+        ),
+    )
+
+
+def _environment_duration(name: str, *, default: float, allow_zero: bool) -> float:
+    raw = str(os.environ.get(name) or default).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a finite number") from exc
+    if not math.isfinite(value) or value < 0 or (not allow_zero and value == 0):
+        requirement = "nonnegative" if allow_zero else "positive"
+        raise RuntimeError(f"{name} must be a finite {requirement} number")
+    return value
+
+
+def _host_application_root() -> Path:
+    configured_source = str(os.environ.get("OPENTULPA_SOURCE_ROOT") or "").strip()
+    if configured_source:
+        source = Path(configured_source).expanduser().resolve()
+        if not _is_source_checkout(source):
+            raise RuntimeError("OPENTULPA_SOURCE_ROOT is not an OpenTulpa source checkout")
+        return source
+
+    inferred = Path(__file__).resolve().parents[3]
+    if _is_source_checkout(inferred):
+        return inferred
+
+    configured_assets = str(os.environ.get("OPENTULPA_INSTALL_ASSETS_ROOT") or "").strip()
+    if configured_assets:
+        assets = Path(configured_assets).expanduser().resolve()
+        if not (assets / "railway_sandbox_bridge" / "bridge.mjs").is_file():
+            raise RuntimeError("OPENTULPA_INSTALL_ASSETS_ROOT has no OpenTulpa bridge assets")
+        return assets
+
+    package_root = Path(str(resources.files(opentulpa))).resolve()
+    if not package_root.is_dir():
+        raise RuntimeError("installed OpenTulpa package resources are unavailable")
+    return package_root
+
+
+def _is_source_checkout(root: Path) -> bool:
+    return (
+        root.is_dir()
+        and (root / "pyproject.toml").is_file()
+        and (root / "src" / "opentulpa" / "__init__.py").is_file()
+    )
+
+
+def _require_installed_host_dependencies(
+    project_root: Path,
+    *,
+    settings: Any,
+    paths: HostPaths,
+    generation_store: GenerationStore,
+) -> RuntimeGenerationSpec | None:
+    if _is_source_checkout(project_root):
+        return None
+    configured_seed = str(os.environ.get("OPENTULPA_SOURCE_SEED_ROOT") or "").strip()
+    configured_wheelhouse = str(os.environ.get("OPENTULPA_TRUSTED_WHEELHOUSE") or "").strip()
+    seed = Path(configured_seed or HOST_GENERATION_DEPENDENCIES["source_seed"]).expanduser()
+    wheelhouse = Path(
+        configured_wheelhouse or HOST_GENERATION_DEPENDENCIES["wheelhouse"]
+    ).expanduser()
+    if settings.evolution_enabled and seed.is_dir() and wheelhouse.is_dir():
+        return None
+    recovered = _load_current_generation(paths, generation_store=generation_store)
+    if recovered is not None:
+        return recovered
+    raise HostInstallRequiredError(
+        "Installed OpenTulpa has no runnable source checkout or trusted generation inputs. "
+        "Run the installer/recovery flow to provide the source seed and offline wheelhouse."
+    )
+
+
+def _load_current_generation(
+    paths: HostPaths,
+    *,
+    generation_store: GenerationStore,
+) -> RuntimeGenerationSpec | None:
+    pointer = paths.control_root / "evolution" / "current_release.json"
+    if not os.path.lexists(pointer):
+        return None
+    try:
+        metadata = pointer.lstat()
+        if (
+            pointer.is_symlink()
+            or not pointer.is_file()
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise RuntimeError("current release pointer is unsafe")
+        release = Release.model_validate_json(pointer.read_bytes())
+        if release.metadata.get("artifact_kind") != "python_generation":
+            raise RuntimeError("current release is not a Python generation")
+        spec = RuntimeGenerationSpec.from_release_metadata(release.metadata)
+        if release.artifact_digest != spec.manifest_digest:
+            raise RuntimeError("current release manifest provenance is inconsistent")
+        installed = generation_store.open(
+            spec.generation_id,
+            expected_manifest_digest=spec.manifest_digest,
+            expected_state_contract_digest=spec.state_contract_digest,
+            expected_evaluator_fingerprint=spec.evaluator_fingerprint,
+            expected_install_profile=spec.install_profile,
+            controller_protocol=spec.controller_protocol,
+        )
+        if installed.manifest.identity.source_commit != release.source_commit:
+            raise RuntimeError("current generation source provenance is inconsistent")
+    except Exception as exc:
+        raise HostInstallRequiredError(
+            "Installed OpenTulpa cannot verify its current generation. "
+            "Run the installer/recovery flow."
+        ) from exc
+    return spec
+
+
+def _load_or_create_control_cipher(paths: HostPaths) -> AesGcmHostKeyCipher:
+    if paths.control_root == paths.data_root / "bootstrap":
+        return load_or_create_host_cipher(paths.data_root)
+    configured = str(os.environ.get("OPENTULPA_SECRET_VAULT_KEY") or "").strip()
+    if configured:
+        return AesGcmHostKeyCipher.from_base64(configured)
+    key_path = paths.control_root / "secret-vault.key"
+    if not key_path.exists():
+        descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(os.urandom(32))
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            key_path.unlink(missing_ok=True)
+            raise
+    if key_path.is_symlink() or not key_path.is_file() or key_path.stat().st_mode & 0o077:
+        raise RuntimeError("host secret key must be a private regular file")
+    key = key_path.read_bytes()
+    if len(key) != 32:
+        raise RuntimeError("host secret key must contain exactly 32 bytes")
+    return AesGcmHostKeyCipher(key)
 
 
 def _telegram_bootstrap_from_environment() -> tuple[str, int | None]:
@@ -466,7 +661,10 @@ def _server_command(args: argparse.Namespace) -> None:
             os.environ["PUBLIC_BASE_URL"] = normalize_url(args.public_url)
         except ClientConfigError as exc:
             raise SystemExit(str(exc)) from exc
-    serve(public_url=args.public_url)
+    try:
+        serve(public_url=args.public_url)
+    except HostInstallRequiredError as exc:
+        raise SystemExit(f"{exc.status}: {exc}") from exc
 
 
 def _open_tui() -> None:
@@ -574,6 +772,9 @@ def _ensure_tui_binary() -> Path:
         ):
             return binary
     if not source_digest:
+        packaged = _packaged_tui_binary(target_name)
+        if packaged is not None:
+            return packaged
         for installed_name in ("opentulpa-tui", target_name):
             installed = shutil.which(installed_name)
             if installed:
@@ -625,6 +826,24 @@ def _ensure_tui_binary() -> Path:
     if _tui_protocol(binary) != "2":
         raise SystemExit("The native OpenTulpa terminal client build is incompatible.")
     return binary
+
+
+def _packaged_tui_binary(target_name: str) -> Path | None:
+    configured_assets = str(os.environ.get("OPENTULPA_INSTALL_ASSETS_ROOT") or "").strip()
+    candidates: list[Path] = []
+    if configured_assets:
+        root = Path(configured_assets).expanduser().resolve()
+        candidates.extend((root / "bin" / target_name, root / "tui" / target_name))
+    package_root = Path(str(resources.files(opentulpa))).resolve()
+    candidates.extend((package_root / "bin" / target_name, package_root / "tui" / target_name))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            if _tui_protocol(candidate) != "2":
+                raise SystemExit(
+                    "The packaged OpenTulpa terminal client is incompatible with this release."
+                )
+            return candidate
+    return None
 
 
 def _tui_protocol(binary: Path) -> str:
@@ -694,6 +913,143 @@ def _migrate_legacy_session_names(connection: Connection) -> None:
         return
 
 
+def _controller_install_root() -> Path:
+    configured = str(os.environ.get("OPENTULPA_INSTALL_ROOT") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    data_home = str(os.environ.get("XDG_DATA_HOME") or "").strip()
+    base = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
+    return (base / "opentulpa" / "install").resolve()
+
+
+def _private_install_file(path: Path) -> bytes:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"OpenTulpa installation metadata is missing: {path}") from exc
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise RuntimeError(f"OpenTulpa installation file is not private and trusted: {path}")
+    return path.read_bytes()
+
+
+def _update_command(args: argparse.Namespace) -> int:
+    install_root = _controller_install_root()
+    controller_root = install_root / "controller"
+    try:
+        raw_metadata = _private_install_file(controller_root / "install.json")
+        metadata = json.loads(raw_metadata)
+        canonical = (
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        if raw_metadata != canonical or int(metadata.get("format_version", 0)) != 1:
+            raise RuntimeError("OpenTulpa installation metadata is not canonical or supported")
+        source_root = Path(str(metadata["source_root"])).expanduser().resolve()
+        repository = str(metadata["repository"])
+        ref = str(metadata["ref"])
+        managed_source = bool(metadata["managed_source"])
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+        print(f"Cannot update OpenTulpa: {exc}", file=sys.stderr)
+        return 1
+
+    installer = controller_root / "installer.sh"
+    try:
+        _private_install_file(installer)
+    except RuntimeError as exc:
+        print(f"Cannot update OpenTulpa: {exc}", file=sys.stderr)
+        return 1
+    if not os.access(installer, os.X_OK):
+        print(f"Cannot update OpenTulpa: installer is not executable: {installer}", file=sys.stderr)
+        return 1
+
+    requested_source = str(getattr(args, "source", None) or "").strip()
+    fetch = bool(getattr(args, "fetch", False))
+    if fetch and (requested_source or not managed_source):
+        print("Cannot use --fetch with an explicit local source; local sources are never fetched.", file=sys.stderr)
+        return 2
+
+    command = [str(installer)]
+    if requested_source:
+        command.extend(["--source", str(Path(requested_source).expanduser().resolve())])
+    elif not managed_source:
+        command.extend(["--source", str(source_root)])
+    if fetch:
+        command.append("--fetch")
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "OPENTULPA_INSTALL_ROOT": str(install_root),
+            "OPENTULPA_INSTALL_REPOSITORY": repository,
+            "OPENTULPA_INSTALL_REF": ref,
+        }
+    )
+    print("Installing a verified OpenTulpa controller generation...", flush=True)
+    try:
+        completed = subprocess.run(command, env=environment, check=False)  # noqa: S603
+    except OSError as exc:
+        print(f"OpenTulpa update could not start: {exc}", file=sys.stderr)
+        return 1
+    if completed.returncode != 0:
+        print(
+            f"OpenTulpa update failed with status {completed.returncode}; the active controller was unchanged.",
+            file=sys.stderr,
+        )
+        return completed.returncode or 1
+
+    try:
+        controller_executable, generation = _active_controller_entrypoint(controller_root)
+    except RuntimeError as exc:
+        print(f"OpenTulpa update activated invalid controller state: {exc}", file=sys.stderr)
+        return 1
+    print(f"Activated OpenTulpa controller generation {generation}.")
+    if bool(getattr(args, "restart_local_host", False)):
+        try:
+            restarted_url = restart_remembered_local_server(
+                controller_executable=controller_executable,
+                controller_generation_id=generation,
+            )
+        except LocalServerError as exc:
+            print(f"Controller updated, but the local host was not restarted: {exc}", file=sys.stderr)
+            return 1
+        if restarted_url:
+            print(f"Restarted the remembered local OpenTulpa host at {restarted_url}.")
+        else:
+            print("No remembered local OpenTulpa host was running.")
+    return 0
+
+
+def _active_controller_entrypoint(controller_root: Path) -> tuple[Path, str]:
+    current = controller_root / "current"
+    if not current.is_symlink():
+        raise RuntimeError("controller/current is not a symbolic link")
+    target = os.readlink(current)
+    parts = Path(target).parts
+    if len(parts) != 2 or parts[0] != "generations" or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None:
+        raise RuntimeError("controller/current escapes the generation store")
+    generation = controller_root / parts[0] / parts[1]
+    if generation.is_symlink() or not generation.is_dir():
+        raise RuntimeError("active controller generation directory is invalid")
+    executable = generation / "bin" / "opentulpa-host"
+    try:
+        metadata = executable.lstat()
+    except OSError as exc:
+        raise RuntimeError("active controller host executable is missing") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or not metadata.st_mode & stat.S_IXUSR
+    ):
+        raise RuntimeError("active controller host executable is invalid")
+    return executable.absolute(), parts[1]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="opentulpa")
     subparsers = parser.add_subparsers(dest="command")
@@ -715,6 +1071,18 @@ def main() -> None:
     logs = subparsers.add_parser("logs", help="show redacted runtime logs")
     logs.add_argument("--follow", action="store_true")
     subparsers.add_parser("disconnect", help="forget the server and owner credential")
+    update = subparsers.add_parser("update", help="install and activate a verified controller update")
+    update.add_argument("--source", help="import an exact clean local checkout")
+    update.add_argument(
+        "--fetch",
+        action="store_true",
+        help="fetch the configured ref for the installer-managed source seed",
+    )
+    update.add_argument(
+        "--restart-local-host",
+        action="store_true",
+        help="restart only the exact private local host recorded by OpenTulpa",
+    )
     args = parser.parse_args()
     if args.command in {"server", "serve"}:
         _server_command(args)
@@ -722,6 +1090,8 @@ def main() -> None:
     if args.command is None:
         _open_tui()
         return
+    if args.command == "update":
+        raise SystemExit(_update_command(args))
     raise SystemExit(_remote(args))
 
 

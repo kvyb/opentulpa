@@ -1,18 +1,25 @@
 # opentulpa: allow-test-credential
 from __future__ import annotations
 
+import hashlib
+import os
+import shutil
+import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from opentulpa.evolution.workspace import (
+    CandidateWorkspace,
     GitCandidateError,
     GitCandidateWorkspace,
     candidate_content_contains_secret,
     candidate_path_is_promotable,
     candidate_path_is_runtime_overlay,
 )
+
+_REPOSITORY_TEMPLATE: Path | None = None
 
 
 def _git(root: Path, *args: str) -> str:
@@ -25,8 +32,7 @@ def _git(root: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _repository(tmp_path: Path) -> Path:
-    root = tmp_path / "source"
+def _create_repository(root: Path) -> None:
     root.mkdir()
     _git(root, "init", "-b", "main")
     _git(root, "config", "user.name", "Test")
@@ -34,6 +40,21 @@ def _repository(tmp_path: Path) -> Path:
     (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     _git(root, "add", "app.py")
     _git(root, "commit", "-m", "seed")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _repository_template(tmp_path_factory: pytest.TempPathFactory) -> None:
+    global _REPOSITORY_TEMPLATE
+
+    root = tmp_path_factory.mktemp("workspace-repository-template") / "source"
+    _create_repository(root)
+    _REPOSITORY_TEMPLATE = root
+
+
+def _repository(tmp_path: Path) -> Path:
+    assert _REPOSITORY_TEMPLATE is not None
+    root = tmp_path / "source"
+    shutil.copytree(_REPOSITORY_TEMPLATE, root)
     return root
 
 
@@ -68,6 +89,7 @@ def test_candidate_commit_is_isolated_and_retained_by_private_ref(tmp_path: Path
     )
     assert review.patch_sha256 == commit.diff_sha256
     assert review.patch_path.is_file()
+    assert stat.S_IMODE(review.patch_path.stat().st_mode) == 0o600
 
     artifact = manager.contribution_metadata(
         candidate_id="candidate_1",
@@ -76,6 +98,8 @@ def test_candidate_commit_is_isolated_and_retained_by_private_ref(tmp_path: Path
     )
     assert artifact.patch_path.read_text(encoding="utf-8").startswith("From ")
     assert artifact.patch_sha256
+    assert stat.S_IMODE(artifact.patch_path.stat().st_mode) == 0o600
+    assert not tuple((tmp_path / "artifacts").glob("*.tmp"))
 
     manager.remove(workspace)
     assert not workspace.path.exists()
@@ -116,6 +140,7 @@ def test_candidate_recovers_clean_commit_after_persistence_crash(tmp_path: Path)
         _git(source, "rev-parse", "refs/opentulpa/candidates/candidate_recovery")
         == recovered.source_commit
     )
+    assert manager.recover_commit(workspace) == recovered
     manager.remove(workspace)
 
 
@@ -203,6 +228,9 @@ def test_candidate_can_commit_public_environment_template(tmp_path: Path) -> Non
         'BOT_TOKEN = "123456789:K7mQ2vN9xR4pL8cD6sW3uY5tH1jF0aBz"\n',
         "Authorization: Bearer K7mQ2vN9xR4pL8cD6sW3uY5tH1jF0aBz\n",
         'CLIENT_SECRET = "K7mQ2vN9xR4pL8cD6sW3uY5tH1jF0aBz"\n',
+        'CLIENT_SECRET = "exampleexampleexampleexample1234"\n',
+        'API_KEY = "testtesttesttesttesttesttest"\n',
+        'TOKEN = "sk-testtesttesttesttesttesttest"\n',
         "-----BEGIN PRIVATE KEY-----\nK7mQ2vN9xR4pL8cD6sW3uY5tH1jF0aBz\n"
         "-----END PRIVATE KEY-----\n",
     ),
@@ -228,7 +256,59 @@ def test_candidate_rejects_real_credential_content_before_commit(
     manager.remove(workspace)
 
 
-def test_candidate_allows_explicit_test_credential_fixture(tmp_path: Path) -> None:
+def test_candidate_immutable_diff_digest_handles_non_utf8_blob_bytes(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-byte-diff")
+    (workspace.path / "app.py").write_bytes(b"VALUE = '\xff'\n")
+
+    assert manager.diff(workspace).startswith("opentulpa-immutable-review-v1\n")
+    approved_evidence = manager.full_diff(workspace).encode("ascii")
+
+    committed = manager.commit(workspace, message="Preserve raw diff bytes")
+    review = manager.review_artifact(
+        candidate_id=workspace.candidate_id,
+        base_commit=committed.base_commit,
+        head_commit=committed.source_commit,
+    )
+    raw_review = review.patch_path.read_bytes()
+    assert hashlib.sha256(approved_evidence).hexdigest() == committed.diff_sha256
+    assert hashlib.sha256(raw_review).hexdigest() == committed.diff_sha256
+    assert review.patch_sha256 == committed.diff_sha256
+
+
+def test_candidate_review_evidence_ignores_worktree_attributes(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-attributes")
+    (workspace.path / ".gitattributes").write_text("app.py -diff\n", encoding="utf-8")
+    (workspace.path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    approved = manager.full_diff(workspace).encode("ascii")
+
+    committed = manager.commit(workspace, message="Attribute-independent evidence")
+    (source / ".gitattributes").write_text("app.py binary\n", encoding="utf-8")
+    review = manager.review_artifact(
+        candidate_id=workspace.candidate_id,
+        base_commit=committed.base_commit,
+        head_commit=committed.source_commit,
+    )
+
+    assert hashlib.sha256(approved).hexdigest() == committed.diff_sha256
+    assert review.patch_sha256 == committed.diff_sha256
+    assert review.patch_path.read_bytes() == approved
+
+
+def test_candidate_rejects_marker_labeled_test_credential_fixture(tmp_path: Path) -> None:
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
@@ -244,9 +324,9 @@ def test_candidate_allows_explicit_test_credential_fixture(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    commit = manager.commit(workspace, message="Add explicit credential fixture")
+    with pytest.raises(GitCandidateError, match="credential material"):
+        manager.commit(workspace, message="Add explicit credential fixture")
 
-    assert commit.promotion_eligible is True
     manager.remove(workspace)
 
 
@@ -259,32 +339,501 @@ def test_secret_ingress_source_is_not_mistaken_for_credential_material() -> None
     ) is False
 
 
-def test_candidate_commit_disables_repository_git_hooks(tmp_path: Path) -> None:
+def test_candidate_rejects_repository_git_hooks(tmp_path: Path) -> None:
     source = _repository(tmp_path)
     _git(source, "config", "core.hooksPath", ".githooks")
+    marker = tmp_path / "host-hook-ran"
+    hooks = source / ".githooks"
+    hooks.mkdir()
+    hook = hooks / "post-commit"
+    hook.write_text(f"#!/bin/sh\nprintf pwned > {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        GitCandidateWorkspace(
+            source_repository=source,
+            worktrees_root=tmp_path / "worktrees",
+            artifacts_root=tmp_path / "artifacts",
+        )
+
+    assert marker.exists() is False
+
+
+def test_candidate_revalidates_changed_repository_config_without_timing(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
         worktrees_root=tmp_path / "worktrees",
         artifacts_root=tmp_path / "artifacts",
     )
-    workspace = manager.create(candidate_id="candidate_hooks")
-    marker = tmp_path / "host-hook-ran"
-    hooks = workspace.path / ".githooks"
-    hooks.mkdir()
-    hook = hooks / "post-commit"
-    hook.write_text(f"#!/bin/sh\nprintf pwned > {marker}\n", encoding="utf-8")
-    hook.chmod(0o755)
-    (workspace.path / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    workspace = manager.create(candidate_id="candidate-config-cache")
+    assert manager.head(workspace) == workspace.base_commit
 
-    manager.commit(workspace, message="Do not run hooks")
+    _git(source, "config", "core.hooksPath", ".host-hooks")
+
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        manager.head(workspace)
+
+
+def test_candidate_config_cache_binds_file_contents_not_only_metadata(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-config-content-cache")
+    config = source / ".git" / "config"
+    original = config.read_bytes()
+    metadata = config.stat()
+    assert b"filemode = true" in original
+    hostile = original.replace(b"filemode = true", b"filemode = nope")
+    assert len(hostile) == len(original)
+
+    config.write_bytes(hostile)
+    os.utime(config, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        manager.head(workspace)
+
+
+def test_candidate_ignores_host_config_includes_filters_and_helpers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _repository(tmp_path)
+    (source / ".gitattributes").write_text("*.py filter=host diff=host\n", encoding="utf-8")
+    _git(source, "add", ".gitattributes")
+    _git(source, "commit", "-m", "attributes")
+    marker = tmp_path / "host-command-ran"
+    command = tmp_path / "host-command"
+    command.write_text(f"#!/bin/sh\nprintf pwned > '{marker}'\nexit 1\n", encoding="utf-8")
+    command.chmod(0o755)
+    included = tmp_path / "included.gitconfig"
+    included.write_text(
+        f"[filter \"host\"]\n\tclean = {command}\n\tsmudge = {command}\n\trequired = true\n"
+        f"[diff]\n\texternal = {command}\n[credential]\n\thelper = !{command}\n",
+        encoding="utf-8",
+    )
+    hostile_global = tmp_path / "global.gitconfig"
+    hostile_global.write_text(
+        f"[include]\n\tpath = {included}\n[core]\n\tfsmonitor = {command}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile_global))
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate_host_config")
+    (workspace.path / "app.py").write_text("VALUE = 5\n", encoding="utf-8")
+
+    assert "app.py" in manager.diff(workspace)
+    manager.commit(workspace, message="Ignore host Git execution config")
 
     assert marker.exists() is False
     manager.remove(workspace)
 
 
+def test_candidate_rejects_repository_config_includes_without_exposing_path(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path)
+    private_include = tmp_path / "private-host-path.gitconfig"
+    private_include.write_text("[filter \"host\"]\n\trequired = true\n", encoding="utf-8")
+    _git(source, "config", "include.path", str(private_include))
+
+    with pytest.raises(GitCandidateError, match="configuration is unsafe") as error:
+        GitCandidateWorkspace(
+            source_repository=source,
+            worktrees_root=tmp_path / "worktrees",
+            artifacts_root=tmp_path / "artifacts",
+        )
+
+    assert str(private_include) not in str(error.value)
+
+
 @pytest.mark.parametrize(
-    "protected_path",
+    ("key", "value"),
     (
+        ("core.worktree", "../host-worktree"),
+        ("extensions.worktreeConfig", "true"),
+        ("core.fsmonitor", "true"),
+        ("diff.host.textconv", "/bin/true"),
+        ("filter.host.clean", "/bin/true"),
+        ("merge.host.driver", "/bin/true %O %A %B"),
+        ("credential.helper", "store"),
+        ("branch.main.rebase", "true"),
+        ("remote.origin.uploadpack", "/bin/true"),
+    ),
+)
+def test_candidate_rejects_non_allowlisted_repository_config(
+    tmp_path: Path,
+    key: str,
+    value: str,
+) -> None:
+    source = _repository(tmp_path)
+    _git(source, "config", key, value)
+
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        GitCandidateWorkspace(
+            source_repository=source,
+            worktrees_root=tmp_path / "worktrees",
+            artifacts_root=tmp_path / "artifacts",
+        )
+
+
+def test_candidate_rejects_worktree_config_and_shallow_repository(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    (source / ".git" / "config.worktree").write_text(
+        "[core]\n\tfsmonitor = true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        GitCandidateWorkspace(
+            source_repository=source,
+            worktrees_root=tmp_path / "worktrees-a",
+            artifacts_root=tmp_path / "artifacts-a",
+        )
+
+    (source / ".git" / "config.worktree").unlink()
+    (source / ".git" / "shallow").write_text(_git(source, "rev-parse", "HEAD") + "\n")
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        GitCandidateWorkspace(
+            source_repository=source,
+            worktrees_root=tmp_path / "worktrees-b",
+            artifacts_root=tmp_path / "artifacts-b",
+        )
+
+
+def test_candidate_accepts_normal_clone_remote_and_branch_metadata(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", str(source), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+
+    manager = GitCandidateWorkspace(
+        source_repository=clone,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-clone")
+
+    assert manager.head(workspace) == _git(clone, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://owner:secret@example.invalid/repository.git",
+        "file:///private/repository.git",
+        "ext::sh -c command",
+        "http://example.invalid/repository.git",
+    ),
+)
+def test_candidate_rejects_unsafe_or_credentialed_remote_urls(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    source = _repository(tmp_path)
+    _git(source, "config", "remote.origin.url", url)
+
+    with pytest.raises(GitCandidateError, match="configuration is unsafe"):
+        GitCandidateWorkspace(
+            source_repository=source,
+            worktrees_root=tmp_path / "worktrees",
+            artifacts_root=tmp_path / "artifacts",
+        )
+
+def test_candidate_rejects_invalid_base_before_running_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = CandidateWorkspace(
+        candidate_id="candidate-invalid-base",
+        path=tmp_path / "worktrees" / "candidate-invalid-base",
+        base_commit="--upload-pack=/host/program",
+    )
+    called = False
+
+    def fail_git(*args: object, **kwargs: object) -> str:
+        nonlocal called
+        called = True
+        raise AssertionError("Git must not run")
+
+    monkeypatch.setattr(manager, "_run_git", fail_git)
+    with pytest.raises(ValueError, match="Git commit is invalid"):
+        manager.head(workspace)
+    assert called is False
+
+
+def test_candidate_can_adopt_dirty_and_committed_legacy_worktrees(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    base = _git(source, "rev-parse", "HEAD")
+    dirty_path = manager.worktrees_root / "candidate-dirty-adopted"
+    _git(source, "worktree", "add", "--detach", str(dirty_path), base)
+    (dirty_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    dirty_workspace = CandidateWorkspace("candidate-dirty-adopted", dirty_path, base)
+
+    adopted_dirty = manager.adopt(dirty_workspace)
+
+    assert adopted_dirty.path == dirty_path
+    assert manager.status(adopted_dirty)
+    assert manager.adopt(dirty_workspace) == adopted_dirty
+
+    committed_path = manager.worktrees_root / "candidate-committed-adopted"
+    _git(source, "worktree", "add", "--detach", str(committed_path), base)
+    (committed_path / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    _git(committed_path, "add", "app.py")
+    _git(
+        committed_path,
+        "-c",
+        "user.name=Legacy",
+        "-c",
+        "user.email=legacy@example.com",
+        "commit",
+        "-m",
+        "legacy commit",
+    )
+    committed_workspace = CandidateWorkspace("candidate-committed-adopted", committed_path, base)
+    committed_head = _git(committed_path, "rev-parse", "HEAD")
+    _git(
+        source,
+        "update-ref",
+        "refs/opentulpa/candidates/candidate-committed-adopted",
+        committed_head,
+    )
+    adopted_committed = manager.adopt(committed_workspace)
+
+    assert manager.head(adopted_committed) == committed_head
+    assert manager.status(adopted_committed) == ()
+
+
+def test_candidate_adoption_rejects_canonical_and_unrelated_worktrees(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    base = _git(source, "rev-parse", "HEAD")
+    with pytest.raises(GitCandidateError, match="metadata is unsafe"):
+        manager.adopt(CandidateWorkspace("source", source, base))
+
+    unrelated = tmp_path / "unrelated"
+    _git(source, "worktree", "add", "--detach", str(unrelated), base)
+    with pytest.raises(GitCandidateError, match="metadata is unsafe"):
+        manager.adopt(CandidateWorkspace("unrelated", unrelated, base))
+
+
+def test_candidate_commit_rejects_secret_in_adopted_descendant_history(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    base = _git(source, "rev-parse", "HEAD")
+    legacy_path = manager.worktrees_root / "candidate-adopted-secret"
+    _git(source, "worktree", "add", "--detach", str(legacy_path), base)
+    (legacy_path / "settings.py").write_text(
+        'CLIENT_SECRET = "exampleexampleexampleexample1234"\n',
+        encoding="utf-8",
+    )
+    _git(legacy_path, "add", "settings.py")
+    _git(
+        legacy_path,
+        "-c",
+        "user.name=Legacy",
+        "-c",
+        "user.email=legacy@example.com",
+        "commit",
+        "-m",
+        "legacy secret",
+    )
+    workspace = manager.adopt(
+        CandidateWorkspace("candidate-adopted-secret", legacy_path, base)
+    )
+    (legacy_path / "settings.py").write_text("SETTING = 'sanitized'\n", encoding="utf-8")
+
+    previous_head = manager.head(workspace)
+    with pytest.raises(GitCandidateError, match="credential material"):
+        manager.commit(workspace, message="Benign follow-up must not hide old secret")
+    assert manager.head(workspace) == previous_head
+
+
+def test_candidate_id_and_ref_replacement_are_rejected(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-reused")
+    (workspace.path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    committed = manager.commit(workspace, message="Retain candidate")
+    manager.remove(workspace)
+    with pytest.raises(GitCandidateError, match="already been retained"):
+        manager.create(candidate_id="candidate-reused")
+
+    workspace = manager.create(candidate_id="candidate-replaced")
+    _git(
+        source,
+        "update-ref",
+        "refs/opentulpa/candidates/candidate-replaced",
+        committed.base_commit,
+    )
+    (workspace.path / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    with pytest.raises(GitCandidateError, match="already retains another commit"):
+        manager.commit(workspace, message="Do not replace retained ref")
+
+
+def test_same_candidate_session_can_advance_retained_ref_with_exact_cas(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-repeat")
+    (workspace.path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    first = manager.commit(workspace, message="First candidate commit")
+    (workspace.path / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+
+    second = manager.commit(workspace, message="Second candidate commit")
+
+    assert second.source_commit != first.source_commit
+    assert second.changed_paths == ("app.py",)
+    assert _git(source, "rev-parse", "refs/opentulpa/candidates/candidate-repeat") == (
+        second.source_commit
+    )
+    review = manager.review_artifact(
+        candidate_id=workspace.candidate_id,
+        base_commit=workspace.base_commit,
+        head_commit=second.source_commit,
+    )
+    assert review.patch_sha256 == second.diff_sha256
+
+
+def test_contribution_ref_is_cas_retained_and_idempotent(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    first_workspace = manager.create(candidate_id="candidate-contribution-a")
+    (first_workspace.path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    first = manager.commit(first_workspace, message="First contribution")
+    first_artifact = manager.contribution_metadata(
+        candidate_id="shared-contribution",
+        base_commit=first.base_commit,
+        head_commit=first.source_commit,
+    )
+    assert manager.contribution_metadata(
+        candidate_id="shared-contribution",
+        base_commit=first.base_commit,
+        head_commit=first.source_commit,
+    ) == first_artifact
+
+    second_workspace = manager.create(candidate_id="candidate-contribution-b")
+    (second_workspace.path / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    second = manager.commit(second_workspace, message="Second contribution")
+    with pytest.raises(GitCandidateError, match="already retains another commit"):
+        manager.contribution_metadata(
+            candidate_id="shared-contribution",
+            base_commit=second.base_commit,
+            head_commit=second.source_commit,
+        )
+
+
+def test_candidate_detects_staged_index_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-index-race")
+    (workspace.path / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    validate = manager._validate_index_content
+
+    def race_index(root: Path, paths: tuple[str, ...]) -> None:
+        validate(root, paths)
+        (root / "app.py").write_text("VALUE = 99\n", encoding="utf-8")
+        _git(root, "add", "app.py")
+
+    monkeypatch.setattr(manager, "_validate_index_content", race_index)
+    with pytest.raises(GitCandidateError, match="index changed"):
+        manager.commit(workspace, message="Detect staged race")
+
+
+def test_candidate_rejects_non_utf8_index_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-non-utf8")
+    repository = os.fsencode(workspace.path)
+    blob = subprocess.run(
+        [b"git", b"-C", repository, b"hash-object", b"-w", b"--stdin"],
+        input=b"VALUE = 2\n",
+        check=True,
+        capture_output=True,
+    ).stdout.strip()
+    subprocess.run(
+        [
+            b"git",
+            b"-C",
+            repository,
+            b"update-index",
+            b"--add",
+            b"--cacheinfo",
+            b"100644," + blob + b",invalid-\xff.py",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    run_git = manager._run_git
+
+    def preserve_index(root: Path, *arguments: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        if arguments == ("add", "--all"):
+            return ""
+        return run_git(root, *arguments, **kwargs)
+
+    monkeypatch.setattr(manager, "_run_git", preserve_index)
+
+    with pytest.raises(GitCandidateError, match="non-UTF-8 path"):
+        manager.commit(workspace, message="Reject invalid path")
+
+
+def test_candidate_can_commit_full_source_changes_for_release(tmp_path: Path) -> None:
+    protected_paths = (
         "src/opentulpa/bootstrap/gateway.py",
         "src/opentulpa/api/app.py",
         "src/opentulpa/deep_agent/service.py",
@@ -296,12 +845,7 @@ def test_candidate_commit_disables_repository_git_hooks(tmp_path: Path) -> None:
         "src/opentulpa/tooling/contract.py",
         "pyproject.toml",
         "start.sh",
-    ),
-)
-def test_candidate_can_commit_full_source_change_for_release(
-    tmp_path: Path,
-    protected_path: str,
-) -> None:
+    )
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
@@ -309,20 +853,20 @@ def test_candidate_can_commit_full_source_change_for_release(
         artifacts_root=tmp_path / "artifacts",
     )
     workspace = manager.create(candidate_id="candidate_kernel")
-    path = workspace.path / protected_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# candidate change\n", encoding="utf-8")
+    for protected_path in protected_paths:
+        path = workspace.path / protected_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# candidate change\n", encoding="utf-8")
 
     commit = manager.commit(workspace, message="Propose kernel change")
 
-    assert commit.changed_paths == (protected_path,)
+    assert commit.changed_paths == tuple(sorted(protected_paths))
     assert commit.promotion_eligible is True
     manager.remove(workspace)
 
 
-@pytest.mark.parametrize(
-    ("extension_path", "promotable", "runtime_overlay"),
-    (
+def test_candidate_classifies_and_commits_explicit_extension_surfaces(tmp_path: Path) -> None:
+    extension_surfaces = (
         ("src/opentulpa/capabilities/bundled.py", True, True),
         ("src/opentulpa/capability_workers/generated.py", True, True),
         ("src/opentulpa/capability_workers/__init__.py", True, True),
@@ -337,14 +881,7 @@ def test_candidate_can_commit_full_source_change_for_release(
         ("src/opentulpa/deep_agent/prompts.py", True, True),
         ("docs/evolution.md", True, True),
         ("tests/test_generated.py", True, True),
-    ),
-)
-def test_candidate_classifies_explicit_extension_surfaces(
-    tmp_path: Path,
-    extension_path: str,
-    promotable: bool,
-    runtime_overlay: bool,
-) -> None:
+    )
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
@@ -352,14 +889,16 @@ def test_candidate_classifies_explicit_extension_surfaces(
         artifacts_root=tmp_path / "artifacts",
     )
     workspace = manager.create(candidate_id="candidate_extension")
-    path = workspace.path / extension_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# generated extension\n", encoding="utf-8")
+    for extension_path, promotable, runtime_overlay in extension_surfaces:
+        path = workspace.path / extension_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# generated extension\n", encoding="utf-8")
+        assert candidate_path_is_promotable(extension_path) is promotable
+        assert candidate_path_is_runtime_overlay(extension_path) is runtime_overlay
 
     commit = manager.commit(workspace, message="Add extension")
 
     assert commit.source_commit != commit.base_commit
-    assert commit.promotion_eligible is promotable
-    assert candidate_path_is_promotable(extension_path) is promotable
-    assert candidate_path_is_runtime_overlay(extension_path) is runtime_overlay
+    assert commit.changed_paths == tuple(sorted(path for path, _, _ in extension_surfaces))
+    assert commit.promotion_eligible is False
     manager.remove(workspace)

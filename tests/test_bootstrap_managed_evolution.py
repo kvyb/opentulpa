@@ -9,7 +9,10 @@ import pytest
 from fastapi import FastAPI
 
 from opentulpa.bootstrap.evolution_api import EvolutionClient, register_evolution_control_api
-from opentulpa.bootstrap.evolution_runtime import ManagedEvolutionRuntime
+from opentulpa.bootstrap.evolution_runtime import (
+    ManagedEvolutionRuntime,
+    TrustedSourceReleaseProvider,
+)
 from opentulpa.bootstrap.gateway import (
     ActiveReleaseTransport,
     BootstrapGateway,
@@ -22,9 +25,12 @@ from opentulpa.bootstrap.supervisor import BootstrapSupervisor, SupervisorPolicy
 from opentulpa.evolution.archive import EvolutionArchive
 from opentulpa.evolution.models import (
     Candidate,
+    EvaluationCheck,
+    EvaluationReport,
     PromotionAttempt,
     Release,
 )
+from opentulpa.evolution.release_builder import OciReleaseArtifact, ReleaseBuildRequest
 
 
 def _release() -> ReleaseRecord:
@@ -46,6 +52,52 @@ def _release() -> ReleaseRecord:
 class _InitialProvider:
     async def build(self) -> ReleaseRecord:
         return _release()
+
+
+class _RecordingInitialBuilder:
+    def __init__(self) -> None:
+        self.requests: list[ReleaseBuildRequest] = []
+
+    async def build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
+        self.requests.append(request)
+        generation_id = "9" * 64
+        return OciReleaseArtifact(
+            artifact_kind="python_generation",
+            artifact_digest=f"sha256:{'8' * 64}",
+            manifest_digest=f"sha256:{'8' * 64}",
+            image_reference=f"python-generation:{generation_id}",
+            entrypoint=("venv/bin/python", "-I", "-m", "opentulpa"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_initial_trusted_release_uses_pre_artifact_evaluation_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    builder = _RecordingInitialBuilder()
+    provider = TrustedSourceReleaseProvider(
+        source_repository=source,
+        builder=builder,
+        evaluator_version="initial-v2",
+        evaluator_fingerprint=f"sha256:{'e' * 64}",
+    )
+    source_commit = "a" * 40
+    lock_hash = "d" * 64
+    monkeypatch.setattr(provider, "_source_commit", lambda: source_commit)
+    monkeypatch.setattr(provider, "_lock_hash", lambda: lock_hash)
+
+    release = await provider.build()
+
+    expected = hashlib.sha256(
+        f"{source_commit}:{lock_hash}:initial-v2:sha256:{'e' * 64}".encode()
+    ).hexdigest()
+    assert builder.requests[0].evaluation_input_sha256 == expected
+    assert release.metadata["evaluation_input_digest"] == f"sha256:{expected}"
+    assert release.metadata["artifact_kind"] == "python_generation"
+    assert release.metadata["generation_id"] == "9" * 64
 
 
 class _EvolutionLifecycle:
@@ -103,6 +155,107 @@ async def test_managed_evolution_installs_and_seeds_first_release(tmp_path: Path
     await archive.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_initial_seed_rejects_existing_candidate_dependency_provenance(
+    tmp_path: Path,
+) -> None:
+    host = InMemoryReleaseHost()
+    bootstrap = BootstrapSupervisor(
+        store=BootstrapStore(tmp_path / "bootstrap.db"),
+        host=host,
+        policy=SupervisorPolicy(
+            production_probe_attempts=1,
+            probe_interval_seconds=0,
+            probation_seconds=0,
+            probation_probe_interval_seconds=1,
+        ),
+    )
+    await bootstrap.start()
+    await bootstrap.install_initial(_release())
+    archive = EvolutionArchive(tmp_path / "evolution.db")
+    await archive.start()
+    await archive.create_candidate(
+        Candidate(
+            id=_release().candidate_id,
+            base_commit=_release().source_commit,
+            requested_improvement="stale initial candidate",
+            source_commit=_release().source_commit,
+            dependency_lock_hash="f" * 64,
+            artifact_digest=_release().artifact_digest,
+            evaluator_fingerprint=f"sha256:{'e' * 64}",
+        )
+    )
+    runtime = ManagedEvolutionRuntime(
+        bootstrap=bootstrap,
+        archive=archive,
+        evolution=_EvolutionLifecycle(),  # type: ignore[arg-type]
+        initial_release=None,
+    )
+
+    with pytest.raises(RuntimeError, match="lineage conflicts"):
+        await runtime.start()
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_initial_seed_rejects_stale_existing_evaluation_report(tmp_path: Path) -> None:
+    host = InMemoryReleaseHost()
+    bootstrap = BootstrapSupervisor(
+        store=BootstrapStore(tmp_path / "bootstrap.db"),
+        host=host,
+        policy=SupervisorPolicy(
+            production_probe_attempts=1,
+            probe_interval_seconds=0,
+            probation_seconds=0,
+            probation_probe_interval_seconds=1,
+        ),
+    )
+    await bootstrap.start()
+    await bootstrap.install_initial(_release())
+    archive = EvolutionArchive(tmp_path / "evolution.db")
+    await archive.start()
+    candidate = await archive.create_candidate(
+        Candidate(
+            id=_release().candidate_id,
+            base_commit=_release().source_commit,
+            requested_improvement="stale initial evaluation",
+            source_commit=_release().source_commit,
+            dependency_lock_hash="d" * 64,
+            artifact_digest=_release().artifact_digest,
+            evaluator_fingerprint=f"sha256:{'e' * 64}",
+        )
+    )
+    await archive.append_evaluation(
+        EvaluationReport(
+            candidate_id=candidate.id,
+            source_commit=_release().source_commit,
+            artifact_digest=_release().artifact_digest,
+            evaluator_fingerprint=f"sha256:{'e' * 64}",
+            evaluator_version="stale-evaluator-v1",
+            passed=True,
+            checks=(
+                EvaluationCheck(
+                    name="bootstrap.initial_release",
+                    passed=True,
+                    summary="stale evidence",
+                ),
+            ),
+            summary="stale evidence",
+        ),
+        expected_revision=candidate.revision,
+    )
+    runtime = ManagedEvolutionRuntime(
+        bootstrap=bootstrap,
+        archive=archive,
+        evolution=_EvolutionLifecycle(),  # type: ignore[arg-type]
+        initial_release=None,
+    )
+
+    with pytest.raises(RuntimeError, match="evaluation conflicts"):
+        await runtime.start()
+    await runtime.shutdown()
+
+
 class _EvolutionService:
     def __init__(self, patch: Path) -> None:
         self.candidate = Candidate(
@@ -131,6 +284,22 @@ class _EvolutionService:
             "candidate": {"id": self.candidate.id, "status": "building"},
             "exit_code": 0,
             "output": "tests passed\n",
+        }
+
+    async def source_sync_upstream(self, **kwargs: Any) -> dict[str, Any]:
+        self.source_calls.append(("sync-upstream", kwargs))
+        return {
+            "synced": True,
+            "candidate_id": self.candidate.id,
+            "upstream_commit": "b" * 40,
+        }
+
+    async def source_resolve_dependencies(self, **kwargs: Any) -> dict[str, Any]:
+        self.source_calls.append(("resolve-dependencies", kwargs))
+        return {
+            "candidate_id": self.candidate.id,
+            "dependency_base_id": "e" * 64,
+            "dependency_lock_hash": "f" * 64,
         }
 
     async def source_release(self, **kwargs: Any) -> dict[str, Any]:
@@ -216,6 +385,15 @@ async def test_evolution_control_client_is_typed_authenticated_and_digest_checke
             timeout_seconds=120,
             audit_context=audit,
         )
+        source_sync = await client.source_sync_upstream(
+            expected_active_release_id="release-current",
+            audit_context=audit,
+        )
+        source_dependencies = await client.source_resolve_dependencies(
+            expected_candidate_id="candidate_test",
+            expected_diff_sha256="d" * 64,
+            audit_context=audit,
+        )
         source_release = await client.source_release(
             idempotency_key="source-release-1",
             expected_candidate_id="candidate_test",
@@ -242,6 +420,8 @@ async def test_evolution_control_client_is_typed_authenticated_and_digest_checke
         assert downloaded.read_bytes() == patch.read_bytes()
         assert source_status["candidate_id"] == "candidate_test"
         assert source_shell["output"] == "tests passed\n"
+        assert source_sync["upstream_commit"] == "b" * 40
+        assert source_dependencies["dependency_base_id"] == "e" * 64
         assert source_release["candidate"]["status"] == "ready"
         assert source_rollback.candidate_id == service.candidate.id
         assert promotion == source_rollback
@@ -253,6 +433,21 @@ async def test_evolution_control_client_is_typed_authenticated_and_digest_checke
                 {
                     "command": "pytest -q",
                     "timeout_seconds": 120,
+                    "audit_context": audit,
+                },
+            ),
+            (
+                "sync-upstream",
+                {
+                    "expected_active_release_id": "release-current",
+                    "audit_context": audit,
+                },
+            ),
+            (
+                "resolve-dependencies",
+                {
+                    "expected_candidate_id": "candidate_test",
+                    "expected_diff_sha256": "d" * 64,
                     "audit_context": audit,
                 },
             ),

@@ -185,6 +185,62 @@ async def test_probation_failure_automatically_restores_previous_release(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_failed_candidate_stop_enters_safe_mode_without_starting_rollback(
+    tmp_path: Path,
+) -> None:
+    store = BootstrapStore(tmp_path / "bootstrap.db")
+    host = InMemoryReleaseHost()
+    supervisor = BootstrapSupervisor(store=store, host=host, policy=_policy())
+    await supervisor.start()
+    blue = _release("blue", "a")
+    green = _release("green", "b")
+    await supervisor.install_initial(blue)
+    host.health_sequence(green.id, mode="production", values=(True, False))
+    original_stop = host.stop
+
+    async def fail_green_production_stop(running) -> None:  # type: ignore[no-untyped-def]
+        if running.release_id == green.id and running.mode == "production":
+            raise RuntimeError("configured containment failure")
+        await original_stop(running)
+
+    host.stop = fail_green_production_stop  # type: ignore[method-assign]
+
+    queued = await supervisor.request_activation(green, origin=_origin())
+    result = await supervisor.activate(queued.id)
+
+    assert result.status is ActivationStatus.FAILED
+    assert result.failure_code == "candidate_containment_failed"
+    assert store.get_state().safe_mode is True
+    assert [call for call in host.calls if call == ("start", blue.id, "production")] == [
+        ("start", blue.id, "production")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_restored_release_probe_stops_started_rollback_process(
+    tmp_path: Path,
+) -> None:
+    store = BootstrapStore(tmp_path / "bootstrap.db")
+    host = InMemoryReleaseHost()
+    supervisor = BootstrapSupervisor(store=store, host=host, policy=_policy())
+    await supervisor.start()
+    blue = _release("blue", "a")
+    green = _release("green", "b")
+    host.health_sequence(blue.id, mode="production", values=(True, False))
+    await supervisor.install_initial(blue)
+    host.health_sequence(green.id, mode="production", values=(True, False))
+
+    queued = await supervisor.request_activation(green, origin=_origin())
+    result = await supervisor.activate(queued.id)
+
+    assert result.status is ActivationStatus.FAILED
+    assert result.failure_code == "rollback_failed"
+    assert store.get_state().safe_mode is True
+    assert await host.discover(blue.id, mode="production") is None
+    assert host.calls.count(("stop", blue.id, "production")) == 2
+
+
+@pytest.mark.asyncio
 async def test_staging_failure_keeps_blue_and_does_not_rotate_lease(tmp_path: Path) -> None:
     store = BootstrapStore(tmp_path / "bootstrap.db")
     host = InMemoryReleaseHost()
@@ -312,6 +368,121 @@ async def test_restart_during_probation_restores_last_known_good(tmp_path: Path)
     assert host.product_state == {"message": "written during probation"}
     assert ("restore", queued.id, None) in host.calls
     assert ("discard_snapshot", queued.id, None) in host.calls
+
+
+@pytest.mark.parametrize("crash_status", [ActivationStatus.QUEUED, ActivationStatus.STAGED])
+@pytest.mark.asyncio
+async def test_restart_before_drain_retains_last_known_good(
+    tmp_path: Path,
+    crash_status: ActivationStatus,
+) -> None:
+    store = BootstrapStore(tmp_path / "bootstrap.db")
+    host = InMemoryReleaseHost()
+    first = BootstrapSupervisor(store=store, host=host, policy=_policy())
+    await first.start()
+    blue = _release("blue", "a")
+    green = _release("green", "b")
+    await first.install_initial(blue)
+    queued = await first.request_activation(green, origin=_origin())
+    if crash_status is ActivationStatus.STAGED:
+        preparing = store.transition_activation(
+            queued.id,
+            expected=ActivationStatus.QUEUED,
+            target=ActivationStatus.PREPARING,
+        )
+        store.transition_activation(
+            preparing.id,
+            expected=ActivationStatus.PREPARING,
+            target=ActivationStatus.STAGED,
+        )
+
+    restarted = BootstrapSupervisor(store=store, host=host, policy=_policy())
+    await restarted.start()
+
+    recovered = store.get_activation(queued.id)
+    assert recovered is not None
+    assert recovered.status is ActivationStatus.FAILED
+    assert recovered.failure_code == "bootstrap_restarted"
+    state = store.get_state()
+    assert state.serving_release_id == blue.id
+    assert state.last_known_good_release_id == blue.id
+    assert state.ingress_paused is False
+
+
+@pytest.mark.parametrize(
+    "crash_status",
+    [ActivationStatus.VERIFYING, ActivationStatus.ROLLING_BACK],
+)
+@pytest.mark.asyncio
+async def test_restart_after_candidate_start_restores_last_known_good(
+    tmp_path: Path,
+    crash_status: ActivationStatus,
+) -> None:
+    store = BootstrapStore(tmp_path / "bootstrap.db")
+    host = InMemoryReleaseHost()
+    first = BootstrapSupervisor(store=store, host=host, policy=_policy())
+    await first.start()
+    blue = _release("blue", "a")
+    green = _release("green", "b")
+    await first.install_initial(blue)
+    queued = await first.request_activation(green, origin=_origin())
+    preparing = store.transition_activation(
+        queued.id,
+        expected=ActivationStatus.QUEUED,
+        target=ActivationStatus.PREPARING,
+    )
+    staged = store.transition_activation(
+        preparing.id,
+        expected=ActivationStatus.PREPARING,
+        target=ActivationStatus.STAGED,
+    )
+    draining = store.transition_activation(
+        staged.id,
+        expected=ActivationStatus.STAGED,
+        target=ActivationStatus.DRAINING,
+    )
+    starting = store.transition_activation(
+        draining.id,
+        expected=ActivationStatus.DRAINING,
+        target=ActivationStatus.STARTING,
+    )
+    await host.snapshot_state(starting.id)
+    green_lease = store.begin_cutover(starting)
+    await host.start(
+        await host.prepare(green),
+        ReleaseLaunchContext(
+            mode="production",
+            lease_epoch=green_lease.epoch,
+            secrets_enabled=True,
+            ingress_enabled=False,
+        ),
+    )
+    current = store.transition_activation(
+        starting.id,
+        expected=ActivationStatus.STARTING,
+        target=ActivationStatus.VERIFYING,
+        lease_epoch=green_lease.epoch,
+    )
+    if crash_status is ActivationStatus.ROLLING_BACK:
+        store.transition_activation(
+            current.id,
+            expected=ActivationStatus.VERIFYING,
+            target=ActivationStatus.ROLLING_BACK,
+        )
+
+    restarted = BootstrapSupervisor(store=store, host=host, policy=_policy())
+    await restarted.start()
+
+    recovered = store.get_activation(queued.id)
+    assert recovered is not None
+    assert recovered.status is ActivationStatus.ROLLED_BACK
+    assert recovered.failure_code == "bootstrap_restarted"
+    state = store.get_state()
+    assert state.serving_release_id == blue.id
+    assert state.last_known_good_release_id == blue.id
+    assert state.ingress_paused is False
+    assert await host.discover(green.id, mode="production") is None
+    assert ("restore", queued.id, None) in host.calls
 
 
 @pytest.mark.asyncio

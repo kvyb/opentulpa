@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -20,11 +20,17 @@ from typing import Literal, Protocol
 from uuid import uuid4
 
 from opentulpa.evolution.process import run_bounded_process
+from opentulpa.evolution.sandbox import (
+    _build_bubblewrap_argv,
+    _strong_sandbox_tools,
+    strong_sandbox_unavailable_reason,
+)
 
 EvaluationStage = Literal["build", "contract", "public", "security"]
 
 _IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}\Z")
 _SECRET_RE = re.compile(r"(?i)\b(api[_-]?key|authorization|password|secret|token)\s*[:=]\s*\S+")
+_TRUSTED_OWNER_UID = 0
 
 
 def _force_remove_container(container_cli: str, container_name: str) -> None:
@@ -77,6 +83,33 @@ class EvaluationCommandResult:
     output: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class EvaluationExecutables:
+    """Executable names or exact paths used by the trusted evaluation gates."""
+
+    python: str = "python"
+    ruff: str = "ruff"
+    mypy: str = "mypy"
+    pytest: str = "pytest"
+
+    def __post_init__(self) -> None:
+        if any(not value or "\x00" in value for value in self.values()):
+            raise ValueError("evaluation executable is invalid")
+
+    def values(self) -> tuple[str, ...]:
+        return self.python, self.ruff, self.mypy, self.pytest
+
+    @classmethod
+    def isolated(cls, controller_root: str | Path = "/controller") -> EvaluationExecutables:
+        binary_root = str(controller_root).rstrip("/") + "/bin"
+        return cls(
+            python=f"{binary_root}/python",
+            ruff=f"{binary_root}/ruff",
+            mypy=f"{binary_root}/mypy",
+            pytest=f"{binary_root}/pytest",
+        )
+
+
 class EvaluationRunner(Protocol):
     """Execute one fixed command against a disposable candidate checkout."""
 
@@ -124,23 +157,31 @@ class LocalEvaluationRunner:
 
 
 class IsolatedProcessEvaluationRunner:
-    """Run fixed Railway gates as a secret-less unprivileged Linux process."""
+    """Run fixed gates in the same strong namespace sandbox as source commands."""
 
     def __init__(
         self,
         *,
-        uid: int = 65_532,
-        gid: int = 65_532,
+        controller_root: Path,
+        wheelhouse: Path,
+        uid: int = 65_533,
+        gid: int = 65_533,
         memory_bytes: int = 2 * 1024 * 1024 * 1024,
         pid_limit: int = 256,
         max_output_bytes: int = 1_000_000,
         temporary_root: Path = Path("/var/tmp/opentulpa-evaluation"),
+        dependency_site: Path | None = None,
     ) -> None:
-        if not hasattr(os, "geteuid") or os.geteuid() != 0:
-            raise RuntimeError("isolated process evaluation requires a root host supervisor")
-        if shutil.which("setpriv") is None or shutil.which("prlimit") is None:
-            raise RuntimeError("isolated process evaluation requires setpriv and prlimit")
-        if uid < 1 or gid < 1 or memory_bytes < 64 * 1024 * 1024:
+        unavailable = self.unavailable_reason(
+            controller_root=controller_root,
+            wheelhouse=wheelhouse,
+            dependency_site=dependency_site,
+        )
+        if unavailable is not None:
+            raise RuntimeError(unavailable)
+        if uid < 1 or gid < 1 or uid == 65_532 or gid == 65_532:
+            raise ValueError("isolated process evaluation identity is invalid")
+        if memory_bytes < 64 * 1024 * 1024:
             raise ValueError("isolated process evaluation limits are invalid")
         if pid_limit < 16 or pid_limit > 4_096 or max_output_bytes < 1_024:
             raise ValueError("isolated process evaluation limits are invalid")
@@ -150,19 +191,80 @@ class IsolatedProcessEvaluationRunner:
         safe_temporary_root.mkdir(parents=True, exist_ok=True, mode=0o711)
         os.chown(safe_temporary_root, 0, 0)
         safe_temporary_root.chmod(0o711)
+        tools = _strong_sandbox_tools()
+        if isinstance(tools, str):
+            raise RuntimeError(tools)
+        self._setpriv, self._bwrap, self._prlimit = tools
         self._uid = uid
         self._gid = gid
         self._memory_bytes = memory_bytes
         self._pid_limit = pid_limit
         self._max_output_bytes = max_output_bytes
         self._temporary_root = safe_temporary_root.resolve(strict=True)
+        self._controller_root = controller_root.expanduser().absolute()
+        self._wheelhouse = wheelhouse.expanduser().absolute()
+        self._dependency_site = (
+            dependency_site.expanduser().absolute() if dependency_site is not None else None
+        )
+        self._executables = EvaluationExecutables.isolated(self._controller_root)
+        self._host_executables = {
+            isolated: self._controller_root / "bin" / Path(isolated).name
+            for isolated in self._executables.values()
+        }
+        self._fingerprint = self._input_fingerprint()
+
+    @classmethod
+    def unavailable_reason(
+        cls,
+        *,
+        controller_root: Path,
+        wheelhouse: Path,
+        dependency_site: Path | None = None,
+    ) -> str | None:
+        unavailable = strong_sandbox_unavailable_reason()
+        if unavailable is not None:
+            return unavailable
+        roots = [
+            (controller_root, "controller generation"),
+            (wheelhouse, "offline wheelhouse"),
+        ]
+        if dependency_site is not None:
+            roots.append((dependency_site, "resolved dependency site"))
+        for path, label in roots:
+            reason = cls._read_only_root_reason(path, label=label)
+            if reason is not None:
+                return reason
+        for name in EvaluationExecutables.isolated(controller_root).values():
+            executable = controller_root.expanduser().absolute() / "bin" / Path(name).name
+            reason = cls._executable_reason(executable)
+            if reason is not None:
+                return reason
+        try:
+            _evaluation_package_inputs(
+                controller_root.expanduser().absolute(),
+                wheelhouse.expanduser().absolute(),
+            )
+        except (OSError, RuntimeError, ValueError):
+            return "isolated evaluation exact package or wheelhouse inputs are unavailable"
+        return None
+
+    @classmethod
+    def is_supported(cls, *, controller_root: Path, wheelhouse: Path) -> bool:
+        return (
+            cls.unavailable_reason(
+                controller_root=controller_root,
+                wheelhouse=wheelhouse,
+            )
+            is None
+        )
+
+    @property
+    def executables(self) -> EvaluationExecutables:
+        return self._executables
 
     @property
     def fingerprint(self) -> str:
-        return (
-            f"isolated-process-v4:uid={self._uid}:gid={self._gid}:"
-            f"memory={self._memory_bytes}:pids={self._pid_limit}"
-        )
+        return self._fingerprint
 
     async def run(
         self,
@@ -177,38 +279,61 @@ class IsolatedProcessEvaluationRunner:
             root,
         )
         try:
-            argv = [
-                "setpriv",
-                f"--reuid={self._uid}",
-                f"--regid={self._gid}",
-                "--clear-groups",
-                "--no-new-privs",
-                "prlimit",
-                f"--as={self._memory_bytes}:{self._memory_bytes}",
-                f"--nproc={self._pid_limit}:{self._pid_limit}",
-                f"--fsize={20 * 1024 * 1024}:{20 * 1024 * 1024}",
-                f"--cpu={command.timeout_seconds + 5}:{command.timeout_seconds + 5}",
-                "--",
-                "/bin/sh",
-                "-c",
-                _shell_with_group_cleanup(shlex.join(command.argv)),
-            ]
+            if command.argv[0] not in self._host_executables:
+                raise ValueError("isolated evaluator command is not an exact trusted executable")
+            argv = _build_bubblewrap_argv(
+                setpriv=self._setpriv,
+                bwrap=self._bwrap,
+                prlimit=self._prlimit,
+                uid=self._uid,
+                gid=self._gid,
+                workspace=evaluation_workspace,
+                workspace_read_only=False,
+                read_only_mounts=(
+                    (self._controller_root, str(self._controller_root)),
+                    (self._wheelhouse, str(self._wheelhouse)),
+                    *(
+                        ((self._dependency_site, "/dependency-site"),)
+                        if self._dependency_site is not None
+                        else ()
+                    ),
+                ),
+                environment={
+                    "HOME": "/tmp",
+                    "MYPY_CACHE_DIR": "/tmp/mypy-cache",
+                    **(
+                        {
+                            "PYTHONPATH": "/dependency-site",
+                        }
+                        if self._dependency_site is not None
+                        else {}
+                    ),
+                    "PATH": (f"{self._controller_root}/bin:/usr/local/bin:/usr/bin:/bin"),
+                    "PIP_CONFIG_FILE": "/dev/null",
+                    "PIP_FIND_LINKS": str(self._wheelhouse),
+                    "PIP_NO_INDEX": "1",
+                    "PYTEST_ADDOPTS": "-p no:cacheprovider",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONHASHSEED": "0",
+                    "PYTHONPYCACHEPREFIX": "/tmp/pycache",
+                    "RUFF_CACHE_DIR": "/tmp/ruff-cache",
+                    "TMPDIR": "/tmp",
+                    "UV_FIND_LINKS": str(self._wheelhouse),
+                    "UV_NO_INDEX": "1",
+                    "UV_OFFLINE": "1",
+                },
+                command=command.argv,
+                memory_bytes=self._memory_bytes,
+                pid_limit=self._pid_limit,
+                file_bytes=20 * 1024 * 1024,
+                cpu_seconds=command.timeout_seconds + 5,
+            )
             return await asyncio.to_thread(
                 _run_process,
                 argv,
                 evaluation_workspace,
                 command,
-                {
-                    "HOME": str(evaluation_root / "home"),
-                    "PATH": os.environ.get("PATH", os.defpath),
-                    "MYPY_CACHE_DIR": str(evaluation_root / "mypy-cache"),
-                    "PYTEST_ADDOPTS": "-p no:cacheprovider",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "PYTHONHASHSEED": "0",
-                    "PYTHONPYCACHEPREFIX": str(evaluation_root / "pycache"),
-                    "RUFF_CACHE_DIR": str(evaluation_root / "ruff-cache"),
-                    "TMPDIR": str(evaluation_root / "tmp"),
-                },
+                {},
                 self._max_output_bytes,
             )
         finally:
@@ -231,14 +356,10 @@ class IsolatedProcessEvaluationRunner:
                     raise RuntimeError("candidate source is not owned by the stable host")
 
     def _evaluation_copy(self, root: Path) -> tuple[Path, Path]:
-        evaluation_root = Path(
-            tempfile.mkdtemp(prefix="run-", dir=str(self._temporary_root))
-        )
+        evaluation_root = Path(tempfile.mkdtemp(prefix="run-", dir=str(self._temporary_root)))
         workspace = evaluation_root / "workspace"
         try:
             shutil.copytree(root, workspace, symlinks=True)
-            (evaluation_root / "home").mkdir()
-            (evaluation_root / "tmp").mkdir()
             self._make_owned_writable(evaluation_root)
         except Exception:
             shutil.rmtree(evaluation_root, ignore_errors=True)
@@ -253,7 +374,7 @@ class IsolatedProcessEvaluationRunner:
         ):
             directory_path = Path(directory)
             os.chown(directory_path, self._uid, self._gid, follow_symlinks=False)
-            directory_path.chmod(directory_path.stat().st_mode | stat.S_IRWXU)
+            directory_path.chmod(0o700)
             for name in directory_names:
                 path = directory_path / name
                 if path.is_symlink():
@@ -262,7 +383,108 @@ class IsolatedProcessEvaluationRunner:
                 path = directory_path / name
                 os.chown(path, self._uid, self._gid, follow_symlinks=False)
                 if not path.is_symlink():
-                    path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
+                    metadata = path.stat()
+                    path.chmod(0o700 if stat.S_IMODE(metadata.st_mode) & 0o111 else 0o600)
+
+    @staticmethod
+    def _read_only_root_reason(path: Path, *, label: str) -> str | None:
+        candidate = path.expanduser().absolute()
+        current = Path(candidate.anchor)
+        for component in candidate.parts[1:]:
+            current /= component
+            try:
+                metadata = current.lstat()
+            except OSError:
+                return f"isolated evaluation {label} is unavailable"
+            if stat.S_ISLNK(metadata.st_mode):
+                return f"isolated evaluation {label} has a symbolic-link ancestor"
+            if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+                return f"isolated evaluation {label} must be root-owned and immutable"
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_IMODE(metadata.st_mode) & stat.S_IXOTH:
+                return f"isolated evaluation {label} is not candidate-traversable"
+        if not candidate.is_dir():
+            return f"isolated evaluation {label} is unavailable"
+        return None
+
+    @staticmethod
+    def _executable_reason(path: Path) -> str | None:
+        try:
+            metadata = path.lstat()
+            resolved = path.resolve(strict=True)
+            target = resolved.stat()
+        except OSError:
+            return f"isolated evaluation requires exact {path.name} from the controller generation"
+        if (
+            not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode))
+            or not stat.S_ISREG(target.st_mode)
+            or metadata.st_uid != 0
+            or target.st_uid != 0
+            or (
+                stat.S_ISREG(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) & 0o022
+            )
+            or stat.S_IMODE(target.st_mode) & 0o022
+            or not os.access(path, os.X_OK)
+        ):
+            return (
+                f"isolated evaluation requires immutable {path.name} from the controller generation"
+            )
+        for ancestor in (resolved, *resolved.parents):
+            try:
+                ancestor_metadata = ancestor.lstat()
+            except OSError:
+                return (
+                    f"isolated evaluation requires immutable {path.name} from the controller generation"
+                )
+            if stat.S_ISLNK(ancestor_metadata.st_mode):
+                return (
+                    f"isolated evaluation requires immutable {path.name} from the controller generation"
+                )
+            if (
+                ancestor_metadata.st_uid != _TRUSTED_OWNER_UID
+                or stat.S_IMODE(ancestor_metadata.st_mode) & 0o022
+                or (
+                    stat.S_ISDIR(ancestor_metadata.st_mode)
+                    and not stat.S_IMODE(ancestor_metadata.st_mode) & stat.S_IXOTH
+                )
+            ):
+                return (
+                    f"isolated evaluation requires immutable {path.name} from the controller generation"
+                )
+        return None
+
+    def _input_fingerprint(self) -> str:
+        dependency_site = getattr(self, "_dependency_site", None)
+        tools = {
+            Path(isolated).name: {
+                "path": isolated,
+                "sha256": _file_sha256(host.resolve(strict=True)),
+            }
+            for isolated, host in sorted(self._host_executables.items())
+        }
+        packages, wheels = _evaluation_package_inputs(
+            self._controller_root,
+            self._wheelhouse,
+        )
+        payload = {
+            "version": "root-linux-bwrap-v1",
+            "uid": self._uid,
+            "gid": self._gid,
+            "memory": self._memory_bytes,
+            "pids": self._pid_limit,
+            "sandbox_tools": {
+                path.name: _file_sha256(path)
+                for path in (self._setpriv, self._bwrap, self._prlimit)
+            },
+            "executables": tools,
+            "packages": packages,
+            "wheelhouse": wheels,
+            "dependency_site": (
+                _immutable_tree_sha256(dependency_site) if dependency_site is not None else None
+            ),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 class OciEvaluationRunner:
@@ -427,16 +649,21 @@ class CandidateEvaluator:
         return tuple(results)
 
 
-def trusted_default_commands(*, timeout_seconds: int = 900) -> tuple[EvaluationCommand, ...]:
+def trusted_default_commands(
+    *,
+    timeout_seconds: int = 900,
+    executables: EvaluationExecutables | None = None,
+) -> tuple[EvaluationCommand, ...]:
     """Return the supervisor-owned release gates candidates cannot rewrite."""
 
     timeout = max(60, min(int(timeout_seconds), 3_600))
+    tools = executables or EvaluationExecutables()
     return (
         EvaluationCommand(
             name="python.compile",
             stage="build",
             argv=(
-                "python",
+                tools.python,
                 "-I",
                 "-c",
                 (
@@ -451,26 +678,26 @@ def trusted_default_commands(*, timeout_seconds: int = 900) -> tuple[EvaluationC
         EvaluationCommand(
             name="ruff",
             stage="public",
-            argv=("ruff", "check", "src", "tests"),
+            argv=(tools.ruff, "check", "src", "tests"),
             timeout_seconds=timeout,
         ),
         EvaluationCommand(
             name="mypy",
             stage="public",
-            argv=("mypy", "src"),
+            argv=(tools.mypy, "src"),
             timeout_seconds=timeout,
         ),
         EvaluationCommand(
             name="pytest",
             stage="public",
-            argv=("python", "-m", "pytest", "-q"),
+            argv=(tools.pytest, "-q"),
             timeout_seconds=timeout,
         ),
         EvaluationCommand(
             name="legacy.runtime.absent",
             stage="security",
             argv=(
-                "python",
+                tools.python,
                 "-I",
                 "-c",
                 (
@@ -491,7 +718,7 @@ def trusted_default_commands(*, timeout_seconds: int = 900) -> tuple[EvaluationC
             name="source.secret.paths",
             stage="security",
             argv=(
-                "python",
+                tools.python,
                 "-I",
                 "-c",
                 (
@@ -508,7 +735,7 @@ def trusted_default_commands(*, timeout_seconds: int = 900) -> tuple[EvaluationC
             name="kernel.contract",
             stage="contract",
             argv=(
-                "python",
+                tools.python,
                 "-I",
                 "-c",
                 (
@@ -563,17 +790,106 @@ def _run_process(
     )
 
 
-def _shell_with_group_cleanup(command: str) -> str:
-    cleanup = (
-        "status=$?; trap '' TERM HUP INT; kill -TERM -$$ >/dev/null 2>&1 || true; exit $status"
-    )
-    return f"trap {shlex.quote(cleanup)} EXIT; {command}"
+def _file_sha256(path: Path) -> str:
+    metadata = path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError("isolated evaluation input is not root-owned and immutable")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _immutable_tree_sha256(root: Path) -> str:
+    entries: list[tuple[str, str, int]] = []
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_names.sort()
+        for name in (*directory_names, *sorted(file_names)):
+            path = Path(directory) / name
+            metadata = path.lstat()
+            relative = path.relative_to(root).as_posix()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != _TRUSTED_OWNER_UID
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise RuntimeError("isolated evaluation dependency site is unsafe")
+            if stat.S_ISDIR(metadata.st_mode):
+                entries.append((relative, "directory", 0))
+            elif stat.S_ISREG(metadata.st_mode):
+                entries.append((relative, _file_sha256(path), metadata.st_size))
+            else:
+                raise RuntimeError("isolated evaluation dependency site is unsafe")
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _evaluation_package_inputs(
+    controller_root: Path,
+    wheelhouse: Path,
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    packages: dict[str, dict[str, str]] = {}
+    for distribution in ("mypy", "pytest", "ruff"):
+        records = tuple(
+            controller_root.glob(f"lib/python*/site-packages/{distribution}-*.dist-info/RECORD")
+        )
+        if len(records) != 1:
+            raise RuntimeError(
+                f"isolated evaluation requires exact {distribution} package metadata"
+            )
+        record = records[0]
+        metadata_path = record.with_name("METADATA")
+        packages[distribution] = {
+            "metadata_sha256": _file_sha256(metadata_path),
+            "record_sha256": _file_sha256(record),
+            "recorded_files_sha256": _recorded_distribution_sha256(
+                record,
+                controller_root=controller_root,
+            ),
+        }
+    wheels: dict[str, str] = {}
+    for path in sorted(wheelhouse.rglob("*")):
+        path_metadata = path.lstat()
+        if stat.S_ISLNK(path_metadata.st_mode) or path_metadata.st_uid != _TRUSTED_OWNER_UID:
+            raise RuntimeError("isolated evaluation wheelhouse is unsafe")
+        if stat.S_ISDIR(path_metadata.st_mode):
+            if stat.S_IMODE(path_metadata.st_mode) & 0o022:
+                raise RuntimeError("isolated evaluation wheelhouse is mutable")
+            continue
+        if not stat.S_ISREG(path_metadata.st_mode) or path.suffix != ".whl":
+            raise RuntimeError("isolated evaluation wheelhouse contains a non-wheel input")
+        wheels[str(path.relative_to(wheelhouse))] = _file_sha256(path)
+    return packages, wheels
+
+
+def _recorded_distribution_sha256(record: Path, *, controller_root: Path) -> str:
+    site_packages = record.parent.parent
+    entries: list[tuple[str, str]] = []
+    with record.open("r", encoding="utf-8", newline="") as stream:
+        for row in csv.reader(stream):
+            if not row or not row[0]:
+                raise RuntimeError("isolated evaluation package RECORD is invalid")
+            path = (site_packages / row[0]).resolve(strict=True)
+            try:
+                relative = path.relative_to(controller_root)
+            except ValueError as exc:
+                raise RuntimeError("isolated evaluation package escaped the controller") from exc
+            entries.append((relative.as_posix(), _file_sha256(path)))
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 __all__ = [
     "CandidateEvaluator",
     "EvaluationCommand",
     "EvaluationCommandResult",
+    "EvaluationExecutables",
     "EvaluationRunner",
     "EvaluationStage",
     "IsolatedProcessEvaluationRunner",

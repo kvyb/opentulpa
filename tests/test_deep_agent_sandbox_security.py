@@ -103,7 +103,7 @@ def test_persistent_container_launch_is_least_privilege_and_bounded(
     assert mounts == [
         f"type=bind,src={mounted_workspace},dst=/workspace,bind-propagation=rprivate"
     ]
-    assert str(sandbox._REPOSITORY_ROOT) not in mounts[0]  # noqa: SLF001
+    assert not mounted_workspace.is_relative_to(sandbox._REPOSITORY_ROOT)  # noqa: SLF001
     assert ".env" not in mounts[0]
     assert "docker.sock" not in mounts[0]
 

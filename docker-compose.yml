@@ -10,9 +10,15 @@ services:
       PORT: 8000
     ports:
       - "8000:8000"
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     volumes:
       - opentulpa_data:/app/opentulpa_data
-    command: ["./start.sh", "serve", "--run-only"]
+    command: ["/opt/opentulpa-install/controller/generations/image/bin/opentulpa-host"]
 
 volumes:
   opentulpa_data:

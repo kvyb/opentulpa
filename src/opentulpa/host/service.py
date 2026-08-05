@@ -72,11 +72,23 @@ class HostService:
             await self._evolution.start()
 
     async def shutdown(self) -> None:
+        failures: list[BaseException] = []
         if self._evolution is not None:
-            await self._evolution.shutdown()
-        await self.runtime.shutdown()
+            try:
+                await self._evolution.shutdown()
+            except BaseException as exc:
+                failures.append(exc)
+        try:
+            await self.runtime.shutdown()
+        except BaseException as exc:
+            failures.append(exc)
         if self._owns_client:
-            await self._client.aclose()
+            try:
+                await self._client.aclose()
+            except BaseException as exc:
+                failures.append(exc)
+        if failures:
+            raise failures[0]
 
     async def apply(self, value: HostConfigInput) -> HostConfigView:
         async with self._activation_lock:
@@ -90,8 +102,6 @@ class HostService:
         try:
             await self.runtime.replace(staged, rollback=previous)
             await self._configure_telegram(staged)
-            if staged.telegram_bot_token is None:
-                self.runtime.clear_telegram_identity()
             if self._evolution is not None:
                 await self._evolution.start()
             active = self.store.activate(staged.revision)
@@ -103,8 +113,6 @@ class HostService:
                 with suppress(Exception):
                     await self.runtime.replace(previous, rollback=previous)
                     await self._configure_telegram(previous)
-                    if previous.telegram_bot_token is None:
-                        self.runtime.clear_telegram_identity()
             raise HostActivationError(self._safe_error(exc)) from exc
         finally:
             self._activating = False

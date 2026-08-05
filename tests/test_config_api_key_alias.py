@@ -76,9 +76,7 @@ def test_settings_accepts_model_provider_order(monkeypatch) -> None:
 
     settings = Settings()
 
-    assert settings.llm_provider_order == {
-        "provider/model": ["provider/one", "provider/two"]
-    }
+    assert settings.llm_provider_order == {"provider/model": ["provider/one", "provider/two"]}
 
 
 def test_settings_accepts_business_knowledge_oracle_model_env(monkeypatch) -> None:
@@ -199,3 +197,89 @@ def test_settings_discovers_yaml_by_walking_parent_directories(monkeypatch, tmp_
     settings = Settings()
 
     assert settings.llm_model == "from-parent"
+
+
+def test_explicit_config_file_overrides_cwd_yaml(monkeypatch, tmp_path: Path) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / "opentulpa.config.yaml").write_text("llm_model: from-cwd\n", encoding="utf-8")
+    config_file = tmp_path / "explicit.yaml"
+    config_file.write_text("llm_model: from-explicit\nport: 8123\n", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("OPENTULPA_CONFIG_FILE", str(config_file))
+
+    settings = Settings()
+
+    assert settings.llm_model == "from-explicit"
+    assert settings.port == 8123
+
+
+def test_explicit_config_file_must_be_a_regular_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENTULPA_CONFIG_FILE", str(tmp_path / "missing.yaml"))
+
+    try:
+        Settings()
+    except ValueError as exc:
+        assert "OPENTULPA_CONFIG_FILE" in str(exc)
+    else:
+        raise AssertionError("missing explicit config file was accepted")
+
+
+def test_installed_mode_uses_packaged_yaml_defaults(monkeypatch, tmp_path: Path) -> None:
+    cwd = tmp_path / "unrelated"
+    application_root = tmp_path / "application"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("OPENTULPA_APPLICATION_ROOT", str(application_root))
+    monkeypatch.delenv("OPENTULPA_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("BROWSER_USE_USER_DATA_DIR", raising=False)
+
+    settings = Settings()
+
+    assert settings.browser_use_user_data_dir == ".opentulpa/browser_profiles"
+
+
+def test_installed_mode_ignores_cwd_yaml_and_dotenv(monkeypatch, tmp_path: Path) -> None:
+    application_root = tmp_path / "application"
+    application_root.mkdir()
+    (application_root / "opentulpa.config.yaml").write_text(
+        "llm_model: from-application-root\n",
+        encoding="utf-8",
+    )
+    explicit_config = tmp_path / "explicit.yaml"
+    explicit_config.write_text("port: 8123\n", encoding="utf-8")
+    cwd_parent = tmp_path / "contaminated"
+    cwd = cwd_parent / "nested"
+    cwd.mkdir(parents=True)
+    (cwd_parent / "opentulpa.config.yaml").write_text(
+        "llm_model: from-cwd\nport: 65535\n",
+        encoding="utf-8",
+    )
+    (cwd / ".env").write_text(
+        "LLM_MODEL=from-dotenv\nOPENAI_COMPATIBLE_API_KEY=cwd-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("OPENTULPA_APPLICATION_ROOT", str(application_root))
+    monkeypatch.setenv("OPENTULPA_CONFIG_FILE", str(explicit_config))
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    settings = Settings()
+
+    assert settings.port == 8123
+    assert settings.llm_model == "from-application-root"
+    assert settings.openai_compatible_api_key is None
+    assert settings.browser_use_user_data_dir == ".opentulpa/browser_profiles"
+
+
+def test_source_mode_still_loads_cwd_dotenv(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENTULPA_APPLICATION_ROOT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    (tmp_path / ".env").write_text("LLM_MODEL=from-source-dotenv\n", encoding="utf-8")
+
+    settings = Settings()
+
+    assert settings.llm_model == "from-source-dotenv"

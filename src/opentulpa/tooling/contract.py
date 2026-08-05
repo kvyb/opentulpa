@@ -406,6 +406,25 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     _tool("source_status", "evolution", ToolEffect.READ),
     _tool(
+        "source_sync_upstream",
+        "evolution",
+        ToolEffect.UPDATE,
+        timeout_seconds=300,
+    ),
+    _tool(
+        "source_prepare_pr",
+        "evolution",
+        ToolEffect.CREATE,
+        idempotency=IdempotencyMode.REQUIRED,
+        timeout_seconds=900,
+    ),
+    _tool(
+        "source_resolve_dependencies",
+        "evolution",
+        ToolEffect.UPDATE,
+        timeout_seconds=1_800,
+    ),
+    _tool(
         "source_shell",
         "evolution",
         ToolEffect.EXECUTE,

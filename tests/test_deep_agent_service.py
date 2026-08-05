@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from io import BytesIO
@@ -738,6 +739,53 @@ def _service(
         execution_backend=execution_backend,
         workspace_backend=workspace_backend,
     )
+
+
+@pytest.mark.asyncio
+async def test_standby_health_does_not_mutate_durable_run_ownership(tmp_path: Path) -> None:
+    model = _ToolCapableTextModel(responses=["unused"])
+    initializer = _service(tmp_path, model)
+    await initializer.start(recover_pending_resumes=False)
+    await initializer.shutdown()
+
+    runs_path = tmp_path / "runs.sqlite3"
+    with sqlite3.connect(runs_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO agent_runs (
+                run_id, tenant_id, actor_id, thread_id, checkpoint_thread_id,
+                channel, run_kind, correlation_id, status, approvals_json,
+                created_at, updated_at
+            ) VALUES (?, 'tenant', 'actor', 'thread', ?, 'owner', 'owner',
+                      'correlation', ?, '[]', '2026-01-01T00:00:00+00:00',
+                      '2026-01-01T00:00:00+00:00')
+            """,
+            (
+                ("run-running", "checkpoint-running", "running"),
+                ("run-resume", "checkpoint-resume", "resume_pending"),
+            ),
+        )
+    before = runs_path.read_bytes()
+
+    standby = _service(tmp_path, model)
+    await standby.start_standby()
+    try:
+        assert standby.healthy()
+        assert standby.standby
+        assert not standby.started
+        assert standby._runs_db is None  # noqa: SLF001
+        assert standby._active_run_tasks == {}  # noqa: SLF001
+        assert standby._pending_resume_tasks == set()  # noqa: SLF001
+    finally:
+        await standby.shutdown()
+
+    assert runs_path.read_bytes() == before
+    with sqlite3.connect(runs_path) as connection:
+        statuses = dict(connection.execute("SELECT run_id, status FROM agent_runs"))
+    assert statuses == {
+        "run-resume": "resume_pending",
+        "run-running": "running",
+    }
 
 
 def test_owner_uses_one_workspace_backend_for_shell_and_files(tmp_path: Path) -> None:

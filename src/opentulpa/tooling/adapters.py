@@ -268,6 +268,21 @@ class ProductToolApplication(Protocol):
 
     async def source_status(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
+    async def source_sync_upstream(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput: ...
+
+    async def source_prepare_pr(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput: ...
+
+    async def source_resolve_dependencies(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput: ...
+
     async def source_shell(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
     async def source_release(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
@@ -485,6 +500,18 @@ def _description(spec: ToolSpec) -> str:
         "source_status": (
             "Inspect source self-update state. available reports whether self-update is usable; "
             "active and session_active report only whether an editable candidate session exists."
+        ),
+        "source_sync_upstream": (
+            "Fetch configured remote main through the stable controller and open an isolated "
+            "reconciliation candidate bound to the current active release."
+        ),
+        "source_prepare_pr": (
+            "Export an evaluated self-evolution patch into one clean Git branch based on the "
+            "configured upstream repository. Test it in /workspace before repository_publish_pr."
+        ),
+        "source_resolve_dependencies": (
+            "Resolve an exact pyproject dependency proposal through the stable credential-free "
+            "OCI resolver, then install its verified lock into the active source candidate."
         ),
         "sandbox_ssh_diagnostic": (
             "Run one SSH command from the sandbox using an opaque stored private-key or password "

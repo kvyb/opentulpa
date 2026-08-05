@@ -1,64 +1,86 @@
 # Deployment
 
-OpenTulpa's default production shape is **Host + Sandbox Worker + Data**.
-The stable host starts or binds a private sandbox worker before reporting readiness.
-If the sandbox canary fails, `/healthz` returns `503` and `/_host` shows the failed
-check. A deployed bot is not operational unless shell execution and SSH diagnostics
-can reach the sandbox. Repository work and source evolution remain sandboxed through
-the existing reviewed execution paths and are the next surfaces to converge onto this
-worker API.
+OpenTulpa separates a stable launcher/controller from immutable runtime generations and
+external persistent state. The controller owns installation, source evolution, release
+activation, readiness, probation, rollback, and recovery. Product databases, memories,
+skills, tenant workspaces, Git lineage, and controller metadata live outside a runtime
+generation and must be backed up separately.
 
-OpenTulpa has three explicit host shapes:
+## Runtime Model
 
-- **Host** is the default. It starts before model configuration and owns setup, owner
-  authentication, encrypted credentials, child process health, redacted logs, and the
-  public proxy. The Deep Agents application runs as its replaceable child.
+The installer:
 
-- **Direct** starts the mutable FastAPI release itself. Use it for development or a
-  platform that already owns image rollout and rollback. Reviewed capability workers
-  may run as subprocesses in this mode.
-- **Managed** starts the immutable bootstrap gateway. The bootstrap builds the first
-  release from a canonical Git commit, then owns staging, activation, and rollback.
+- verifies a Git source commit and archives that exact commit;
+- builds the controller wheel and dependency wheelhouse;
+- creates the Python virtualenv at the final generation path, not in a temporary path;
+- records hashes and provenance in the generation manifest; and
+- atomically updates `controller/current`, retaining the prior target as `controller/previous`.
 
-Do not treat direct mode as a safe self-replacement mechanism. It deliberately has no
-access to the stable bootstrap evolution API.
+The launcher validates the selected generation before execution. A venv is inherently
+machine- and path-specific, not a portable artifact. OpenTulpa therefore builds each
+venv at its final path, as described by the
+[Python documentation](https://docs.python.org/3/library/venv.html), rather than copying
+one between hosts.
 
-## Dependencies
+The installer lock is a private authoritative directory created with `mkdir` under the
+controller root. It has no PID metadata and is never automatically reclaimed. If an
+install is interrupted, an operator may remove the lock only after verifying that no
+installer process or installer descendants are still running. There is no stale-lock
+automation.
 
-Required in every mode:
+## Supported Source Mutation
 
-- Python 3.12;
-- [`uv`](https://docs.astral.sh/uv/);
-- writable persistent storage.
+Strong candidate mutation and evaluation isolation is available only when all of these
+are true:
 
-The default host does not require `OPENAI_COMPATIBLE_API_KEY` to start. Configure it in
-`/_host` or provide it for non-interactive first boot.
-With the default OpenRouter endpoint, the same key also enables grounded `web_search`
-through OpenRouter's web plugin. No separate search key or optional package is needed.
+- the supervisor is rootful Linux;
+- trusted, root-owned `bwrap`, `setpriv`, and `prlimit` executables are available;
+- bubblewrap mount, PID, IPC, UTS, and network namespaces pass the startup probe; and
+- the container deployment supplies the required Docker Compose capabilities.
 
-Local loopback startup generates and privately persists owner authentication and
-selects `${XDG_DATA_HOME:-$HOME/.local/share}/opentulpa` automatically. Public host
-deployments can be claimed with their one-time pairing code; managed deployments still
-require an explicit `OPENTULPA_OWNER_TOKEN` and persistent storage paths.
+The candidate and evaluator use distinct runtime identities and capability boundaries.
+The served runtime uses UID/GID `65532`; source candidate processes use a distinct
+candidate identity (default UID/GID `65533`). The candidate receives no controller
+credentials, OCI socket, product state, or host environment. The controller remains the
+only authority that can publish generations, activate releases, or roll back.
 
-The launcher installs only the lean core unless `OPENTULPA_EXTRAS` is set. Use
-`OPENTULPA_EXTRAS=bundled` or a comma-separated subset of `browser`, `integrations`,
-`documents`, `research`, and `hosted-sandbox`; managed installation bakes the same
-selection into the reviewed runtime base.
+Unsupported namespace environments, non-root Linux, macOS, and Railway disable source
+mutation and evaluation rather than weakening the boundary. Immutable serving and
+ordinary persistent product operation continue. This is a fail-closed source-mutation
+decision, not a serving outage.
 
-Tenant shell tools must go through a sandbox. The default stable host starts a
-private sandbox worker automatically and refuses health if the worker cannot execute
-its canary. Local/VPS installs may use rootless Podman/Docker internally, while
-Railway-compatible Linux containers use the bundled restricted process worker with
-`setpriv`, `prlimit`, and a secret-free workspace. Managed mode additionally requires:
+## Dependency Resolver
 
-- a rootless Docker or Podman engine available to the bootstrap;
-- a persistent canonical Git checkout;
-- a reviewed runtime base image and evaluator image;
-- an administrator-created production egress network;
-- separate persistent bootstrap state and release workspace paths.
+Dependency resolution is disabled unless `OPENTULPA_DEPENDENCY_RESOLVER_IMAGE_DIGEST`
+names an exact local OCI image ID. Build and inspect the dedicated fixed-command image:
 
-## Stable Host
+```bash
+docker build -f docker/dependency-resolver.Dockerfile \
+  -t opentulpa-dependency-resolver .
+docker image inspect opentulpa-dependency-resolver --format '{{.Id}}'
+```
+
+Set the resulting `sha256:...` value and, if needed, set
+`OPENTULPA_CONTAINER_CLI` to an exact Docker or Podman executable. The controller verifies
+the image ID and rejects credential-bearing index environment variables before each
+resolution. The worker receives only a copied `pyproject.toml` and a private output
+directory; it receives no product state, controller credentials, source Git metadata, or
+arbitrary candidate command.
+
+The selected engine must be reachable by the stable controller. Do not expose its socket
+to the served runtime or candidate sandbox. A Docker socket is host-level authority, so
+prefer a dedicated rootless engine or isolated resolver host and restrict which controller
+account can access it. Railway does not provide this local resolver path.
+
+When the stable controller itself runs in a container, create a dedicated named volume,
+mount it at `/var/lib/opentulpa-dependency-resolver`, and set
+`OPENTULPA_DEPENDENCY_RESOLVER_VOLUME` to its exact engine-level name. The controller uses
+the mounted filesystem while each sibling worker receives only its current resolution
+subpath through an OCI volume mount. Do not reuse the product-data or controller-state
+volume for this purpose. Native controllers leave this variable unset and use the default
+private bind-mount staging directory.
+
+## Local Install
 
 ```bash
 git clone https://github.com/kvyb/opentulpa.git
@@ -67,407 +89,88 @@ cd opentulpa
 opentulpa
 ```
 
-Choose **Run here** and enter the model key. The CLI starts the host in the background,
-configures it through the host API, and opens the TUI. The host console remains available
-at `http://127.0.0.1:8000/_host`. It remains healthy
-while unconfigured or while a candidate child fails. Local owner access needs no token.
-Remote first boot prints a one-time pairing code, and the returned owner token can be
-used by `opentulpa connect`. The server root redirects to `/_host`; agent conversation
-is intentionally provided only by the local terminal client and configured interfaces.
-Health checks are:
+Local automatic restart is deliberately strict: it requires both `pidfd_open` and
+`pidfd_send_signal`. There is no numeric-PID fallback. If pidfd support is unavailable,
+stop the remembered host manually before starting the new controller generation.
 
-- `http://127.0.0.1:8000/healthz`
-- `http://127.0.0.1:8000/agent/healthz`
+## Docker Compose
 
-The first endpoint reports host health. The second returns `503` until the child is
-ready. Use `./start.sh server` to run the mutable application directly for development.
+```bash
+cp .env.example .env
+```
 
-`./start.sh local` remains a convenience mode for a host-configured Telegram bot. It
-starts the direct app, a temporary Cloudflare tunnel, and webhook synchronization. It
-requires `TELEGRAM_BOT_TOKEN` plus an owner username or numeric ID allowlist. It is a
-development convenience, not the dynamic Telegram capability path.
+The included Compose service runs the stable host with `SYS_ADMIN` and `NET_ADMIN`,
+`seccomp=unconfined`, and `apparmor=unconfined`. These capabilities are required by the
+rootful Linux namespace sandbox used for source mutation/evaluation. The deployment must
+therefore run a rootful Linux Docker engine with the Compose capabilities intact.
 
-## Managed Runtime
+This is a significant hardened-production implication: the service is not equivalent to
+a least-privilege container. Operators should isolate the host, restrict access to the
+Docker daemon, constrain network egress, review the Compose security options, and disable
+source mutation entirely when that risk is unacceptable. Serving immutable generations
+does not require claiming that source mutation is available.
 
-Managed mode keeps a stable public gateway while release containers change behind it.
-The mutable release never receives the source repository, bootstrap database,
-environment file, or OCI socket.
+Persist the `opentulpa_data` volume and set `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
+It contains product state, Git lineage, release records, and the controller's external
+persistent state. Do not treat a runtime generation or candidate worktree as a backup.
 
-### 1. Configure the host
+The root image starts the immutable `opentulpa-host` controller directly. When that image
+is used as the trusted base for legacy managed OCI releases, candidate containers use the
+same immutable controller interpreter with only the reviewed `/app/src` package overlaid.
+They do not depend on `/app/.venv` and do not execute a candidate-controlled `start.sh`.
 
-Start from `.env.example` and set at least:
+## Railway
+
+Railway can serve an installed immutable release with a persistent volume:
 
 ```env
-OPENAI_COMPATIBLE_API_KEY=...
-OPENTULPA_OWNER_TOKEN=...
-EVOLUTION_ENABLED=true
-
-OPENTULPA_BOOTSTRAP_STATE_ROOT=/absolute/persistent/opentulpa-bootstrap
-OPENTULPA_RELEASE_WORKSPACE=/absolute/persistent/opentulpa-release-data
-OPENTULPA_RELEASE_BASE_IMAGE=opentulpa-runtime-base:0.1.0
-OPENTULPA_RELEASE_EGRESS_NETWORK=opentulpa-release-egress
-OPENTULPA_CONTAINER_CLI=docker
-OPENTULPA_RECOVERY_TOKEN=<32-or-more-random-characters>
-OPENTULPA_INGRESS_TOKEN=<32-or-more-random-characters>
+OPENTULPA_DATA_ROOT=/app/opentulpa_data
 ```
 
-Run the managed launcher from the canonical checkout. It must contain `.git` and
-`uv.lock`. The runtime setting `EVOLUTION_SOURCE_REPOSITORY` supports an explicit
-canonical checkout for custom hosts, but the bundled `doctor managed` validates the
-launcher checkout.
+Configure unattended owner/model credentials as required by the deployment. Railway is
+not a supported source-mutation/evaluation environment: its namespace and privilege
+requirements are not assumed, so source mutation fails closed. Railway serves the
+immutable release and keeps the stable controller boundary; it does not self-mutate the
+source or perform in-place source promotion.
 
-The state and workspace roots must be different from each other and from the source
-checkout. The release workspace is mounted read-write at `/workspace`; it holds the
-product databases, checkpoints, memories, skills, capabilities, and tenant workspace
-directories. Bootstrap state holds leases, releases, activation records, the evolution
-archive, private candidate refs, and its generated internal token.
+## Release Cutover And Rollback
 
-The bootstrap creates its internal evolution credential as a mode `0600` file.
-Recovery and durable ingress use the required, stable high-entropy deployment tokens
-shown above; they are never passed to a mutable release.
-
-### 2. Create the production network
-
-The bootstrap refuses to launch a production release without an explicitly named,
-non-internal OCI network. Create it before startup:
-
-```bash
-docker network create opentulpa-release-egress
-```
-
-A normal bridge network has broad internet access. Restrict this network with the host
-firewall, rootless engine configuration, or an egress proxy to the destinations needed
-by the model and enabled adapters. The setting is an explicit boundary, not an
-automatic hostname allowlist.
-
-Staging and candidate evaluation use isolated no-network containers. Production
-release egress is the only declared runtime network path. Interactive tenant and source
-shells use outbound bridge networking by default so the owner agent can fetch dependencies,
-inspect public repositories, and run networked experiments. They still receive no host or
-service credentials. Apply stricter destination controls at the OCI host or egress proxy
-when the deployment requires them. Optional ChatGPT Codex subscription inference needs
-outbound HTTPS to `auth.openai.com` for device login and refresh, and `chatgpt.com` for
-model discovery and inference. It adds no inbound callback and no deployment secret.
-
-### 3. Install reviewed images
-
-```bash
-./start.sh install managed
-```
-
-Managed installation builds:
-
-- `OPENTULPA_RELEASE_BASE_IMAGE` from the reviewed root `Dockerfile`;
-- `opentulpa-evolution:0.1.0` from `docker/evolution.Dockerfile` unless the configured
-  evaluator/sandbox image names override it;
-- `SANDBOX_IMAGE` (default `opentulpa-tenant-sandbox:0.1.0`) from
-  `docker/tenant-sandbox.Dockerfile`.
-
-At bootstrap startup every reviewed tag is inspected and converted to its immutable
-local `sha256:` image ID. The tenant image ID and OCI engine remain in the stable host.
-The mutable production release receives private sandbox and capability-worker
-URL/tokens plus its release ID, lease epoch, and short-lived control credential. Every
-call is fenced to the current production lease; old and staging releases fail closed.
-The sandbox endpoint accepts only a hidden tenant ID, bounded command, and timeout. The
-capability endpoint accepts only a reviewed package module, exact bundled manifest,
-tenant config, and manifest-declared ephemeral grants. Neither endpoint accepts an
-image, mount, runtime user, container socket, or OCI arguments. The stable host derives
-the active release image and mounts only per-tenant/per-capability `/state` into a
-rootless bounded worker, never the product `/workspace`, source, databases, or host
-credentials.
-
-`OPENTULPA_CAPABILITY_ALLOWED_HOSTS` is the administrator ceiling for manifest-declared
-worker egress. The configured capability/release network must enforce that ceiling at
-the host firewall or proxy layer; an OCI network name alone is not destination
-filtering. Requests outside the declared ceiling fail before container launch.
-
-The runtime base contains the lockfile-matched virtual environment. Candidate release
-building exports an exact evaluated Git commit and replaces the complete secret-free
-application snapshot. Core, API, product-service, config, integrations, interfaces,
-tools, web assets, tests, and new source files may all evolve. The candidate's Dockerfile
-and `.dockerignore` are copied as source artifacts but never executed by the trusted
-builder. Secret paths, links, special files, and dependency-lock changes fail closed.
-
-Every candidate image must carry
-`org.opentulpa.release.runtime-overlay=full-source-v1`.
-The immutable bootstrap verifies this exact label before it prepares the image.
-
-If the managed release needs all optional adapters, build the runtime base with the
-bundled extra before startup:
-
-```bash
-docker build \
-  --build-arg OPENTULPA_EXTRAS=bundled \
-  -t opentulpa-runtime-base:0.1.0 .
-```
-
-Pin production image references and preserve the built image until its release is no
-longer a rollback target. A dependency-lock change cannot be deployed as a normal
-candidate; rebuild and review the trusted runtime base first.
-
-### 4. Check and start
-
-```bash
-./start.sh doctor managed
-./start.sh run managed
-```
-
-Or install and start in one command:
-
-```bash
-./start.sh managed
-```
-
-`doctor managed` checks required environment, launcher Git source, OCI availability,
-all three reviewed images, and the explicit egress network. Startup does not silently
-fall back to direct mode. The bootstrap additionally validates state/workspace
-separation and writability while starting.
-
-On an empty state store, the bootstrap builds the canonical checkout as the first
-content-addressed release, starts it with ingress disabled, verifies production health,
-and only then accepts public traffic. Subsequent accepted candidates follow:
+The release controller follows this sequence:
 
 ```text
-queue -> prepare -> isolated staging -> drain old release -> start new release
-      -> production health -> probation -> active
+prepare -> isolated staging -> strict readiness -> drain -> stop old
+        -> start candidate -> strict readiness -> live probation -> active
 ```
 
-A failure before cutover leaves the current release serving. A failure after cutover
-automatically restores the prior image and lease. Only release-coupled capability state
-is restored; product records created during probation remain intact. Exact bundled
-seed capability pointers are reconciled to the restored image, while candidate-only
-seeds are deactivated without deleting history. If restoration is impossible, the
-gateway enters safe mode rather than forwarding to an unverified process.
+Cutover is stop/start fenced and has an availability gap. It is explicitly not standby
+and not zero-downtime. The old active child does not survive normal promotion. If staging
+fails, the current release remains active. After cutover, a readiness or probation
+failure stops the candidate and restores the exact previous release generation and its
+recorded HostConfig. If that restoration fails, the controller enters safe mode rather
+than serving an unverified process.
 
-Probation serves live traffic with production credentials. Automatic rollback restores
-the release process and release-coupled capability state, but it cannot retract external
-messages, purchases, authorization changes, or provider writes. Rehearse changes near
-external effects with fake sinks and retain normal authorization and idempotency controls.
+Rollback restores release-coupled capability state where the implementation has a saved
+snapshot. It does not rewind product-state mutations or external side effects such as
+messages, purchases, authorization changes, or provider writes. Use idempotency and fake
+sinks when rehearsing releases near external effects.
 
-Recovery is host-shell only. There is intentionally no browser console: `/recovery` and
-all children are reserved by the stable gateway and always return `404` instead of being
-proxied to mutable release assets. Recovery APIs require the separate bearer token and
-reject requests carrying `Origin`, `Referer`, or any `Sec-Fetch-*` header.
+## Git Lineage
 
-Set the token in the host environment, never in a command argument or URL:
+Source sessions use detached Git worktrees. Instance, upstream, and accepted-upstream
+lineage are native Git refs, and upstream integration uses Git's native merge index and
+conflict stages. A candidate worktree is an editing/evaluation workspace, not a serving
+source directory and not a reusable source projection. Promotion exports the exact
+committed source bytes into a new wheel/venv generation.
 
-```bash
-export OPENTULPA_RECOVERY_URL=http://127.0.0.1:8000
-export OPENTULPA_RECOVERY_TOKEN='<the separately stored recovery token>'
-opentulpa-recovery status
-opentulpa-recovery rollback --reason 'Restore the previous healthy release'
-opentulpa-recovery restart
-opentulpa-recovery safe-mode
-```
+## Backups And Recovery
 
-`opentulpa-recovery rollback`, `opentulpa-recovery restart`, and
-`opentulpa-recovery safe-mode` remain available even when the mutable release is dead.
-The CLI uses `httpx` with redirects, proxy-environment inheritance, and browser headers
-disabled.
+Back up together:
 
-Ordinary source promotion starts directly from the authenticated owner run. The stable
-bootstrap independently binds and verifies the source commit, fixed evaluator evidence,
-artifact digest, staging health, and rollback path, but does not prove owner intent if the
-active release is already malicious. Deployments that require that hostile-release threat
-model need a separate host-controlled signing authority, which is intentionally not part
-of this minimal mode.
+- the persistent product data root;
+- controller/bootstrap state and release records;
+- the canonical Git repository, including private `refs/opentulpa/*` refs; and
+- every generation artifact still referenced by `current`, `previous`, or rollback metadata.
 
-### 5. Back up the right state
-
-Back up these together:
-
-- `OPENTULPA_BOOTSTRAP_STATE_ROOT`;
-- `OPENTULPA_RELEASE_WORKSPACE`;
-- the canonical Git repository including private `refs/opentulpa/*` refs;
-- every OCI image still referenced by a current or previous release.
-
-Restoring only the SQLite product databases is insufficient for source lineage and
-release rollback. Restoring only bootstrap state is insufficient for conversations,
-memory, capabilities, and tenant workspaces.
-
-## Dynamic Telegram From The Terminal
-
-To let the running agent establish Telegram itself, do **not** set a host
-`TELEGRAM_BOT_TOKEN`.
-
-1. Start terminal-only direct or managed mode with `OPENTULPA_OWNER_TOKEN`.
-2. Connect with `opentulpa connect <server-url>` and authenticate.
-3. Ask OpenTulpa to enable Telegram and paste the BotFather token in that message.
-4. Credential ingress encrypts the value and replaces it with a `secret://` handle
-   before checkpointing.
-5. The agent seeds the Telegram manifest and runs its deterministic tests.
-6. The agent activates the exact passing capability revision and secret-handle binding.
-7. In Telegram, send `/start <code>`. The default one-time code is the final eight
-   characters of the bot token; `OPENTULPA_TELEGRAM_PAIRING_CODE` can override it.
-8. The worker begins Telegram long polling and uses only scoped Agent API, file,
-   approval, replay, and notification endpoints.
-
-The worker uses the same tenant and Deep Agents checkpoints as web. Rotating the bound
-secret creates a new vault revision and reconciles the active worker. A source release
-restart restores the active capability generation from persistent state.
-In managed mode, Telegram runs in the stable host's rootless capability container with
-only its private `/state/telegram.json` mount. Revision changes stop the old long poll
-before starting the new generation. If startup or activation persistence fails, the
-prior generation is restarted against the same state and the activation pointer is not
-advanced, so two pollers never intentionally share the bot token.
-
-The owner chat always runs through the Telegram capability worker above. A host-level
-`TELEGRAM_BOT_TOKEN` is reserved for the separate Telegram Business intake webhook at
-`/webhook/telegram`; it does not enable a second owner-chat implementation. Configure:
-
-```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_WEBHOOK_SECRET=...
-PUBLIC_BASE_URL=https://opentulpa.example.com
-```
-
-Telegram Business intake requires Business Mode plus the appropriate inbox permissions.
-Do not bind the same bot token to the long-polling owner capability and the Business
-webhook because Telegram permits only one update transport per bot.
-
-## Optional Adapters
-
-The base dependency set contains Deep Agents, LangChain/LangGraph, FastAPI, SQLite
-checkpoint support, APScheduler, HTTP, encryption, Langfuse hooks, MCP adapters, and
-the OpenRouter chat adapter. FastAPI is the universal API, not an optional capability
-dependency.
-
-Install only what the deployment uses:
-
-| Extra | Adds | Runtime behavior |
-|---|---|---|
-| `browser` | Browser Use Cloud SDK, Playwright CDP client | Hosted Chromium with required `BROWSER_USE_API_KEY`; no host-browser fallback |
-| `integrations` | Composio SDK and LangChain provider | Tenant-owned SaaS connections after an environment key or encrypted owner-chat key is configured |
-| `documents` | PDF, workbook, and encoding parsers | Additional file-analysis formats |
-| `research` | Crawl4AI | Richer content extraction; bounded built-in extraction remains available without it |
-| `hosted-sandbox` | Hosted workspace adapters such as Daytona | Optional remote repository workspaces; the mandatory sandbox worker remains the default |
-| `bundled` | All of the above | Convenience image for a full adapter set |
-
-Examples:
-
-```bash
-uv sync --no-dev --extra browser
-```
-
-```env
-BROWSER_USE_API_KEY=...  # required when browser tools are enabled
-COMPOSIO_API_KEY=...     # optional SaaS integration provider
-GITHUB_TOKEN=...         # optional private checkout or direct-Git publishing fallback
-```
-
-The environment variables remain suitable for unattended bootstrap. An authenticated
-owner may instead send `COMPOSIO_API_KEY=<value>` in chat; credential ingress stores it
-as `secret://composio_api_key`, and the trusted adapter hot-loads it without restarting.
-The same ingress accepts `GITHUB_TOKEN=<value>`.
-No optional adapter receives credentials through model-visible arguments. Browser and
-Composio actions execute without per-call approval after normal authorization checks.
-Browser navigation requires explicit allowed domains and rejects direct private and
-link-local targets. Chromium and target-network access run inside Browser Use Cloud;
-OpenTulpa controls it over CDP and cannot DNS-pin the vendor browser's connections.
-Composio discovery, OAuth, and invocation remain host-side product tools while source or repository
-sandboxes are active. The sandbox receives only sanitized tool results; neither the Composio API key
-nor connected-account credentials are mounted or exported into sandbox processes.
-
-## Docker Compose And Railway
-
-The included `docker-compose.yml` and `railway.toml` start the stable host, its
-private sandbox worker, and the replaceable Deep Agents child. The image bundles a
-secret-free source seed, SSH client, and fixed evaluation dependencies. On first boot
-the host creates persistent Git lineage; sandbox commands run with no inherited
-credentials, while the stable host alone commits, evaluates, activates,
-health-checks, and rolls back the child.
-
-For Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-Persist the volume mounted at `/app/opentulpa_data` and set
-`OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
-
-For Railway, configure only the durable data root and any unattended credentials:
-
-- `OPENTULPA_DATA_ROOT=/app/opentulpa_data` with a persistent volume;
-- optionally `OPENAI_COMPATIBLE_API_KEY` and `OPENTULPA_OWNER_TOKEN` for unattended boot.
-
-Without an owner token, read the one-time pairing code from the first startup log and
-claim the deployment at `/_host`. Configure Telegram there; polling needs no webhook.
-Repository work requires no user-provided sandbox credential. A compatible Linux
-container running as root with `setpriv`, `prlimit`, and `ssh` starts the mandatory
-sandbox worker automatically; commands receive no host environment or service
-credentials, run under fixed resource limits, and are serialized across workspaces.
-The checkout persists on the OpenTulpa volume. This process boundary is intended for
-a single-active-process, owner-operated deployment; advanced remote VM workspace
-providers remain optional and are not part of the default Railway setup.
-
-An active tenant-owned Composio GitHub connection can publish a verified single-commit workspace
-through GitHub's Git Data API without exposing OAuth to the sandbox. `GITHUB_TOKEN` is needed only
-for private checkout or direct-Git fallback commit shapes. Public repositories can be opened,
-edited, tested, and committed without it.
-
-The Docker and Railway entrypoint is `./start.sh serve --run-only`. A VM can initialize
-and start both interfaces directly:
-
-```bash
-./start.sh serve \
-  --api-key '<openai-compatible-key>' \
-  --telegram-bot-token '<telegram-bot-token>' \
-  --telegram-user-id 123456789 \
-  --public-url https://tulpa.example.com
-```
-
-One host is one OpenTulpa installation. Its owner token and optional Telegram owner ID
-determine the owner identity; there is no tenant argument. Secrets are encrypted in the
-host database rather than saved to `.env`. Product, host, and Deep Agent state live
-under `OPENTULPA_DATA_ROOT`.
-
-Source evolution is enabled by default when the bundled source seed is present. It needs
-no Docker socket, repository token, Railway token, or extra environment variable. The
-Railway container remains the stable recovery boundary and swaps only the mutable child
-to an evaluated source overlay. The dependency lock cannot change through this path;
-deploy a new base image for dependency updates. Persist `/app/opentulpa_data`, because it
-contains the instance's source and release lineage as well as product state.
-
-The stronger managed VM mode remains available when every release must be rebuilt as an
-independent rootless OCI image with a dedicated release network.
-
-## Migration Cutover
-
-Historical chat checkpoints are intentionally not migrated. Product data, memories,
-and user-authored skills are.
-
-Rehearse against a copied data directory with fake external sinks:
-
-```bash
-uv run --extra migration opentulpa-migrate-deepagents \
-  --data-root /path/to/copied-data --dry-run
-uv run --extra migration opentulpa-migrate-deepagents \
-  --data-root /path/to/copied-data
-```
-
-The command fails closed when any preserved product database is absent. This catches a
-wrong data root before migration writes begin. Use `--allow-missing` only for a verified
-new installation that has no legacy product stores; never use it for a cutover.
-The dry run checks existing AgentSpec/TriggerSpec destinations, so a same-ID schedule
-with different content is reported as a blocking conflict rather than silently treated
-as migrated. Applied migration rebases legacy absolute uploaded-file paths to the
-current copied data root in one SQLite transaction and verifies the resulting file
-bytes. Destination conflicts never disable the corresponding legacy routine, setup
-session, memory, or user skill; resolve the conflict and rerun the idempotent command.
-The preservation checksum includes disabled workflows, intake cursors and pending
-runs, Telegram Business messages, and the knowledge preflight cache.
-
-For the single production cutover:
-
-1. pause ingress consumers and trigger dispatch;
-2. take a complete product-data and source-lineage backup;
-3. run migration and retain its count/checksum report;
-4. deploy the V2 API and coordinated clients;
-5. smoke test web, Telegram, intake, schedules, destructive-shell approvals, and optional adapters;
-6. resume consumers and triggers.
-
-Cross-tenant access, duplicate external effects, migration loss, or a destructive-shell approval that
-cannot resume are immediate rollback conditions. Migration rollback restores the old
-image/client and pre-cutover data snapshot. Managed candidate rollback is a separate
-release operation and does not reverse product-data migration.
+Recovery is controller-owned. Verify the installer lock and all installer descendants
+before manually removing an abandoned lock. Never infer lock ownership from a PID file:
+the installer intentionally creates no PID lock metadata.

@@ -3,6 +3,7 @@
 import json
 import os
 from functools import lru_cache
+from importlib import resources
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,6 +15,8 @@ from pydantic_settings import (
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from opentulpa.core.paths import RuntimePaths
 
 PRIMARY_OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
 LEGACY_OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -42,6 +45,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    def __init__(self, **values: Any) -> None:
+        if not RuntimePaths.from_environment().legacy_source_mode:
+            values.setdefault("_env_file", None)
+        super().__init__(**values)
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -51,14 +59,17 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Load defaults from YAML, but allow env/.env overrides."""
-        return (
-            init_settings,
-            env_settings,
-            dotenv_settings,
-            _YamlRuntimeDefaultsSource(settings_cls),
-            file_secret_settings,
-        )
+        """Load YAML defaults while retaining source-checkout dotenv behavior."""
+        yaml_settings = _YamlRuntimeDefaultsSource(settings_cls)
+        if RuntimePaths.from_environment().legacy_source_mode:
+            return (
+                init_settings,
+                env_settings,
+                dotenv_settings,
+                yaml_settings,
+                file_secret_settings,
+            )
+        return init_settings, env_settings, yaml_settings, file_secret_settings
 
     # Host
     host: str = Field(default="0.0.0.0", description="Bind host")
@@ -89,6 +100,14 @@ class Settings(BaseSettings):
             "Canonical Git checkout used by the managed bootstrap to create disposable "
             "source candidates. Defaults to the bootstrap project root."
         ),
+    )
+    evolution_upstream_repository: str = Field(
+        default="https://github.com/kvyb/opentulpa.git",
+        description="Unauthenticated HTTPS Git repository used for trusted upstream sync.",
+    )
+    evolution_upstream_ref: str = Field(
+        default="refs/heads/main",
+        description="Full remote branch ref imported by trusted upstream sync.",
     )
     evolution_sandbox_image: str = Field(
         default="opentulpa-evolution:0.1.0",
@@ -163,6 +182,7 @@ class Settings(BaseSettings):
         default="https://app.daytona.io/api",
         description="Daytona API URL used for hosted repository workspaces.",
     )
+
     @field_validator("repository_sandbox_provider")
     @classmethod
     def validate_repository_sandbox_provider(cls, value: str) -> str:
@@ -178,6 +198,7 @@ class Settings(BaseSettings):
         if provider not in {"auto", "railway", "local"}:
             raise ValueError("sandbox_provider must be auto, railway, or local")
         return provider
+
     # Telegram
     telegram_bot_token: str | None = Field(default=None, description="Telegram bot token")
     telegram_allowed_usernames: str | None = Field(
@@ -464,44 +485,50 @@ def get_settings() -> Settings:
 
 
 class _YamlRuntimeDefaultsSource(PydanticBaseSettingsSource):
-    """Optional repository-level YAML defaults source."""
+    """Layer explicit and development YAML over the packaged runtime defaults."""
 
     def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
-        self._delegate = self._build_delegate(settings_cls)
+        self._values = self._load_values(settings_cls)
 
-    def _candidate_paths(self) -> list[Path]:
-        candidates: list[Path] = []
-        seen: set[Path] = set()
-
-        def _add_path(path: Path) -> None:
-            resolved = path.resolve()
-            if resolved in seen:
-                return
-            seen.add(resolved)
-            candidates.append(path)
-
-        for base in [Path.cwd(), Path(__file__).resolve().parents[3]]:
-            _add_path(base / DEFAULT_CONFIG_FILENAME)
-            for parent in base.parents:
-                _add_path(parent / DEFAULT_CONFIG_FILENAME)
-
-        return candidates
-
-    def _build_delegate(
-        self, settings_cls: type[BaseSettings]
-    ) -> PydanticBaseSettingsSource | None:
-        for candidate in self._candidate_paths():
-            if candidate.exists():
-                return YamlConfigSettingsSource(settings_cls, yaml_file=candidate)
+    @staticmethod
+    def _cwd_config_file() -> Path | None:
+        cwd = Path.cwd()
+        for base in (cwd, *cwd.parents):
+            candidate = base / DEFAULT_CONFIG_FILENAME
+            if candidate.is_file():
+                return candidate.resolve()
         return None
 
+    @staticmethod
+    def _load_yaml(settings_cls: type[BaseSettings], path: Path) -> dict[str, Any]:
+        return YamlConfigSettingsSource(settings_cls, yaml_file=path)()
+
+    def _load_values(self, settings_cls: type[BaseSettings]) -> dict[str, Any]:
+        resource = resources.files("opentulpa").joinpath(
+            "resources",
+            DEFAULT_CONFIG_FILENAME,
+        )
+        if not resource.is_file():
+            raise RuntimeError(f"packaged runtime defaults are missing: {DEFAULT_CONFIG_FILENAME}")
+        with resources.as_file(resource) as packaged_path:
+            values = self._load_yaml(settings_cls, packaged_path)
+
+        runtime_paths = RuntimePaths.from_environment()
+        application_config = runtime_paths.application_root / DEFAULT_CONFIG_FILENAME
+        candidates = (
+            (application_config, self._cwd_config_file(), runtime_paths.config_file)
+            if runtime_paths.legacy_source_mode
+            else (application_config, runtime_paths.config_file)
+        )
+        for candidate in candidates:
+            if candidate is not None and candidate.is_file():
+                values.update(self._load_yaml(settings_cls, candidate))
+        return values
+
     def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
-        if self._delegate is None:
-            return None, field_name, False
-        return self._delegate.get_field_value(field, field_name)
+        del field
+        return self._values.get(field_name), field_name, False
 
     def __call__(self) -> dict[str, Any]:
-        if self._delegate is None:
-            return {}
-        return self._delegate()
+        return self._values.copy()
