@@ -201,7 +201,7 @@ class TrustedLocalProcessEngine:
         return "trusted-local-process"
 
     def health_checks(self) -> dict[str, bool]:
-        return {"trusted_local": True, "ssh": shutil.which("ssh") is not None}
+        return {"trusted_local": True}
 
     def execute(
         self,

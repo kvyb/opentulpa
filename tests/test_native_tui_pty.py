@@ -197,7 +197,7 @@ def _run_smoke(binary: Path) -> None:
         assert os.waitpid(pid, os.WNOHANG) == (0, 0)
         os.write(master, b"/mo")
         time.sleep(0.1)
-        command_output = _read_until(master, b"Choose the provider and model")
+        command_output = _read_until(master, b"Choose the global provider and model")
         assert b"/model" in command_output
         os.write(master, b"\r")
         model_output = _read_until(master, b"Server default")
