@@ -15,6 +15,7 @@ from pydantic import JsonValue
 from opentulpa.bootstrap.models import OutboxEvent, ReleaseOrigin, ReleaseRecord
 from opentulpa.bootstrap.supervisor import BootstrapSupervisor
 from opentulpa.evolution.archive import EvolutionArchive
+from opentulpa.evolution.candidate_provenance import CandidateSourceProvenance
 from opentulpa.evolution.lineage import GitLineage, GitLineageError
 from opentulpa.evolution.models import (
     Candidate,
@@ -93,12 +94,12 @@ class TrustedSourceReleaseProvider:
                 if artifact.artifact_kind == "python_generation" and generation is not None
                 else {}
             ),
-            **(
-                {"accepted_upstream_commit": accepted_upstream}
-                if accepted_upstream is not None
-                else {}
-            ),
         }
+        source_metadata = CandidateSourceProvenance(
+            changed_paths=(),
+            diff_sha256=empty_diff_sha256,
+            accepted_upstream_commit=accepted_upstream,
+        ).apply_to_metadata({})
         if isinstance(self._builder, TrustedWheelReleaseBuilder):
             policy = self._builder._policy
             artifact_metadata.update(
@@ -125,8 +126,7 @@ class TrustedSourceReleaseProvider:
                 "evaluator_version": self._evaluator_version,
                 "evaluator_fingerprint": self._evaluator_fingerprint,
                 "base_commit": source_commit,
-                "changed_paths": [],
-                "diff_sha256": empty_diff_sha256,
+                **source_metadata,
             },
         )
 
@@ -278,8 +278,24 @@ class ManagedEvolutionRuntime:
             metadata=release.metadata,
         ).release_metadata()
         accepted_upstream = release.metadata.get("accepted_upstream_commit")
-        if accepted_upstream is not None:
-            release_provenance["accepted_upstream_commit"] = accepted_upstream
+        raw_release_paths = release.metadata.get("changed_paths")
+        source_provenance = CandidateSourceProvenance(
+            changed_paths=(
+                tuple(str(path) for path in raw_release_paths)
+                if isinstance(raw_release_paths, list)
+                and all(isinstance(path, str) for path in raw_release_paths)
+                else ()
+            ),
+            diff_sha256=str(release.metadata.get("diff_sha256") or empty_diff_sha256),
+            accepted_upstream_commit=(
+                str(accepted_upstream) if accepted_upstream is not None else None
+            ),
+        )
+        source_metadata = source_provenance.apply_to_metadata({})
+        if source_provenance.accepted_upstream_commit is not None:
+            release_provenance["accepted_upstream_commit"] = (
+                source_provenance.accepted_upstream_commit
+            )
         fingerprint = str(release.metadata.get("evaluator_fingerprint") or release.manifest_digest)
         evaluator_version = str(
             release.metadata.get("evaluator_version") or "bootstrap-trusted-install-v1"
@@ -298,10 +314,7 @@ class ManagedEvolutionRuntime:
                     metadata={
                         "manifest_digest": release.manifest_digest,
                         "release_entrypoint": list(release.entrypoint),
-                        "changed_paths": [],
-                        "diff_sha256": str(
-                            release.metadata.get("diff_sha256") or empty_diff_sha256
-                        ),
+                        **source_metadata,
                         **release_provenance,
                         "bootstrap_initial": True,
                     },
@@ -331,19 +344,10 @@ class ManagedEvolutionRuntime:
             )
         ):
             raise RuntimeError("initial evolution evaluation conflicts with the serving release")
-        expected_diff_sha256 = str(release.metadata.get("diff_sha256") or empty_diff_sha256)
-        raw_release_paths = release.metadata.get("changed_paths")
-        expected_changed_paths: list[JsonValue] = (
-            [str(path) for path in raw_release_paths]
-            if isinstance(raw_release_paths, list)
-            and all(isinstance(path, str) for path in raw_release_paths)
-            else []
-        )
         for key, expected in (
             ("manifest_digest", release.manifest_digest),
             ("release_entrypoint", list(release.entrypoint)),
-            ("changed_paths", expected_changed_paths),
-            ("diff_sha256", expected_diff_sha256),
+            *tuple(source_metadata.items()),
             *tuple(release_provenance.items()),
         ):
             existing = candidate.metadata.get(key)
@@ -353,8 +357,7 @@ class ManagedEvolutionRuntime:
             **candidate.metadata,
             "manifest_digest": release.manifest_digest,
             "release_entrypoint": list(release.entrypoint),
-            "changed_paths": expected_changed_paths,
-            "diff_sha256": expected_diff_sha256,
+            **source_metadata,
             **release_provenance,
             "bootstrap_initial": True,
         }
@@ -394,13 +397,7 @@ class ManagedEvolutionRuntime:
         evaluation_report = candidate.evaluation_report
         if evaluation_report is None:
             raise RuntimeError("initial evolution evaluation evidence is unavailable")
-        raw_changed_paths = candidate.metadata.get("changed_paths")
-        changed_paths: list[JsonValue] = (
-            [str(path) for path in raw_changed_paths]
-            if isinstance(raw_changed_paths, list)
-            and all(isinstance(path, str) for path in raw_changed_paths)
-            else []
-        )
+        candidate_source = CandidateSourceProvenance.from_metadata(candidate.metadata)
         initial = Release(
             id=release.id,
             candidate_id=candidate.id,
@@ -412,8 +409,8 @@ class ManagedEvolutionRuntime:
                 "manifest_digest": release.manifest_digest,
                 "release_entrypoint": list(release.entrypoint),
                 "base_commit": candidate.base_commit,
-                "changed_paths": changed_paths,
-                "diff_sha256": str(candidate.metadata.get("diff_sha256") or empty_diff_sha256),
+                "changed_paths": list(candidate_source.changed_paths or ()),
+                "diff_sha256": candidate_source.diff_sha256 or empty_diff_sha256,
                 "evaluation_report_id": evaluation_report.id,
                 "evaluation_summary": evaluation_report.summary,
                 "evaluator_fingerprint": evaluation_report.evaluator_fingerprint,

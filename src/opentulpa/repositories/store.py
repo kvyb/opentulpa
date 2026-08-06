@@ -70,6 +70,20 @@ class RepositoryWorkspaceStore:
                 );
                 """
             )
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(repository_workspaces)")
+            }
+            for name, declaration in (
+                ("source_candidate_id", "TEXT"),
+                ("source_commit", "TEXT"),
+                ("verified_tree_oid", "TEXT"),
+                ("verified_patch_sha256", "TEXT"),
+                ("export_verified_at", "TEXT"),
+            ):
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE repository_workspaces ADD COLUMN {name} {declaration}"
+                    )
             conn.commit()
 
     @staticmethod
@@ -85,11 +99,15 @@ class RepositoryWorkspaceStore:
                     INSERT INTO repository_workspaces (
                         id, tenant_id, repository_url, provider, provider_workspace_id,
                         base_ref, base_sha, branch, head_sha, status, last_error,
-                        pull_request_url, created_at, updated_at, last_used_at
+                        pull_request_url, source_candidate_id, source_commit,
+                        verified_tree_oid, verified_patch_sha256, export_verified_at,
+                        created_at, updated_at, last_used_at
                     ) VALUES (
                         :id, :tenant_id, :repository_url, :provider, :provider_workspace_id,
                         :base_ref, :base_sha, :branch, :head_sha, :status, :last_error,
-                        :pull_request_url, :created_at, :updated_at, :last_used_at
+                        :pull_request_url, :source_candidate_id, :source_commit,
+                        :verified_tree_oid, :verified_patch_sha256, :export_verified_at,
+                        :created_at, :updated_at, :last_used_at
                     )
                     """,
                     data,
@@ -111,6 +129,11 @@ class RepositoryWorkspaceStore:
                     status=:status,
                     last_error=:last_error,
                     pull_request_url=:pull_request_url,
+                    source_candidate_id=:source_candidate_id,
+                    source_commit=:source_commit,
+                    verified_tree_oid=:verified_tree_oid,
+                    verified_patch_sha256=:verified_patch_sha256,
+                    export_verified_at=:export_verified_at,
                     updated_at=:updated_at,
                     last_used_at=:last_used_at
                 WHERE id=:id AND tenant_id=:tenant_id

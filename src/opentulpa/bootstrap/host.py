@@ -6,6 +6,7 @@ import asyncio
 import copy
 from collections import defaultdict, deque
 from collections.abc import Iterable
+from contextlib import suppress
 from typing import Protocol
 from uuid import uuid4
 
@@ -45,6 +46,8 @@ class ReleaseHost(Protocol):
 
     async def stop(self, running: RunningRelease) -> None: ...
 
+    async def contain(self, running: RunningRelease, *, attempts: int = 3) -> bool: ...
+
     async def snapshot_state(self, activation_id: str) -> None: ...
 
     async def restore_state(self, activation_id: str) -> bool: ...
@@ -57,6 +60,13 @@ class ReleaseHost(Protocol):
         *,
         mode: str = "production",
     ) -> RunningRelease | None: ...
+
+    async def collect_logs(
+        self,
+        running: RunningRelease,
+        *,
+        max_bytes: int = 64 * 1024,
+    ) -> str: ...
 
 
 class InMemoryReleaseHost:
@@ -185,6 +195,23 @@ class InMemoryReleaseHost:
         async with self._lock:
             self.calls.append(("stop", running.release_id, running.mode))
             self._running.pop(running.instance_id, None)
+
+    async def contain(self, running: RunningRelease, *, attempts: int = 3) -> bool:
+        target = running
+        for _ in range(attempts):
+            with suppress(Exception):
+                await self.stop(target)
+            surviving = await self.discover(target.release_id, mode=target.mode)
+            if surviving is None:
+                return True
+            target = surviving
+        return False
+
+    async def collect_logs(self, running: RunningRelease, *, max_bytes: int = 64 * 1024) -> str:
+        del max_bytes
+        async with self._lock:
+            self.calls.append(("logs", running.release_id, running.mode))
+        return ""
 
     async def snapshot_state(self, activation_id: str) -> None:
         async with self._lock:

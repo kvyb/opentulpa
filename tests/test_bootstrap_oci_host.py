@@ -42,6 +42,7 @@ class FakeOciRunner:
         trusted_source_layout: bool = True,
         source_layout: str = "full-source-v1",
         image_volumes: bool = False,
+        log_output: bytes = b"",
     ) -> None:
         self.release = release
         self.rootless = rootless
@@ -49,9 +50,12 @@ class FakeOciRunner:
         self.trusted_source_layout = trusted_source_layout
         self.source_layout = source_layout
         self.image_volumes = image_volumes
+        self.log_output = log_output
         self.commands: list[tuple[str, ...]] = []
         self.networks: set[str] = set()
         self.containers: dict[str, dict[str, object]] = {}
+        self.fail_container_removal = False
+        self.fail_network_removal = False
         self._counter = 0
 
     async def run(
@@ -97,7 +101,11 @@ class FakeOciRunner:
                 return OciCommandResult(returncode=0, output=b"false")
             exists = command[3] in self.networks
             return OciCommandResult(returncode=0 if exists else 1, output=b"true" if exists else b"")
+        if command[1:3] == ("network", "ls"):
+            return OciCommandResult(returncode=0, output="\n".join(sorted(self.networks)).encode())
         if command[1:3] == ("network", "rm"):
+            if self.fail_network_removal:
+                return OciCommandResult(returncode=1)
             existed = command[3] in self.networks
             self.networks.discard(command[3])
             return OciCommandResult(returncode=0 if existed else 1)
@@ -139,12 +147,16 @@ class FakeOciRunner:
                 assert isinstance(config, dict)
                 labels = config["Labels"]
                 assert isinstance(labels, dict)
-                if all(
-                    value.startswith("label=")
-                    and labels.get(value.removeprefix("label=").split("=", 1)[0])
-                    == value.split("=", 2)[2]
-                    for value in filters
-                ):
+                matches = True
+                for value in filters:
+                    if value.startswith("label="):
+                        key, expected = value.removeprefix("label=").split("=", 1)
+                        matches = matches and labels.get(key) == expected
+                    elif value.startswith("id="):
+                        matches = matches and identifier.startswith(value.removeprefix("id="))
+                    else:
+                        matches = False
+                if matches:
                     identifiers.append(identifier)
             return OciCommandResult(returncode=0, output="\n".join(identifiers).encode())
         if command[1] == "inspect":
@@ -154,10 +166,15 @@ class FakeOciRunner:
             return OciCommandResult(returncode=0, output=json.dumps(container).encode())
         if command[1] == "stop":
             return OciCommandResult(returncode=0)
+        if command[1] == "logs":
+            return OciCommandResult(returncode=0, output=self.log_output)
         if command[1] == "rm":
             identifier = command[-1]
+            if self.fail_container_removal:
+                return OciCommandResult(returncode=1)
+            existed = identifier in self.containers
             self.containers.pop(identifier, None)
-            return OciCommandResult(returncode=0)
+            return OciCommandResult(returncode=0 if existed else 1)
         raise AssertionError(f"unexpected OCI command: {command}")
 
 
@@ -324,6 +341,89 @@ async def test_staging_release_has_no_egress_secrets_or_persistent_mount(
 
         await host.stop(running)
         assert network_name not in runner.networks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_resource", ["container", "network"])
+async def test_containment_fails_closed_while_oci_resources_survive(
+    tmp_path: Path,
+    failed_resource: str,
+) -> None:
+    release = _release()
+    runner = FakeOciRunner(release)
+    policy = OciReleasePolicy(
+        state_root=tmp_path / "state",
+        production_network_name="release-egress",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_control_app(release)),
+        base_url="http://127.0.0.1:49153",
+    ) as client:
+        host = RootlessOciReleaseHost(policy=policy, runner=runner, http_client=client)
+        running = await host.start(
+            await host.prepare(release),
+            ReleaseLaunchContext(mode="staging"),
+        )
+        network_name = next(iter(runner.networks))
+        if failed_resource == "container":
+            runner.fail_container_removal = True
+        else:
+            runner.fail_network_removal = True
+
+        assert await host.contain(running, attempts=2) is False
+        if failed_resource == "container":
+            assert running.instance_id in runner.containers
+        else:
+            assert network_name in runner.networks
+
+        runner.fail_container_removal = False
+        runner.fail_network_removal = False
+        assert await host.contain(running, attempts=1) is True
+        assert running.instance_id not in runner.containers
+        assert network_name not in runner.networks
+
+
+@pytest.mark.asyncio
+async def test_oci_log_collection_is_bounded_and_redacted(tmp_path: Path) -> None:
+    release = _release()
+    runner = FakeOciRunner(release)
+    policy = OciReleasePolicy(
+        state_root=tmp_path / "state",
+        production_network_name="release-egress",
+        production_environment=(("OPENAI_COMPATIBLE_API_KEY", "production-secret"),),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_control_app(release)),
+        base_url="http://127.0.0.1:49153",
+    ) as client:
+        host = RootlessOciReleaseHost(policy=policy, runner=runner, http_client=client)
+        running = await host.start(
+            await host.prepare(release),
+            ReleaseLaunchContext(
+                mode="production",
+                lease_epoch=1,
+                secrets_enabled=True,
+                ingress_enabled=False,
+            ),
+        )
+        runner.log_output = (
+            b"production-secret Authorization: Bearer "
+            + (running.control_token or "").encode()
+            + b" Authorization: Basic dXNlcjpwYXNz Cookie: session=dynamic-secret "
+            + b" password=hunter2 "
+            + b"x" * 100
+        )
+
+        logs = await host.collect_logs(running, max_bytes=64)
+
+        assert len(logs.encode()) <= 64
+        assert "production-secret" not in logs
+        assert running.control_token not in logs
+        assert "hunter2" not in logs
+        assert "dXNlcjpwYXNz" not in logs
+        assert "dynamic-secret" not in logs
+        assert "[redacted]" in logs
+        await host.stop(running)
 
 
 @pytest.mark.asyncio

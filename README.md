@@ -29,15 +29,21 @@ built at its final path for the target machine; see the
 ## Deployment
 
 OpenTulpa can serve immutable releases locally, in Docker Compose, or on Railway.
-Railway serves immutable installed releases but does not self-mutate their source.
-Strong source mutation and evaluation isolation is supported only on rootful Linux with
-working `bwrap` namespaces and the required Docker Compose capabilities. Unsupported
-namespace environments, non-root Linux, macOS, and Railway fail closed for source
-mutation while immutable serving continues.
+The default production path is the installed host controller: the Docker image and
+`./install.sh` both package the controller generation, source seed, trusted evaluation
+wheelhouse, and `uv` toolchain that core self-evolution needs. Source evolution is
+enabled by default and uses a trusted-local candidate worktree on hosts such as Railway
+where rootful namespace isolation is unavailable.
 
-Docker Compose requires the documented rootful capabilities and relaxed confinement for
-the namespace sandbox. Treat that as a hardened-production consideration, not as a
-general-purpose container hardening profile. See [Deployment](docs/DEPLOYMENT.md).
+Trusted-local evolution is intended for single-tenant/personal deployments. It is not a
+security sandbox for adversarial tenants: candidate commands run as the controller user in
+a disposable worktree, while the stable controller keeps release and rollback authority.
+
+Rootful Linux `bwrap`/process isolation and OCI-backed dependency resolution remain
+optional hardened backends. They are not required for the default self-evolution loop.
+Optional capability bundles such as browser automation, integrations, document tooling,
+research tooling, and hosted sandboxes are separate deployment choices.
+See [Deployment](docs/DEPLOYMENT.md).
 The image starts the immutable host controller directly. Host releases execute only from
 sealed Python generations; managed OCI releases execute only from immutable image digests.
 
@@ -46,13 +52,16 @@ sealed Python generations; managed OCI releases execute only from immutable imag
 1. The stable controller opens a detached Git candidate worktree.
 2. Native Git refs retain instance and upstream lineage; native merge state records and
    exposes conflicts instead of inventing a parallel conflict format.
-3. On supported rootful Linux, the candidate and evaluator run with separate UIDs and
-   capability boundaries. The candidate workspace is never the serving source tree.
-4. Optional dependency proposals go through a credential-free, content-addressed OCI
+3. By default, the candidate uses a trusted-local full Git worktree and normal local
+   shell while the stable controller owns evaluation, release building, activation, and
+   rollback. The candidate workspace is never the serving source tree.
+4. On supported rootful Linux, optional hardened candidate/evaluator isolation can run
+   with separate UIDs and namespace boundaries.
+5. Optional dependency proposals go through a credential-free, content-addressed OCI
    resolver; fixed evaluation and generation building use its exact lock and wheelhouse.
-5. Promotion is a stop/start-fenced cutover with an availability gap, strict readiness,
+6. Promotion is a stop/start-fenced cutover with an availability gap, strict readiness,
    and live probation. It is not standby or zero-downtime promotion.
-6. A failure restores the exact previous generation and its recorded HostConfig. Product
+7. A failure restores the exact previous generation and its recorded HostConfig. Product
    database mutations and external side effects are not rewound.
 
 The active child cannot survive normal promotion: it is drained and stopped before the

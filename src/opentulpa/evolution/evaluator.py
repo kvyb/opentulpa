@@ -125,9 +125,14 @@ class EvaluationRunner(Protocol):
 
 
 class LocalEvaluationRunner:
-    """Development-only runner; generated candidate code executes on the host."""
+    """Trusted-local runner; generated candidate code executes as the controller user."""
 
-    def __init__(self, *, extra_env: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        extra_env: dict[str, str] | None = None,
+        fingerprint_context: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+    ) -> None:
         self._env = {
             "PATH": os.environ.get("PATH", os.defpath),
             "HOME": "/tmp",
@@ -135,10 +140,25 @@ class LocalEvaluationRunner:
             "PYTHONHASHSEED": "0",
             **(extra_env or {}),
         }
+        self._fingerprint_context = fingerprint_context or {}
 
     @property
     def fingerprint(self) -> str:
-        return "local-development-runner-v1"
+        context = (
+            self._fingerprint_context()
+            if callable(self._fingerprint_context)
+            else dict(self._fingerprint_context)
+        )
+        return self._input_fingerprint(context)
+
+    def _input_fingerprint(self, context: dict[str, str]) -> str:
+        payload = {
+            "version": "trusted-local-runner-v1",
+            "environment": self._env,
+            "context": context,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
     async def run(
         self,
@@ -769,16 +789,23 @@ def _run_process(
     timeout_cleanup: Callable[[], None] | None = None,
 ) -> EvaluationCommandResult:
     started = time.monotonic()
-    completed = run_bounded_process(
-        argv,
-        cwd=cwd,
-        env=env,
-        timeout_seconds=command.timeout_seconds,
-        max_output_bytes=max_output_bytes,
-        timeout_cleanup=timeout_cleanup,
-    )
-    raw = completed.output
-    exit_code = completed.returncode
+    try:
+        completed = run_bounded_process(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=command.timeout_seconds,
+            max_output_bytes=max_output_bytes,
+            timeout_cleanup=timeout_cleanup,
+        )
+        raw = completed.output
+        exit_code = completed.returncode
+    except FileNotFoundError:
+        raw = f"evaluation executable is unavailable: {argv[0]}".encode()
+        exit_code = 127
+    except OSError as exc:
+        raw = f"evaluation process failed: {type(exc).__name__}".encode()
+        exit_code = 126
     duration = time.monotonic() - started
     return EvaluationCommandResult(
         name=command.name,

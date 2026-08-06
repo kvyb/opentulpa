@@ -495,6 +495,9 @@ class RepositoryPort(Protocol):
         patch: bytes,
         expected_sha256: str,
         message: str,
+        source_candidate_id: str | None = None,
+        source_commit: str | None = None,
+        expected_tree_oid: str | None = None,
     ) -> Any: ...
 
 
@@ -2260,6 +2263,22 @@ class ProductToolApplication:
                     "invalid_service_response",
                     "The source contribution digest is invalid.",
                 )
+            tree_oid = (
+                str(metadata.get("candidate_tree_oid") or "").strip().lower()
+                if isinstance(metadata, Mapping)
+                else ""
+            )
+            source_commit = str(contribution.get("head_commit") or "").strip().lower()
+            if (
+                len(tree_oid) != 40
+                or any(character not in "0123456789abcdef" for character in tree_oid)
+                or len(source_commit) != 40
+                or any(character not in "0123456789abcdef" for character in source_commit)
+            ):
+                raise ProductToolApplicationError(
+                    "invalid_service_response",
+                    "The source contribution tree binding is invalid.",
+                )
             patch_path = await _resolve(
                 evolution.review_patch(candidate_id=str(invocation.arguments["candidate_id"]))
             )
@@ -2294,6 +2313,9 @@ class ProductToolApplication:
                     patch=patch,
                     expected_sha256=digest,
                     message=str(invocation.arguments["message"]),
+                    source_candidate_id=str(invocation.arguments["candidate_id"]),
+                    source_commit=source_commit,
+                    expected_tree_oid=tree_oid,
                 )
             )
             result = dict(_structured(imported, mode="python"))
@@ -2301,7 +2323,8 @@ class ProductToolApplication:
                 {
                     "candidate_id": str(invocation.arguments["candidate_id"]),
                     "candidate_revision": int(invocation.arguments["expected_revision"]),
-                    "requires_tests_before_publish": True,
+                    "requires_tests_before_publish": False,
+                    "evaluation_reused_by_exact_tree": True,
                 }
             )
             return result

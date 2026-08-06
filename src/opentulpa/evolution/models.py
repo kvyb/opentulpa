@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
@@ -135,6 +135,11 @@ class Candidate(_EvolutionModel):
     parent_candidate_id: str | None = Field(default=None, min_length=1, max_length=100)
     source_commit: str | None = Field(default=None, min_length=1, max_length=200)
     worktree_path: str | None = Field(default=None, min_length=1, max_length=4_096)
+    # None is the legacy discriminator and stays absent from canonical legacy payloads.
+    workspace_kind: Literal["full_repository", "linked_worktree"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     dependency_lock_hash: str | None = Field(default=None, min_length=1, max_length=200)
     artifact_digest: str | None = Field(default=None, min_length=1, max_length=300)
     evaluator_fingerprint: str | None = Field(

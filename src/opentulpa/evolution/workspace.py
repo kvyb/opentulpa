@@ -8,12 +8,13 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import Literal, cast
 
 from opentulpa.evolution.git_security import (
     GitSecurityError,
@@ -56,6 +57,7 @@ _PUBLIC_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template
 _RESERVED_SOURCE_COMPONENTS = frozenset({".git", ".venv"})
 _PRIVATE_KEY_BEGIN_RE = re.compile(rb"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 _PRIVATE_KEY_END_RE = re.compile(rb"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+_FULL_REPOSITORY_MARKER = "opentulpa-full-repository-v1"
 _BEARER_RE = re.compile(rb"(?i)\bbearer[ \t]+([A-Za-z0-9._~+/=-]{20,})")
 _PROVIDER_TOKEN_RES = (
     re.compile(rb"\bsk-(?:proj-|live-|lf-)?[A-Za-z0-9_-]{20,}\b"),
@@ -117,6 +119,51 @@ class CandidateWorkspace:
     candidate_id: str
     path: Path
     base_commit: str
+    repository_kind: Literal["full_repository", "linked_worktree"] = "linked_worktree"
+
+
+def candidate_repository_directory(
+    path: Path,
+    *,
+    candidate_id: str,
+    base_commit: str,
+    worktrees_root: Path,
+) -> Path:
+    """Validate a newly-created, independent candidate repository."""
+    try:
+        root = path.expanduser().resolve(strict=True)
+        expected = (worktrees_root / candidate_id).resolve(strict=False)
+        if root != expected or not root.is_dir():
+            raise GitCandidateError("candidate repository identity is invalid")
+        git_directory, common_directory = _discover_git_directories(root)
+        if git_directory != common_directory:
+            raise GitCandidateError("candidate repository is not independent")
+        marker = git_directory / "opentulpa-candidate"
+        if _read_git_admin_file(marker) != f"{_FULL_REPOSITORY_MARKER} {candidate_id} {base_commit}":
+            raise GitCandidateError("candidate repository discriminator is invalid")
+        _require_independent_object_store(git_directory / "objects")
+        return root
+    except GitCandidateError:
+        raise
+    except OSError:
+        raise GitCandidateError("candidate repository is unavailable") from None
+
+
+def _require_independent_object_store(objects: Path) -> None:
+    try:
+        if objects.is_symlink() or not objects.is_dir():
+            raise OSError("invalid object store")
+        for directory, directories, files in os.walk(objects, followlinks=False):
+            root = Path(directory)
+            if any((root / name).is_symlink() for name in directories):
+                raise OSError("linked object directory")
+            for name in files:
+                path = root / name
+                metadata = path.lstat()
+                if not path.is_file() or path.is_symlink() or metadata.st_nlink != 1:
+                    raise OSError("shared object file")
+    except OSError:
+        raise GitCandidateError("candidate repository object store is not independent") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +184,7 @@ class ContributionArtifact:
     branch_name: str
     patch_path: Path
     patch_sha256: str
+    tree_oid: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,14 +253,7 @@ class GitCandidateWorkspace:
             path = self._candidate_path(safe_id)
             if os.path.lexists(path):
                 raise GitCandidateError("candidate worktree already exists")
-            self._run_git(
-                self._source_repository,
-                "worktree",
-                "add",
-                "--detach",
-                str(path),
-                base_commit,
-            )
+            self._create_full_repository(path, base_commit, safe_id)
             try:
                 resolved = path.resolve(strict=True)
             except OSError:
@@ -220,23 +261,17 @@ class GitCandidateWorkspace:
             if not self._is_relative_to(resolved, self._worktrees_root):
                 self._remove_path(safe_id, resolved)
                 raise GitCandidateError("candidate worktree escaped its configured root")
-            _, git_directory = _candidate_worktree_directories(
+            candidate_repository_directory(
                 resolved,
                 candidate_id=safe_id,
                 base_commit=base_commit,
                 worktrees_root=self._worktrees_root,
-                common_directory=self._git_common_directory,
-                require_registration=False,
             )
-            try:
-                self._register_candidate_worktree(git_directory, safe_id, base_commit)
-            except GitCandidateError:
-                self._remove_path(safe_id, resolved)
-                raise
             workspace = CandidateWorkspace(
                 candidate_id=safe_id,
                 path=resolved,
                 base_commit=base_commit,
+                repository_kind="full_repository",
             )
             self._validate_workspace(workspace)
             return workspace
@@ -289,7 +324,7 @@ class GitCandidateWorkspace:
                     raise GitCandidateError("candidate worktree registration is invalid")
             else:
                 self._register_candidate_worktree(git_directory, safe_id, safe_base)
-            return CandidateWorkspace(safe_id, root, safe_base)
+            return CandidateWorkspace(safe_id, root, safe_base, "linked_worktree")
 
     def head(self, workspace: CandidateWorkspace) -> str:
         with self._mutation():
@@ -387,6 +422,7 @@ class GitCandidateWorkspace:
             if evidence != expected_evidence or committed_paths != final_paths:
                 raise GitCandidateError("candidate immutable review evidence changed")
             diff_sha256 = hashlib.sha256(evidence).hexdigest()
+            self._import_git_objects(root, source_commit, base_commit)
             self._advance_candidate_ref(
                 workspace,
                 source_commit,
@@ -421,6 +457,7 @@ class GitCandidateWorkspace:
             self._validate_changed_paths(changed_paths)
             self._validate_tree_content(root, source_commit, changed_paths)
             diff_sha256 = hashlib.sha256(evidence).hexdigest()
+            self._import_git_objects(root, source_commit, base_commit)
             self._advance_candidate_ref(
                 workspace,
                 source_commit,
@@ -469,6 +506,13 @@ class GitCandidateWorkspace:
             if not patch.strip():
                 raise GitCandidateError("candidate contribution patch is empty")
             digest = hashlib.sha256(patch).hexdigest()
+            tree_oid = self._run_git(
+                self._source_repository,
+                "show",
+                "--no-patch",
+                "--format=%T",
+                safe_head,
+            ).strip()
             patch_path = self._artifacts_root / f"{safe_id}-{digest[:16]}.patch"
             self._publish_artifact(patch_path, patch)
             branch_name = f"opentulpa/candidate-{safe_id}"
@@ -480,7 +524,73 @@ class GitCandidateWorkspace:
                 branch_name=branch_name,
                 patch_path=patch_path,
                 patch_sha256=digest,
+                tree_oid=tree_oid,
             )
+
+    def import_exact_commit(
+        self,
+        workspace: CandidateWorkspace,
+        *,
+        source_commit: str,
+    ) -> str:
+        """Import the candidate's verified Git objects into the canonical ODB.
+
+        This transfers Git objects through pack/index-pack, never by applying a
+        patch. A temporary canonical ref protects the imported graph while all
+        ancestry, tree, mode, and blob checks are repeated in the destination.
+        """
+        with self._mutation():
+            root = self._validate_workspace(workspace)
+            exact = self._commit(source_commit)
+            base = self._commit(workspace.base_commit)
+            self._validate_commit_lineage(root, base, exact)
+            self._import_git_objects(root, exact, base)
+            temporary_ref = f"refs/opentulpa/imports/{workspace.candidate_id}"
+            self._retain_ref(temporary_ref, exact)
+            try:
+                self._validate_commit_lineage(self._source_repository, base, exact)
+                if self._head(root) != exact:
+                    raise GitCandidateError("candidate exact import source changed")
+                imported_tree = self._run_git(
+                    self._source_repository,
+                    "show",
+                    "--no-patch",
+                    "--format=%T",
+                    exact,
+                ).strip()
+                candidate_tree = self._run_git(root, "show", "--no-patch", "--format=%T", exact).strip()
+                if imported_tree != candidate_tree:
+                    raise GitCandidateError("candidate exact import tree changed")
+            finally:
+                self._run_git(
+                    self._source_repository,
+                    "update-ref",
+                    "-d",
+                    temporary_ref,
+                    exact,
+                    allowed_returncodes=frozenset({0, 1}),
+                )
+            return exact
+
+    def _import_git_objects(self, root: Path, exact: str, base: str) -> None:
+        pack = self._run_git_bytes(
+            root,
+            "pack-objects",
+            "--stdout",
+            "--thin",
+            "--revs",
+            input_bytes=f"{exact}\n^{base}\n".encode("ascii"),
+        )
+        if not pack:
+            raise GitCandidateError("candidate object import was empty")
+        self._run_git_bytes(
+            self._source_repository,
+            "index-pack",
+            "--stdin",
+            "--fix-thin",
+            "--keep=opentulpa-exact-import",
+            input_bytes=pack,
+        )
 
     def review_artifact(
         self,
@@ -518,7 +628,46 @@ class GitCandidateWorkspace:
     def remove(self, workspace: CandidateWorkspace) -> None:
         with self._mutation():
             root = self._validate_workspace(workspace)
-            self._remove_path(workspace.candidate_id, root)
+            if self._is_full_repository(root, workspace):
+                shutil.rmtree(root)
+            else:
+                self._remove_path(workspace.candidate_id, root)
+
+    def _create_full_repository(self, path: Path, base_commit: str, candidate_id: str) -> None:
+        """Copy Git objects, then initialize a clean repository without remotes."""
+        try:
+            path.mkdir()
+            init_arguments = ["init", "--quiet", "-b", "candidate"]
+            if self._oid_length == 64:
+                init_arguments.insert(2, "--object-format=sha256")
+            self._run_git(path, *init_arguments)
+            self._run_git(path, "config", "--local", "user.name", "OpenTulpa Candidate")
+            self._run_git(
+                path,
+                "config",
+                "--local",
+                "user.email",
+                "candidate@opentulpa.local",
+            )
+            candidate_git, _ = _discover_git_directories(path)
+            shutil.copytree(
+                self._git_common_directory / "objects",
+                candidate_git / "objects",
+                dirs_exist_ok=True,
+            )
+            if (candidate_git / "objects" / "info" / "alternates").exists():
+                raise GitCandidateError("candidate repository object store is not independent")
+            marker = candidate_git / "opentulpa-candidate"
+            marker.write_text(
+                f"{_FULL_REPOSITORY_MARKER} {candidate_id} {base_commit}\n",
+                encoding="ascii",
+            )
+            self._run_git(path, "checkout", "--detach", base_commit)
+            self._run_git(path, "remote", "remove", "origin", allowed_returncodes=frozenset({0, 2}))
+        except (OSError, GitCandidateError):
+            with suppress(OSError):
+                shutil.rmtree(path)
+            raise GitCandidateError("candidate repository creation failed") from None
 
     def _remove_path(self, candidate_id: str, root: Path) -> None:
         try:
@@ -702,13 +851,21 @@ class GitCandidateWorkspace:
     def _validate_workspace(self, workspace: CandidateWorkspace) -> Path:
         base_commit = self._commit(workspace.base_commit)
         safe_id = self._candidate_id(workspace.candidate_id)
-        root, _ = _candidate_worktree_directories(
-            workspace.path,
-            candidate_id=safe_id,
-            base_commit=base_commit,
-            worktrees_root=self._worktrees_root,
-            common_directory=self._git_common_directory,
-        )
+        if workspace.repository_kind == "full_repository":
+            root = candidate_repository_directory(
+                workspace.path,
+                candidate_id=safe_id,
+                base_commit=base_commit,
+                worktrees_root=self._worktrees_root,
+            )
+        else:
+            root, _ = _candidate_worktree_directories(
+                workspace.path,
+                candidate_id=safe_id,
+                base_commit=base_commit,
+                worktrees_root=self._worktrees_root,
+                common_directory=self._git_common_directory,
+            )
         self._assert_safe_git_configuration(root)
         symbolic = self._run_git(
             root,
@@ -728,6 +885,20 @@ class GitCandidateWorkspace:
         if resolved_base != base_commit:
             raise GitCandidateError("candidate base commit is invalid")
         return root
+
+    def _is_full_repository(self, root: Path, workspace: CandidateWorkspace) -> bool:
+        if workspace.repository_kind != "full_repository":
+            return False
+        try:
+            candidate_repository_directory(
+                root,
+                candidate_id=workspace.candidate_id,
+                base_commit=workspace.base_commit,
+                worktrees_root=self._worktrees_root,
+            )
+        except GitCandidateError:
+            return False
+        return True
 
     def _candidate_path(self, candidate_id: str) -> Path:
         return self._worktrees_root / self._candidate_id(candidate_id)
@@ -1152,7 +1323,8 @@ class GitCandidateWorkspace:
 
     def _assert_safe_git_configuration(self, cwd: Path) -> None:
         git_directory, common_directory = _discover_git_directories(cwd)
-        if common_directory != self._git_common_directory:
+        independent = common_directory == git_directory and cwd != self._source_repository
+        if common_directory != self._git_common_directory and not independent:
             raise GitCandidateError("candidate belongs to another repository")
         key = (git_directory, common_directory)
         validated = getattr(self._operation_state, "validated_directories", None)
@@ -1161,11 +1333,13 @@ class GitCandidateWorkspace:
         if _repository_git_configuration_is_unsafe(
             cwd,
             git_directory,
-            self._git_common_directory,
+            common_directory,
             timeout_seconds=self._timeout_seconds,
             max_output_bytes=self._max_git_output_bytes,
         ):
             raise GitCandidateError("repository Git configuration is unsafe")
+        if independent and self._run_git(cwd, "remote").strip():
+            raise GitCandidateError("candidate repository must not have remotes")
         if validated is not None:
             validated.add(key)
 
@@ -1264,5 +1438,6 @@ __all__ = [
     "candidate_path_is_promotable",
     "candidate_path_is_runtime_overlay",
     "candidate_content_contains_secret",
+    "candidate_repository_directory",
     "repository_mutation_lock",
 ]

@@ -385,12 +385,12 @@ def _assert_notification_sequence(data_root: Path) -> list[dict[str, Any]]:
     expected = (
         "evolution.build.preparing",
         "evolution.build.switching",
-        "evolution.promotion.active",
+        "evolution.build.active",
         "evolution.build.preparing",
         "evolution.build.switching",
         "evolution.promotion.failed",
         "evolution.build.switching",
-        "evolution.rollback.active",
+        "evolution.build.rolled_back",
     )
     rows = _wait_for(
         lambda: _notification_rows(data_root),

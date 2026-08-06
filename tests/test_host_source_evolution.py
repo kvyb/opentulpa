@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
 import shutil
@@ -17,10 +18,12 @@ from opentulpa.core.config import Settings
 from opentulpa.evolution.evaluator import (
     EvaluationCommand,
     IsolatedProcessEvaluationRunner,
+    LocalEvaluationRunner,
 )
 from opentulpa.evolution.generation import StateContract
 from opentulpa.evolution.generation_store import GenerationStore
 from opentulpa.evolution.release_builder import (
+    OciReleaseArtifact,
     ReleaseBuildError,
     WheelReleaseBuildPolicy,
 )
@@ -28,15 +31,18 @@ from opentulpa.evolution.sandbox import (
     CandidateContainerBackend,
     CandidateProcessBackend,
     CandidateSandboxPolicy,
+    TrustedLocalCandidateBackend,
 )
-from opentulpa.host import evolution_composition
 from opentulpa.host import paths as host_paths_module
 from opentulpa.host.evolution import (
     HostEvolutionRuntime,
     HostReleaseActivator,
+    TrustedGenerationReleaseProvider,
     seed_source_repository,
 )
 from opentulpa.host.evolution_composition import (
+    _trusted_local_evaluation_context,
+    _trusted_local_evaluation_executables,
     _TrustedHostWheelReleaseBuilder,
     build_host_evolution_runtime,
 )
@@ -415,6 +421,22 @@ class _InitialRelease:
         raise AssertionError("non-bootstrap current release must not be rebuilt")
 
 
+class _InitialReleaseBuilder:
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    async def build(self, request: Any) -> OciReleaseArtifact:
+        self.requests.append(request)
+        digest = hashlib.sha256(request.evaluator_fingerprint.encode()).hexdigest()
+        return OciReleaseArtifact(
+            artifact_kind="python_generation",
+            artifact_digest=f"sha256:{digest}",
+            manifest_digest=f"sha256:{digest}",
+            image_reference=f"python-generation:{digest}",
+            entrypoint=("venv/bin/python", "-I", "-m", "opentulpa"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_prepare_selects_archived_python_generation_without_rebuilding(
     tmp_path: Path,
@@ -440,6 +462,32 @@ async def test_prepare_selects_archived_python_generation_without_rebuilding(
     assert len(store.opens) == 1
 
 
+@pytest.mark.asyncio
+async def test_initial_release_provider_resolves_current_evaluator_fingerprint(
+    tmp_path: Path,
+) -> None:
+    seed = _seed(tmp_path)
+    repository = seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
+    builder = _InitialReleaseBuilder()
+    current_fingerprint = f"sha256:{'1' * 64}"
+
+    provider = TrustedGenerationReleaseProvider(
+        source_repository=repository,
+        worktrees_root=tmp_path / "initial-worktrees",
+        builder=builder,
+        evaluator_version="test-evaluator-v1",
+        evaluator_fingerprint=lambda: current_fingerprint,
+        state_contract=_state_contract(),
+        install_profile="runtime",
+    )
+    current_fingerprint = f"sha256:{'2' * 64}"
+
+    release = await provider.build()
+
+    assert builder.requests[0].evaluator_fingerprint == current_fingerprint
+    assert release.metadata["evaluator_fingerprint"] == current_fingerprint
+
+
 def test_missing_wheelhouse_fails_generation_builder_clearly(tmp_path: Path) -> None:
     store = GenerationStore(
         tmp_path / "runtime-generations",
@@ -459,7 +507,7 @@ def test_missing_wheelhouse_fails_generation_builder_clearly(tmp_path: Path) -> 
         _TrustedHostWheelReleaseBuilder(policy=policy, store=store)
 
 
-def test_nonroot_composition_keeps_immutable_generation_runtime_without_source_mutation(
+def test_composition_defaults_to_trusted_local_source_mutation_without_strong_sandbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,6 +534,11 @@ def test_nonroot_composition_keeps_immutable_generation_runtime_without_source_m
         "unavailable_reason",
         staticmethod(lambda: "strong sandbox requires Linux namespaces"),
     )
+    monkeypatch.setattr(
+        IsolatedProcessEvaluationRunner,
+        "unavailable_reason",
+        classmethod(lambda cls, **kwargs: "exact evaluator tools are unavailable"),
+    )
     data = tmp_path / "data"
     data.mkdir(mode=0o700)
 
@@ -497,32 +550,41 @@ def test_nonroot_composition_keeps_immutable_generation_runtime_without_source_m
     )
 
     assert composed is not None
-    assert composed.service.source_mutation_enabled is False
+    assert composed.service.source_mutation_enabled is True
+    assert isinstance(composed.service._evaluator._runner, LocalEvaluationRunner)  # noqa: SLF001
+    factory = composed.service._candidate_backend_factory  # noqa: SLF001
+    assert factory is not None
+    workspace = data / "bootstrap" / "evolution" / "worktrees" / "candidate"
+    workspace.mkdir()
+    assert isinstance(factory(workspace), TrustedLocalCandidateBackend)
 
 
-def test_source_mutation_requires_both_shell_and_evaluator_isolation(
+def test_trusted_local_evaluator_context_hashes_exact_tool_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        CandidateProcessBackend,
-        "unavailable_reason",
-        staticmethod(lambda: None),
-    )
-    monkeypatch.setattr(
-        IsolatedProcessEvaluationRunner,
-        "unavailable_reason",
-        classmethod(lambda cls, **kwargs: "exact evaluator tools are unavailable"),
-    )
+    binary_root = tmp_path / "bin"
+    binary_root.mkdir()
+    for name in ("python", "ruff", "mypy", "pytest"):
+        path = binary_root / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o700)
+    monkeypatch.setattr(sys, "executable", str(binary_root / "python"))
 
-    reason = evolution_composition._source_mutation_unavailable_reason(  # noqa: SLF001
-        controller_root=tmp_path / "controller",
-        wheelhouse=tmp_path / "wheelhouse",
+    executables = _trusted_local_evaluation_executables()
+    first = _trusted_local_evaluation_context(executables)
+    runner = LocalEvaluationRunner(
+        fingerprint_context=lambda: _trusted_local_evaluation_context(executables)
     )
+    first_fingerprint = runner.fingerprint
+    (binary_root / "ruff").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (binary_root / "ruff").chmod(0o700)
+    second = _trusted_local_evaluation_context(executables)
 
-    assert (
-        reason == "source mutation evaluator is unavailable: exact evaluator tools are unavailable"
-    )
+    assert executables.ruff == str(binary_root / "ruff")
+    assert first["tool.python.path"] == str(binary_root / "python")
+    assert first["tool.ruff.sha256"] != second["tool.ruff.sha256"]
+    assert first_fingerprint != runner.fingerprint
 
 
 def test_host_runtime_and_candidate_identities_are_distinct(
@@ -543,7 +605,8 @@ def test_host_runtime_and_candidate_identities_are_distinct(
 def test_final_image_installs_strong_sandbox_and_distinct_candidate_identity() -> None:
     recipe = Path("Dockerfile").read_text(encoding="utf-8")
 
-    assert "bubblewrap curl git openssh-client util-linux" in recipe
+    for package in ("bubblewrap", "curl", "git", "openssh-client", "util-linux"):
+        assert package in recipe
     assert "opentulpa-runtime:x:65532:65532" in recipe
     assert "opentulpa-candidate:x:65533:65533" in recipe
     assert "test -x /usr/bin/bwrap" in recipe

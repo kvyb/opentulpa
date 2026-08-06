@@ -32,6 +32,7 @@ from opentulpa.repositories.store import RepositoryWorkspaceStore
 
 _GIT_REF_RE = re.compile(r"^(?![./])(?!.*(?:\.\.|//|@\{|\\))[\w./-]{1,250}(?<![./])$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_OBJECT_ID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _GIT_IDENTITY_RE = re.compile(r"^(.*) <([^<>]+)> ([0-9]+) ([+-][0-9]{4})$")
 _MAX_STATUS_LINES = 100
 _MAX_PUBLISH_FILES = 200
@@ -326,6 +327,9 @@ class RepositoryWorkspaceService:
         patch: bytes,
         expected_sha256: str,
         message: str,
+        source_candidate_id: str | None = None,
+        source_commit: str | None = None,
+        expected_tree_oid: str | None = None,
     ) -> dict[str, Any]:
         expected = str(expected_sha256 or "").strip().casefold()
         if not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -337,6 +341,17 @@ class RepositoryWorkspaceService:
         safe_message = " ".join(str(message or "").split())[:500]
         if not safe_message:
             raise RepositoryWorkspaceError("contribution commit message is required")
+        binding = (source_candidate_id, source_commit, expected_tree_oid)
+        if any(value is not None for value in binding):
+            if any(value is None for value in binding):
+                raise RepositoryWorkspaceError("source contribution binding is incomplete")
+            if (
+                not str(source_candidate_id).strip()
+                or len(str(source_candidate_id).strip()) > 100
+                or not _SHA_RE.fullmatch(str(source_commit))
+                or not _SHA_RE.fullmatch(str(expected_tree_oid))
+            ):
+                raise RepositoryWorkspaceError("source contribution binding is invalid")
         workspace = self._owned(tenant_id=tenant_id, workspace_id=workspace_id)
         if workspace.status is not RepositoryWorkspaceStatus.READY:
             raise RepositoryWorkspaceError("repository workspace is not ready")
@@ -375,14 +390,39 @@ class RepositoryWorkspaceService:
                         timeout=60,
                     )
                 raise
-            head_sha = await self._git_sha(backend, "HEAD")
-            parent_sha = await self._git_sha(backend, "HEAD^")
-            if parent_sha != workspace.base_sha or head_sha == workspace.base_sha:
-                raise RepositoryWorkspaceError("contribution commit lineage is invalid")
+            try:
+                head_sha = await self._git_sha(backend, "HEAD")
+                parent_sha = await self._git_sha(backend, "HEAD^")
+                if parent_sha != workspace.base_sha or head_sha == workspace.base_sha:
+                    raise RepositoryWorkspaceError("contribution commit lineage is invalid")
+                head_tree_oid = await self._git_object_id(backend, "HEAD^{tree}")
+                await self._run(backend, "git fsck --strict --no-dangling", timeout=300)
+                await self._run(
+                    backend,
+                    f"git diff --check {workspace.base_sha}..{head_sha}",
+                    timeout=60,
+                )
+                if expected_tree_oid is not None and head_tree_oid != expected_tree_oid:
+                    raise RepositoryWorkspaceError(
+                        "exported contribution tree differs from the evaluated candidate"
+                    )
+            except Exception:
+                with suppress(Exception):
+                    await self._run(
+                        backend,
+                        f"git reset --hard {workspace.base_sha}",
+                        timeout=60,
+                    )
+                raise
             now = utc_now()
             workspace = workspace.model_copy(
                 update={
                     "head_sha": head_sha,
+                    "source_candidate_id": source_candidate_id,
+                    "source_commit": source_commit,
+                    "verified_tree_oid": head_tree_oid if expected_tree_oid is not None else None,
+                    "verified_patch_sha256": expected if expected_tree_oid is not None else None,
+                    "export_verified_at": now if expected_tree_oid is not None else None,
                     "updated_at": now,
                     "last_used_at": now,
                 }
@@ -401,8 +441,10 @@ class RepositoryWorkspaceService:
                 "base_sha": workspace.base_sha,
                 "branch": workspace.branch,
                 "head_sha": head_sha,
+                "head_tree_oid": head_tree_oid,
                 "patch_sha256": expected,
                 "clean": True,
+                "export_verified": expected_tree_oid is not None,
             }
 
     async def close(
@@ -496,6 +538,14 @@ class RepositoryWorkspaceService:
                 raise RepositoryPublishError(
                     "repository workspace has uncommitted changes; commit and verify them first"
                 )
+            if workspace.source_candidate_id is not None and (
+                workspace.export_verified_at is None
+                or workspace.verified_tree_oid is None
+                or workspace.verified_patch_sha256 is None
+                or await self._git_object_id(backend, "HEAD^{tree}")
+                != workspace.verified_tree_oid
+            ):
+                raise RepositoryPublishError("source contribution export verification is stale")
             ancestor = await backend.aexecute(
                 f"git merge-base --is-ancestor {workspace.base_sha} HEAD",
                 timeout=60,
@@ -1016,6 +1066,15 @@ class RepositoryWorkspaceService:
         ).strip()
         if not _SHA_RE.fullmatch(value):
             raise RepositoryWorkspaceError("repository returned an invalid commit")
+        return value
+
+    @classmethod
+    async def _git_object_id(cls, backend: SandboxBackendProtocol, ref: str) -> str:
+        value = (
+            await cls._run(backend, f"git rev-parse {cls._shell_quote(ref)}", timeout=60)
+        ).strip()
+        if not _OBJECT_ID_RE.fullmatch(value):
+            raise RepositoryWorkspaceError("repository returned an invalid Git object identity")
         return value
 
     @staticmethod

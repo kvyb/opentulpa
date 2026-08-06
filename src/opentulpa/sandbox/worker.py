@@ -190,18 +190,18 @@ class RestrictedProcessEngine:
         )
 
 
-class DevProcessEngine:
-    """Explicit dev-only executor for tests and local iteration without root privileges."""
+class TrustedLocalProcessEngine:
+    """Trusted single-tenant executor used when strong process isolation is unavailable."""
 
     def __init__(self, *, max_output_bytes: int) -> None:
         self._max_output_bytes = max_output_bytes
 
     @property
     def tier(self) -> str:
-        return "dev-process"
+        return "trusted-local-process"
 
     def health_checks(self) -> dict[str, bool]:
-        return {"dev_mode": True, "ssh": shutil.which("ssh") is not None}
+        return {"trusted_local": True, "ssh": shutil.which("ssh") is not None}
 
     def execute(
         self,
@@ -243,7 +243,11 @@ class DevProcessEngine:
                 truncated=truncated,
             )
         if cancel_event is not None and cancel_event.is_set():
-            return ExecuteResponse(output="sandbox execution was cancelled", exit_code=130, truncated=False)
+            return ExecuteResponse(
+                output="sandbox execution was cancelled",
+                exit_code=130,
+                truncated=False,
+            )
         truncated = len(stdout) > self._max_output_bytes
         return ExecuteResponse(
             output=stdout[: self._max_output_bytes].decode("utf-8", errors="replace"),
@@ -599,9 +603,17 @@ def build_default_worker_service() -> SandboxWorkerService:
         "yes",
         "on",
     }
+    trusted_local_disabled = str(
+        os.environ.get("OPENTULPA_DISABLE_TRUSTED_LOCAL_SANDBOX") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
     engine: SandboxExecutionEngine
-    if dev and not CandidateProcessBackend.supported():
-        engine = DevProcessEngine(max_output_bytes=max_output)
+    if CandidateProcessBackend.supported():
+        engine = RestrictedProcessEngine(
+            policy=policy,
+            max_workspace_bytes=max_archive,
+        )
+    elif dev or not trusted_local_disabled:
+        engine = TrustedLocalProcessEngine(max_output_bytes=max_output)
     else:
         engine = RestrictedProcessEngine(
             policy=policy,
@@ -639,6 +651,9 @@ def main() -> None:
     finally:
         if listener is not None:
             listener.close()
+
+
+DevProcessEngine = TrustedLocalProcessEngine
 
 
 def _inherited_listener(*, host: str, port: int) -> socket.socket | None:
@@ -696,6 +711,7 @@ __all__ = [
     "SandboxWorkerService",
     "SandboxWorkspaceCreateRequest",
     "SandboxWorkspaceResult",
+    "TrustedLocalProcessEngine",
     "build_default_worker_service",
     "create_sandbox_worker_app",
     "main",

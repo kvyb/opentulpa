@@ -25,8 +25,10 @@ from opentulpa.evolution.git_security import (
 )
 from opentulpa.evolution.workspace import (
     CandidateWorkspace,
+    GitCandidateError,
     candidate_content_contains_secret,
     candidate_path_is_promotable,
+    candidate_repository_directory,
 )
 
 UPSTREAM_REF = "refs/heads/upstream"
@@ -36,6 +38,12 @@ DEFAULT_UPSTREAM_REF = UPSTREAM_REF
 DEFAULT_INSTANCE_REF = INSTANCE_REF
 DEFAULT_ACCEPTED_UPSTREAM_REF = ACCEPTED_UPSTREAM_REF
 
+_GIT_IDENTITY_ENV = {
+    "GIT_AUTHOR_NAME": "OpenTulpa Candidate",
+    "GIT_AUTHOR_EMAIL": "candidate@opentulpa.local",
+    "GIT_COMMITTER_NAME": "OpenTulpa Supervisor",
+    "GIT_COMMITTER_EMAIL": "supervisor@opentulpa.local",
+}
 _OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _CONFLICT_MARKER_RE = re.compile(
     rb"(?m)^(?:<<<<<<<(?: .*)?\r?$|\|\|\|\|\|\|\|(?: .*)?\r?$|=======\r?$|>>>>>>>(?: .*)?\r?$)"
@@ -658,14 +666,22 @@ class GitLineage:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", candidate_id):
             raise GitLineageError("candidate_id is invalid")
         try:
-            root, _ = candidate_worktree_directories(
-                workspace.path,
-                candidate_id=candidate_id,
-                base_commit=workspace.base_commit,
-                worktrees_root=self._worktrees_root,
-                common_directory=self._git_common_directory,
-            )
-        except GitSecurityError:
+            if workspace.repository_kind == "full_repository":
+                root = candidate_repository_directory(
+                    workspace.path,
+                    candidate_id=candidate_id,
+                    base_commit=workspace.base_commit,
+                    worktrees_root=self._worktrees_root,
+                )
+            else:
+                root, _ = candidate_worktree_directories(
+                    workspace.path,
+                    candidate_id=candidate_id,
+                    base_commit=workspace.base_commit,
+                    worktrees_root=self._worktrees_root,
+                    common_directory=self._git_common_directory,
+                )
+        except (GitSecurityError, GitCandidateError):
             raise GitLineageError("candidate is not a managed detached worktree") from None
         self._assert_safe_git_configuration(root)
         symbolic = self._run_git(
@@ -712,7 +728,8 @@ class GitLineage:
             git_directory, common_directory = discover_git_directories(cwd)
         except GitSecurityError:
             raise GitLineageError("Git repository metadata is unsafe") from None
-        if common_directory != self._git_common_directory:
+        independent = common_directory == git_directory and cwd != self._repository
+        if common_directory != self._git_common_directory and not independent:
             raise GitLineageError("candidate belongs to another repository")
         key = (git_directory, common_directory)
         validated = getattr(self._operation_state, "validated_directories", None)
@@ -746,6 +763,7 @@ class GitLineage:
                 timeout_seconds=self._timeout_seconds,
                 max_output_bytes=self._max_git_output_bytes,
                 input_bytes=input_bytes,
+                env=_GIT_IDENTITY_ENV,
                 allow_https=allow_https,
             )
         except OSError:

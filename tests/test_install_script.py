@@ -44,6 +44,10 @@ def _source(root: Path, *, commit: str = "1" * 40) -> Path:
     (root / "install.sh").write_text(
         (REPO_ROOT / "install.sh").read_text(encoding="utf-8"), encoding="utf-8"
     )
+    (root / "controller_generation.py").write_text(
+        (REPO_ROOT / "controller_generation.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     bridge = root / "railway_sandbox_bridge"
     bridge.mkdir()
     (bridge / "bridge.mjs").write_text("export {}\n", encoding="utf-8")

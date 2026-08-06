@@ -551,6 +551,7 @@ class BootstrapSupervisor:
             return current
         except Exception as exc:
             error = self._public_error(exc)
+            await self._collect_runtime_diagnostics(production or staging)
             if staging is not None and not await self._stop_quietly(staging):
                 await self._enter_safe_mode()
                 return await self._fail_after_cutover(
@@ -665,6 +666,7 @@ class BootstrapSupervisor:
             return completed
         except Exception:
             logger.exception("automatic release rollback failed: activation=%s", activation.id)
+            await self._collect_runtime_diagnostics(restored)
             contained = restored is None or await self._stop_quietly(restored)
             self._active_handle = None if contained else restored
             await self._enter_safe_mode()
@@ -1236,25 +1238,25 @@ class BootstrapSupervisor:
         )
 
     async def _stop_quietly(self, running: RunningRelease) -> bool:
-        target = running
-        for _ in range(3):
-            try:
-                await self._host.stop(target)
-            except Exception:
-                logger.exception("release stop failed: release=%s", target.release_id)
-            try:
-                surviving = await self._host.discover(target.release_id, mode=target.mode)
-            except Exception:
-                logger.exception(
-                    "release containment could not be verified: release=%s",
-                    target.release_id,
-                )
-                return False
-            if surviving is None:
-                return True
-            target = surviving
-        logger.error("release remained discoverable after containment: release=%s", running.release_id)
-        return False
+        try:
+            contained = await self._host.contain(running)
+        except Exception:
+            logger.exception("release containment could not be verified: release=%s", running.release_id)
+            return False
+        if not contained:
+            logger.error("release remained discoverable after containment: release=%s", running.release_id)
+        return contained
+
+    async def _collect_runtime_diagnostics(self, running: RunningRelease | None) -> None:
+        if running is None:
+            return
+        try:
+            logs = await self._host.collect_logs(running)
+        except Exception:
+            logger.exception("release diagnostics unavailable: release=%s", running.release_id)
+            return
+        if logs:
+            logger.error("release diagnostics: release=%s\n%s", running.release_id, logs)
 
     async def _discard_state_snapshot_quietly(self, activation_id: str) -> None:
         try:

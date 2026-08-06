@@ -23,11 +23,9 @@ from opentulpa.evolution.dependency_resolver import (
 )
 from opentulpa.evolution.evaluator import (
     CandidateEvaluator,
-    EvaluationCommand,
-    EvaluationCommandResult,
     EvaluationExecutables,
     EvaluationRunner,
-    IsolatedProcessEvaluationRunner,
+    LocalEvaluationRunner,
     trusted_default_commands,
 )
 from opentulpa.evolution.generation import StateContract, canonical_json_bytes
@@ -43,8 +41,8 @@ from opentulpa.evolution.release_builder import (
     WheelReleaseBuildPolicy,
 )
 from opentulpa.evolution.sandbox import (
-    CandidateProcessBackend,
     CandidateSandboxPolicy,
+    TrustedLocalCandidateBackend,
 )
 from opentulpa.evolution.supervisor import EvolutionSupervisor
 from opentulpa.evolution.workspace import GitCandidateWorkspace
@@ -82,26 +80,6 @@ _BRIDGE_ASSETS = (
         "opentulpa/railway_sandbox_bridge/package-lock.json",
     ),
 )
-
-
-class _IntegrityOnlyEvaluationRunner:
-    """Preserve evaluator identity without executing candidate bytes on the host."""
-
-    def __init__(self, *, fingerprint: str) -> None:
-        self._fingerprint = fingerprint
-
-    @property
-    def fingerprint(self) -> str:
-        return self._fingerprint
-
-    async def run(
-        self,
-        *,
-        workspace: Path,
-        command: EvaluationCommand,
-    ) -> EvaluationCommandResult:
-        del workspace, command
-        raise RuntimeError("source mutation evaluation is unavailable on this host")
 
 
 class _TrustedHostWheelReleaseBuilder(TrustedWheelReleaseBuilder):
@@ -214,12 +192,7 @@ def build_host_evolution_runtime(
             "host source evolution requires the trusted offline wheelhouse "
             "(OPENTULPA_TRUSTED_WHEELHOUSE)"
         )
-    controller_generation = _controller_generation_root()
-    source_mutation_unavailable_reason = _source_mutation_unavailable_reason(
-        controller_root=controller_generation,
-        wheelhouse=wheelhouse,
-    )
-    source_mutation_enabled = source_mutation_unavailable_reason is None
+    source_mutation_enabled = True
 
     state_contract = _packaged_state_contract()
     lock_hash = hashlib.sha256((seed_root / "uv.lock").read_bytes()).hexdigest()
@@ -295,32 +268,18 @@ def build_host_evolution_runtime(
         network_enabled=False,
     )
 
-    def candidate_backend(workspace: Path) -> CandidateProcessBackend:
-        return CandidateProcessBackend(
+    def candidate_backend(workspace: Path) -> TrustedLocalCandidateBackend:
+        return TrustedLocalCandidateBackend(
             workspace=workspace,
             allowed_root=worktrees_root,
             policy=sandbox_policy,
-            read_only_mounts=(
-                (controller_generation, str(controller_generation)),
-                (wheelhouse, str(wheelhouse)),
-            ),
         )
 
+    evaluator_executables = _trusted_local_evaluation_executables()
     evaluator_runner: EvaluationRunner
-    if source_mutation_enabled:
-        isolated_evaluator = IsolatedProcessEvaluationRunner(
-            controller_root=controller_generation,
-            wheelhouse=wheelhouse,
-            pid_limit=settings.sandbox_pid_limit,
-            max_output_bytes=settings.sandbox_max_output_bytes,
-        )
-        evaluator_runner = isolated_evaluator
-        evaluator_executables = isolated_evaluator.executables
-    else:
-        evaluator_runner = _IntegrityOnlyEvaluationRunner(
-            fingerprint="root-linux-bwrap-v1:source-mutation-unavailable"
-        )
-        evaluator_executables = EvaluationExecutables.isolated(controller_generation)
+    evaluator_runner = LocalEvaluationRunner(
+        fingerprint_context=lambda: _trusted_local_evaluation_context(evaluator_executables)
+    )
     evaluator = CandidateEvaluator(
         runner=evaluator_runner,
         commands=trusted_default_commands(
@@ -330,20 +289,23 @@ def build_host_evolution_runtime(
     )
 
     def dependency_evaluator(base: Any) -> CandidateEvaluator:
-        if not source_mutation_enabled:
-            raise RuntimeError("resolved dependency evaluation is unavailable on this host")
-        runner = IsolatedProcessEvaluationRunner(
-            controller_root=controller_generation,
-            wheelhouse=base.wheelhouse,
-            dependency_site=base.dependency_site,
-            pid_limit=settings.sandbox_pid_limit,
-            max_output_bytes=settings.sandbox_max_output_bytes,
+        extra_env = {
+            "MYPYPATH": str(base.dependency_site),
+            "PYTHONPATH": str(base.dependency_site),
+        }
+        runner = LocalEvaluationRunner(
+            extra_env=extra_env,
+            fingerprint_context=lambda: {
+                **_trusted_local_evaluation_context(evaluator_executables),
+                "dependency_base_id": str(base.id),
+                "dependency_site_sha256": str(base.site_sha256),
+            },
         )
         return CandidateEvaluator(
             runner=runner,
             commands=trusted_default_commands(
                 timeout_seconds=900,
-                executables=runner.executables,
+                executables=evaluator_executables,
             ),
         )
 
@@ -385,7 +347,7 @@ def build_host_evolution_runtime(
             worktrees_root=worktrees_root,
             artifacts_root=artifacts_root,
         ),
-        candidate_backend_factory=candidate_backend if source_mutation_enabled else None,
+        candidate_backend_factory=candidate_backend,
         evaluator=evaluator,
         evaluator_version=_EVALUATOR_VERSION,
         release_pointer=AtomicReleasePointer(evolution_root / "current_release.json"),
@@ -397,9 +359,7 @@ def build_host_evolution_runtime(
         lineage=lineage,
         event_sink=RuntimeEvolutionEventSink(runtime),
         source_mutation_enabled=source_mutation_enabled,
-        source_mutation_unavailable_reason=(
-            None if source_mutation_enabled else source_mutation_unavailable_reason
-        ),
+        source_mutation_unavailable_reason=None,
         dependency_resolver=dependency_resolver,
         dependency_evaluator_factory=(
             dependency_evaluator if dependency_resolver is not None else None
@@ -410,7 +370,7 @@ def build_host_evolution_runtime(
         worktrees_root=initial_worktrees_root,
         builder=builder,
         evaluator_version=_EVALUATOR_VERSION,
-        evaluator_fingerprint=evaluator.fingerprint,
+        evaluator_fingerprint=lambda: evaluator.fingerprint,
         state_contract=state_contract,
         install_profile=_INSTALL_PROFILE,
     )
@@ -435,36 +395,55 @@ def _private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
-def _source_mutation_unavailable_reason(
-    *,
-    controller_root: Path,
-    wheelhouse: Path,
-) -> str | None:
-    candidate_reason = CandidateProcessBackend.unavailable_reason()
-    if candidate_reason is not None:
-        return f"source mutation candidate shell is unavailable: {candidate_reason}"
-    evaluator_reason = IsolatedProcessEvaluationRunner.unavailable_reason(
-        controller_root=controller_root,
-        wheelhouse=wheelhouse,
+def _trusted_local_evaluation_executables() -> EvaluationExecutables:
+    binary_root = Path(sys.executable).absolute().parent
+
+    def tool(name: str) -> str:
+        candidate = binary_root / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        resolved = shutil.which(name)
+        if resolved is not None:
+            path = Path(resolved).expanduser().absolute()
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        raise RuntimeError(f"trusted local evaluation requires {name} on PATH")
+
+    return EvaluationExecutables(
+        python=sys.executable,
+        ruff=tool("ruff"),
+        mypy=tool("mypy"),
+        pytest=tool("pytest"),
     )
-    if evaluator_reason is not None:
-        return f"source mutation evaluator is unavailable: {evaluator_reason}"
-    return None
 
 
-def _source_mutation_isolated() -> bool:
-    """Compatibility predicate for callers that only need native shell support."""
+def _trusted_local_evaluation_context(executables: EvaluationExecutables) -> dict[str, str]:
+    context: dict[str, str] = {"mode": "trusted-local"}
+    tools = {
+        "python": executables.python,
+        "ruff": executables.ruff,
+        "mypy": executables.mypy,
+        "pytest": executables.pytest,
+    }
+    for name, value in tools.items():
+        path = Path(value).expanduser().absolute()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise RuntimeError(f"trusted local evaluation requires executable {name}")
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file():
+            raise RuntimeError(f"trusted local evaluation requires executable {name}")
+        context[f"tool.{name}.path"] = str(path)
+        context[f"tool.{name}.resolved_path"] = str(resolved)
+        context[f"tool.{name}.sha256"] = _local_file_sha256(resolved)
+    return context
 
-    return CandidateProcessBackend.is_supported()
 
-
-def _controller_generation_root() -> Path:
-    configured = str(os.environ.get("OPENTULPA_INSTALL_ROOT") or "").strip()
-    if configured:
-        installed = Path(configured).expanduser().absolute() / "controller/generations/image"
-        if installed.is_dir():
-            return installed
-    return Path(sys.executable).absolute().parent.parent
+def _local_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _trusted_uv_cli() -> str:

@@ -93,10 +93,16 @@ rollback, and restart recovery.
 ## Isolation Preconditions
 
 Source mutation/evaluation tests must distinguish supported and unsupported environments.
-The strong path requires rootful Linux, trusted `bwrap`/`setpriv`/`prlimit`, permitted
-namespaces, and the required Docker Compose capabilities. Non-root Linux, macOS, blocked
-namespaces, and Railway must report source mutation unavailable while immutable serving
-tests continue to pass. Never “fix” those tests by weakening the boundary.
+The default installed-host path uses trusted-local source mutation and must work without
+rootful namespace support. Verify this path on Docker/Railway-style environments by
+opening a source session, running a source shell command in the Git worktree, evaluating,
+building a sealed generation, and rehearsing activation/rollback.
+
+The optional strong path requires rootful Linux, trusted `bwrap`/`setpriv`/`prlimit`,
+permitted namespaces, and the required Docker Compose capabilities. Non-root Linux,
+macOS, blocked namespaces, and Railway must report the optional strong backend
+unavailable while default trusted-local source mutation and immutable serving continue.
+Never “fix” strong-backend tests by weakening that boundary.
 
 Verify that candidate and served runtime identities are distinct, that candidate commands
 cannot read controller credentials or product state, and that no candidate workspace is
@@ -156,7 +162,7 @@ On a platform with pidfd support, verify automatic local restart signals the exa
 remembered process through pidfd and rejects identity changes. On a platform without
 pidfd, verify automatic restart fails closed and offers no numeric-PID fallback.
 
-Verify immutable serving on macOS, non-root Linux, unsupported namespace environments,
-and Railway. Verify source mutation is disabled on each of them rather than silently
-falling back to a weaker isolation mode. Verify Docker Compose source mutation only with
-the documented rootful capabilities and security options.
+Verify immutable serving and default trusted-local source mutation on macOS, non-root
+Linux, unsupported namespace environments, and Railway installed-host deployments. Verify
+the optional rootful process sandbox only with the documented Docker Compose capabilities
+and security options.
