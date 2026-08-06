@@ -579,35 +579,13 @@ GENERATION_ID=$(
   BOOTSTRAP_PYTHON_SHA256="$BOOTSTRAP_PYTHON_SHA256" \
   PYTHON_IDENTITY="$PYTHON_IDENTITY" \
   PROFILE="$PROFILE" \
-  "$PYTHON_BIN" - <<'PY'
-import hashlib
-import json
-import os
-
-identity = {
-    "install_profile": os.environ["PROFILE"],
-    "bootstrap_python": os.environ["BOOTSTRAP_PYTHON"],
-    "bootstrap_python_sha256": os.environ["BOOTSTRAP_PYTHON_SHA256"],
-    "lock_sha256": os.environ["LOCK_SHA256"],
-    "python": json.loads(os.environ["PYTHON_IDENTITY"]),
-    "requirements_sha256": os.environ["REQUIREMENTS_SHA256"],
-    "source_commit": os.environ["SOURCE_COMMIT"],
-    "source_seed_sha256": os.environ["SOURCE_SEED_SHA256"],
-    "source_tree_oid": os.environ["SOURCE_TREE_OID"],
-    "tui_name": os.environ["TUI_NAME"] or None,
-    "tui_sha256": os.environ["TUI_SHA256"] or None,
-    "uv_sha256": os.environ["UV_SHA256"],
-    "wheel_name": os.environ["WHEEL_NAME"],
-    "wheel_sha256": os.environ["WHEEL_SHA256"],
-    "wheelhouse_sha256": os.environ["WHEELHOUSE_SHA256"],
-}
-encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-print(hashlib.sha256(encoded).hexdigest())
-PY
+  "$PYTHON_BIN" "${EXACT_SOURCE}/controller_generation.py" generation-id
 )
 GENERATION="${GENERATIONS_ROOT}/${GENERATION_ID}"
 
 generation_valid() {
+  "$PYTHON_BIN" "${EXACT_SOURCE}/controller_generation.py" verify-manifest \
+    "$1/manifest.json" "$GENERATION_ID" || return 1
   "$PYTHON_BIN" - "$1" "$GENERATION_ID" $COMMANDS <<'PY'
 import hashlib
 import json
@@ -625,12 +603,6 @@ if not complete.is_file() or complete.stat().st_size != 0 or not manifest_path.i
     raise SystemExit(1)
 raw = manifest_path.read_bytes()
 manifest = json.loads(raw)
-canonical = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
-if raw != canonical or manifest.get("generation_id") != generation_id:
-    raise SystemExit(1)
-identity = json.dumps(manifest["identity"], sort_keys=True, separators=(",", ":")).encode()
-if hashlib.sha256(identity).hexdigest() != generation_id:
-    raise SystemExit(1)
 def sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 if sha256(root / "requirements.txt") != manifest["identity"]["requirements_sha256"]:
@@ -850,28 +822,7 @@ PY
     BOOTSTRAP_PYTHON_SHA256="$BOOTSTRAP_PYTHON_SHA256" \
     PYTHON_IDENTITY="$PYTHON_IDENTITY" \
     PROFILE="$PROFILE" \
-    "$PYTHON_BIN" - <<'PY'
-import json
-import os
-
-print(json.dumps({
-    "bootstrap_python": os.environ["BOOTSTRAP_PYTHON"],
-    "bootstrap_python_sha256": os.environ["BOOTSTRAP_PYTHON_SHA256"],
-    "install_profile": os.environ["PROFILE"],
-    "lock_sha256": os.environ["LOCK_SHA256"],
-    "python": json.loads(os.environ["PYTHON_IDENTITY"]),
-    "requirements_sha256": os.environ["REQUIREMENTS_SHA256"],
-    "source_commit": os.environ["SOURCE_COMMIT"],
-    "source_seed_sha256": os.environ["SOURCE_SEED_SHA256"],
-    "source_tree_oid": os.environ["SOURCE_TREE_OID"],
-    "tui_name": os.environ["TUI_NAME"] or None,
-    "tui_sha256": os.environ["TUI_SHA256"] or None,
-    "uv_sha256": os.environ["UV_SHA256"],
-    "wheel_name": os.environ["WHEEL_NAME"],
-    "wheel_sha256": os.environ["WHEEL_SHA256"],
-    "wheelhouse_sha256": os.environ["WHEELHOUSE_SHA256"],
-}, sort_keys=True, separators=(",", ":")))
-PY
+  "$PYTHON_BIN" "${EXACT_SOURCE}/controller_generation.py" identity
   )
   GENERATION_ID="$GENERATION_ID" \
   IDENTITY_JSON="$IDENTITY_JSON" \
@@ -885,34 +836,8 @@ PY
   VERIFIED_OID="$VERIFIED_OID" \
   RUNTIME_TREE_SHA256="$RUNTIME_TREE_SHA256" \
   WHEELHOUSE_JSON="$WHEELHOUSE_JSON" \
-  "$PYTHON_BIN" - "${GENERATION}/manifest.json" <<'PY'
-import json
-import os
-import pathlib
-import sys
-
-manifest = {
-    "format_version": 1,
-    "generation_id": os.environ["GENERATION_ID"],
-    "identity": json.loads(os.environ["IDENTITY_JSON"]),
-    "runtime_tree_sha256": os.environ["RUNTIME_TREE_SHA256"],
-    "source": {
-        "actual_remote": os.environ["ACTUAL_REMOTE"] or None,
-        "configured_ref": os.environ["VERIFIED_REF"] or None,
-        "explicit": os.environ["EXPLICIT_SOURCE"] == "1",
-        "kind": os.environ["SOURCE_KIND"],
-        "oid": os.environ["VERIFIED_OID"],
-        "ref": os.environ["REF"],
-        "repository": os.environ["REPOSITORY"],
-        "root": os.environ["SOURCE_ROOT"],
-    },
-    "wheelhouse": json.loads(os.environ["WHEELHOUSE_JSON"]),
-}
-pathlib.Path(sys.argv[1]).write_text(
-    json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
-    encoding="utf-8",
-)
-PY
+  "$PYTHON_BIN" "${EXACT_SOURCE}/controller_generation.py" write-manifest \
+    "${GENERATION}/manifest.json"
   chmod 400 "${GENERATION}/manifest.json"
   : > "${GENERATION}/COMPLETE"
   chmod 400 "${GENERATION}/COMPLETE"

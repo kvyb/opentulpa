@@ -81,23 +81,24 @@ no parallel conflict database that can disagree with Git.
 
 ## Mutation And Trust Boundaries
 
-Strong source mutation/evaluation isolation is supported only on rootful Linux where
-trusted `bwrap`, `setpriv`, and `prlimit` are available and namespace probing succeeds.
-Docker Compose must provide the required `SYS_ADMIN` and `NET_ADMIN` capabilities and
-the configured relaxed seccomp/AppArmor settings. Unsupported namespace environments,
-non-root Linux, macOS, and Railway fail closed for source mutation while immutable
-serving continues.
+The default source-evolution boundary is trusted-local: the stable controller gives the
+candidate a disposable full Git worktree and a normal local shell, then independently
+runs fixed evaluation, builds a sealed generation, and owns activation/rollback. This is
+the default for installed-host Docker, local installs, Railway, and private single-tenant
+hosts. The candidate worktree is not the serving source tree and cannot publish releases.
 
-The served runtime and candidate are distinct identities and trust domains. The served
-runtime defaults to UID/GID `65532`; candidate processes default to UID/GID `65533`.
-The evaluator has its own bounded process identity and no controller authority. Namespace,
-mount, network, PID, CPU, memory, file-size, and capability limits are applied before
-candidate commands run. Candidates cannot access controller credentials, product state,
-the resolver engine/socket, or the host environment. Hash verification detects tampering;
-the UID and capability separation is the strong mutation boundary.
+Optional strong source mutation/evaluation isolation is supported only on rootful Linux
+where trusted `bwrap`, `setpriv`, and `prlimit` are available and namespace probing
+succeeds. Docker Compose must provide the required `SYS_ADMIN` and `NET_ADMIN`
+capabilities and the configured relaxed seccomp/AppArmor settings.
 
-When the boundary is unavailable, the controller does not silently use a weaker source
-mutation path. Serving an already-built immutable generation remains allowed.
+When the optional strong backend is enabled, the served runtime and candidate are
+distinct identities and trust domains. The served runtime defaults to UID/GID `65532`;
+hardened candidate processes default to UID/GID `65533`. Namespace, mount, network, PID,
+CPU, memory, file-size, and capability limits are applied before candidate commands run.
+Candidates cannot access controller credentials, product state, the resolver engine/socket,
+or the host environment. Hash verification detects tampering; UID and capability separation
+is the optional strong mutation boundary.
 
 ## Serving Lifecycle
 

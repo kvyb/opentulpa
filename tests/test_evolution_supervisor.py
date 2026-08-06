@@ -57,6 +57,7 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuildError,
     ReleaseBuildRequest,
 )
+from opentulpa.evolution.sandbox import TrustedLocalCandidateBackend
 from opentulpa.evolution.supervisor import (
     EvolutionSupervisor,
     EvolutionSupervisorError,
@@ -392,6 +393,17 @@ class _EvolutionSupervisorWorkspaceFake:
             promotion_eligible=True,
         )
 
+    def import_exact_commit(
+        self,
+        workspace: CandidateWorkspace,
+        *,
+        source_commit: str,
+    ) -> str:
+        if self.head(workspace) != source_commit:
+            raise RuntimeError("candidate exact import source changed")
+        self._snapshot(source_commit)
+        return source_commit
+
     def remove(self, workspace: CandidateWorkspace) -> None:
         shutil.rmtree(workspace.path)
 
@@ -426,6 +438,7 @@ class _EvolutionSupervisorWorkspaceFake:
             f"opentulpa/candidate-{candidate_id}",
             path,
             digest,
+            "f" * 40,
         )
 
     def parent(self, commit: str) -> str:
@@ -665,6 +678,7 @@ def _supervisor(
     source_mutation_enabled: bool = True,
     dependency_resolver: Any = None,
     dependency_evaluator_factory: Any = None,
+    candidate_backend_factory: Any = _WritableSourceBackend,
 ) -> EvolutionSupervisor:
     supervisor_type = (
         EvolutionSupervisor if automatic_promotions else _ManualPromotionEvolutionSupervisor
@@ -684,7 +698,7 @@ def _supervisor(
     supervisor = supervisor_type(
         archive=EvolutionArchive(tmp_path / "evolution.db"),
         workspaces=workspaces,  # type: ignore[arg-type]
-        candidate_backend_factory=_WritableSourceBackend,
+        candidate_backend_factory=candidate_backend_factory,
         evaluator=CandidateEvaluator(
             runner=evaluation_runner or _EvolutionSupervisorEvaluationRunner(),
             commands=(
@@ -775,6 +789,34 @@ async def test_integrity_only_supervisor_reports_source_mutation_unavailable(
         await supervisor.source_shell(command="true", audit_context=_source_audit())
     with pytest.raises(EvolutionSupervisorError, match="isolated root Linux"):
         await supervisor.queue_rollback()
+
+
+@pytest.mark.asyncio
+async def test_source_shell_uses_trusted_local_backend_with_git_worktree(
+    tmp_path: Path,
+) -> None:
+    source = _source_repository(tmp_path)
+    worktrees_root = tmp_path / "worktrees"
+    supervisor = _supervisor(
+        tmp_path,
+        source,
+        real_git=True,
+        candidate_backend_factory=lambda workspace: TrustedLocalCandidateBackend(
+            workspace=workspace,
+            allowed_root=worktrees_root,
+        ),
+    )
+    await supervisor.start()
+
+    result = await supervisor.source_shell(
+        command="git rev-parse --is-inside-work-tree && printf '\\n# changed\\n' >> site_app.py",
+        audit_context=_source_audit(),
+    )
+
+    assert result["exit_code"] == 0
+    assert result["output"].strip() == "true"
+    assert result["dirty"] is True
+    assert "site_app.py" in result["changed_files"]
 
 
 def _release_binding(status: dict[str, Any]) -> dict[str, str]:
@@ -942,7 +984,7 @@ async def test_interactive_source_session_survives_restart_and_releases(
     shell = await first.source_shell(
         command=(
             "set -e\n"
-            "test ! -e .git\n"
+            "test -e .git\n"
             "cat >> site_app.py <<'PY'\n\n"
             "@app.get('/status')\n"
             "def status():\n"
@@ -1121,7 +1163,7 @@ async def test_source_release_announces_cutover_to_original_thread_before_activa
         "build.preparing",
         "candidate.ready",
         "build.switching",
-        "promotion.active",
+        "build.active",
     ]
     assert all(event.candidate_id == candidate.id for event in sink.events)
     assert all(event.origin["thread_id"] == audit["thread_id"] for event in sink.events)
@@ -2964,7 +3006,7 @@ async def test_restart_reconstructs_active_promotion_event_after_enqueue_crash(
     restarted = _supervisor(tmp_path, source, event_sink=sink)
     await restarted.start()
     try:
-        matching = [event for event in sink.events if event.event_type == "promotion.active"]
+        matching = [event for event in sink.events if event.event_type == "build.active"]
         assert len(matching) == 1
         assert matching[0].payload["attempt_id"] == queued.id
     finally:
@@ -3064,7 +3106,7 @@ async def test_restart_reconstructs_rollback_event_after_enqueue_crash(
     restarted = _supervisor(tmp_path, source, event_sink=sink)
     await restarted.start()
     try:
-        matching = [event for event in sink.events if event.event_type == "rollback.active"]
+        matching = [event for event in sink.events if event.event_type == "build.rolled_back"]
         assert len(matching) == 1
         assert matching[0].payload["attempt_id"] == queued.id
     finally:

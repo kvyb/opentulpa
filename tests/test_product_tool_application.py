@@ -536,8 +536,12 @@ async def test_source_prepare_pr_exports_digest_bound_patch_to_clean_repository(
             "contribution": {
                 "upstream_repository": "https://github.com/kvyb/opentulpa",
                 "branch_name": "opentulpa/candidate-1",
+                "head_commit": "b" * 40,
                 "sanitized": True,
-                "metadata": {"patch_sha256": digest},
+                "metadata": {
+                    "patch_sha256": digest,
+                    "candidate_tree_oid": "c" * 40,
+                },
             },
         },
         review_patch=patch_path,
@@ -569,7 +573,8 @@ async def test_source_prepare_pr_exports_digest_bound_patch_to_clean_repository(
 
     assert prepared.data["workspace_id"] == "repo-1"
     assert prepared.data["candidate_id"] == "candidate-1"
-    assert prepared.data["requires_tests_before_publish"] is True
+    assert prepared.data["requires_tests_before_publish"] is False
+    assert prepared.data["evaluation_reused_by_exact_tree"] is True
     assert evolution.calls[0][0] == "prepare_contribution"
     assert evolution.calls[1] == ("review_patch", {"candidate_id": "candidate-1"})
     assert repositories.calls[0] == (
@@ -587,6 +592,9 @@ async def test_source_prepare_pr_exports_digest_bound_patch_to_clean_repository(
     assert imported[0] == "import_verified_patch"
     assert imported[1]["patch"] == patch
     assert imported[1]["expected_sha256"] == digest
+    assert imported[1]["source_candidate_id"] == "candidate-1"
+    assert imported[1]["source_commit"] == "b" * 40
+    assert imported[1]["expected_tree_oid"] == "c" * 40
     assert ports["idempotency"].calls[0][1]["operation"] == "source_prepare_pr"
 
 

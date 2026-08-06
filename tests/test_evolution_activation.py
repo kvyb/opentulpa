@@ -22,6 +22,10 @@ def _release(name: str, character: str) -> ReleaseRecord:
         artifact_digest=f"sha256:{character * 64}",
         manifest_digest=f"sha256:{character * 64}",
         entrypoint=("python", "-m", "opentulpa"),
+        metadata={
+            "artifact_kind": "oci_image",
+            "image_reference": f"registry.example/opentulpa@sha256:{character * 64}",
+        },
     )
 
 
@@ -128,7 +132,10 @@ async def test_bootstrap_activator_uses_verified_bootstrap_rollback(tmp_path: Pa
     ).status is ReleaseActivationStatus.ACTIVE
 
     synthetic = blue.model_copy(
-        update={"id": "release_rollback_blue", "metadata": {"rollback_target": blue.id}}
+        update={
+            "id": "release_rollback_blue",
+            "metadata": {**blue.metadata, "rollback_target": blue.id},
+        }
     )
     rolled_back = await activator.activate(
         synthetic,
@@ -181,7 +188,7 @@ async def test_synthetic_rollback_replays_after_restart_then_allows_promotion(
     synthetic = blue.model_copy(
         update={
             "id": "release_rollback_synthetic",
-            "metadata": {"rollback_target": blue.id},
+            "metadata": {**blue.metadata, "rollback_target": blue.id},
         }
     )
     assert (

@@ -139,7 +139,7 @@ async def test_evolution_sink_delivers_failure_to_original_owner_thread(tmp_path
     [
         ("build.preparing", "preparing", "Preparing and testing a new OpenTulpa build."),
         ("build.switching", "switching", "Switching to the new OpenTulpa build now."),
-        ("promotion.active", "active", "The new OpenTulpa build is active."),
+        ("build.active", "active", "The new OpenTulpa build is active."),
         (
             "promotion.failed",
             "failed",

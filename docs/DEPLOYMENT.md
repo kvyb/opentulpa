@@ -30,24 +30,48 @@ automation.
 
 ## Supported Source Mutation
 
-Strong candidate mutation and evaluation isolation is available only when all of these
-are true:
+Source mutation is enabled by default on the installed-host path. The stable controller
+opens a disposable full Git worktree, runs trusted-local source commands inside that
+worktree, runs fixed supervisor-owned evaluation gates, builds a sealed Python
+generation, and owns activation/rollback. The candidate worktree is never the serving
+source tree and cannot directly publish a release.
+
+This default is a trusted single-tenant mode, not an adversarial sandbox. Candidate shell
+commands run as the controller user inside the deployment container/host. Use it for
+personal, owner-controlled deployments. For untrusted tenants or adversarial code, disable
+source evolution or use the optional hardened backend on infrastructure that supports it.
+The private product sandbox worker follows the same default: it uses strong process
+isolation when available and otherwise falls back to trusted-local command execution so
+single-tenant Railway/VPC deployments can boot without Docker-in-Docker.
+
+The installed generation must include these trusted inputs:
+
+- `OPENTULPA_SOURCE_SEED_ROOT`: full source seed used to seed persistent Git lineage;
+- `OPENTULPA_TRUSTED_WHEELHOUSE`: offline wheelhouse used for generation builds;
+- `OPENTULPA_UV_BIN`: trusted `uv` executable used by the release builder;
+- `OPENTULPA_DATA_ROOT`: persistent external state root for product data, Git lineage,
+  release records, and runtime generations.
+
+The Docker image and `./install.sh` both produce this installed layout. `Settings` keeps
+`evolution_enabled=True` by default; source mutation is disabled only when explicitly
+configured off or when the required installed inputs are missing.
+
+The default package includes what core source evolution needs. Optional bundles such as
+browser automation, integrations, document parsing, research tooling, hosted sandboxes,
+or the OCI dependency resolver must be selected and configured separately.
+
+Rootful Linux process isolation remains available as an optional hardened backend when
+all of these are true:
 
 - the supervisor is rootful Linux;
 - trusted, root-owned `bwrap`, `setpriv`, and `prlimit` executables are available;
 - bubblewrap mount, PID, IPC, UTS, and network namespaces pass the startup probe; and
 - the container deployment supplies the required Docker Compose capabilities.
 
-The candidate and evaluator use distinct runtime identities and capability boundaries.
-The served runtime uses UID/GID `65532`; source candidate processes use a distinct
-candidate identity (default UID/GID `65533`). The candidate receives no controller
-credentials, OCI socket, product state, or host environment. The controller remains the
-only authority that can publish generations, activate releases, or roll back.
-
-Unsupported namespace environments, non-root Linux, macOS, and Railway disable source
-mutation and evaluation rather than weakening the boundary. Immutable serving and
-ordinary persistent product operation continue. This is a fail-closed source-mutation
-decision, not a serving outage.
+That optional backend uses distinct runtime identities and capability boundaries. The
+served runtime uses UID/GID `65532`; hardened source candidate processes use a distinct
+candidate identity (default UID/GID `65533`). The default trusted-local path does not
+require these namespace capabilities.
 
 ## Dependency Resolver
 
@@ -99,16 +123,18 @@ stop the remembered host manually before starting the new controller generation.
 cp .env.example .env
 ```
 
-The included Compose service runs the stable host with `SYS_ADMIN` and `NET_ADMIN`,
-`seccomp=unconfined`, and `apparmor=unconfined`. These capabilities are required by the
-rootful Linux namespace sandbox used for source mutation/evaluation. The deployment must
-therefore run a rootful Linux Docker engine with the Compose capabilities intact.
+The image starts the installed immutable host controller directly and includes the source
+seed, wheelhouse, and `uv` toolchain needed by default source evolution.
 
-This is a significant hardened-production implication: the service is not equivalent to
-a least-privilege container. Operators should isolate the host, restrict access to the
-Docker daemon, constrain network egress, review the Compose security options, and disable
-source mutation entirely when that risk is unacceptable. Serving immutable generations
-does not require claiming that source mutation is available.
+The included Compose service may run the stable host with `SYS_ADMIN` and `NET_ADMIN`,
+`seccomp=unconfined`, and `apparmor=unconfined` for the optional rootful Linux namespace
+sandbox. Those capabilities are not required for the default trusted-local source
+evolution path.
+
+If you enable the optional rootful sandbox, this is a significant hardened-production
+implication: the service is not equivalent to a least-privilege container. Operators
+should isolate the host, restrict access to the Docker daemon, constrain network egress,
+and review the Compose security options.
 
 Persist the `opentulpa_data` volume and set `OPENTULPA_DATA_ROOT=/app/opentulpa_data`.
 It contains product state, Git lineage, release records, and the controller's external
@@ -121,17 +147,44 @@ or candidate-controlled `start.sh`.
 
 ## Railway
 
-Railway can serve an installed immutable release with a persistent volume:
+Railway should use the Dockerfile/installed-host path. That path supports default
+trusted-local source evolution without a Docker socket or rootful namespace privileges.
+
+Required Railway configuration:
 
 ```env
 OPENTULPA_DATA_ROOT=/app/opentulpa_data
 ```
 
-Configure unattended owner/model credentials as required by the deployment. Railway is
-not a supported source-mutation/evaluation environment: its namespace and privilege
-requirements are not assumed, so source mutation fails closed. Railway serves the
-immutable release and keeps the stable controller boundary; it does not self-mutate the
-source or perform in-place source promotion.
+Attach a persistent volume at that path and run a single replica for the controller.
+Configure unattended owner/model credentials as required by the deployment. Do not mount
+the Docker socket into the service; it is not needed for the default self-evolution loop.
+
+The Dockerfile already sets the installed-input defaults:
+
+```env
+OPENTULPA_INSTALL_ROOT=/opt/opentulpa-install
+OPENTULPA_SOURCE_SEED_ROOT=/opt/opentulpa-source
+OPENTULPA_TRUSTED_WHEELHOUSE=/opt/opentulpa-install/controller/generations/image/wheelhouse
+OPENTULPA_UV_BIN=/usr/local/bin/uv
+```
+
+Railway does not support the optional local OCI dependency resolver path unless you add a
+separate resolver service. Ordinary source edits, fixed evaluation, generation builds,
+promotion, and rollback do not require that resolver.
+
+## Private VPC Or Single-Tenant Host
+
+For a personal VPC/VPS-style deployment, use the same installed-host model:
+
+- build or pull the OpenTulpa Docker image;
+- persist `OPENTULPA_DATA_ROOT` on durable storage;
+- run one controller replica;
+- configure the owner/model/Telegram credentials;
+- expose only the public app endpoint and keep controller data private;
+- rely on default trusted-local evolution only for trusted owner-controlled code;
+- add the optional rootful namespace backend or dependency resolver only when you need
+  those stronger or broader capabilities.
 
 ## Release Cutover And Rollback
 

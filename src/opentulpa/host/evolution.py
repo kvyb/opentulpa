@@ -148,7 +148,7 @@ class TrustedGenerationReleaseProvider:
         worktrees_root: Path,
         builder: ReleaseBuilder,
         evaluator_version: str,
-        evaluator_fingerprint: str,
+        evaluator_fingerprint: str | Callable[[], str],
         state_contract: StateContract,
         install_profile: str,
     ) -> None:
@@ -163,10 +163,11 @@ class TrustedGenerationReleaseProvider:
 
     async def build(self) -> ReleaseRecord:
         workspace, source_commit, lock_hash = await asyncio.to_thread(self._prepare_workspace)
+        evaluator_fingerprint = self._current_evaluator_fingerprint()
         evaluation_input = hashlib.sha256(
             (
                 f"{source_commit}:{lock_hash}:{self._evaluator_version}:"
-                f"{self._evaluator_fingerprint}"
+                f"{evaluator_fingerprint}"
             ).encode()
         ).hexdigest()
         try:
@@ -178,7 +179,7 @@ class TrustedGenerationReleaseProvider:
                     source_commit=source_commit,
                     dependency_lock_hash=lock_hash,
                     evaluator_version=self._evaluator_version,
-                    evaluator_fingerprint=self._evaluator_fingerprint,
+                    evaluator_fingerprint=evaluator_fingerprint,
                     evaluation_input_sha256=evaluation_input,
                 )
             )
@@ -202,7 +203,7 @@ class TrustedGenerationReleaseProvider:
                 "bootstrap_initial": True,
                 "dependency_lock_hash": lock_hash,
                 "evaluator_version": self._evaluator_version,
-                "evaluator_fingerprint": self._evaluator_fingerprint,
+                "evaluator_fingerprint": evaluator_fingerprint,
                 "state_contract_sha256": self._state_contract.sha256(),
                 "controller_protocol": self._state_contract.runtime_protocol,
                 "install_profile": self._install_profile,
@@ -211,6 +212,17 @@ class TrustedGenerationReleaseProvider:
                 "diff_sha256": hashlib.sha256(b"").hexdigest(),
             },
         )
+
+    def _current_evaluator_fingerprint(self) -> str:
+        value = (
+            self._evaluator_fingerprint()
+            if callable(self._evaluator_fingerprint)
+            else self._evaluator_fingerprint
+        )
+        safe_value = str(value or "").strip()
+        if not safe_value:
+            raise RuntimeError("initial release evaluator fingerprint is unavailable")
+        return safe_value
 
     def source_commit(self) -> str:
         """Return the exact bundled upstream commit without rebuilding a generation."""

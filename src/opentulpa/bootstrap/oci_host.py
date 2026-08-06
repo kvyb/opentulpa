@@ -82,6 +82,13 @@ _RESERVED_ENV_NAMES = frozenset(
         "OPENTULPA_DRAIN_PATH",
     }
 ) | _PYTHON_IMPORT_ENV_NAMES
+_LOG_SECRET_RE = re.compile(
+    r"(?i)("
+    r"(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|digest)?\s*|"
+    r"(?:set-)?cookie\s*:\s*|"
+    r"(?:token|secret|password|api[_-]?key)\s*[=:]\s*"
+    r")([^\s,;]+)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,7 +579,7 @@ class RootlessOciReleaseHost:
     async def stop(self, running: RunningRelease) -> None:
         async with self._lock:
             network_name = self._instance_networks.get(running.instance_id)
-            stop = await self._runner.run(
+            await self._runner.run(
                 (
                     self._policy.container_cli,
                     "stop",
@@ -583,18 +590,61 @@ class RootlessOciReleaseHost:
                 timeout_seconds=self._policy.stop_timeout_seconds + 10,
                 max_output_bytes=self._policy.max_command_output_bytes,
             )
-            remove = await self._runner.run(
+            await self._runner.run(
                 (self._policy.container_cli, "rm", "--force", running.instance_id),
                 timeout_seconds=self._policy.command_timeout_seconds,
                 max_output_bytes=self._policy.max_command_output_bytes,
             )
+            if network_name is not None:
+                await self._remove_network(network_name)
+            container_absent = await self._container_absent(running.instance_id)
+            network_absent = network_name is None or await self._network_absent(network_name)
+            if not container_absent or not network_absent:
+                raise ReleaseHostError("OCI release container could not be stopped")
             self._running.pop(running.instance_id, None)
             self._instance_networks.pop(running.instance_id, None)
-            network_removed = True
-            if network_name is not None:
-                network_removed = await self._remove_network(network_name)
-            if (remove.returncode != 0 and stop.returncode != 0) or not network_removed:
-                raise ReleaseHostError("OCI release container could not be stopped")
+
+    async def contain(self, running: RunningRelease, *, attempts: int = 3) -> bool:
+        for _ in range(attempts):
+            with suppress(Exception):
+                await self.stop(running)
+            network_name = self._instance_networks.get(running.instance_id)
+            container_absent = await self._container_absent(running.instance_id)
+            network_absent = network_name is None or await self._network_absent(network_name)
+            if container_absent and network_absent:
+                self._running.pop(running.instance_id, None)
+                self._instance_networks.pop(running.instance_id, None)
+                return True
+        return False
+
+    async def collect_logs(self, running: RunningRelease, *, max_bytes: int = 64 * 1024) -> str:
+        """Collect diagnostics without allowing unbounded or secret-bearing output."""
+
+        if not 1 <= max_bytes <= self._policy.max_command_output_bytes:
+            raise ValueError("OCI log byte limit is invalid")
+        result = await self._runner.run(
+            (
+                self._policy.container_cli,
+                "logs",
+                "--tail",
+                "200",
+                running.instance_id,
+            ),
+            timeout_seconds=self._policy.command_timeout_seconds,
+            max_output_bytes=max_bytes,
+        )
+        if result.returncode != 0:
+            raise ReleaseHostError("OCI release log collection failed")
+        text = result.output.decode("utf-8", errors="replace")
+        secrets_to_redact = {
+            running.control_token or "",
+            *(value for _, value in self._policy.production_environment),
+        }
+        for value in secrets_to_redact:
+            if value:
+                text = text.replace(value, "[redacted]")
+        text = _LOG_SECRET_RE.sub(r"\1[redacted]", text)
+        return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
 
     async def snapshot_state(self, activation_id: str) -> None:
         """Snapshot only release-coupled worker state, never shared product data."""
@@ -970,6 +1020,37 @@ class RootlessOciReleaseHost:
             max_output_bytes=self._policy.max_command_output_bytes,
         )
         return result.returncode == 0
+
+    async def _container_absent(self, container_id: str) -> bool:
+        result = await self._runner.run(
+            (
+                self._policy.container_cli,
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--filter",
+                f"id={container_id}",
+                "--format",
+                "{{.ID}}",
+            ),
+            timeout_seconds=self._policy.command_timeout_seconds,
+            max_output_bytes=self._policy.max_command_output_bytes,
+        )
+        if result.returncode != 0 or result.truncated:
+            return False
+        identifiers = [line.strip().lower() for line in result.output.decode().splitlines() if line]
+        return all(_CONTAINER_ID_RE.fullmatch(value) and value != container_id for value in identifiers)
+
+    async def _network_absent(self, network_name: str) -> bool:
+        result = await self._runner.run(
+            (self._policy.container_cli, "network", "ls", "--format", "{{.Name}}"),
+            timeout_seconds=self._policy.command_timeout_seconds,
+            max_output_bytes=self._policy.max_command_output_bytes,
+        )
+        if result.returncode != 0 or result.truncated:
+            return False
+        names = {line.strip() for line in result.output.decode().splitlines() if line.strip()}
+        return network_name not in names
 
     def _is_instance_network(self, network_name: str) -> bool:
         return re.fullmatch(rf"{re.escape(self._policy.network_name)}-[0-9a-f]{{10}}", network_name) is not None

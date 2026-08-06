@@ -109,6 +109,144 @@ def test_candidate_commit_is_isolated_and_retained_by_private_ref(tmp_path: Path
     )
 
 
+def test_new_candidate_is_an_independent_remote_free_repository(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-full-repository")
+
+    assert (workspace.path / ".git").is_dir()
+    assert _git(workspace.path, "rev-parse", "--git-common-dir") == ".git"
+    assert _git(workspace.path, "remote") == ""
+    assert _git(workspace.path, "config", "--local", "user.name") == "OpenTulpa Candidate"
+    assert (
+        _git(workspace.path, "config", "--local", "user.email")
+        == "candidate@opentulpa.local"
+    )
+    config = (workspace.path / ".git" / "config").read_text(encoding="utf-8")
+    assert "credential." not in config
+    assert "remote." not in config
+    assert "core.hookspath" not in config
+    source_objects = (source / ".git" / "objects").stat()
+    candidate_objects = (workspace.path / ".git" / "objects").stat()
+    assert (source_objects.st_dev, source_objects.st_ino) != (
+        candidate_objects.st_dev,
+        candidate_objects.st_ino,
+    )
+
+    assert _git(workspace.path, "status", "--porcelain") == ""
+    assert _git(workspace.path, "diff") == ""
+    assert _git(workspace.path, "log", "-1", "--format=%s") == "seed"
+    assert _git(workspace.path, "blame", "app.py")
+    _git(workspace.path, "branch", "review")
+    _git(workspace.path, "merge", "--no-edit", "review")
+    _git(workspace.path, "rebase", "HEAD")
+    (workspace.path / "topic.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(workspace.path, "add", "topic.py")
+    _git(
+        workspace.path,
+        "-c",
+        "user.name=Candidate",
+        "-c",
+        "user.email=candidate@opentulpa.local",
+        "commit",
+        "-m",
+        "topic",
+    )
+    topic = _git(workspace.path, "rev-parse", "HEAD")
+    _git(workspace.path, "reset", "--hard", "HEAD^")
+    _git(workspace.path, "cherry-pick", topic)
+    _git(workspace.path, "bisect", "start")
+    _git(workspace.path, "bisect", "reset")
+    manager.remove(workspace)
+
+
+def test_exact_import_transfers_objects_and_cleans_temporary_ref(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+    workspace = manager.create(candidate_id="candidate-exact-import")
+    (workspace.path / "app.py").write_text("VALUE = 7\n", encoding="utf-8")
+    committed = manager.commit(workspace, message="Exact object import")
+
+    assert _git(source, "cat-file", "-e", committed.source_commit) == ""
+    assert manager.import_exact_commit(workspace, source_commit=committed.source_commit) == (
+        committed.source_commit
+    )
+    assert _git(source, "rev-parse", committed.source_commit) == committed.source_commit
+    with pytest.raises(subprocess.CalledProcessError):
+        _git(source, "rev-parse", f"refs/opentulpa/imports/{workspace.candidate_id}")
+
+
+def test_full_candidate_rejects_post_creation_remote_alternate_and_hardlink(
+    tmp_path: Path,
+) -> None:
+    source = _repository(tmp_path)
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+    remote_workspace = manager.create(candidate_id="candidate-remote-mutation")
+    _git(remote_workspace.path, "remote", "add", "origin", "https://example.com/repo.git")
+    with pytest.raises(GitCandidateError, match="configuration|remotes"):
+        manager.head(remote_workspace)
+
+    alternate_workspace = manager.create(candidate_id="candidate-alternate-mutation")
+    alternate = alternate_workspace.path / ".git" / "objects" / "info" / "alternates"
+    alternate.write_text(str(source / ".git" / "objects") + "\n", encoding="utf-8")
+    with pytest.raises(GitCandidateError, match="object store|configuration"):
+        manager.head(alternate_workspace)
+
+    hardlink_workspace = manager.create(candidate_id="candidate-hardlink-mutation")
+    source_object = next(
+        path
+        for path in (source / ".git" / "objects").glob("[0-9a-f][0-9a-f]/*")
+        if path.is_file()
+    )
+    candidate_object = hardlink_workspace.path / ".git" / "objects" / source_object.relative_to(
+        source / ".git" / "objects"
+    )
+    candidate_object.unlink()
+    os.link(source_object, candidate_object)
+    with pytest.raises(GitCandidateError, match="object store"):
+        manager.head(hardlink_workspace)
+
+
+def test_full_candidate_preserves_sha256_object_format(tmp_path: Path) -> None:
+    source = tmp_path / "source-sha256"
+    source.mkdir()
+    initialized = subprocess.run(
+        ["git", "-C", str(source), "init", "--object-format=sha256", "-b", "main"],
+        capture_output=True,
+        check=False,
+    )
+    if initialized.returncode != 0:
+        pytest.skip("installed Git does not support SHA-256 repositories")
+    _git(source, "config", "user.name", "Test")
+    _git(source, "config", "user.email", "test@example.com")
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(source, "add", "app.py")
+    _git(source, "commit", "-m", "seed")
+    manager = GitCandidateWorkspace(
+        source_repository=source,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+    workspace = manager.create(candidate_id="candidate-sha256")
+
+    assert _git(workspace.path, "rev-parse", "--show-object-format") == "sha256"
+    assert manager.head(workspace) == _git(source, "rev-parse", "HEAD")
+
+
 def test_candidate_recovers_clean_commit_after_persistence_crash(tmp_path: Path) -> None:
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(

@@ -86,6 +86,21 @@ async def test_local_evaluation_runner_does_not_inherit_secrets(
     assert result.output.strip() == "absent"
 
 
+@pytest.mark.asyncio
+async def test_local_evaluation_runner_reports_missing_executable(tmp_path: Path) -> None:
+    result = await LocalEvaluationRunner().run(
+        workspace=tmp_path,
+        command=EvaluationCommand(
+            name="missing.executable",
+            argv=(str(tmp_path / "missing-tool"), "--version"),
+        ),
+    )
+
+    assert result.passed is False
+    assert result.exit_code == 127
+    assert "evaluation executable is unavailable" in result.output
+
+
 def test_evaluation_contract_rejects_shellless_command_injection() -> None:
     with pytest.raises(ValueError, match="argv"):
         EvaluationCommand(name="bad", argv=())

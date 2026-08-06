@@ -7,28 +7,28 @@ import hashlib
 import logging
 import os
 import re
-import shutil
 import stat
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import JsonValue
 
 from opentulpa.bootstrap.models import ReleaseOrigin, ReleaseRecord
 from opentulpa.core.ids import new_short_id
-from opentulpa.evolution.activation import (
-    ReleaseActivationStatus,
-    ReleaseActivator,
-)
+from opentulpa.evolution.activation import ReleaseActivator
 from opentulpa.evolution.archive import EvolutionArchive, PromotionAttemptConflictError
+from opentulpa.evolution.candidate_provenance import CandidateSourceProvenance
+from opentulpa.evolution.context import EvolutionAuditContext, SourceSessionContext
 from opentulpa.evolution.dependency_resolver import DependencyResolver, ResolvedDependencyBase
+from opentulpa.evolution.evaluation_metadata import EvaluationMetadata
 from opentulpa.evolution.evaluator import CandidateEvaluator, EvaluationCommandResult
-from opentulpa.evolution.generation import (
-    UPSTREAM_LINEAGE_METADATA_KEY,
-    UpstreamLineage,
+from opentulpa.evolution.event_publisher import (
+    EvolutionEventPublisher,
+    EvolutionEventSink,
+    InMemoryEvolutionEventSink,
 )
+from opentulpa.evolution.generation import UpstreamLineage
 from opentulpa.evolution.lineage import GitLineage, GitLineageError, GitLineageSnapshot
 from opentulpa.evolution.models import (
     Candidate,
@@ -36,7 +36,6 @@ from opentulpa.evolution.models import (
     ContributionMetadata,
     EvaluationCheck,
     EvaluationReport,
-    EvolutionEvent,
     PromotionAttempt,
     PromotionAttemptStatus,
     Release,
@@ -52,14 +51,20 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuildRequest,
     TrustedWheelReleaseBuilder,
 )
+from opentulpa.evolution.release_coordinator import (
+    ReleaseCoordinationError,
+    ReleaseCoordinator,
+)
 from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
 from opentulpa.evolution.sanitizer import (
     ContributionSanitizationError,
     sanitize_contribution_patch,
 )
+from opentulpa.evolution.source_session import SourceSessionService
 from opentulpa.evolution.workspace import (
     CandidateCommit,
     CandidateWorkspace,
+    GitCandidateError,
     GitCandidateWorkspace,
 )
 
@@ -67,23 +72,10 @@ logger = logging.getLogger(__name__)
 
 _GENERATION_REFERENCE_RE = re.compile(r"python-generation:([0-9a-f]{64})\Z")
 _COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-_VERIFIED_UPSTREAM_MERGE_COMMIT_KEY = "opentulpa.evolution.upstream_merge_commit"
 
 
 class EvolutionSupervisorError(RuntimeError):
     """Public evolution failure without model, Git, or filesystem internals."""
-
-
-class EvolutionEventSink(Protocol):
-    async def deliver(self, event: EvolutionEvent) -> None: ...
-
-
-class InMemoryEvolutionEventSink:
-    def __init__(self) -> None:
-        self.events: list[EvolutionEvent] = []
-
-    async def deliver(self, event: EvolutionEvent) -> None:
-        self.events.append(event)
 
 
 class EvolutionSupervisor:
@@ -135,7 +127,7 @@ class EvolutionSupervisor:
         self._activation_lock = asyncio.Lock()
         self._release_builder = release_builder
         self._release_activator = release_activator
-        self._event_sink = event_sink
+        self._event_publisher = EvolutionEventPublisher(archive=archive, sink=event_sink)
         self._lineage = lineage
         self._source_mutation_enabled = bool(source_mutation_enabled)
         self._source_mutation_unavailable_reason = str(
@@ -145,10 +137,21 @@ class EvolutionSupervisor:
         self._dependency_resolver = dependency_resolver
         self._dependency_evaluator_factory = dependency_evaluator_factory
         self._dependency_evaluators: dict[str, CandidateEvaluator] = {}
+        self._source_session = SourceSessionService(self)
         self._source_locks: dict[str, asyncio.Lock] = {}
         self._promotion_wake = asyncio.Event()
         self._promotion_dispatcher: asyncio.Task[None] | None = None
         self._started = False
+        self._release_coordinator = ReleaseCoordinator(
+            archive=archive,
+            activator=release_activator,
+            validate_attempt=self._validate_coordinated_attempt,
+            bootstrap_release=self._bootstrap_release,
+            release_origin=self._release_origin,
+            project_release=self._project_coordinated_release,
+            publish_switching=self._publish_coordinated_switching,
+            publish_terminal=self._publish_coordinated_terminal,
+        )
 
     @property
     def started(self) -> bool:
@@ -187,8 +190,7 @@ class EvolutionSupervisor:
                     await self._reconcile_source_session(candidate)
                 else:
                     await self._cleanup_stale_candidate(candidate)
-        await self._ensure_terminal_candidate_events()
-        await self._ensure_terminal_promotion_events()
+        await self._event_publisher.recover_terminal_events()
         await self.flush_events()
         self._started = True
         if self._source_mutation_enabled:
@@ -230,47 +232,7 @@ class EvolutionSupervisor:
     ) -> dict[str, Any]:
         """Inspect the single persistent source session owned by one tenant."""
 
-        self._require_started()
-        if not self._source_mutation_enabled:
-            return {
-                "available": False,
-                "active": False,
-                "session_active": False,
-                "candidate_id": None,
-                "reason": self._source_mutation_unavailable_reason,
-                "source_mutation_enabled": False,
-                "dependency_resolution_available": False,
-                "diff_sha256": hashlib.sha256(b"").hexdigest(),
-                "conflict_paths": [],
-            }
-        session_key, audit = self._source_context(audit_context)
-        async with self._source_lock(session_key):
-            lineage = await self._source_lineage()
-            candidate = await self._find_source_session(
-                session_key,
-                tenant_id=str(audit["tenant_id"]),
-            )
-            if candidate is None:
-                return {
-                    "available": True,
-                    "source_mutation_enabled": True,
-                    "dependency_resolution_available": self._dependency_resolver is not None,
-                    "active": False,
-                    "session_active": False,
-                    "candidate_id": None,
-                    "diff_sha256": hashlib.sha256(b"").hexdigest(),
-                    "conflict_paths": [],
-                    **lineage,
-                }
-            workspace = self._source_workspace(candidate)
-            return {
-                "available": True,
-                "source_mutation_enabled": True,
-                "dependency_resolution_available": self._dependency_resolver is not None,
-                "session_active": True,
-                **await self._source_snapshot(candidate, workspace),
-                **lineage,
-            }
+        return await self._source_session.source_status(audit_context=audit_context)
 
     async def source_shell(
         self,
@@ -281,48 +243,11 @@ class EvolutionSupervisor:
     ) -> dict[str, Any]:
         """Run one command and return concise candidate status; source_status includes the diff."""
 
-        self._require_started()
-        self._require_source_mutation()
-        safe_command = str(command or "").strip()
-        if not safe_command or "\x00" in safe_command or len(safe_command) > 100_000:
-            raise ValueError("source shell command is invalid")
-        timeout = int(timeout_seconds)
-        if timeout < 1 or timeout > 3_600:
-            raise ValueError("source shell timeout must be between 1 and 3600 seconds")
-        backend_factory = self._candidate_backend_factory
-        if backend_factory is None:
-            raise EvolutionSupervisorError("source shell is unavailable")
-        session_key, audit = self._source_context(audit_context)
-        async with self._source_lock(session_key):
-            candidate, workspace = await self._open_source_session(
-                session_key=session_key,
-                audit=audit,
-            )
-            await self._require_current_source_base(candidate)
-            conflict_paths = await self._source_conflict_paths(candidate, workspace)
-            backend = backend_factory(workspace.path)
-            with self._hide_git_metadata(workspace):
-                response = await backend.aexecute(safe_command, timeout=timeout)
-            if self._lineage is not None and conflict_paths:
-                try:
-                    await asyncio.to_thread(
-                        self._lineage.stage_resolved_conflicts,
-                        workspace,
-                        conflict_paths,
-                    )
-                except GitLineageError as exc:
-                    raise EvolutionSupervisorError(
-                        "source merge conflict resolution is invalid"
-                    ) from exc
-            current = await self._required_candidate(candidate.id)
-            snapshot = await self._source_snapshot(current, workspace, include_diff=False)
-            output, output_truncated = self._bounded_text(response.output)
-            return {
-                **snapshot,
-                "exit_code": int(response.exit_code),
-                "output": output,
-                "output_truncated": bool(response.truncated or output_truncated),
-            }
+        return await self._source_session.source_shell(
+            command=command,
+            timeout_seconds=timeout_seconds,
+            audit_context=audit_context,
+        )
 
     async def source_sync_upstream(
         self,
@@ -332,49 +257,10 @@ class EvolutionSupervisor:
     ) -> dict[str, Any]:
         """Fetch remote main through the controller and open its isolated reconciliation."""
 
-        self._require_started()
-        self._require_source_mutation()
-        expected_release = str(expected_active_release_id or "").strip()
-        if not expected_release or len(expected_release) > 100:
-            raise ValueError("expected active release is invalid")
-        lineage = self._lineage
-        if lineage is None:
-            raise EvolutionSupervisorError("source lineage is unavailable")
-        session_key, audit = self._source_context(audit_context)
-        tenant_id = str(audit["tenant_id"])
-        async with self._source_lock(session_key):
-            current = await self._archive.get_current_release()
-            if current is None or current.id != expected_release:
-                raise EvolutionSupervisorError("active release changed before upstream sync")
-            if await self._find_source_session(session_key, tenant_id=tenant_id) is not None:
-                raise EvolutionSupervisorError(
-                    "finish or release the active source session before upstream sync"
-                )
-            try:
-                synced = await asyncio.to_thread(
-                    lineage.sync_upstream,
-                    self._upstream_repository,
-                    self._upstream_ref,
-                )
-            except (GitLineageError, ValueError) as exc:
-                raise EvolutionSupervisorError("remote upstream synchronization failed") from exc
-            values = {
-                "synced": synced.changed,
-                "previous_upstream_commit": synced.previous_commit,
-                "upstream_commit": synced.upstream_commit,
-            }
-            if not synced.changed:
-                return {**values, **await self._source_lineage()}
-            candidate, workspace = await self._open_source_session(
-                session_key=session_key,
-                audit=audit,
-            )
-            return {
-                **values,
-                "session_active": True,
-                **await self._source_snapshot(candidate, workspace),
-                **await self._source_lineage(),
-            }
+        return await self._source_session.source_sync_upstream(
+            expected_active_release_id=expected_active_release_id,
+            audit_context=audit_context,
+        )
 
     async def source_resolve_dependencies(
         self,
@@ -385,45 +271,11 @@ class EvolutionSupervisor:
     ) -> dict[str, Any]:
         """Resolve an exact dependency proposal through the trusted network worker."""
 
-        self._require_started()
-        self._require_source_mutation()
-        resolver = self._dependency_resolver
-        if resolver is None:
-            raise EvolutionSupervisorError("autonomous dependency resolution is unavailable")
-        candidate_id = str(expected_candidate_id or "").strip()
-        diff_sha256 = str(expected_diff_sha256 or "").strip().lower()
-        if not candidate_id or len(candidate_id) > 100:
-            raise ValueError("expected source candidate is invalid")
-        if len(diff_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in diff_sha256
-        ):
-            raise ValueError("expected source diff digest is invalid")
-        session_key, audit = self._source_context(audit_context)
-        async with self._source_lock(session_key):
-            candidate, workspace = await self._open_source_session(
-                session_key=session_key,
-                audit=audit,
-            )
-            if candidate.id != candidate_id:
-                raise EvolutionSupervisorError("source dependency proposal identity changed")
-            await self._require_current_source_base(candidate)
-            before = await self._source_snapshot(candidate, workspace, include_diff=False)
-            if before["diff_sha256"] != diff_sha256 or not before["dirty"]:
-                raise EvolutionSupervisorError("source dependency proposal changed")
-            if before["conflict_paths"]:
-                raise EvolutionSupervisorError("source dependency proposal has unresolved conflicts")
-            resolved = await resolver.resolve(workspace.path)
-            await asyncio.to_thread(self._install_resolved_lock, workspace.path, resolved)
-            current = await self._required_candidate(candidate.id)
-            after = await self._source_snapshot(current, workspace)
-            return {
-                **after,
-                "dependency_base_id": resolved.id,
-                "dependency_lock_hash": resolved.lock_sha256,
-                "dependency_inventory_sha256": resolved.inventory_sha256,
-                "dependency_resolver_fingerprint": resolved.resolver_fingerprint,
-                "dependency_wheelhouse_sha256": resolved.wheelhouse_sha256,
-            }
+        return await self._source_session.source_resolve_dependencies(
+            expected_candidate_id=expected_candidate_id,
+            expected_diff_sha256=expected_diff_sha256,
+            audit_context=audit_context,
+        )
 
     async def source_release(
         self,
@@ -436,71 +288,13 @@ class EvolutionSupervisor:
     ) -> dict[str, Any]:
         """Commit exact session bytes, run fixed gates, and queue safe activation."""
 
-        self._require_started()
-        self._require_source_mutation()
-        safe_key = str(idempotency_key or "").strip()
-        if not safe_key or len(safe_key) > 200:
-            raise ValueError("source release idempotency key is invalid")
-        safe_candidate_id = str(expected_candidate_id or "").strip()
-        if not safe_candidate_id or len(safe_candidate_id) > 100:
-            raise ValueError("expected source candidate is invalid")
-        safe_diff_sha256 = str(expected_diff_sha256 or "").strip().lower()
-        if len(safe_diff_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in safe_diff_sha256
-        ):
-            raise ValueError("expected source diff digest is invalid")
-        safe_message = " ".join(str(message or "").split())[:500]
-        if not safe_message:
-            safe_message = "OpenTulpa self-update"
-        session_key, audit = self._source_context(audit_context)
-        tenant_id = str(audit["tenant_id"])
-        async with self._source_lock(session_key):
-            operation = await self._archive.get_source_release_operation(
-                tenant_id=tenant_id,
-                idempotency_key=safe_key,
-            )
-            if operation is not None:
-                if (
-                    operation.message != safe_message
-                    or operation.candidate_id != safe_candidate_id
-                    or operation.expected_diff_sha256 != safe_diff_sha256
-                ):
-                    raise EvolutionSupervisorError(
-                        "source release idempotency key was used for another request"
-                    )
-                if operation.status is SourceReleaseOperationStatus.COMPLETED:
-                    return dict(operation.result or {})
-                return await self._execute_source_release(operation)
-
-            candidate = await self._find_source_session(
-                session_key,
-                tenant_id=tenant_id,
-            )
-            if candidate is None:
-                raise EvolutionSupervisorError("no active source session exists")
-            if candidate.id != safe_candidate_id:
-                raise EvolutionSupervisorError("source session changed before approval")
-            await self._require_current_source_base(candidate)
-            workspace = self._source_workspace(candidate)
-            self._require_source_diff_binding(
-                workspace,
-                expected_diff_sha256=safe_diff_sha256,
-            )
-            current_release = await self._archive.get_current_release()
-            operation_digest = hashlib.sha256(f"{tenant_id}\x00{safe_key}".encode()).hexdigest()
-            operation = await self._archive.create_source_release_operation(
-                SourceReleaseOperation(
-                    id=f"source_release_{operation_digest[:48]}",
-                    tenant_id=tenant_id,
-                    idempotency_key=safe_key,
-                    candidate_id=candidate.id,
-                    expected_diff_sha256=safe_diff_sha256,
-                    base_release_id=(current_release.id if current_release is not None else None),
-                    message=safe_message,
-                    audit_context=dict(audit),
-                )
-            )
-            return await self._execute_source_release(operation)
+        return await self._source_session.source_release(
+            idempotency_key=idempotency_key,
+            expected_candidate_id=expected_candidate_id,
+            expected_diff_sha256=expected_diff_sha256,
+            message=message,
+            audit_context=audit_context,
+        )
 
     async def source_rollback(
         self,
@@ -780,7 +574,7 @@ class EvolutionSupervisor:
                     PromotionAttemptStatus.ACTIVATING,
                 }:
                     continue
-                await self._resume_promotion_attempt(attempt)
+                await self._release_coordinator.resume(attempt)
                 processed += 1
         return processed
 
@@ -801,44 +595,24 @@ class EvolutionSupervisor:
             except TimeoutError:
                 continue
 
-    async def _activate_promotion_attempt(
+    async def _validate_coordinated_attempt(
         self,
         attempt: PromotionAttempt,
-        *,
-        rollback_target: Release | None = None,
-        current_candidate_revision: int | None = None,
-    ) -> Release:
-        activator = self._release_activator
-        if activator is None:
-            await self._fail_promotion_attempt(
-                attempt,
-                code="activation_unavailable",
-                message="The immutable release bootstrap is unavailable.",
-            )
-            raise EvolutionSupervisorError("release activation is unavailable")
+        rollback_target: Release | None,
+    ) -> None:
         try:
             await self._validate_attempt_for_activation(
                 attempt,
                 rollback_target=rollback_target,
             )
-        except EvolutionSupervisorError:
-            await self._fail_promotion_attempt(
-                attempt,
-                code="release_stale",
-                message="The release request changed before activation.",
-            )
-            raise
-        if attempt.status is PromotionAttemptStatus.QUEUED:
-            attempt = await self._archive.transition_promotion_attempt(
-                attempt.id,
-                expected_status=PromotionAttemptStatus.QUEUED,
-                new_status=PromotionAttemptStatus.ACTIVATING,
-                expected_revision=attempt.revision,
-                bootstrap_activation_id=attempt.id,
-            )
-        if attempt.status is not PromotionAttemptStatus.ACTIVATING:
-            raise EvolutionSupervisorError("promotion attempt is not resumable")
+        except EvolutionSupervisorError as exc:
+            raise ReleaseCoordinationError(str(exc)) from exc
 
+    async def _publish_coordinated_switching(
+        self,
+        attempt: PromotionAttempt,
+        rollback: bool,
+    ) -> None:
         await self._publish_build_event(
             event_key=f"promotion:{attempt.id}:switching",
             event_type="build.switching",
@@ -849,176 +623,19 @@ class EvolutionSupervisor:
                 "candidate_id": attempt.candidate_id,
                 "release_id": attempt.release.id,
                 "status": "switching",
-                "rollback": rollback_target is not None,
+                "rollback": rollback,
             },
         )
-        try:
-            result = await activator.activate(
-                self._bootstrap_release(attempt.release),
-                activation_id=attempt.id,
-                origin=self._release_origin(attempt.origin),
-                reason=attempt.release.reason,
-                rollback=rollback_target is not None,
-            )
-        except Exception as exc:
-            code, message = self._activation_error(exc)
-            await self._fail_promotion_attempt(attempt, code=code, message=message)
-            raise EvolutionSupervisorError(message) from exc
-        if result.status is not ReleaseActivationStatus.ACTIVE:
-            code = result.failure_code or "activation_failed"
-            message = result.failure_message or "Release activation did not become active."
-            await self._fail_promotion_attempt(attempt, code=code, message=message)
-            raise EvolutionSupervisorError(message)
 
-        active = attempt.release.model_copy(
-            update={
-                "metadata": {
-                    **attempt.release.metadata,
-                    "activation_state": "active",
-                    "bootstrap_activation_id": result.activation_id,
-                }
-            }
-        )
-        try:
-            if rollback_target is None:
-                _, recorded = await self._archive.promote_candidate(
-                    active,
-                    expected_revision=attempt.candidate_revision,
-                )
-            else:
-                rollback_of = str(active.metadata.get("rollback_of") or "")
-                if not rollback_of:
-                    raise EvolutionSupervisorError("rollback attempt lost its predecessor")
-                if current_candidate_revision is None:
-                    current = await self._archive.get_current_release()
-                    if current is None or current.id != rollback_of:
-                        raise EvolutionSupervisorError("rollback predecessor changed")
-                    current_candidate = await self._required_candidate(current.candidate_id)
-                    current_candidate_revision = current_candidate.revision
-                _, recorded = await self._archive.activate_rollback(
-                    rollback_target.id,
-                    activation=active,
-                    expected_current_release_id=rollback_of,
-                    expected_current_candidate_revision=current_candidate_revision,
-                )
-        except Exception as exc:
-            logger.exception(
-                "bootstrap activated release but archive commit is pending: attempt=%s",
-                attempt.id,
-            )
-            raise EvolutionSupervisorError(
-                "release activated; archive reconciliation is pending"
-            ) from exc
-        try:
-            await self._project_release(recorded)
-        except Exception as exc:
-            logger.exception(
-                "archive activated release but projection is pending: attempt=%s",
-                attempt.id,
-            )
-            raise EvolutionSupervisorError(
-                "release activated; projection reconciliation is pending"
-            ) from exc
-        completed_attempt = await self._archive.transition_promotion_attempt(
-            attempt.id,
-            expected_status=PromotionAttemptStatus.ACTIVATING,
-            new_status=PromotionAttemptStatus.ACTIVE,
-            expected_revision=attempt.revision,
-            bootstrap_activation_id=result.activation_id,
-        )
-        await self._publish_promotion_event(completed_attempt, active_release=recorded)
-        return recorded
+    async def _project_coordinated_release(self, release: Release) -> None:
+        await self._project_release(release)
 
-    async def _resume_promotion_attempt(self, attempt: PromotionAttempt) -> None:
-        candidate = await self._required_candidate(attempt.candidate_id)
-        recorded_failure = candidate.metadata.get("last_activation_failure")
-        if isinstance(recorded_failure, dict) and str(
-            recorded_failure.get("attempt_id") or ""
-        ) == attempt.id:
-            await self._fail_promotion_attempt(
-                attempt,
-                code=str(recorded_failure.get("code") or "activation_failed"),
-                message=str(
-                    recorded_failure.get("message") or "Release activation failed."
-                ),
-            )
-            return
-        current = await self._archive.get_current_release()
-        if current is not None and current.id == attempt.release.id:
-            await self._project_release(current)
-            if attempt.status is PromotionAttemptStatus.ACTIVATING:
-                attempt = await self._archive.transition_promotion_attempt(
-                    attempt.id,
-                    expected_status=PromotionAttemptStatus.ACTIVATING,
-                    new_status=PromotionAttemptStatus.ACTIVE,
-                    expected_revision=attempt.revision,
-                    bootstrap_activation_id=attempt.id,
-                )
-            await self._publish_promotion_event(attempt, active_release=current)
-            return
-        rollback_target_id = str(attempt.release.metadata.get("rollback_target") or "")
-        rollback_target = (
-            await self._archive.get_release(rollback_target_id) if rollback_target_id else None
-        )
-        if rollback_target_id and rollback_target is None:
-            await self._fail_promotion_attempt(
-                attempt,
-                code="rollback_target_missing",
-                message="The rollback target is no longer available.",
-            )
-            return
-        try:
-            await self._activate_promotion_attempt(attempt, rollback_target=rollback_target)
-        except EvolutionSupervisorError:
-            logger.warning(
-                "promotion attempt did not resume: attempt=%s",
-                attempt.id,
-                exc_info=True,
-            )
-
-    async def _fail_promotion_attempt(
+    async def _publish_coordinated_terminal(
         self,
         attempt: PromotionAttempt,
-        *,
-        code: str,
-        message: str,
+        active_release: Release | None,
     ) -> None:
-        safe_code = str(code or "activation_failed")[:100]
-        safe_message = str(message or "Release activation failed.")[:2_000]
-        current_attempt = await self._archive.get_promotion_attempt(attempt.id)
-        if current_attempt is None or current_attempt.status in {
-            PromotionAttemptStatus.ACTIVE,
-            PromotionAttemptStatus.FAILED,
-        }:
-            return
-        candidate = await self._required_candidate(current_attempt.candidate_id)
-        failure_record: dict[str, JsonValue] = {
-            "attempt_id": current_attempt.id,
-            "code": safe_code,
-            "message": safe_message,
-        }
-        if candidate.metadata.get("last_activation_failure") != failure_record:
-            await self._archive.update_candidate(
-                candidate.model_copy(
-                    update={
-                        "metadata": {
-                            **candidate.metadata,
-                            "last_activation_failure": failure_record,
-                        }
-                    }
-                ),
-                expected_revision=candidate.revision,
-            )
-        failed = await self._archive.transition_promotion_attempt(
-            current_attempt.id,
-            expected_status=current_attempt.status,
-            new_status=PromotionAttemptStatus.FAILED,
-            expected_revision=current_attempt.revision,
-            bootstrap_activation_id=current_attempt.bootstrap_activation_id or current_attempt.id,
-            failure_code=safe_code,
-            failure_message=safe_message,
-        )
-        await self._publish_promotion_event(failed)
+        await self._publish_promotion_event(attempt, active_release=active_release)
 
     async def _validate_attempt_for_activation(
         self,
@@ -1072,12 +689,6 @@ class EvolutionSupervisor:
             raise EvolutionSupervisorError("active source lineage diverged from the archive")
 
     @staticmethod
-    def _activation_error(exc: Exception) -> tuple[str, str]:
-        code = str(getattr(exc, "code", "") or "activation_failed")[:100]
-        message = str(getattr(exc, "public_message", "") or "Release activation failed.")[:2_000]
-        return code, message
-
-    @staticmethod
     def _release_origin(origin: Mapping[str, JsonValue]) -> ReleaseOrigin | None:
         required = ("tenant_id", "actor_id", "thread_id", "channel", "correlation_id")
         values = {key: str(origin.get(key) or "").strip() for key in required}
@@ -1088,21 +699,29 @@ class EvolutionSupervisor:
     @staticmethod
     def _candidate_origin(candidate: Candidate) -> dict[str, JsonValue]:
         value = candidate.metadata.get("requested_by")
-        return dict(value) if isinstance(value, dict) else {}
+        return EvolutionAuditContext.from_mapping(
+            value if isinstance(value, Mapping) else None
+        ).as_metadata()
+
+    @staticmethod
+    def _candidate_source_provenance(candidate: Candidate) -> CandidateSourceProvenance:
+        try:
+            return CandidateSourceProvenance.from_metadata(candidate.metadata)
+        except ValueError as exc:
+            raise EvolutionSupervisorError("candidate source provenance is invalid") from exc
 
     @staticmethod
     def _release_artifact_metadata(candidate: Candidate) -> dict[str, JsonValue]:
+        source = EvolutionSupervisor._candidate_source_provenance(candidate)
         manifest_digest = str(candidate.metadata.get("manifest_digest") or "")
         raw_entrypoint = candidate.metadata.get("release_entrypoint")
-        raw_changed_paths = candidate.metadata.get("changed_paths")
-        diff_sha256 = str(candidate.metadata.get("diff_sha256") or "")
         report = candidate.evaluation_report
         if (
             not manifest_digest
             or not isinstance(raw_entrypoint, list)
             or not raw_entrypoint
-            or not isinstance(raw_changed_paths, list)
-            or not diff_sha256
+            or source.changed_paths is None
+            or source.diff_sha256 is None
             or report is None
             or not candidate.evaluator_fingerprint
         ):
@@ -1110,15 +729,14 @@ class EvolutionSupervisor:
         artifact_kind = str(candidate.metadata.get("artifact_kind") or "")
         if artifact_kind not in {"oci_image", "python_generation"}:
             raise EvolutionSupervisorError("candidate release artifact kind is invalid")
-        accepted_upstream = str(candidate.metadata.get("accepted_upstream_commit") or "")
         evaluation_input_digest = str(candidate.metadata.get("evaluation_input_digest") or "")
         metadata: dict[str, JsonValue] = {
             "artifact_kind": artifact_kind,
             "manifest_digest": manifest_digest,
             "release_entrypoint": [str(item) for item in raw_entrypoint],
             "base_commit": candidate.base_commit,
-            "changed_paths": [str(item) for item in raw_changed_paths],
-            "diff_sha256": diff_sha256,
+            "changed_paths": list(source.changed_paths),
+            "diff_sha256": source.diff_sha256,
             **(
                 {"evaluation_input_digest": evaluation_input_digest}
                 if evaluation_input_digest
@@ -1130,8 +748,8 @@ class EvolutionSupervisor:
                 else {}
             ),
             **(
-                {"accepted_upstream_commit": accepted_upstream}
-                if accepted_upstream
+                {"accepted_upstream_commit": source.accepted_upstream_commit}
+                if source.accepted_upstream_commit is not None
                 else {}
             ),
             "evaluation_report_id": report.id,
@@ -1235,82 +853,10 @@ class EvolutionSupervisor:
             raise EvolutionSupervisorError("release artifact provenance is invalid") from exc
 
     async def flush_events(self, *, limit: int = 100) -> int:
-        sink = self._event_sink
-        if sink is None:
-            return 0
-        delivered = 0
-        for event in await self._archive.pending_events(limit=limit):
-            try:
-                await sink.deliver(event)
-            except Exception:
-                logger.exception("evolution event delivery failed: event=%s", event.id)
-                await self._archive.mark_event_attempt(event.id, delivered=False)
-                continue
-            await self._archive.mark_event_attempt(event.id, delivered=True)
-            delivered += 1
-        return delivered
-
-    async def _ensure_terminal_candidate_events(self) -> None:
-        for status in (CandidateStatus.READY, CandidateStatus.FAILED):
-            for candidate in await self._archive.list_candidates(status=status, limit=1_000):
-                await self._publish_candidate_event(candidate)
-
-    async def _ensure_terminal_promotion_events(self) -> None:
-        terminal: dict[str, tuple[PromotionAttempt, Release | None]] = {}
-        for release in await self._archive.list_release_history(limit=1_000):
-            attempt_id = str(release.metadata.get("bootstrap_activation_id") or "")
-            if not attempt_id:
-                continue
-            attempt = await self._archive.get_promotion_attempt(attempt_id)
-            if attempt is not None and attempt.status is PromotionAttemptStatus.ACTIVE:
-                terminal[attempt.id] = (attempt, release)
-        for candidate in await self._archive.list_candidates(limit=1_000):
-            failure = candidate.metadata.get("last_activation_failure")
-            if not isinstance(failure, dict):
-                continue
-            attempt_id = str(failure.get("attempt_id") or "")
-            if not attempt_id or attempt_id in terminal:
-                continue
-            attempt = await self._archive.get_promotion_attempt(attempt_id)
-            if attempt is not None and attempt.status is PromotionAttemptStatus.FAILED:
-                terminal[attempt.id] = (attempt, None)
-        for attempt, active_release in terminal.values():
-            await self._publish_promotion_event(attempt, active_release=active_release)
+        return await self._event_publisher.flush(limit=limit)
 
     async def _publish_candidate_event(self, candidate: Candidate) -> None:
-        if candidate.status not in {CandidateStatus.READY, CandidateStatus.FAILED}:
-            return
-        report = candidate.evaluation_report
-        completion_id = (
-            report.id if report is not None else f"{candidate.status.value}:{candidate.revision}"
-        )
-        event = EvolutionEvent(
-            event_key=f"candidate:{candidate.id}:completed:{completion_id}",
-            event_type=(
-                "candidate.ready"
-                if candidate.status is CandidateStatus.READY
-                else "candidate.failed"
-            ),
-            candidate_id=candidate.id,
-            origin=self._candidate_origin(candidate),
-            payload={
-                "candidate_id": candidate.id,
-                "status": candidate.status.value,
-                "source_commit": candidate.source_commit,
-                "summary": (
-                    report.summary
-                    if report is not None
-                    else "Candidate improvement did not complete."
-                ),
-                **(
-                    {"failure_code": str(candidate.metadata["failure_code"])}
-                    if "failure_code" in candidate.metadata
-                    else {}
-                ),
-            },
-        )
-        await self._archive.enqueue_event(event)
-        await self.flush_events()
+        await self._event_publisher.publish_candidate(candidate)
 
     async def _publish_build_event(
         self,
@@ -1321,16 +867,13 @@ class EvolutionSupervisor:
         origin: Mapping[str, JsonValue],
         payload: dict[str, JsonValue],
     ) -> None:
-        await self._archive.enqueue_event(
-            EvolutionEvent(
-                event_key=event_key,
-                event_type=event_type,
-                candidate_id=candidate_id,
-                origin=dict(origin),
-                payload=payload,
-            )
+        await self._event_publisher.publish_build(
+            event_key=event_key,
+            event_type=event_type,
+            candidate_id=candidate_id,
+            origin=origin,
+            payload=payload,
         )
-        await self.flush_events()
 
     async def _publish_promotion_event(
         self,
@@ -1338,34 +881,10 @@ class EvolutionSupervisor:
         *,
         active_release: Release | None = None,
     ) -> None:
-        failed = attempt.status is PromotionAttemptStatus.FAILED
-        rollback = bool(attempt.release.metadata.get("rollback_target"))
-        event = EvolutionEvent(
-            event_key=f"promotion:{attempt.id}:terminal",
-            event_type=(
-                "rollback.failed"
-                if failed and rollback
-                else "promotion.failed"
-                if failed
-                else "rollback.active"
-                if rollback
-                else "promotion.active"
-            ),
-            candidate_id=attempt.candidate_id,
-            origin=attempt.origin,
-            payload={
-                "attempt_id": attempt.id,
-                "candidate_id": attempt.candidate_id,
-                "status": attempt.status.value,
-                "release_id": (
-                    active_release.id if active_release is not None else attempt.release.id
-                ),
-                **({"failure_code": attempt.failure_code} if attempt.failure_code else {}),
-                **({"failure_message": attempt.failure_message} if attempt.failure_message else {}),
-            },
+        await self._event_publisher.publish_promotion(
+            attempt,
+            active_release=active_release,
         )
-        await self._archive.enqueue_event(event)
-        await self.flush_events()
 
     async def prepare_contribution(
         self,
@@ -1405,6 +924,7 @@ class EvolutionSupervisor:
                 metadata={
                     "patch_sha256": artifact.patch_sha256,
                     "patch_filename": artifact.patch_path.name,
+                    "candidate_tree_oid": artifact.tree_oid,
                     "sanitation_scanner": attestation.scanner_version,
                     "sanitation_bytes": attestation.bytes_scanned,
                     "requires_owner_review": True,
@@ -1430,7 +950,7 @@ class EvolutionSupervisor:
             base_commit=candidate.base_commit,
             head_commit=candidate.source_commit,
         )
-        recorded_digest = str(candidate.metadata.get("diff_sha256", "") or "")
+        recorded_digest = self._candidate_source_provenance(candidate).diff_sha256
         if not recorded_digest or artifact.patch_sha256 != recorded_digest:
             raise EvolutionSupervisorError("candidate review artifact failed digest validation")
         return artifact.patch_path
@@ -1582,11 +1102,9 @@ class EvolutionSupervisor:
             passed=passed,
             checks=checks,
             summary="Candidate passed all required checks." if passed else "Candidate failed.",
-            metadata=(
-                {"source_release_operation_id": source_release_operation_id}
-                if source_release_operation_id is not None
-                else {}
-            ),
+            metadata=EvaluationMetadata(
+                source_release_operation_id=source_release_operation_id
+            ).apply_to_metadata({}),
         )
 
     async def _fail_candidate(
@@ -1652,7 +1170,8 @@ class EvolutionSupervisor:
             return dict(operation.result or {})
         candidate = await self._required_candidate(operation.candidate_id)
         if candidate.status in {CandidateStatus.READY, CandidateStatus.PROMOTED}:
-            if candidate.metadata.get("diff_sha256") != operation.expected_diff_sha256:
+            source = self._candidate_source_provenance(candidate)
+            if source.diff_sha256 != operation.expected_diff_sha256:
                 raise EvolutionSupervisorError("source release approval binding changed")
             return await self._finish_source_release(operation, candidate)
         if candidate.status is not CandidateStatus.BUILDING or not self._is_source_session(
@@ -1692,7 +1211,10 @@ class EvolutionSupervisor:
             and prior_report.artifact_digest == current.artifact_digest
             and prior_report.evaluator_fingerprint == evaluator.fingerprint
             and prior_report.evaluator_version == self._evaluator_version
-            and prior_report.metadata.get("source_release_operation_id") == operation.id
+            and EvaluationMetadata.from_metadata(
+                prior_report.metadata
+            ).source_release_operation_id
+            == operation.id
         ):
             if not prior_report.passed:
                 snapshot = await self._source_snapshot(current, workspace)
@@ -1700,6 +1222,7 @@ class EvolutionSupervisor:
                     operation,
                     {**snapshot, "promotion": None},
                 )
+            await self._import_exact_source_commit(workspace, commit.source_commit)
             ready = await self._archive.transition_status(
                 current.id,
                 expected_status=CandidateStatus.BUILDING,
@@ -1776,6 +1299,7 @@ class EvolutionSupervisor:
                 operation,
                 {**snapshot, "promotion": None},
             )
+        await self._import_exact_source_commit(workspace, commit.source_commit)
         ready = await self._archive.transition_status(
             current.id,
             expected_status=CandidateStatus.BUILDING,
@@ -1783,6 +1307,20 @@ class EvolutionSupervisor:
             expected_revision=current.revision,
         )
         return await self._finish_source_release(operation, ready)
+
+    async def _import_exact_source_commit(
+        self,
+        workspace: CandidateWorkspace,
+        source_commit: str,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._workspaces.import_exact_commit,
+                workspace,
+                source_commit=source_commit,
+            )
+        except GitCandidateError as exc:
+            raise EvolutionSupervisorError("exact source Git object import failed") from exc
 
     async def _bind_source_commit(
         self,
@@ -1804,21 +1342,20 @@ class EvolutionSupervisor:
             current,
             commit.source_commit,
         )
-        old_paths = current.metadata.get("changed_paths")
-        changed_paths = sorted(
-            {
-                *(str(path) for path in old_paths if isinstance(path, str)),
-                *commit.changed_paths,
-            }
-            if isinstance(old_paths, list)
-            else set(commit.changed_paths)
-        )
+        source = self._candidate_source_provenance(current)
+        changed_paths = sorted({*(source.changed_paths or ()), *commit.changed_paths})
         source_changed = current.source_commit != commit.source_commit
-        metadata: dict[str, JsonValue] = dict(current.metadata)
-        if verified_merge is None:
-            metadata.pop(_VERIFIED_UPSTREAM_MERGE_COMMIT_KEY, None)
-        else:
-            metadata[_VERIFIED_UPSTREAM_MERGE_COMMIT_KEY] = verified_merge
+        source = CandidateSourceProvenance(
+            changed_paths=tuple(changed_paths),
+            diff_sha256=commit.diff_sha256,
+            promotion_eligible=bool(
+                commit.promotion_eligible and source.promotion_eligible is not False
+            ),
+            accepted_upstream_commit=source.accepted_upstream_commit,
+            upstream_lineage=source.upstream_lineage,
+            verified_upstream_merge_commit=verified_merge,
+        )
+        metadata = source.apply_to_metadata(current.metadata)
         if source_changed:
             for key in (
                 "artifact_kind",
@@ -1846,16 +1383,7 @@ class EvolutionSupervisor:
                     "dependency_wheelhouse_sha256": dependency_base.wheelhouse_sha256,
                 }
             )
-        metadata.update(
-            {
-                "changed_paths": list(changed_paths),
-                "diff_sha256": commit.diff_sha256,
-                "evaluation_input_digest": evaluation_input_digest,
-                "promotion_eligible": bool(
-                    commit.promotion_eligible and current.metadata.get("promotion_eligible", True)
-                ),
-            }
-        )
+        metadata["evaluation_input_digest"] = evaluation_input_digest
         if (
             current.source_commit == commit.source_commit
             and current.dependency_lock_hash == lock_hash
@@ -1924,6 +1452,7 @@ class EvolutionSupervisor:
             candidate_id=candidate.id,
             path=Path(candidate.worktree_path),
             base_commit=candidate.base_commit,
+            repository_kind=(candidate.workspace_kind or "linked_worktree"),
         )
         try:
             self._restore_git_metadata(workspace)
@@ -1971,7 +1500,7 @@ class EvolutionSupervisor:
                         await self._execute_source_release(current)
             except Exception:
                 candidate = await self._archive.get_candidate(operation.candidate_id)
-                if candidate is None or candidate.status is CandidateStatus.FAILED:
+                if await self._source_release_is_unrecoverable(operation, candidate):
                     current = await self._archive.get_source_release_operation(
                         tenant_id=operation.tenant_id,
                         idempotency_key=operation.idempotency_key,
@@ -2014,6 +1543,30 @@ class EvolutionSupervisor:
                         operation.id,
                     )
 
+    async def _source_release_is_unrecoverable(
+        self,
+        operation: SourceReleaseOperation,
+        candidate: Candidate | None,
+    ) -> bool:
+        if candidate is None or candidate.status not in {
+            CandidateStatus.BUILDING,
+            CandidateStatus.READY,
+            CandidateStatus.PROMOTED,
+        }:
+            return True
+        current = await self._archive.get_current_release()
+        if (current.id if current is not None else None) != operation.base_release_id:
+            return True
+        if current is not None and current.source_commit != candidate.base_commit:
+            return True
+        if candidate.status in {CandidateStatus.READY, CandidateStatus.PROMOTED}:
+            try:
+                source = self._candidate_source_provenance(candidate)
+            except EvolutionSupervisorError:
+                return True
+            return source.diff_sha256 != operation.expected_diff_sha256
+        return False
+
     async def _require_current_source_base(self, candidate: Candidate) -> None:
         current = await self._archive.get_current_release()
         if current is not None and current.source_commit != candidate.base_commit:
@@ -2025,8 +1578,9 @@ class EvolutionSupervisor:
             raise EvolutionSupervisorError("source lineage has no active release")
         snapshot = await self._lineage_snapshot()
         accepted = await self._accepted_upstream_for_release(current)
-        recorded = self._candidate_upstream_lineage(candidate)
-        target_accepted = str(candidate.metadata.get("accepted_upstream_commit") or "")
+        source = self._candidate_source_provenance(candidate)
+        recorded = self._required_upstream_lineage(source)
+        target_accepted = source.accepted_upstream_commit or ""
         allowed_targets = {
             snapshot.accepted_upstream_commit,
             str(recorded.upstream_commit or ""),
@@ -2052,11 +1606,14 @@ class EvolutionSupervisor:
 
     @staticmethod
     def _candidate_upstream_lineage(candidate: Candidate) -> UpstreamLineage:
-        raw = candidate.metadata.get(UPSTREAM_LINEAGE_METADATA_KEY)
-        try:
-            return UpstreamLineage.model_validate(raw)
-        except (TypeError, ValueError) as exc:
-            raise EvolutionSupervisorError("candidate upstream lineage is invalid") from exc
+        source = EvolutionSupervisor._candidate_source_provenance(candidate)
+        return EvolutionSupervisor._required_upstream_lineage(source)
+
+    @staticmethod
+    def _required_upstream_lineage(source: CandidateSourceProvenance) -> UpstreamLineage:
+        if source.upstream_lineage is None:
+            raise EvolutionSupervisorError("candidate upstream lineage is invalid")
+        return source.upstream_lineage
 
     async def _adopt_source_lineage(
         self,
@@ -2066,8 +1623,8 @@ class EvolutionSupervisor:
         lineage = self._lineage
         if lineage is None:
             return candidate
-        if UPSTREAM_LINEAGE_METADATA_KEY in candidate.metadata:
-            self._candidate_upstream_lineage(candidate)
+        source = self._candidate_source_provenance(candidate)
+        if source.upstream_lineage is not None:
             return candidate
         snapshot = await self._lineage_snapshot()
         if snapshot.instance_commit != candidate.base_commit:
@@ -2095,13 +1652,15 @@ class EvolutionSupervisor:
                     verified_merge = None
                 else:
                     accepted = snapshot.upstream_commit
-        metadata: dict[str, JsonValue] = {
-            **candidate.metadata,
-            UPSTREAM_LINEAGE_METADATA_KEY: recorded.model_dump(mode="json"),
-            "accepted_upstream_commit": accepted,
-        }
-        if verified_merge is not None:
-            metadata[_VERIFIED_UPSTREAM_MERGE_COMMIT_KEY] = verified_merge
+        source = CandidateSourceProvenance(
+            changed_paths=source.changed_paths,
+            diff_sha256=source.diff_sha256,
+            promotion_eligible=source.promotion_eligible,
+            accepted_upstream_commit=accepted,
+            upstream_lineage=recorded,
+            verified_upstream_merge_commit=verified_merge,
+        )
+        metadata = source.apply_to_metadata(candidate.metadata)
         return await self._archive.update_candidate(
             candidate.model_copy(update={"metadata": metadata}),
             expected_revision=candidate.revision,
@@ -2109,7 +1668,14 @@ class EvolutionSupervisor:
 
     @staticmethod
     def _is_source_session(candidate: Candidate) -> bool:
-        return candidate.metadata.get("source_session") is True
+        return EvolutionSupervisor._source_session_context(candidate).active
+
+    @staticmethod
+    def _source_session_context(candidate: Candidate) -> SourceSessionContext:
+        try:
+            return SourceSessionContext.from_metadata(candidate.metadata)
+        except ValueError as exc:
+            raise EvolutionSupervisorError("candidate source session metadata is invalid") from exc
 
     async def _reconcile_source_session(self, candidate: Candidate) -> None:
         """Keep a valid interactive worktree across bootstrap restarts."""
@@ -2126,6 +1692,7 @@ class EvolutionSupervisor:
             candidate_id=candidate.id,
             path=Path(candidate.worktree_path),
             base_commit=candidate.base_commit,
+            repository_kind=(candidate.workspace_kind or "linked_worktree"),
         )
         try:
             self._restore_git_metadata(workspace)
@@ -2184,13 +1751,12 @@ class EvolutionSupervisor:
         self,
         audit_context: Mapping[str, str] | None,
     ) -> tuple[str, dict[str, str]]:
-        sanitized = self._audit_context(audit_context)
-        audit = {key: str(value) for key, value in sanitized.items()}
-        tenant_id = audit.get("tenant_id", "")
-        if not tenant_id:
-            raise EvolutionSupervisorError("source session context is incomplete")
-        digest = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
-        return digest, audit
+        audit = EvolutionAuditContext.from_mapping(audit_context)
+        try:
+            session_key, _ = audit.required_source_identity()
+        except ValueError as exc:
+            raise EvolutionSupervisorError("source session context is incomplete") from exc
+        return session_key, {key: str(value) for key, value in audit.as_metadata().items()}
 
     def _source_lock(self, session_key: str) -> asyncio.Lock:
         return self._source_locks.setdefault(session_key, asyncio.Lock())
@@ -2207,12 +1773,8 @@ class EvolutionSupervisor:
         )
         matches: list[Candidate] = []
         for candidate in candidates:
-            requested_by = candidate.metadata.get("requested_by")
-            if self._is_source_session(candidate) and (
-                candidate.metadata.get("source_session_key") == session_key
-                or candidate.metadata.get("source_tenant_id") == tenant_id
-                or (isinstance(requested_by, dict) and requested_by.get("tenant_id") == tenant_id)
-            ):
+            session = self._source_session_context(candidate)
+            if session.matches(session_key=session_key, tenant_id=tenant_id):
                 matches.append(candidate)
         if len(matches) > 1:
             raise EvolutionSupervisorError("source session state is ambiguous")
@@ -2224,7 +1786,10 @@ class EvolutionSupervisor:
         session_key: str,
         audit: Mapping[str, str],
     ) -> tuple[Candidate, CandidateWorkspace]:
-        tenant_id = str(audit["tenant_id"])
+        audit_model = EvolutionAuditContext.from_mapping(audit)
+        session = SourceSessionContext.create(audit_model)
+        assert session.tenant_id is not None
+        tenant_id = session.tenant_id
         existing = await self._find_source_session(
             session_key,
             tenant_id=tenant_id,
@@ -2260,30 +1825,24 @@ class EvolutionSupervisor:
             candidate_id=candidate_id,
             base_ref=base_ref,
         )
-        metadata: dict[str, JsonValue] = {
-            "source_session": True,
-            "source_session_key": session_key,
-            "source_tenant_id": tenant_id,
-            "requested_by": dict(audit),
-        }
+        if session.session_key != session_key:
+            raise EvolutionSupervisorError("source session identity changed")
+        metadata = session.apply_to_metadata({})
         if lineage_snapshot is not None:
-            metadata.update(
-                {
-                    UPSTREAM_LINEAGE_METADATA_KEY: (
-                        lineage_snapshot.upstream_lineage.model_dump(mode="json")
-                    ),
-                    "accepted_upstream_commit": (
-                        lineage_snapshot.upstream_commit
-                        if merge_prepared
-                        else lineage_snapshot.accepted_upstream_commit
-                    ),
-                }
-            )
+            metadata = CandidateSourceProvenance(
+                accepted_upstream_commit=(
+                    lineage_snapshot.upstream_commit
+                    if merge_prepared
+                    else lineage_snapshot.accepted_upstream_commit
+                ),
+                upstream_lineage=lineage_snapshot.upstream_lineage,
+            ).apply_to_metadata(metadata)
         candidate = Candidate(
             id=candidate_id,
             base_commit=workspace.base_commit,
             requested_improvement="Interactive OpenTulpa source session",
             worktree_path=str(workspace.path),
+            workspace_kind=workspace.repository_kind,
             metadata=metadata,
         )
         try:
@@ -2314,6 +1873,7 @@ class EvolutionSupervisor:
             candidate_id=candidate.id,
             path=Path(candidate.worktree_path),
             base_commit=candidate.base_commit,
+            repository_kind=(candidate.workspace_kind or "linked_worktree"),
         )
         self._restore_git_metadata(workspace)
         return workspace
@@ -2369,22 +1929,16 @@ class EvolutionSupervisor:
         if candidate.source_commit != head:
             raise EvolutionSupervisorError("source session commit changed unexpectedly")
         await self._verify_candidate_merge_commit(candidate, head)
-        diff_sha256 = str(candidate.metadata.get("diff_sha256") or "")
-        raw_paths = candidate.metadata.get("changed_paths")
-        changed_paths = (
-            tuple(str(path) for path in raw_paths if isinstance(path, str))
-            if isinstance(raw_paths, list)
-            else ()
-        )
-        if len(diff_sha256) != 64 or not changed_paths:
+        source = self._candidate_source_provenance(candidate)
+        if source.diff_sha256 is None or not source.changed_paths:
             raise EvolutionSupervisorError("source session commit evidence is unavailable")
         return CandidateCommit(
             candidate_id=candidate.id,
             base_commit=candidate.base_commit,
             source_commit=head,
-            diff_sha256=diff_sha256,
-            changed_paths=changed_paths,
-            promotion_eligible=bool(candidate.metadata.get("promotion_eligible", False)),
+            diff_sha256=source.diff_sha256,
+            changed_paths=source.changed_paths,
+            promotion_eligible=bool(source.promotion_eligible),
         )
 
     async def _verify_candidate_merge_commit(
@@ -2395,27 +1949,24 @@ class EvolutionSupervisor:
         lineage = self._lineage
         if lineage is None:
             return None
-        recorded = self._candidate_upstream_lineage(candidate)
+        source = self._candidate_source_provenance(candidate)
+        recorded = self._required_upstream_lineage(source)
         if recorded.upstream_commit is None:
             raise EvolutionSupervisorError("candidate upstream merge state is invalid")
         snapshot = await self._lineage_snapshot()
-        target_accepted = str(candidate.metadata.get("accepted_upstream_commit") or "")
+        target_accepted = source.accepted_upstream_commit or ""
         if target_accepted == snapshot.accepted_upstream_commit:
             return None
         if target_accepted != recorded.upstream_commit:
             raise EvolutionSupervisorError("candidate accepted upstream is invalid")
-        raw_verified = str(
-            candidate.metadata.get(_VERIFIED_UPSTREAM_MERGE_COMMIT_KEY) or ""
-        )
-        if raw_verified and _COMMIT_RE.fullmatch(raw_verified) is None:
-            raise EvolutionSupervisorError("candidate verified merge metadata is invalid")
+        raw_verified = source.verified_upstream_merge_commit
         try:
             return await asyncio.to_thread(
                 lineage.verify_merged_tip,
                 source_commit,
                 instance_commit=candidate.base_commit,
                 upstream_commit=recorded.upstream_commit,
-                expected_merge_commit=raw_verified or None,
+                expected_merge_commit=raw_verified,
             )
         except GitLineageError as exc:
             raise EvolutionSupervisorError("source merge commit is invalid") from exc
@@ -2445,12 +1996,8 @@ class EvolutionSupervisor:
             else await asyncio.to_thread(self._source_diff, workspace)
         )
         status = await asyncio.to_thread(self._workspaces.status, workspace)
-        metadata_paths = candidate.metadata.get("changed_paths")
-        changed_files = (
-            {str(path) for path in metadata_paths if isinstance(path, str)}
-            if isinstance(metadata_paths, list)
-            else set()
-        )
+        source = self._candidate_source_provenance(candidate)
+        changed_files = set(source.changed_paths or ())
         changed_files.update(self._status_path(item) for item in status)
         changed_files.discard("")
         snapshot = {
@@ -2530,7 +2077,7 @@ class EvolutionSupervisor:
     @staticmethod
     def _source_candidate_data(candidate: Candidate) -> dict[str, Any]:
         report = candidate.evaluation_report
-        raw_paths = candidate.metadata.get("changed_paths")
+        source = EvolutionSupervisor._candidate_source_provenance(candidate)
         return {
             "id": candidate.id,
             "status": candidate.status.value,
@@ -2538,12 +2085,8 @@ class EvolutionSupervisor:
             "base_commit": candidate.base_commit,
             "source_commit": candidate.source_commit,
             "artifact_digest": candidate.artifact_digest,
-            "changed_paths": (
-                [str(path) for path in raw_paths if isinstance(path, str)]
-                if isinstance(raw_paths, list)
-                else []
-            ),
-            "diff_sha256": str(candidate.metadata.get("diff_sha256") or "") or None,
+            "changed_paths": list(source.changed_paths or ()),
+            "diff_sha256": source.diff_sha256,
             "evaluation": report.model_dump(mode="json") if report is not None else None,
             "created_at": candidate.created_at.isoformat(),
             "updated_at": candidate.updated_at.isoformat(),
@@ -2559,12 +2102,18 @@ class EvolutionSupervisor:
         text = str(value or "").replace("\x00", "")
         return text[:limit], len(text) > limit
 
+    @staticmethod
+    def _evolution_error(message: str) -> EvolutionSupervisorError:
+        """Keep the service independent from this module's concrete exception class."""
+        return EvolutionSupervisorError(message)
+
     async def _cleanup_stale_candidate(self, candidate: Candidate) -> None:
         if candidate.worktree_path:
             workspace = CandidateWorkspace(
                 candidate_id=candidate.id,
                 path=Path(candidate.worktree_path),
                 base_commit=candidate.base_commit,
+                repository_kind=(candidate.workspace_kind or "linked_worktree"),
             )
             await self._fail_candidate(candidate.id, workspace, code="process_restarted")
             return
@@ -2588,24 +2137,7 @@ class EvolutionSupervisor:
 
     @staticmethod
     def _audit_context(value: Mapping[str, str] | None) -> dict[str, JsonValue]:
-        if value is None:
-            return {}
-        limits = {
-            "tenant_id": 200,
-            "actor_id": 200,
-            "thread_id": 8_192,
-            "channel": 64,
-            "run_kind": 64,
-            "correlation_id": 8_192,
-            "origin": 4_000,
-            "authority": 100,
-            "reason": 4_000,
-        }
-        return {
-            key: cleaned[: limits[key]]
-            for key in limits
-            if (cleaned := str(value.get(key, "") or "").strip())
-        }
+        return EvolutionAuditContext.from_mapping(value).as_metadata()
 
     async def _accepted_upstream_for_release(self, release: Release) -> str | None:
         recorded = str(release.metadata.get("accepted_upstream_commit") or "").strip()
@@ -2760,25 +2292,6 @@ class EvolutionSupervisor:
             raise EvolutionSupervisorError(
                 "active release pointer projection failed"
             ) from last_error
-
-    @contextmanager
-    def _hide_git_metadata(self, workspace: CandidateWorkspace):  # type: ignore[no-untyped-def]
-        git_path = workspace.path / ".git"
-        hidden = workspace.path.parent / f".{workspace.candidate_id}.git-link"
-        if git_path.is_symlink() or not git_path.is_file() or hidden.exists():
-            raise EvolutionSupervisorError("candidate Git metadata is invalid")
-        os.replace(git_path, hidden)
-        try:
-            yield
-        finally:
-            if os.path.lexists(git_path):
-                if git_path.is_symlink() or git_path.is_file():
-                    git_path.unlink()
-                elif git_path.is_dir():
-                    shutil.rmtree(git_path)
-                else:
-                    raise EvolutionSupervisorError("candidate created invalid Git metadata")
-            os.replace(hidden, git_path)
 
     @staticmethod
     def _dependency_lock_hash(workspace: Path) -> str | None:

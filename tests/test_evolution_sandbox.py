@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from opentulpa.evolution.sandbox import (
     CandidateContainerBackend,
     CandidateProcessBackend,
     CandidateSandboxPolicy,
+    TrustedLocalCandidateBackend,
     resolve_local_oci_image,
 )
 
@@ -49,6 +51,63 @@ def test_candidate_sandbox_policy_rejects_unbounded_configuration() -> None:
         CandidateSandboxPolicy(image="python; unsafe")
     with pytest.raises(ValueError, match="timeout"):
         CandidateSandboxPolicy(timeout_seconds=0)
+
+
+def test_trusted_local_candidate_shell_runs_directly_without_inheriting_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    allowed = tmp_path / "allowed"
+    candidate = allowed / "candidate"
+    candidate.mkdir(parents=True)
+    source = candidate / "source.txt"
+    source.write_text("before\n", encoding="utf-8")
+    monkeypatch.setenv("OPENTULPA_PRIVATE_TOKEN", "must-not-leak")
+    backend = TrustedLocalCandidateBackend(workspace=candidate, allowed_root=allowed)
+
+    result = backend.execute(
+        "printf '%s' \"${OPENTULPA_PRIVATE_TOKEN-absent}\"; "
+        "printf 'after\\n' > source.txt"
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "absent"
+    assert source.read_text(encoding="utf-8") == "after\n"
+
+
+def test_trusted_local_candidate_shell_restores_invalid_workspace(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    candidate = allowed / "candidate"
+    candidate.mkdir(parents=True)
+    source = candidate / "source.txt"
+    source.write_text("before\n", encoding="utf-8")
+    backend = TrustedLocalCandidateBackend(workspace=candidate, allowed_root=allowed)
+
+    result = backend.execute("printf 'after\\n' > source.txt; ln -s /etc/hosts escape")
+
+    assert result.exit_code == 126
+    assert source.read_text(encoding="utf-8") == "before\n"
+    assert not (candidate / "escape").exists()
+
+
+@pytest.mark.asyncio
+async def test_trusted_local_candidate_shell_cancellation_stops_command(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    candidate = allowed / "candidate"
+    candidate.mkdir(parents=True)
+    backend = TrustedLocalCandidateBackend(workspace=candidate, allowed_root=allowed)
+
+    task = asyncio.create_task(
+        backend.aexecute("sleep 5; printf 'after' > cancelled.txt", timeout=30)
+    )
+    await asyncio.sleep(0.1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not (candidate / "cancelled.txt").exists()
 
 
 def test_strong_process_command_has_only_explicit_mounts_and_private_namespaces(

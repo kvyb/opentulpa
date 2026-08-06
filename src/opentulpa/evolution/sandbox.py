@@ -225,6 +225,8 @@ def _build_bubblewrap_argv(
             or destination.startswith("//")
             or any(component in {"", ".", ".."} for component in destination[1:].split("/"))
             or "\x00" in destination
+            or "," in destination
+            or any(ord(character) < 0x20 or ord(character) == 0x7f for character in destination)
             or destination in destinations
             or destination == "/workspace"
             or destination.startswith("/workspace/")
@@ -232,6 +234,11 @@ def _build_bubblewrap_argv(
             raise ValueError("sandbox read-only mount destination is invalid")
         if source == Path("/"):
             raise ValueError("sandbox cannot bind the host root")
+        source_text = str(source)
+        if "," in source_text or any(
+            ord(character) < 0x20 or ord(character) == 0x7f for character in source_text
+        ):
+            raise ValueError("sandbox read-only mount source has invalid mount grammar")
         destinations.add(destination)
         validated_mounts.append((source, destination))
     argv.extend(_mount_parent_arguments(destinations))
@@ -415,7 +422,11 @@ class CandidateContainerBackend(LocalShellBackend):
             raise ValueError("container_cli is invalid")
         root = Path(allowed_root).expanduser()
         candidate = Path(workspace).expanduser()
-        if root.is_symlink() or candidate.is_symlink():
+        if (
+            root.is_symlink()
+            or candidate.is_symlink()
+            or any(part.is_symlink() for part in (root, candidate))
+        ):
             raise ValueError("candidate sandbox paths cannot be symlinks")
         self._allowed_root = root.resolve(strict=True)
         self._workspace = candidate.resolve(strict=True)
@@ -423,8 +434,10 @@ class CandidateContainerBackend(LocalShellBackend):
             self._workspace, self._allowed_root
         ):
             raise ValueError("candidate workspace escaped the configured root")
-        if "," in str(self._workspace):
-            raise ValueError("candidate workspace cannot contain a comma")
+        if "," in str(self._workspace) or any(
+            ord(character) < 0x20 or ord(character) == 0x7f for character in str(self._workspace)
+        ):
+            raise ValueError("candidate workspace has invalid mount grammar")
         self._lock = threading.RLock()
         self._containers_lock = threading.Lock()
         self._active_containers: set[str] = set()
@@ -760,6 +773,160 @@ class CandidateContainerBackend(LocalShellBackend):
             raise
 
 
+class TrustedLocalCandidateBackend(CandidateContainerBackend):
+    """Trusted host shell for high-fidelity source evolution candidates."""
+
+    @staticmethod
+    def unavailable_reason() -> str | None:
+        return None
+
+    @staticmethod
+    def is_supported() -> bool:
+        return True
+
+    @staticmethod
+    def supported() -> bool:
+        return True
+
+    def __init__(
+        self,
+        *,
+        workspace: str | Path,
+        allowed_root: str | Path,
+        policy: CandidateSandboxPolicy | None = None,
+    ) -> None:
+        super().__init__(
+            workspace=workspace,
+            allowed_root=allowed_root,
+            policy=policy,
+            container_cli="trusted-local",
+        )
+        self._execution_env = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": "/tmp",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0",
+        }
+
+    def execute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> ExecuteResponse:
+        safe_command = str(command or "").strip()
+        if not safe_command or "\x00" in safe_command:
+            return ExecuteResponse(output="command is invalid", exit_code=2, truncated=False)
+        effective_timeout = min(
+            self._policy.timeout_seconds,
+            max(1, int(timeout or self._policy.timeout_seconds)),
+        )
+        shell = "/bin/sh" if Path("/bin/sh").is_file() else "sh"
+        with self._lock:
+            backup: Path | None = None
+            backup_mode = 0o700
+            monitor_stop = threading.Event()
+            workspace_invalid = threading.Event()
+            abort_requested = threading.Event()
+            monitor: threading.Thread | None = None
+
+            def monitor_workspace() -> None:
+                while not monitor_stop.wait(0.1):
+                    if cancel_event is not None and cancel_event.is_set():
+                        abort_requested.set()
+                        return
+                    try:
+                        self._scan_tree()
+                    except (OSError, RuntimeError):
+                        workspace_invalid.set()
+                        abort_requested.set()
+                        return
+
+            try:
+                self._validate_tree()
+                backup, backup_mode = self._recovery_copy()
+                monitor = threading.Thread(
+                    target=monitor_workspace,
+                    name="opentulpa-trusted-local-candidate-quota",
+                    daemon=True,
+                )
+                monitor.start()
+                completed = run_bounded_process(
+                    (shell, "-c", safe_command),
+                    cwd=self._workspace,
+                    env=self._execution_env,
+                    timeout_seconds=effective_timeout,
+                    max_output_bytes=self._policy.max_output_bytes,
+                    abort_event=abort_requested,
+                )
+                monitor_stop.set()
+                monitor.join(timeout=5)
+                try:
+                    self._scan_tree()
+                except (OSError, RuntimeError):
+                    workspace_invalid.set()
+                if workspace_invalid.is_set():
+                    self._restore_recovery_copy(backup, backup_mode)
+                    return ExecuteResponse(
+                        output="command exceeded workspace safety limits; changes were reverted",
+                        exit_code=126,
+                        truncated=False,
+                    )
+                if cancel_event is not None and cancel_event.is_set():
+                    return ExecuteResponse(
+                        output="trusted local execution was cancelled",
+                        exit_code=130,
+                        truncated=False,
+                    )
+                if completed.timed_out:
+                    return ExecuteResponse(
+                        output=(
+                            completed.output.decode("utf-8", errors="replace")
+                            + "\ncommand timed out"
+                        ).strip(),
+                        exit_code=124,
+                        truncated=completed.truncated,
+                    )
+            except (OSError, RuntimeError):
+                if backup is not None:
+                    with suppress(RuntimeError):
+                        self._restore_recovery_copy(backup, backup_mode)
+                return ExecuteResponse(
+                    output="candidate workspace failed security validation",
+                    exit_code=126,
+                    truncated=False,
+                )
+            finally:
+                monitor_stop.set()
+                if monitor is not None:
+                    monitor.join(timeout=5)
+                if backup is not None:
+                    shutil.rmtree(backup, ignore_errors=True)
+        return ExecuteResponse(
+            output=completed.output.decode("utf-8", errors="replace"),
+            exit_code=completed.returncode,
+            truncated=completed.truncated,
+        )
+
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        cancel_event = threading.Event()
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.execute,
+                command,
+                timeout=timeout,
+                cancel_event=cancel_event,
+            )
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancel_event.set()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+
 class CandidateProcessBackend(CandidateContainerBackend):
     """Root-supervised bubblewrap sandbox for an untrusted source workspace."""
 
@@ -1062,6 +1229,7 @@ __all__ = [
     "CandidateContainerBackend",
     "CandidateProcessBackend",
     "CandidateSandboxPolicy",
+    "TrustedLocalCandidateBackend",
     "resolve_local_oci_image",
     "strong_sandbox_unavailable_reason",
 ]
