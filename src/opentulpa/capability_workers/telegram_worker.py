@@ -430,6 +430,7 @@ class TelegramInterfaceWorker:
         self._poll_timeout_seconds = poll_timeout_seconds
         self._retry_delay_seconds = retry_delay_seconds
         self._bot_id: int | None = None
+        self._bot_username: str | None = None
         self._webhook_cleared = False
         self._commands_registered = False
         self._normal_update_lock = asyncio.Lock()
@@ -718,6 +719,16 @@ class TelegramInterfaceWorker:
             return
 
         text = str(message.get("text") or message.get("caption") or "").strip()
+        non_private_chat = _is_non_private_chat(chat)
+        if non_private_chat and not _message_addresses_bot(
+            message,
+            bot_id=self._bot_id,
+            bot_username=self._bot_username,
+        ):
+            self._complete(update_id=update_id, source_event_id=source_event_id)
+            return
+        if non_private_chat:
+            text = _strip_leading_bot_mention(text, self._bot_username)
         paired = self._state.paired_identity()
         if paired is None:
             await self._handle_pairing(
@@ -728,8 +739,10 @@ class TelegramInterfaceWorker:
                 source_event_id=source_event_id,
             )
             return
-        if paired != (user_id, chat_id):
-            await self._telegram.send_message(chat_id=chat_id, text="Unauthorized.")
+        paired_user_id, paired_chat_id = paired
+        if user_id != paired_user_id or (not non_private_chat and chat_id != paired_chat_id):
+            if not non_private_chat:
+                await self._telegram.send_message(chat_id=chat_id, text="Unauthorized.")
             self._complete(update_id=update_id, source_event_id=source_event_id)
             return
 
@@ -902,7 +915,9 @@ class TelegramInterfaceWorker:
         if not callback_id or chat_id is None or user_id is None:
             self._complete(update_id=update_id, source_event_id=source_event_id)
             return
-        if self._state.paired_identity() != (user_id, chat_id):
+        paired = self._state.paired_identity()
+        non_private_chat = _is_non_private_chat(chat)
+        if paired is None or user_id != paired[0] or (not non_private_chat and chat_id != paired[1]):
             await self._telegram.answer_callback_query(
                 callback_query_id=callback_id,
                 text="Unauthorized",
@@ -1286,6 +1301,8 @@ class TelegramInterfaceWorker:
         if bot_id is None:
             raise TelegramAPIError("Telegram returned an invalid bot identity.")
         self._bot_id = bot_id
+        username = str(bot.get("username") or "").strip().lstrip("@")
+        self._bot_username = username or None
 
     def _source_event_id(self, update_id: int) -> str:
         if self._bot_id is None:
@@ -1607,6 +1624,42 @@ def _command(text: str) -> tuple[str, str]:
     command = parts[0].split("@", 1)[0].lower()
     argument = parts[1].strip() if len(parts) == 2 else ""
     return command, argument
+
+
+def _is_non_private_chat(chat: Any) -> bool:
+    if not isinstance(chat, Mapping):
+        return False
+    chat_type = str(chat.get("type") or "private").strip().lower()
+    return chat_type not in {"", "private"}
+
+
+def _message_addresses_bot(
+    message: Mapping[str, Any],
+    *,
+    bot_id: int | None,
+    bot_username: str | None,
+) -> bool:
+    reply = message.get("reply_to_message")
+    if isinstance(reply, Mapping):
+        reply_sender = reply.get("from")
+        if isinstance(reply_sender, Mapping) and _positive_int(reply_sender.get("id")) == bot_id:
+            return True
+    username = str(bot_username or "").strip().lstrip("@").lower()
+    if not username:
+        return False
+    marker = f"@{username}"
+    text = str(message.get("text") or message.get("caption") or "").lower()
+    return marker in text
+
+
+def _strip_leading_bot_mention(text: str, bot_username: str | None) -> str:
+    username = str(bot_username or "").strip().lstrip("@")
+    if not username:
+        return text
+    marker = f"@{username}"
+    if not text.lower().startswith(marker.lower()):
+        return text
+    return text[len(marker) :].strip()
 
 
 def _coalescible_text(

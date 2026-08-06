@@ -247,13 +247,23 @@ class _UnavailableAgent(_Agent):
         raise AgentAPIError("agent API is starting")
 
 
-def _message(update_id: int, *, user_id: int = 7, chat_id: int = 9, text: str) -> dict[str, Any]:
+def _message(
+    update_id: int,
+    *,
+    user_id: int = 7,
+    chat_id: int = 9,
+    chat_type: str | None = None,
+    text: str,
+) -> dict[str, Any]:
+    chat: dict[str, Any] = {"id": chat_id}
+    if chat_type is not None:
+        chat["type"] = chat_type
     return {
         "update_id": update_id,
         "message": {
             "message_id": update_id,
             "from": {"id": user_id},
-            "chat": {"id": chat_id},
+            "chat": chat,
             "text": text,
         },
     }
@@ -320,6 +330,64 @@ async def test_one_time_pairing_then_routes_only_owner_messages(tmp_path: Path) 
 
     await worker.poll_once()
     assert len(agent.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_group_chatter_is_ignored_without_unauthorized_spam(tmp_path: Path) -> None:
+    telegram = _Telegram(
+        [
+            _message(1, user_id=8, chat_id=-100, chat_type="supergroup", text="hello all"),
+            _message(2, user_id=7, chat_id=-100, chat_type="supergroup", text="not for bot"),
+        ]
+    )
+    agent = _Agent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    assert await worker.poll_once() == 2
+
+    assert agent.starts == []
+    assert telegram.messages == []
+    assert state.next_update_id == 3
+
+
+@pytest.mark.asyncio
+async def test_paired_owner_can_address_bot_in_group(tmp_path: Path) -> None:
+    telegram = _Telegram(
+        [
+            _message(
+                1,
+                user_id=7,
+                chat_id=-100,
+                chat_type="supergroup",
+                text="@open_tulpa_bot summarize this thread",
+            )
+        ]
+    )
+    agent = _Agent()
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    assert await worker.poll_once() == 1
+
+    assert agent.starts[0]["thread_id"] == state.thread_id(-100)
+    assert agent.starts[0]["text"] == "summarize this thread"
+    assert telegram.messages[-1]["chat_id"] == -100
+    assert telegram.messages[-1]["text"] == "hello"
 
 
 @pytest.mark.asyncio
