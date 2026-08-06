@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import opentulpa.sandbox.worker as sandbox_worker_module
 from opentulpa.application.product_tools import _sandbox_ssh_command
 from opentulpa.core.config import Settings
 from opentulpa.sandbox.client import SandboxWorkerCanary, SandboxWorkerHealth
@@ -132,7 +133,23 @@ async def test_sandbox_supervisor_starts_module_worker_process(
 
     assert status["ok"] is True
     assert status["checks"]["execute"] is True
-    assert status["checks"]["ssh"] is True
+    if status["tier"] == "native-process":
+        assert status["checks"]["ssh"] is True
+    else:
+        assert "ssh" not in status["checks"]
+
+
+def test_trusted_local_worker_health_does_not_require_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox_worker_module.shutil, "which", lambda _name: None)
+
+    health = _service(tmp_path).health()
+
+    assert health.ok is True
+    assert health.tier == "trusted-local-process"
+    assert health.checks == {"trusted_local": True, "execute": True}
 
 
 @pytest.mark.asyncio
