@@ -134,7 +134,10 @@ class HostPaths:
         except OSError as exc:
             raise HostPathError("host data root could not be inspected") from exc
         if len(entries) > len(allowed) + len(_PRODUCT_ENTRIES):
-            raise HostPathError("host data root has unknown ambiguous migration entries")
+            raise HostPathError(
+                "host data root has unknown ambiguous migration entries: "
+                f"{_entry_names_for_error(entries)}"
+            )
         for entry in entries:
             path = Path(entry.path)
             try:
@@ -148,7 +151,10 @@ class HostPaths:
                 sources.append((path, self.product_root / destination))
                 continue
             if entry.name not in allowed:
-                raise HostPathError("host data root has unknown ambiguous migration entries")
+                raise HostPathError(
+                    "host data root has unknown ambiguous migration entry: "
+                    f"{_entry_name_for_error(entry)}"
+                )
             if not stat.S_ISDIR(metadata.st_mode):
                 raise HostPathError("host data root contains a special controller entry")
 
@@ -190,6 +196,27 @@ def _safe_absolute_path(raw_value: str, *, label: str) -> Path:
         if stat.S_ISLNK(metadata.st_mode):
             raise HostPathError(f"{label} has a symbolic-link ancestor")
     return path
+
+
+def _entry_names_for_error(entries: tuple[os.DirEntry[str], ...]) -> str:
+    return ", ".join(_entry_name_for_error(entry) for entry in sorted(entries, key=lambda item: item.name))
+
+
+def _entry_name_for_error(entry: os.DirEntry[str]) -> str:
+    try:
+        metadata = entry.stat(follow_symlinks=False)
+    except OSError:
+        kind = "unavailable"
+    else:
+        if stat.S_ISDIR(metadata.st_mode):
+            kind = "dir"
+        elif stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+        elif stat.S_ISLNK(metadata.st_mode):
+            kind = "link"
+        else:
+            kind = "special"
+    return f"{entry.name} ({kind})"
 
 
 def _require_separate_roots(*roots: Path) -> None:
