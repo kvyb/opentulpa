@@ -50,6 +50,12 @@ from opentulpa.host.runtime_environment import (
     RuntimeEnvironmentError,
 )
 
+_RUNTIME_ENVIRONMENT_INVARIANT_KEYS = (
+    "runtime_dependency_lock_hash",
+    "runtime_pyproject_sha256",
+    "runtime_install_profile",
+)
+
 
 class RuntimeEvolutionEventSink:
     """Deliver durable evolution events through the exact serving child identity."""
@@ -359,7 +365,7 @@ class HostReleaseActivator:
         metadata = environment.release_metadata()
         if spec.has_runtime_environment:
             recorded = spec.model_dump(mode="json")
-            if any(recorded.get(key) != value for key, value in metadata.items()):
+            if any(recorded.get(key) != metadata.get(key) for key in _RUNTIME_ENVIRONMENT_INVARIANT_KEYS):
                 raise RuntimeEnvironmentError(
                     "runtime_environment_provenance_mismatch",
                     "Runtime dependency environment provenance is inconsistent.",

@@ -226,6 +226,36 @@ async def test_live_repo_activation_prepares_runtime_environment_before_replacem
 
 
 @pytest.mark.asyncio
+async def test_live_repo_activation_refreshes_derived_runtime_environment_identity(
+    tmp_path: Path,
+) -> None:
+    release = _live_repo_release().model_copy(
+        update={
+            "metadata": {
+                **_live_repo_release().metadata,
+                "runtime_environment_id": "a" * 64,
+                "runtime_python_interpreter": "/old/runtime/bin/python",
+                "runtime_dependency_lock_hash": "f" * 64,
+                "runtime_pyproject_sha256": "1" * 64,
+                "runtime_install_profile": "runtime-no-dev-no-install-project-v1",
+            }
+        }
+    )
+    runtime = _LiveSourceRuntime()
+    store = _RuntimeEnvironmentStore(tmp_path)
+    activator = HostReleaseActivator(
+        runtime=runtime,  # type: ignore[arg-type]
+        runtime_environment_store=store,  # type: ignore[arg-type]
+    )
+
+    await activator.prepare_runtime(release)
+
+    assert runtime.live_source is not None
+    assert runtime.live_source.runtime_environment_id == "e" * 64
+    assert runtime.live_source.runtime_python_interpreter == str(store.interpreter)
+
+
+@pytest.mark.asyncio
 async def test_live_repo_activation_reports_rolled_back_previous_source(
     tmp_path: Path,
 ) -> None:
