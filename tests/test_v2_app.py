@@ -213,7 +213,7 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
             "status": "ok",
             "lifecycle": "ready",
             "consumers_enabled": True,
-            "generation_id": None,
+            "source_commit": None,
         }
         assert {key: health_body[key] for key in expected_health} == expected_health
         assert "launch_nonce" not in health_body
@@ -361,10 +361,10 @@ def test_v2_app_restores_capabilities_before_resuming_approved_runs() -> None:
         ]
 
 
-def test_generation_health_echoes_exact_runtime_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    generation_id = "a" * 64
+def test_live_source_health_echoes_exact_runtime_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_commit = "a" * 40
     launch_nonce = "exact launch nonce value"
-    monkeypatch.setenv("OPENTULPA_GENERATION_ID", generation_id)
+    monkeypatch.setenv("OPENTULPA_SOURCE_COMMIT", source_commit)
     monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", launch_nonce)
     events: list[str] = []
 
@@ -372,7 +372,7 @@ def test_generation_health_echoes_exact_runtime_identity(monkeypatch: pytest.Mon
         for path in ("/healthz", "/agent/healthz"):
             response = client.get(path)
             assert response.status_code == 200
-            assert response.json()["generation_id"] == generation_id
+            assert response.json()["source_commit"] == source_commit
             assert "launch_nonce" not in response.json()
         assert client.get("/_runtime/identity").status_code == 401
         assert (
@@ -388,8 +388,7 @@ def test_generation_health_echoes_exact_runtime_identity(monkeypatch: pytest.Mon
         )
         assert identity.status_code == 200
         assert identity.json() == {
-            "generation_id": generation_id,
-            "source_commit": None,
+            "source_commit": source_commit,
             "launch_nonce": launch_nonce,
         }
 
@@ -397,42 +396,29 @@ def test_generation_health_echoes_exact_runtime_identity(monkeypatch: pytest.Mon
 @pytest.mark.parametrize(
     ("environment", "message"),
     [
-        ({"OPENTULPA_GENERATION_ID": "a" * 64}, "launch nonce"),
+        ({"OPENTULPA_SOURCE_COMMIT": "a" * 40}, "launch nonce"),
         (
             {
-                "OPENTULPA_GENERATION_MANIFEST_DIGEST": "b" * 64,
+                "OPENTULPA_SOURCE_COMMIT": f"{'a' * 40} ",
                 "OPENTULPA_LAUNCH_NONCE": "n" * 32,
             },
             "identity",
         ),
         (
             {
-                "OPENTULPA_GENERATION_ID": f"{'a' * 64} ",
-                "OPENTULPA_LAUNCH_NONCE": "n" * 32,
-            },
-            "identity",
-        ),
-        (
-            {
-                "OPENTULPA_GENERATION_ID": "a" * 64,
+                "OPENTULPA_SOURCE_COMMIT": "a" * 40,
                 "OPENTULPA_LAUNCH_NONCE": "short",
             },
             "launch nonce",
         ),
     ],
 )
-def test_generation_mode_rejects_missing_or_invalid_identity(
+def test_live_source_mode_rejects_missing_or_invalid_identity(
     monkeypatch: pytest.MonkeyPatch,
     environment: dict[str, str],
     message: str,
 ) -> None:
-    for name in (
-        "OPENTULPA_GENERATION_ID",
-        "OPENTULPA_GENERATION_MANIFEST_DIGEST",
-        "OPENTULPA_GENERATION_SOURCE_COMMIT",
-        "OPENTULPA_GENERATION_SOURCE_TREE_SHA256",
-        "OPENTULPA_LAUNCH_NONCE",
-    ):
+    for name in ("OPENTULPA_SOURCE_COMMIT", "OPENTULPA_LAUNCH_NONCE"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
@@ -708,7 +694,7 @@ def test_consumer_toggle_rejects_malformed_explicit_values() -> None:
         release_consumers_enabled({"OPENTULPA_DISABLE_CONSUMERS": "sometimes"})
 
 
-def test_main_validates_generation_identity_before_runtime_paths(
+def test_main_validates_live_source_identity_before_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = False
@@ -718,7 +704,7 @@ def test_main_validates_generation_identity_before_runtime_paths(
         called = True
         raise AssertionError("runtime paths must not be resolved")
 
-    monkeypatch.setenv("OPENTULPA_GENERATION_ID", "a" * 64)
+    monkeypatch.setenv("OPENTULPA_SOURCE_COMMIT", "a" * 40)
     monkeypatch.delenv("OPENTULPA_LAUNCH_NONCE", raising=False)
     monkeypatch.setattr(
         main_module.RuntimePaths,

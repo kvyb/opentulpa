@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from opentulpa.evolution.candidate_provenance import CandidateSourceProvenance
-from opentulpa.evolution.generation import UPSTREAM_LINEAGE_METADATA_KEY
+from opentulpa.evolution.lineage import UPSTREAM_LINEAGE_METADATA_KEY
 
 
 def test_candidate_source_provenance_preserves_flat_metadata_and_unknown_keys() -> None:

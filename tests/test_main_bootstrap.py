@@ -49,7 +49,7 @@ def test_runtime_paths_use_external_installed_roots(tmp_path: Path) -> None:
     assert paths.application_root == application_root.resolve()
     assert paths.data_root == data_root.resolve()
     assert paths.config_file == config_file.resolve()
-    assert paths.installed_generation
+    assert paths.installed_package
 
 
 def test_installed_defaults_use_home_instead_of_package_or_cwd(tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ def test_installed_defaults_use_home_instead_of_package_or_cwd(tmp_path: Path) -
 
     assert paths.application_root == (home / ".local" / "share" / "opentulpa").resolve()
     assert paths.data_root is None
-    assert paths.installed_generation
+    assert paths.installed_package
 
 
 def test_installed_defaults_respect_xdg_data_home(tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_installed_defaults_respect_xdg_data_home(tmp_path: Path) -> None:
     )
 
     assert paths.application_root == (data_home / "opentulpa").resolve()
-    assert paths.installed_generation
+    assert paths.installed_package
 
 
 def test_relative_data_and_config_paths_resolve_against_application_root(

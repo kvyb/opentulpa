@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from packaging.utils import canonicalize_name
 
-from opentulpa.evolution.generation import canonical_json_bytes
+from opentulpa.evolution.canonical_json import canonical_json_bytes
 from opentulpa.evolution.process import BoundedProcessResult, run_bounded_process
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")

@@ -11,8 +11,6 @@ import httpx
 import pytest
 
 from opentulpa.client.config import Connection
-from opentulpa.evolution.generation_store import GenerationStore
-from opentulpa.evolution.models import Release
 from opentulpa.host import cli
 from opentulpa.host.paths import HostPathError, HostPaths
 
@@ -272,7 +270,7 @@ def test_source_checkout_prefers_its_built_tui_over_an_installed_copy(
     assert cli._ensure_tui_binary() == local_binary  # noqa: SLF001
 
 
-def test_host_paths_provision_separate_control_generation_and_product_roots(
+def test_host_paths_provision_separate_control_and_product_roots(
     tmp_path: Path,
 ) -> None:
     paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(tmp_path / "data")})
@@ -281,7 +279,6 @@ def test_host_paths_provision_separate_control_generation_and_product_roots(
     paths.provision()
 
     assert paths.control_root.stat().st_mode & 0o777 == 0o700
-    assert paths.generations_root.stat().st_mode & 0o777 == 0o711
     assert paths.product_root.stat().st_mode & 0o777 == 0o700
     assert paths.runtime_control_path.parent == paths.control_root
     assert paths.notification_store_path == paths.product_root / ".opentulpa/notifications.db"
@@ -349,131 +346,17 @@ def test_host_application_root_uses_package_resources_without_checkout(
     assert not cli._is_source_checkout(root)  # noqa: SLF001
 
 
-def test_installed_host_without_generation_inputs_fails_before_host_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(tmp_path / "data")})
-    paths.provision()
-    installed_root = tmp_path / "site-packages" / "opentulpa"
-    installed_root.mkdir(parents=True)
-    monkeypatch.setenv("OPENTULPA_SOURCE_SEED_ROOT", str(tmp_path / "missing-source"))
-    monkeypatch.setenv("OPENTULPA_TRUSTED_WHEELHOUSE", str(tmp_path / "missing-wheels"))
-    generation_store = GenerationStore(
-        paths.generations_root,
-        control_root=paths.control_root / "evolution" / "generation-store",
-        quarantine_root=paths.control_root / "evolution" / "generation-quarantine",
-    )
-
-    with pytest.raises(cli.HostInstallRequiredError) as error:
-        cli._require_installed_host_dependencies(  # noqa: SLF001
-            installed_root,
-            settings=type("Settings", (), {"evolution_enabled": True})(),
-            paths=paths,
-            generation_store=generation_store,
-        )
-
-    assert error.value.status == "install_required"
-    assert not (paths.control_root / "host.db").exists()
-    assert cli.HOST_GENERATION_DEPENDENCIES == {
-        "source_seed": "/opt/opentulpa-source",
-        "wheelhouse": "/opt/opentulpa-wheelhouse",
-    }
-
-
-def test_host_startup_cleans_incomplete_generations_before_dependency_recovery(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("OPENTULPA_DATA_ROOT", str(tmp_path / "data"))
-    cleaned: list[Path] = []
-    monkeypatch.setattr(
-        GenerationStore,
-        "cleanup_incomplete",
-        lambda self: cleaned.append(self.root) or (),
-    )
-    monkeypatch.setattr(
-        cli,
-        "_require_installed_host_dependencies",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            cli.HostInstallRequiredError("configured test stop")
-        ),
-    )
-
-    with pytest.raises(cli.HostInstallRequiredError, match="configured test stop"):
-        cli.build_host_application()
-
-    assert cleaned == [(tmp_path / "data" / "runtime-generations").absolute()]
-
-
-def test_server_reports_installer_required_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_server_reports_live_source_required_status(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(*, public_url: str | None) -> None:
         del public_url
-        raise cli.HostInstallRequiredError("installer inputs are missing")
+        raise cli.HostLiveSourceRequiredError("source checkout is missing")
 
     monkeypatch.setattr(cli, "serve", fail)
 
-    with pytest.raises(SystemExit, match="install_required: installer inputs are missing"):
+    with pytest.raises(SystemExit, match="live_source_required: source checkout is missing"):
         cli._server_command(  # noqa: SLF001
             Namespace(host="127.0.0.1", port=8000, public_url=None)
         )
-
-
-def test_installed_host_recovers_exact_published_current_generation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(tmp_path / "data")})
-    paths.provision()
-    installed_root = tmp_path / "site-packages" / "opentulpa"
-    installed_root.mkdir(parents=True)
-    monkeypatch.setenv("OPENTULPA_SOURCE_SEED_ROOT", str(tmp_path / "missing-source"))
-    monkeypatch.setenv("OPENTULPA_TRUSTED_WHEELHOUSE", str(tmp_path / "missing-wheels"))
-    generation_id = "a" * 64
-    manifest_digest = f"sha256:{'b' * 64}"
-    source_commit = "c" * 40
-    release = Release(
-        id="release-current",
-        candidate_id="candidate-current",
-        source_commit=source_commit,
-        artifact_digest=manifest_digest,
-        metadata={
-            "artifact_kind": "python_generation",
-            "image_reference": f"python-generation:{generation_id}",
-            "generation_id": generation_id,
-            "manifest_digest": manifest_digest,
-            "state_contract_sha256": "d" * 64,
-            "evaluator_fingerprint": f"sha256:{'e' * 64}",
-            "install_profile": "runtime",
-            "controller_protocol": 1,
-        },
-    )
-    pointer = paths.control_root / "evolution" / "current_release.json"
-    pointer.parent.mkdir(mode=0o700)
-    pointer.write_text(release.model_dump_json(), encoding="utf-8")
-    pointer.chmod(0o600)
-    opens: list[tuple[str, dict[str, object]]] = []
-
-    class Store:
-        def open(self, selected: str, **provenance: object) -> object:
-            opens.append((selected, provenance))
-            return SimpleNamespace(
-                manifest=SimpleNamespace(
-                    identity=SimpleNamespace(source_commit=source_commit),
-                )
-            )
-
-    recovered = cli._require_installed_host_dependencies(  # noqa: SLF001
-        installed_root,
-        settings=type("Settings", (), {"evolution_enabled": True})(),
-        paths=paths,
-        generation_store=Store(),  # type: ignore[arg-type]
-    )
-
-    assert recovered is not None
-    assert recovered.generation_id == generation_id
-    assert opens[0][0] == generation_id
-    assert opens[0][1]["expected_manifest_digest"] == manifest_digest
 
 
 def _installed_controller_metadata(

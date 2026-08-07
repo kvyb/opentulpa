@@ -24,10 +24,8 @@ PACKAGED_CONFIG = "opentulpa/resources/opentulpa.config.yaml"
 RELEASE_CONTRACT = "opentulpa/resources/release_contract.json"
 CONSOLE_SCRIPTS = {
     "opentulpa": "opentulpa.host.cli:main",
-    "opentulpa-bootstrap": "opentulpa.bootstrap.gateway:main",
     "opentulpa-host": "opentulpa.host.cli:serve",
     "opentulpa-migrate-deepagents": "opentulpa.migrations.deepagents:main",
-    "opentulpa-recovery": "opentulpa.bootstrap.recovery_cli:main",
     "opentulpa-sandbox-worker": "opentulpa.sandbox.worker:main",
 }
 pytestmark = [pytest.mark.slow, pytest.mark.integration]

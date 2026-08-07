@@ -723,10 +723,10 @@ def test_start_script_install_managed_builds_trusted_runtime_and_evaluator_image
         "--tag opentulpa-tenant-sandbox:0.1.0 "
         "--file docker/tenant-sandbox.Dockerfile ."
     ) in result.stdout
-    assert "uv run --no-sync opentulpa-bootstrap" not in result.stdout
+    assert "uv run --no-sync opentulpa-host" not in result.stdout
 
 
-def test_start_script_run_managed_uses_immutable_bootstrap_without_rebuilding() -> None:
+def test_start_script_run_managed_uses_live_source_host_without_rebuilding() -> None:
     result = _run_start(
         "run",
         "managed",
@@ -744,8 +744,8 @@ def test_start_script_run_managed_uses_immutable_bootstrap_without_rebuilding() 
 
     assert result.returncode == 0
     assert "required .env value(s) missing for managed" not in result.stdout
-    assert "running immutable bootstrap with managed OCI releases" in result.stdout
-    assert "uv run --no-sync opentulpa-bootstrap" in result.stdout
+    assert "running live-source host with managed OCI workers" in result.stdout
+    assert "uv run --no-sync opentulpa-host" in result.stdout
     assert "docker build" not in result.stdout
 
 

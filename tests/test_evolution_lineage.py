@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from opentulpa.evolution.generation import UpstreamLineage
 from opentulpa.evolution.lineage import (
     ACCEPTED_UPSTREAM_REF,
     INSTANCE_REF,
@@ -16,6 +15,7 @@ from opentulpa.evolution.lineage import (
     ConflictStage,
     GitLineage,
     GitLineageError,
+    UpstreamLineage,
 )
 from opentulpa.evolution.workspace import (
     CandidateWorkspace,

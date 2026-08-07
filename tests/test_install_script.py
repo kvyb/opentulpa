@@ -14,8 +14,6 @@ COMMANDS = (
     "opentulpa",
     "opentulpa-host",
     "opentulpa-sandbox-worker",
-    "opentulpa-bootstrap",
-    "opentulpa-recovery",
     "opentulpa-migrate-deepagents",
 )
 

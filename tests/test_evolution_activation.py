@@ -12,19 +12,22 @@ from opentulpa.evolution.activation import (
     BootstrapReleaseActivator,
     ReleaseActivationStatus,
 )
+from opentulpa.evolution.release_provenance import live_repo_artifact_digest
 
 
 def _release(name: str, character: str) -> ReleaseRecord:
+    source_commit = character * 40
+    digest = live_repo_artifact_digest(source_commit)
     return ReleaseRecord(
         id=f"release_{name}",
         candidate_id=f"candidate_{name}",
-        source_commit=character * 40,
-        artifact_digest=f"sha256:{character * 64}",
-        manifest_digest=f"sha256:{character * 64}",
+        source_commit=source_commit,
+        artifact_digest=digest,
+        manifest_digest=digest,
         entrypoint=("python", "-m", "opentulpa"),
         metadata={
-            "artifact_kind": "oci_image",
-            "image_reference": f"registry.example/opentulpa@sha256:{character * 64}",
+            "artifact_kind": "live_repo",
+            "image_reference": f"git-commit:{source_commit}",
         },
     )
 

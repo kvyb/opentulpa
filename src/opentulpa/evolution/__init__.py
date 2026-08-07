@@ -15,11 +15,9 @@ _EXPORTS = {
     "ResolvedDependencyBase": "opentulpa.evolution.dependency_resolver",
     "TrustedDependencyResolver": "opentulpa.evolution.dependency_resolver",
     "OciReleaseArtifact": "opentulpa.evolution.release_builder",
-    "OciReleaseBuildPolicy": "opentulpa.evolution.release_builder",
     "ReleaseBuilder": "opentulpa.evolution.release_builder",
     "ReleaseBuildError": "opentulpa.evolution.release_builder",
     "ReleaseBuildRequest": "opentulpa.evolution.release_builder",
-    "TrustedOciReleaseBuilder": "opentulpa.evolution.release_builder",
 }
 
 __all__ = list(_EXPORTS)

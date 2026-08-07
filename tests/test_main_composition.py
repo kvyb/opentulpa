@@ -198,7 +198,7 @@ def test_build_application_composes_only_v2_product_services(
     assert "/webhook/telegram" in paths
     assert "/webhook/composio/callback" in paths
     assert "/v2/agent/runs" in paths
-    assert "/v2/evolution/candidates" in paths
+    assert "/v2/evolution/candidates" not in paths
     assert not any(path.startswith("/web/") or path.startswith("/internal/") for path in paths)
 
     agent = app.state.agent_service

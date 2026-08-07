@@ -1,4 +1,4 @@
-"""Runtime path resolution for source checkouts and installed generations."""
+"""Runtime path resolution for source checkouts and installed packages."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class RuntimePaths:
         return self.data_root or self.application_root
 
     @property
-    def installed_generation(self) -> bool:
+    def installed_package(self) -> bool:
         return not self.legacy_source_mode
 
     @classmethod

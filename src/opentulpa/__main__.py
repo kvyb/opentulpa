@@ -1555,7 +1555,7 @@ def main() -> None:
     release_consumers_enabled()
     runtime_paths = RuntimePaths.from_environment()
     project_root = runtime_paths.application_root
-    if runtime_paths.data_root is not None or runtime_paths.installed_generation:
+    if runtime_paths.data_root is not None or runtime_paths.installed_package:
         _bootstrap_persistent_storage(
             project_root,
             str(runtime_paths.persistent_root),

@@ -1,4 +1,4 @@
-"""Trusted host, immutable generation, and mutable product root layout."""
+"""Trusted host control and mutable product root layout."""
 
 from __future__ import annotations
 
@@ -24,8 +24,6 @@ _CONTROLLER_ENTRIES = frozenset(
     {
         "bootstrap",
         "product",
-        "runtime-generations",
-        ".runtime-generations-control",
         "bun",
         "sandbox_worker",
     }
@@ -43,7 +41,6 @@ class HostPaths:
     data_root: Path
     control_root: Path
     product_root: Path
-    generations_root: Path
     runtime_uid: int | None
     runtime_gid: int | None
     candidate_uid: int | None
@@ -81,14 +78,9 @@ class HostPaths:
             configured_product or str(data_root / "product"),
             label="OPENTULPA_PRODUCT_ROOT",
         )
-        generations_root = _safe_absolute_path(
-            str(data_root / "runtime-generations"),
-            label="runtime generations root",
-        )
         _require_separate_roots(
             control_root,
             product_root,
-            generations_root,
         )
         isolated = sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0
         if isolated and (_RUNTIME_UID == _CANDIDATE_UID or _RUNTIME_GID == _CANDIDATE_GID):
@@ -97,7 +89,6 @@ class HostPaths:
             data_root=data_root,
             control_root=control_root,
             product_root=product_root,
-            generations_root=generations_root,
             runtime_uid=_RUNTIME_UID if isolated else None,
             runtime_gid=_RUNTIME_GID if isolated else None,
             candidate_uid=_CANDIDATE_UID if isolated else None,
@@ -109,7 +100,6 @@ class HostPaths:
 
         _secure_directory(self.data_root, mode=0o711 if self.runtime_uid is not None else 0o700)
         _secure_directory(self.control_root, mode=0o700)
-        _secure_directory(self.generations_root, mode=0o711)
         _secure_product_directory(self.product_root, runtime_uid=self.runtime_uid)
         self._migrate_legacy_product_entries()
         _validate_regular_tree(self.product_root)
@@ -124,7 +114,6 @@ class HostPaths:
         allowed = _CONTROLLER_ENTRIES | {
             product_name,
             control_name,
-            self.generations_root.name,
         }
         sources: list[tuple[Path, Path]] = []
         try:

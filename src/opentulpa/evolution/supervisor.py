@@ -28,8 +28,12 @@ from opentulpa.evolution.event_publisher import (
     EvolutionEventSink,
     InMemoryEvolutionEventSink,
 )
-from opentulpa.evolution.generation import UpstreamLineage
-from opentulpa.evolution.lineage import GitLineage, GitLineageError, GitLineageSnapshot
+from opentulpa.evolution.lineage import (
+    GitLineage,
+    GitLineageError,
+    GitLineageSnapshot,
+    UpstreamLineage,
+)
 from opentulpa.evolution.models import (
     Candidate,
     CandidateStatus,
@@ -44,12 +48,10 @@ from opentulpa.evolution.models import (
 )
 from opentulpa.evolution.release import ReleasePointer
 from opentulpa.evolution.release_builder import (
-    DependencyAwareWheelReleaseBuilder,
     OciReleaseArtifact,
     ReleaseBuilder,
     ReleaseBuildError,
     ReleaseBuildRequest,
-    TrustedWheelReleaseBuilder,
 )
 from opentulpa.evolution.release_coordinator import (
     ReleaseCoordinationError,
@@ -70,7 +72,6 @@ from opentulpa.evolution.workspace import (
 
 logger = logging.getLogger(__name__)
 
-_GENERATION_REFERENCE_RE = re.compile(r"python-generation:([0-9a-f]{64})\Z")
 _COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _LIVE_SOURCE_RUNTIME_METADATA_KEYS = (
     "runtime_environment_id",
@@ -734,7 +735,7 @@ class EvolutionSupervisor:
         ):
             raise EvolutionSupervisorError("candidate has no verified release manifest")
         artifact_kind = str(candidate.metadata.get("artifact_kind") or "")
-        if artifact_kind not in {"oci_image", "python_generation", "live_repo"}:
+        if artifact_kind != "live_repo":
             raise EvolutionSupervisorError("candidate release artifact kind is invalid")
         evaluation_input_digest = str(candidate.metadata.get("evaluation_input_digest") or "")
         metadata: dict[str, JsonValue] = {
@@ -769,12 +770,6 @@ class EvolutionSupervisor:
                 else {}
             ),
         }
-        if artifact_kind == "python_generation":
-            image_reference = str(candidate.metadata.get("image_reference") or "")
-            match = _GENERATION_REFERENCE_RE.fullmatch(image_reference)
-            if match is None:
-                raise EvolutionSupervisorError("candidate Python generation identity is invalid")
-            metadata["generation_id"] = match.group(1)
         for key in (
             "dependency_base_id",
             "dependency_inventory_sha256",
@@ -1045,32 +1040,6 @@ class EvolutionSupervisor:
                 else {}
             ),
         }
-        if artifact.artifact_kind == "python_generation":
-            match = _GENERATION_REFERENCE_RE.fullmatch(artifact.image_reference)
-            if match is None:
-                raise EvolutionSupervisorError("trusted builder returned an invalid generation")
-            metadata["generation_id"] = match.group(1)
-            builder = self._release_builder
-            if isinstance(builder, TrustedWheelReleaseBuilder):
-                policy = builder._policy
-                metadata.update(
-                    {
-                        "state_contract": policy.state_contract.model_dump(mode="json"),
-                        "state_contract_sha256": policy.state_contract.sha256(),
-                        "install_profile": policy.install_profile,
-                        "controller_protocol": policy.state_contract.runtime_protocol,
-                    }
-                )
-            elif isinstance(builder, DependencyAwareWheelReleaseBuilder):
-                contract = builder.state_contract
-                metadata.update(
-                    {
-                        "state_contract": contract.model_dump(mode="json"),
-                        "state_contract_sha256": contract.sha256(),
-                        "install_profile": builder.install_profile,
-                        "controller_protocol": contract.runtime_protocol,
-                    }
-                )
         return metadata
 
     def _evaluation_report(

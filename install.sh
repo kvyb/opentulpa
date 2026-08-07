@@ -12,7 +12,7 @@ CONTROLLER_ROOT="${INSTALL_ROOT}/controller"
 GENERATIONS_ROOT="${CONTROLLER_ROOT}/generations"
 BIN_ROOT="${INSTALL_ROOT}/bin"
 BIN_DIR="${OPENTULPA_BIN_DIR:-${HOME}/.local/bin}"
-COMMANDS="opentulpa opentulpa-host opentulpa-sandbox-worker opentulpa-bootstrap opentulpa-recovery opentulpa-migrate-deepagents"
+COMMANDS="opentulpa opentulpa-host opentulpa-sandbox-worker opentulpa-migrate-deepagents"
 
 SOURCE_ARGUMENT=""
 FETCH=0

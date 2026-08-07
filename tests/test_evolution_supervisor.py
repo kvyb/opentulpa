@@ -28,17 +28,15 @@ from opentulpa.evolution.evaluator import (
     EvaluationCommandResult,
     LocalEvaluationRunner,
 )
-from opentulpa.evolution.generation import (
-    UPSTREAM_LINEAGE_METADATA_KEY,
-    UpstreamLineage,
-)
 from opentulpa.evolution.lineage import (
     ACCEPTED_UPSTREAM_REF,
     INSTANCE_REF,
+    UPSTREAM_LINEAGE_METADATA_KEY,
     GitLineage,
     GitLineageError,
     GitLineageSnapshot,
     NativeMerge,
+    UpstreamLineage,
     UpstreamSync,
 )
 from opentulpa.evolution.models import (
@@ -127,7 +125,7 @@ class _FakeReleaseBuilder:
         self,
         *,
         fail: bool = False,
-        artifact_kind: str = "oci_image",
+        artifact_kind: str = "live_repo",
         metadata: dict[str, Any] | None = None,
     ) -> None:
         self.fail = fail
@@ -139,27 +137,13 @@ class _FakeReleaseBuilder:
         self.requests.append(request)
         if self.fail:
             raise ReleaseBuildError("Candidate OCI image build failed.")
-        image = hashlib.sha256(f"image:{request.source_commit}".encode()).hexdigest()
-        manifest = hashlib.sha256(f"manifest:{request.source_commit}".encode()).hexdigest()
-        artifact_digest = (
-            f"sha256:{manifest}"
-            if self.artifact_kind == "python_generation"
-            else live_repo_artifact_digest(request.source_commit)
-            if self.artifact_kind == "live_repo"
-            else f"sha256:{image}"
-        )
-        manifest_digest = artifact_digest if self.artifact_kind == "live_repo" else f"sha256:{manifest}"
+        artifact_digest = live_repo_artifact_digest(request.source_commit)
+        manifest_digest = artifact_digest
         return OciReleaseArtifact(
-            artifact_kind=self.artifact_kind,  # type: ignore[arg-type]
+            artifact_kind="live_repo",
             artifact_digest=artifact_digest,
             manifest_digest=manifest_digest,
-            image_reference=(
-                f"python-generation:{manifest}"
-                if self.artifact_kind == "python_generation"
-                else f"git-commit:{request.source_commit}"
-                if self.artifact_kind == "live_repo"
-                else f"opentulpa-release:{manifest[:32]}"
-            ),
+            image_reference=f"git-commit:{request.source_commit}",
             entrypoint=("python", "-m", "site_app"),
             metadata=self.metadata,
         )
@@ -883,11 +867,11 @@ async def _seed_active_release(
     accepted_upstream_commit: str | None,
     release_id: str = "release_seed",
     candidate_id: str = "candidate_seed",
-    artifact_kind: str = "oci_image",
+    artifact_kind: str = "live_repo",
 ) -> Release:
     await supervisor._archive.start()
-    artifact_digest = f"sha256:{hashlib.sha256(candidate_id.encode()).hexdigest()}"
-    manifest_digest = f"sha256:{hashlib.sha256(release_id.encode()).hexdigest()}"
+    artifact_digest = live_repo_artifact_digest(source_commit)
+    manifest_digest = artifact_digest
     fingerprint = f"sha256:{'e' * 64}"
     metadata: dict[str, Any] = {
         "artifact_kind": artifact_kind,
@@ -1781,7 +1765,7 @@ async def test_self_improvement_builds_archives_promotes_and_contributes_website
 
         assert candidate.source_commit
         assert candidate.artifact_digest
-        assert candidate.metadata["artifact_kind"] == "oci_image"
+        assert candidate.metadata["artifact_kind"] == "live_repo"
         assert candidate.metadata["manifest_digest"]
         assert candidate.evaluation_report is not None
         assert candidate.evaluation_report.passed is True
@@ -2767,78 +2751,6 @@ async def test_start_fails_closed_on_unexplained_lineage_divergence(tmp_path: Pa
     with pytest.raises(EvolutionSupervisorError, match="diverged"):
         await restarted.start()
     await restarted._archive.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_python_generation_metadata_and_evaluation_digest_are_wired(
-    tmp_path: Path,
-) -> None:
-    source = _source_repository(tmp_path)
-    (source / "uv.lock").write_text("version = 1\n", encoding="utf-8")
-    _git(source, "add", "uv.lock")
-    _git(source, "commit", "-m", "add dependency lock")
-    base = _git(source, "rev-parse", "HEAD")
-    builder = _FakeReleaseBuilder(artifact_kind="python_generation")
-    lineage = _EvolutionSupervisorLineageFake(instance_commit=base)
-    supervisor = _supervisor(
-        tmp_path,
-        source,
-        builder=builder,
-        lineage=lineage,
-    )
-    await _seed_active_release(
-        supervisor,
-        source_commit=base,
-        accepted_upstream_commit=base,
-    )
-    await supervisor.start()
-    try:
-        edited = await supervisor.source_shell(
-            command=_route_command("status"),
-            audit_context=_source_audit(),
-        )
-        candidate = await supervisor.get_candidate(str(edited["candidate_id"]))
-        assert candidate is not None
-        candidate = await supervisor._archive.update_candidate(
-            candidate.model_copy(
-                update={
-                    "metadata": {
-                        **candidate.metadata,
-                        "state_contract_sha256": "f" * 64,
-                        "install_profile": "runtime",
-                        "controller_protocol": 1,
-                    }
-                }
-            ),
-            expected_revision=candidate.revision,
-        )
-        released = await supervisor.source_release(
-            idempotency_key="python-generation",
-            **_release_binding(edited),
-            audit_context=_source_audit(),
-        )
-        candidate = await supervisor.get_candidate(candidate.id)
-        assert candidate is not None and candidate.source_commit is not None
-        assert len(builder.requests) == 1
-        request = builder.requests[0]
-        expected_input = hashlib.sha256(
-            (
-                f"{candidate.source_commit}:{candidate.dependency_lock_hash}:"
-                f"opentulpa-evaluator-v1:{candidate.evaluator_fingerprint}"
-            ).encode()
-        ).hexdigest()
-        assert request.evaluation_input_sha256 == expected_input
-        assert candidate.metadata["artifact_kind"] == "python_generation"
-        assert candidate.metadata["generation_id"]
-        assert candidate.metadata["accepted_upstream_commit"] == base
-        promotion = PromotionAttempt.model_validate(released["promotion"])
-        assert promotion.release.metadata["generation_id"] == candidate.metadata["generation_id"]
-        assert promotion.release.metadata["manifest_digest"] == candidate.metadata["manifest_digest"]
-        assert promotion.release.metadata["dependency_lock_hash"] == candidate.dependency_lock_hash
-        assert promotion.release.metadata["state_contract_sha256"] == "f" * 64
-        assert promotion.release.metadata["install_profile"] == "runtime"
-    finally:
-        await supervisor.shutdown()
 
 
 @pytest.mark.asyncio

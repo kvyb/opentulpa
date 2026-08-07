@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import shlex
 import shutil
 import socket
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -20,13 +17,6 @@ from opentulpa.evolution.evaluator import (
     IsolatedProcessEvaluationRunner,
     LocalEvaluationRunner,
 )
-from opentulpa.evolution.generation import StateContract
-from opentulpa.evolution.generation_store import GenerationStore
-from opentulpa.evolution.release_builder import (
-    OciReleaseArtifact,
-    ReleaseBuildError,
-    WheelReleaseBuildPolicy,
-)
 from opentulpa.evolution.release_provenance import live_repo_artifact_digest
 from opentulpa.evolution.sandbox import (
     CandidateContainerBackend,
@@ -36,20 +26,15 @@ from opentulpa.evolution.sandbox import (
 )
 from opentulpa.host import paths as host_paths_module
 from opentulpa.host.evolution import (
-    HostEvolutionRuntime,
     HostReleaseActivator,
-    TrustedGenerationReleaseProvider,
     TrustedLiveRepoReleaseBuilder,
-    seed_source_repository,
 )
 from opentulpa.host.evolution_composition import (
     _trusted_local_evaluation_context,
     _trusted_local_evaluation_executables,
-    _TrustedHostWheelReleaseBuilder,
     build_host_evolution_runtime,
 )
 from opentulpa.host.runtime import (
-    RuntimeGenerationSpec,
     RuntimeLiveSourceSpec,
     RuntimeUnavailableError,
 )
@@ -75,125 +60,6 @@ def _seed(tmp_path: Path) -> Path:
     return root
 
 
-def test_source_repository_import_is_persistent_and_tracks_new_bundled_source(
-    tmp_path: Path,
-) -> None:
-    seed = _seed(tmp_path)
-    repository = seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-    first = _git(repository, "rev-parse", "refs/heads/upstream")
-
-    assert seed_source_repository(seed_root=seed, repository=repository) == repository
-    assert _git(repository, "rev-parse", "refs/heads/upstream") == first
-
-    (seed / "README.md").write_text("# Updated\n", encoding="utf-8")
-    seed_source_repository(seed_root=seed, repository=repository)
-    second = _git(repository, "rev-parse", "refs/heads/upstream")
-
-    assert second != first
-    assert _git(repository, "show", f"{second}:README.md") == "# Updated"
-    assert _git(repository, "merge-base", "--is-ancestor", first, second, check=False) == ""
-
-
-def test_seed_import_failure_keeps_prior_upstream_usable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from opentulpa.host import evolution as host_evolution
-
-    seed = _seed(tmp_path)
-    repository = seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-    previous = _git(repository, "rev-parse", "refs/heads/upstream")
-    (seed / "README.md").write_text("# Interrupted update\n", encoding="utf-8")
-    original = host_evolution._git
-
-    def fail_update(repository: Path, *arguments: str, **kwargs: Any) -> Any:
-        if arguments and arguments[0] == "update-ref":
-            raise RuntimeError("injected seed crash")
-        return original(repository, *arguments, **kwargs)
-
-    monkeypatch.setattr(host_evolution, "_git", fail_update)
-
-    with pytest.raises(RuntimeError, match="injected seed crash"):
-        seed_source_repository(seed_root=seed, repository=repository)
-
-    assert _git(repository, "rev-parse", "refs/heads/upstream") == previous
-    assert _git(repository, "show", "refs/heads/upstream:README.md") == "# Seed"
-
-
-def test_seed_import_rejects_hard_linked_files(tmp_path: Path) -> None:
-    seed = _seed(tmp_path)
-    os.link(seed / "README.md", seed / "README-copy.md")
-
-    with pytest.raises(RuntimeError, match="hard-linked"):
-        seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-
-
-def test_seed_import_rejects_dirty_git_worktree(tmp_path: Path) -> None:
-    seed = _seed(tmp_path)
-    _git(seed, "init")
-    _git(seed, "config", "user.name", "Seed Test")
-    _git(seed, "config", "user.email", "seed@example.test")
-    _git(seed, "add", "--all")
-    _git(seed, "commit", "-m", "seed")
-    (seed / "README.md").write_text("# Dirty\n", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="exactly clean"):
-        seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-
-
-def test_seed_import_detects_source_mutation_during_copy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from opentulpa.host import evolution as host_evolution
-
-    seed = _seed(tmp_path)
-    original = host_evolution.shutil.copytree
-
-    def mutate_after_copy(*args: Any, **kwargs: Any) -> Any:
-        result = original(*args, **kwargs)
-        (seed / "README.md").write_text("# Changed during import\n", encoding="utf-8")
-        return result
-
-    monkeypatch.setattr(host_evolution.shutil, "copytree", mutate_after_copy)
-
-    with pytest.raises(RuntimeError, match="changed while it was imported"):
-        seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-
-
-def _state_contract() -> StateContract:
-    return StateContract(
-        runtime_protocol=1,
-        controller_min=1,
-        controller_max=1,
-        product_state_schema=1,
-        workspace_api=1,
-    )
-
-
-def _generation_release(*, evaluator: str = f"sha256:{'e' * 64}") -> ReleaseRecord:
-    generation_id = "a" * 64
-    manifest_digest = f"sha256:{'b' * 64}"
-    return ReleaseRecord(
-        id="release-generation",
-        candidate_id="candidate-generation",
-        source_commit="c" * 40,
-        artifact_digest=manifest_digest,
-        manifest_digest=manifest_digest,
-        entrypoint=("venv/bin/python", "-I", "-m", "opentulpa"),
-        metadata={
-            "artifact_kind": "python_generation",
-            "image_reference": f"python-generation:{generation_id}",
-            "generation_id": generation_id,
-            "manifest_digest": manifest_digest,
-            "evaluator_fingerprint": evaluator,
-            "state_contract_sha256": _state_contract().sha256(),
-            "install_profile": "runtime",
-            "controller_protocol": 1,
-        },
-    )
-
-
 def _live_repo_release(source_commit: str = "d" * 40) -> ReleaseRecord:
     digest = live_repo_artifact_digest(source_commit)
     return ReleaseRecord(
@@ -208,56 +74,6 @@ def _live_repo_release(source_commit: str = "d" * 40) -> ReleaseRecord:
             "image_reference": f"git-commit:{source_commit}",
         },
     )
-
-
-class _GenerationStore:
-    def __init__(self, *, fail: bool = False) -> None:
-        self.fail = fail
-        self.opens: list[tuple[str, dict[str, object]]] = []
-
-    def open(self, generation_id: str, **values: object) -> object:
-        self.opens.append((generation_id, values))
-        if self.fail:
-            raise RuntimeError("corrupt generation provenance")
-        return SimpleNamespace(
-            manifest=SimpleNamespace(
-                identity=SimpleNamespace(source_commit="c" * 40),
-            )
-        )
-
-
-class _GenerationRuntime:
-    def __init__(
-        self,
-        previous: RuntimeGenerationSpec | None = None,
-        *,
-        fail: bool = False,
-        failure_status: str = "ready",
-    ) -> None:
-        self.generation = previous
-        self.status = "ready"
-        self.endpoint = "http://runtime.test"
-        self.fail = fail
-        self.failure_status = failure_status
-        self.replacements: list[tuple[RuntimeGenerationSpec, object | None]] = []
-        self.project_root = Path("/")
-
-    async def replace_generation(
-        self,
-        generation: RuntimeGenerationSpec,
-        *,
-        rollback: object | None = None,
-    ) -> None:
-        self.replacements.append((generation, rollback))
-        if self.fail:
-            self.status = self.failure_status
-            if self.status != "ready":
-                self.endpoint = None
-            raise RuntimeUnavailableError("candidate failed and prior generation was restored")
-        self.generation = generation
-
-    def set_generation(self, generation: RuntimeGenerationSpec) -> None:
-        self.generation = generation
 
 
 class _LiveSourceRuntime:
@@ -322,25 +138,6 @@ class _RuntimeEnvironmentStore:
             pyproject_sha256="1" * 64,
             install_profile="runtime-no-dev-no-install-project-v1",
         )
-
-
-def _generation_activator(
-    tmp_path: Path,
-    *,
-    runtime: _GenerationRuntime,
-    store: _GenerationStore,
-    evaluator_fingerprint_resolver: Callable[[ReleaseRecord], str] | None = None,
-) -> HostReleaseActivator:
-    del tmp_path
-    return HostReleaseActivator(
-        runtime=runtime,  # type: ignore[arg-type]
-        generation_store=store,  # type: ignore[arg-type]
-        state_contract=_state_contract(),
-        evaluator_fingerprint=f"sha256:{'e' * 64}",
-        evaluator_fingerprint_resolver=evaluator_fingerprint_resolver,
-        install_profile="runtime",
-        controller_protocol=1,
-    )
 
 
 @pytest.mark.asyncio
@@ -450,294 +247,25 @@ async def test_live_repo_activation_reports_rolled_back_previous_source(
     assert runtime.live_source == previous
 
 
-def test_host_release_activator_rejects_non_generation_artifacts(
-    tmp_path: Path,
-) -> None:
-    release = _generation_release().model_copy(
-        update={"metadata": {"artifact_kind": "oci_image"}}
-    )
-    activator = _generation_activator(
-        tmp_path,
-        runtime=_GenerationRuntime(),
-        store=_GenerationStore(),
-    )
-
-    with pytest.raises(RuntimeError, match="Python generations or live repo commits"):
-        activator.generation_spec(release)
-
-
-@pytest.mark.asyncio
-async def test_python_generation_activation_accepts_exact_resolved_evaluator_fingerprint(
-    tmp_path: Path,
-) -> None:
-    resolved_fingerprint = f"sha256:{'f' * 64}"
-    release = _generation_release(evaluator=resolved_fingerprint)
-    store = _GenerationStore()
-    runtime = _GenerationRuntime()
-    activator = _generation_activator(
-        tmp_path,
-        runtime=runtime,
-        store=store,
-        evaluator_fingerprint_resolver=lambda value: str(
-            value.metadata["evaluator_fingerprint"]
-        ),
-    )
-
-    result = await activator.activate(
-        release,
-        activation_id="activation-resolved-evaluator",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-
-    assert result.status == "active"
-    assert store.opens[0][1]["expected_evaluator_fingerprint"] == resolved_fingerprint
-
-
-@pytest.mark.asyncio
-async def test_python_generation_activation_verifies_and_uses_runtime_captured_rollback(
-    tmp_path: Path,
-) -> None:
-    release = _generation_release()
-    previous = RuntimeGenerationSpec(
-        generation_id="d" * 64,
-        expected_manifest_digest=f"sha256:{'1' * 64}",
-        expected_state_contract_digest=_state_contract().sha256(),
-        expected_evaluator_fingerprint=f"sha256:{'e' * 64}",
-        expected_install_profile="runtime",
-        controller_protocol=1,
-    )
-    store = _GenerationStore()
-    runtime = _GenerationRuntime(previous, fail=True)
-    activator = _generation_activator(tmp_path, runtime=runtime, store=store)
-
-    result = await activator.activate(
-        release,
-        activation_id="activation-generation",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-
-    assert result.status == "rolled_back"
-    assert store.opens[0][0] == "a" * 64
-    assert runtime.replacements[0][1] is None
-    assert runtime.generation == previous
-
-
-@pytest.mark.parametrize(
-    ("runtime_status", "failure_code"),
-    [("recovery_required", "release_containment_failed"), ("failed", "release_rollback_failed")],
-)
-@pytest.mark.asyncio
-async def test_generation_activation_reports_failed_without_serving_previous(
-    tmp_path: Path,
-    runtime_status: str,
-    failure_code: str,
-) -> None:
-    previous = RuntimeGenerationSpec(
-        generation_id="d" * 64,
-        expected_manifest_digest=f"sha256:{'1' * 64}",
-        expected_state_contract_digest=_state_contract().sha256(),
-        expected_evaluator_fingerprint=f"sha256:{'e' * 64}",
-        expected_install_profile="runtime",
-        controller_protocol=1,
-    )
-    runtime = _GenerationRuntime(previous, fail=True, failure_status=runtime_status)
-    activator = _generation_activator(tmp_path, runtime=runtime, store=_GenerationStore())
-    result = await activator.activate(
-        _generation_release(),
-        activation_id=f"activation-{runtime_status}",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-    assert result.status == "failed"
-    assert result.failure_code == failure_code
-
-
-@pytest.mark.asyncio
-async def test_python_generation_activation_selects_exact_verified_generation(
-    tmp_path: Path,
-) -> None:
-    release = _generation_release()
-    store = _GenerationStore()
-    runtime = _GenerationRuntime()
-    activator = _generation_activator(tmp_path, runtime=runtime, store=store)
-
-    result = await activator.activate(
-        release,
-        activation_id="activation-generation-success",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-
-    assert result.status == "active"
-    assert runtime.generation is not None
-    assert runtime.generation.generation_id == "a" * 64
-    assert store.opens[0][1]["expected_manifest_digest"] == release.manifest_digest
-
-
-@pytest.mark.asyncio
-async def test_python_generation_rejects_corrupt_release_provenance(tmp_path: Path) -> None:
-    store = _GenerationStore()
-    runtime = _GenerationRuntime()
-    activator = _generation_activator(tmp_path, runtime=runtime, store=store)
-
-    result = await activator.activate(
-        _generation_release(evaluator=f"sha256:{'f' * 64}"),
-        activation_id="activation-corrupt",
-        origin=None,
-        reason="test",
-        rollback=False,
-    )
-
-    assert result.status == "failed"
-    assert store.opens == []
-    assert runtime.replacements == []
-
-
-class _Archive:
-    def __init__(self, release: ReleaseRecord) -> None:
-        self.release = release
-
-    async def start(self) -> None:
-        return None
-
-    async def get_current_release(self) -> ReleaseRecord:
-        return self.release
-
-
-class _InitialRelease:
-    async def build(self) -> ReleaseRecord:
-        raise AssertionError("non-bootstrap current release must not be rebuilt")
-
-
-class _InitialReleaseBuilder:
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    async def build(self, request: Any) -> OciReleaseArtifact:
-        self.requests.append(request)
-        digest = hashlib.sha256(request.evaluator_fingerprint.encode()).hexdigest()
-        return OciReleaseArtifact(
-            artifact_kind="python_generation",
-            artifact_digest=f"sha256:{digest}",
-            manifest_digest=f"sha256:{digest}",
-            image_reference=f"python-generation:{digest}",
-            entrypoint=("venv/bin/python", "-I", "-m", "opentulpa"),
-        )
-
-
-@pytest.mark.asyncio
-async def test_prepare_selects_archived_python_generation_without_rebuilding(
-    tmp_path: Path,
-) -> None:
-    release = _generation_release().model_copy(
-        update={"metadata": {**_generation_release().metadata}}
-    )
-    store = _GenerationStore()
-    runtime = _GenerationRuntime()
-    activator = _generation_activator(tmp_path, runtime=runtime, store=store)
-    host = HostEvolutionRuntime(
-        runtime=runtime,  # type: ignore[arg-type]
-        archive=_Archive(release),  # type: ignore[arg-type]
-        evolution=object(),  # type: ignore[arg-type]
-        activator=activator,
-        initial_release=_InitialRelease(),
-    )
-
-    await host.prepare()
-
-    assert runtime.generation is not None
-    assert runtime.generation.generation_id == "a" * 64
-    assert len(store.opens) == 1
-
-
-@pytest.mark.asyncio
-async def test_initial_release_provider_resolves_current_evaluator_fingerprint(
-    tmp_path: Path,
-) -> None:
-    seed = _seed(tmp_path)
-    repository = seed_source_repository(seed_root=seed, repository=tmp_path / "state" / "source")
-    builder = _InitialReleaseBuilder()
-    current_fingerprint = f"sha256:{'1' * 64}"
-
-    provider = TrustedGenerationReleaseProvider(
-        source_repository=repository,
-        worktrees_root=tmp_path / "initial-worktrees",
-        builder=builder,
-        evaluator_version="test-evaluator-v1",
-        evaluator_fingerprint=lambda: current_fingerprint,
-        state_contract=_state_contract(),
-        install_profile="runtime",
-    )
-    current_fingerprint = f"sha256:{'2' * 64}"
-
-    release = await provider.build()
-
-    assert builder.requests[0].evaluator_fingerprint == current_fingerprint
-    assert release.metadata["evaluator_fingerprint"] == current_fingerprint
-
-
-def test_missing_wheelhouse_fails_generation_builder_clearly(tmp_path: Path) -> None:
-    store = GenerationStore(
-        tmp_path / "runtime-generations",
-        control_root=tmp_path / "control",
-    )
-    policy = WheelReleaseBuildPolicy(
-        generations_root=store.root,
-        build_root=tmp_path / "builds",
-        base_dependency_lock_hash="1" * 64,
-        state_contract=_state_contract(),
-        trusted_metadata_hashes={"pyproject.toml": "2" * 64},
-        trusted_wheelhouse=tmp_path / "missing-wheelhouse",
-        external_python_runtime_policy_sha256="3" * 64,
-    )
-
-    with pytest.raises(ReleaseBuildError, match="offline wheelhouse"):
-        _TrustedHostWheelReleaseBuilder(policy=policy, store=store)
-
-
 def test_composition_defaults_to_trusted_local_source_mutation_without_strong_sandbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = _seed(tmp_path)
-    (seed / "pyproject.toml").write_text(
-        "[project]\nname='opentulpa'\nversion='0.1.0'\n",
-        encoding="utf-8",
-    )
-    bridge = seed / "railway_sandbox_bridge"
-    bridge.mkdir()
-    for name in ("bridge.mjs", "package.json", "package-lock.json"):
-        (bridge / name).write_text("{}\n", encoding="utf-8")
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir(mode=0o700)
+    source = _seed(tmp_path)
+    _git(source, "init")
+    _git(source, "config", "user.name", "Source Test")
+    _git(source, "config", "user.email", "source@example.test")
+    _git(source, "add", "--all")
+    _git(source, "commit", "-m", "source")
     uv = tmp_path / "uv"
     uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     uv.chmod(0o500)
-    monkeypatch.setenv("OPENTULPA_SOURCE_SEED_ROOT", str(seed))
-    monkeypatch.setenv("OPENTULPA_TRUSTED_WHEELHOUSE", str(wheelhouse))
     monkeypatch.setenv("OPENTULPA_UV_BIN", str(uv))
-    monkeypatch.delenv("OPENTULPA_SOURCE_SEED_OID", raising=False)
-    monkeypatch.setattr(
-        CandidateProcessBackend,
-        "unavailable_reason",
-        staticmethod(lambda: "strong sandbox requires Linux namespaces"),
-    )
-    monkeypatch.setattr(
-        IsolatedProcessEvaluationRunner,
-        "unavailable_reason",
-        classmethod(lambda cls, **kwargs: "exact evaluator tools are unavailable"),
-    )
     data = tmp_path / "data"
     data.mkdir(mode=0o700)
 
     composed = build_host_evolution_runtime(
-        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(project_root=source),  # type: ignore[arg-type]
         data_root=data,
         control_root=data / "bootstrap",
         settings=Settings(_env_file=None, evolution_enabled=True),
@@ -808,15 +336,15 @@ def test_final_image_installs_strong_sandbox_and_distinct_candidate_identity() -
     assert "find /usr/bin/bwrap -perm /022" in recipe
 
 
-def test_bootstrap_generation_reuse_requires_complete_release_provenance() -> None:
+def test_live_repo_reuse_requires_complete_release_provenance() -> None:
     from opentulpa.host import evolution as host_evolution
 
-    expected = _generation_release()
+    expected = _live_repo_release()
     archived = expected.model_copy(deep=True)
 
     assert host_evolution._same_release_provenance(archived, expected)
     assert not host_evolution._same_release_provenance(
-        archived.model_copy(update={"entrypoint": ("venv/bin/other",)}),
+        archived.model_copy(update={"entrypoint": ("python", "-m", "other")}),
         expected,
     )
     assert not host_evolution._same_release_provenance(
@@ -824,7 +352,7 @@ def test_bootstrap_generation_reuse_requires_complete_release_provenance() -> No
             update={
                 "metadata": {
                     **archived.metadata,
-                    "evaluator_fingerprint": f"sha256:{'f' * 64}",
+                    "image_reference": f"git-commit:{'f' * 40}",
                 }
             }
         ),

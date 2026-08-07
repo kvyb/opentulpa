@@ -44,30 +44,23 @@ from opentulpa.client.local_server import (
     restart_remembered_local_server,
 )
 from opentulpa.core.config import get_settings
-from opentulpa.evolution.generation_store import GenerationStore
-from opentulpa.evolution.models import Release
 from opentulpa.host.app import create_host_app
 from opentulpa.host.evolution import prepare_live_source_repository
 from opentulpa.host.evolution_composition import build_host_evolution_runtime
 from opentulpa.host.models import HostConfigInput
 from opentulpa.host.paths import HostPaths
-from opentulpa.host.runtime import RuntimeGenerationSpec, RuntimeLiveSourceSpec, RuntimeSupervisor
+from opentulpa.host.runtime import RuntimeLiveSourceSpec, RuntimeSupervisor
 from opentulpa.host.service import HostService
 from opentulpa.host.store import HostStore
 from opentulpa.sandbox.supervisor import SandboxWorkerSupervisor
 from opentulpa.secrets.cipher import AesGcmHostKeyCipher
 from opentulpa.secrets.host_key import load_or_create_host_cipher
 
-HOST_GENERATION_DEPENDENCIES = {
-    "source_seed": "/opt/opentulpa-source",
-    "wheelhouse": "/opt/opentulpa-wheelhouse",
-}
 
+class HostLiveSourceRequiredError(RuntimeError):
+    """The v3.1 host only runs from a live OpenTulpa source checkout."""
 
-class HostInstallRequiredError(RuntimeError):
-    """An installed-wheel host has no trusted inputs for its first generation."""
-
-    status = "install_required"
+    status = "live_source_required"
 
 
 def _private_token(path: Path) -> str:
@@ -116,18 +109,11 @@ def build_host_application() -> tuple[Any, str, str, Path]:
     paths.provision()
     project_root = _host_application_root()
     settings = get_settings()
-    generation_store = GenerationStore(
-        paths.generations_root,
-        control_root=paths.control_root / "evolution" / "generation-store",
-        quarantine_root=paths.control_root / "evolution" / "generation-quarantine",
-    )
-    generation_store.cleanup_incomplete()
-    recovered_generation = _require_installed_host_dependencies(
-        project_root,
-        settings=settings,
-        paths=paths,
-        generation_store=generation_store,
-    )
+    live_source = _load_current_live_source(project_root)
+    if live_source is None:
+        raise HostLiveSourceRequiredError(
+            "OpenTulpa v3.1 requires OPENTULPA_SOURCE_ROOT or package execution from a Git source checkout."
+        )
     setup_token = _private_pairing_code(paths.control_root / "host-setup.token")
     evolution_token = _private_token(paths.control_root / "evolution.token")
     store = HostStore(
@@ -168,18 +154,13 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         project_root=project_root,
         data_root=paths.product_root,
         application_root=paths.product_root,
-        generation_store=generation_store,
-        generation_spec=recovered_generation,
+        live_source_spec=live_source,
         control_path=paths.runtime_control_path,
         child_uid=paths.runtime_uid,
         child_gid=paths.runtime_gid,
         probation_seconds=probation_seconds,
         probation_probe_interval_seconds=probation_probe_interval_seconds,
     )
-    if recovered_generation is None:
-        live_source = _load_current_live_source(project_root)
-        if live_source is not None:
-            runtime.set_live_source(live_source)
     sandbox = SandboxWorkerSupervisor(
         project_root=project_root,
         data_root=paths.control_root / "sandbox-host",
@@ -195,12 +176,8 @@ def build_host_application() -> tuple[Any, str, str, Path]:
             runtime=runtime,
             data_root=paths.data_root,
             control_root=paths.control_root,
-            product_root=paths.product_root,
-            generation_store=generation_store,
             settings=settings,
         )
-        if recovered_generation is None
-        else None
     )
     if evolution is not None:
         asyncio.run(evolution.prepare())
@@ -283,74 +260,6 @@ def _is_source_checkout(root: Path) -> bool:
     )
 
 
-def _require_installed_host_dependencies(
-    project_root: Path,
-    *,
-    settings: Any,
-    paths: HostPaths,
-    generation_store: GenerationStore,
-) -> RuntimeGenerationSpec | None:
-    if _is_source_checkout(project_root):
-        return None
-    configured_seed = str(os.environ.get("OPENTULPA_SOURCE_SEED_ROOT") or "").strip()
-    configured_wheelhouse = str(os.environ.get("OPENTULPA_TRUSTED_WHEELHOUSE") or "").strip()
-    seed = Path(configured_seed or HOST_GENERATION_DEPENDENCIES["source_seed"]).expanduser()
-    wheelhouse = Path(
-        configured_wheelhouse or HOST_GENERATION_DEPENDENCIES["wheelhouse"]
-    ).expanduser()
-    if settings.evolution_enabled and seed.is_dir() and wheelhouse.is_dir():
-        return None
-    recovered = _load_current_generation(paths, generation_store=generation_store)
-    if recovered is not None:
-        return recovered
-    raise HostInstallRequiredError(
-        "Installed OpenTulpa has no runnable source checkout or trusted generation inputs. "
-        "Run the installer/recovery flow to provide the source seed and offline wheelhouse."
-    )
-
-
-def _load_current_generation(
-    paths: HostPaths,
-    *,
-    generation_store: GenerationStore,
-) -> RuntimeGenerationSpec | None:
-    pointer = paths.control_root / "evolution" / "current_release.json"
-    if not os.path.lexists(pointer):
-        return None
-    try:
-        metadata = pointer.lstat()
-        if (
-            pointer.is_symlink()
-            or not pointer.is_file()
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_nlink != 1
-            or stat.S_IMODE(metadata.st_mode) & 0o077
-        ):
-            raise RuntimeError("current release pointer is unsafe")
-        release = Release.model_validate_json(pointer.read_bytes())
-        if release.metadata.get("artifact_kind") != "python_generation":
-            raise RuntimeError("current release is not a Python generation")
-        spec = RuntimeGenerationSpec.from_release_metadata(release.metadata)
-        if release.artifact_digest != spec.manifest_digest:
-            raise RuntimeError("current release manifest provenance is inconsistent")
-        installed = generation_store.open(
-            spec.generation_id,
-            expected_manifest_digest=spec.manifest_digest,
-            expected_state_contract_digest=spec.state_contract_digest,
-            expected_evaluator_fingerprint=spec.evaluator_fingerprint,
-            expected_install_profile=spec.install_profile,
-            controller_protocol=spec.controller_protocol,
-        )
-        if installed.manifest.identity.source_commit != release.source_commit:
-            raise RuntimeError("current generation source provenance is inconsistent")
-    except Exception as exc:
-        raise HostInstallRequiredError(
-            "Installed OpenTulpa cannot verify its current generation. "
-            "Run the installer/recovery flow."
-        ) from exc
-    return spec
-
-
 def _load_current_live_source(project_root: Path) -> RuntimeLiveSourceSpec | None:
     if not (_is_source_checkout(project_root) and (project_root / ".git").exists()):
         return None
@@ -364,7 +273,7 @@ def _load_current_live_source(project_root: Path) -> RuntimeLiveSourceSpec | Non
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise HostInstallRequiredError(
+        raise HostLiveSourceRequiredError(
             "Installed OpenTulpa cannot verify its live source checkout."
         ) from exc
     return RuntimeLiveSourceSpec(source_commit=completed.stdout.strip())
@@ -685,7 +594,7 @@ def _server_command(args: argparse.Namespace) -> None:
             raise SystemExit(str(exc)) from exc
     try:
         serve(public_url=args.public_url)
-    except HostInstallRequiredError as exc:
+    except HostLiveSourceRequiredError as exc:
         raise SystemExit(f"{exc.status}: {exc}") from exc
 
 

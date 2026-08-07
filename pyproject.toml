@@ -33,8 +33,6 @@ dependencies = [
 opentulpa = "opentulpa.host.cli:main"
 opentulpa-host = "opentulpa.host.cli:serve"
 opentulpa-sandbox-worker = "opentulpa.sandbox.worker:main"
-opentulpa-bootstrap = "opentulpa.bootstrap.gateway:main"
-opentulpa-recovery = "opentulpa.bootstrap.recovery_cli:main"
 opentulpa-migrate-deepagents = "opentulpa.migrations.deepagents:main"
 
 [project.optional-dependencies]

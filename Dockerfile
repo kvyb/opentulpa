@@ -77,7 +77,7 @@ RUN --mount=type=cache,id=opentulpa-controller-uv,target=/root/.cache/uv,sharing
          --no-deps \
          /tmp/controller-wheel/*.whl \
     && /opt/opentulpa-install/controller/generations/image/bin/python -c \
-         'import importlib.metadata, importlib.resources; d=importlib.metadata.distribution("opentulpa"); assert {"opentulpa", "opentulpa-host", "opentulpa-sandbox-worker", "opentulpa-bootstrap", "opentulpa-recovery", "opentulpa-migrate-deepagents"} <= {e.name for e in d.entry_points if e.group == "console_scripts"}; assert importlib.resources.files("opentulpa").joinpath("resources", "release_contract.json").is_file()'
+         'import importlib.metadata, importlib.resources; d=importlib.metadata.distribution("opentulpa"); assert {"opentulpa", "opentulpa-host", "opentulpa-sandbox-worker", "opentulpa-migrate-deepagents"} <= {e.name for e in d.entry_points if e.group == "console_scripts"}; assert importlib.resources.files("opentulpa").joinpath("resources", "release_contract.json").is_file()'
 
 FROM python:3.12-slim-bookworm
 

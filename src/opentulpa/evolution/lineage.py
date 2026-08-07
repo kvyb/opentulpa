@@ -11,9 +11,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path, PurePosixPath
+from typing import Self
 from urllib.parse import urlsplit
 
-from opentulpa.evolution.generation import UpstreamLineage
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from opentulpa.evolution.git_security import (
     GitSecurityError,
     RepositoryMutationLockError,
@@ -37,6 +39,7 @@ ACCEPTED_UPSTREAM_REF = "refs/opentulpa/upstream/accepted"
 DEFAULT_UPSTREAM_REF = UPSTREAM_REF
 DEFAULT_INSTANCE_REF = INSTANCE_REF
 DEFAULT_ACCEPTED_UPSTREAM_REF = ACCEPTED_UPSTREAM_REF
+UPSTREAM_LINEAGE_METADATA_KEY = "opentulpa.evolution.upstream_lineage"
 
 _GIT_IDENTITY_ENV = {
     "GIT_AUTHOR_NAME": "OpenTulpa Candidate",
@@ -45,6 +48,7 @@ _GIT_IDENTITY_ENV = {
     "GIT_COMMITTER_EMAIL": "supervisor@opentulpa.local",
 }
 _OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_COMMIT_PATTERN = r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
 _CONFLICT_MARKER_RE = re.compile(
     rb"(?m)^(?:<<<<<<<(?: .*)?\r?$|\|\|\|\|\|\|\|(?: .*)?\r?$|=======\r?$|>>>>>>>(?: .*)?\r?$)"
 )
@@ -52,6 +56,27 @@ _CONFLICT_MARKER_RE = re.compile(
 
 class GitLineageError(RuntimeError):
     """A lineage operation failed without exposing Git output or local paths."""
+
+
+class UpstreamLineage(BaseModel):
+    """Rollback-safe source lineage stored under ``UPSTREAM_LINEAGE_METADATA_KEY``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    upstream_commit: str | None = Field(default=None, pattern=_COMMIT_PATTERN)
+    merge_base_commit: str | None = Field(default=None, pattern=_COMMIT_PATTERN)
+
+    @model_validator(mode="after")
+    def _coupled_commits(self) -> Self:
+        if (self.upstream_commit is None) != (self.merge_base_commit is None):
+            raise ValueError("upstream_commit and merge_base_commit must be recorded together")
+        if (
+            self.upstream_commit is not None
+            and self.merge_base_commit is not None
+            and len(self.upstream_commit) != len(self.merge_base_commit)
+        ):
+            raise ValueError("upstream lineage commits must use the same object format")
+        return self
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,7 +7,7 @@ from typing import Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from opentulpa.evolution.generation import (
+from opentulpa.evolution.lineage import (
     UPSTREAM_LINEAGE_METADATA_KEY,
     UpstreamLineage,
 )

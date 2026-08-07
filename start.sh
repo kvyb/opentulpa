@@ -39,7 +39,7 @@ Commands:
   serve                 Start the headless host, Agent API, and configured interfaces
   local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
   server                Install, then run the headless Agent API directly
-  managed               Install trusted OCI images, then run the self-replacing bootstrap
+  managed               Install trusted OCI images, then run the live-source host
   install               Install/setup only
   run [local|server|managed] Run only, without installing
   doctor [local|server|managed] Check startup readiness
@@ -54,7 +54,7 @@ Compatibility aliases:
 Options:
   --local               Force local Telegram mode
   --server              Force plain app server mode
-  --managed             Force immutable-bootstrap managed mode
+  --managed             Force live-source managed mode
   --browser-use         Install Browser Use Cloud adapter dependencies
   --no-browser-use      Skip Browser Use Cloud adapter dependencies
   --cloudflared         Install cloudflared when local mode needs it
@@ -1105,13 +1105,13 @@ stop_existing_server() {
   log "existing OpenTulpa server stopped"
 }
 
-run_bootstrap() {
+run_managed_host() {
   ensure_uv
   if ((${#PASSTHRU[@]})); then
-    run_cmd uv run --no-sync opentulpa-bootstrap "${PASSTHRU[@]}"
+    run_cmd uv run --no-sync opentulpa-host "${PASSTHRU[@]}"
     return 0
   fi
-  run_cmd uv run --no-sync opentulpa-bootstrap
+  run_cmd uv run --no-sync opentulpa-host
 }
 
 run_manager() {
@@ -1477,8 +1477,8 @@ main() {
   fi
 
   if [[ "${runtime}" == "managed" ]]; then
-    log "running immutable bootstrap with managed OCI releases."
-    run_bootstrap
+    log "running live-source host with managed OCI workers."
+    run_managed_host
     return 0
   fi
 

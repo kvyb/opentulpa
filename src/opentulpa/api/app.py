@@ -11,7 +11,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -23,7 +23,6 @@ from opentulpa.api.routes.telegram_business import (
 from opentulpa.api.routes.v2_agent import AgentRunService, register_v2_agent_routes
 from opentulpa.api.routes.v2_capabilities import register_v2_capability_routes
 from opentulpa.api.routes.v2_control_plane import register_v2_control_plane_routes
-from opentulpa.api.routes.v2_evolution import register_v2_evolution_routes
 from opentulpa.api.routes.v2_files import FileVaultPort, register_v2_file_routes
 from opentulpa.api.routes.v2_inference import register_v2_inference_routes
 from opentulpa.api.routes.v2_intake import register_v2_intake_routes
@@ -48,7 +47,6 @@ from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.notifications.sinks import EvolutionNotificationSink
 
 if TYPE_CHECKING:
-    from opentulpa.api.routes.v2_evolution import EvolutionService
     from opentulpa.capabilities.service import CapabilityControlService
     from opentulpa.deep_agent.service import DeepAgentService
     from opentulpa.inference.service import InferenceService
@@ -114,7 +112,6 @@ def _register_health_routes(
             "status": status,
             "lifecycle": app.state.lifecycle_status,
             "consumers_enabled": app.state.consumers_enabled,
-            "generation_id": identity.generation_id,
             "source_commit": identity.source_commit,
             **_deployment_identity(),
         }
@@ -129,7 +126,6 @@ def _register_health_routes(
             return JSONResponse(status_code=401, content={"detail": "invalid runtime identity"})
         return JSONResponse(
             content={
-                "generation_id": identity.generation_id,
                 "source_commit": identity.source_commit,
                 "launch_nonce": identity.launch_nonce,
             },
@@ -284,7 +280,7 @@ def create_app(
     telegram_webhook_secret: str | None = None,
     browser_service: TenantBrowserService | None = None,
     telegram_client: TelegramClient | None = None,
-    evolution_service: EvolutionService | None = None,
+    evolution_service: Any | None = None,
     idempotency_store: IdempotencyStore | None = None,
     release_control_service: ReleaseControlService | None = None,
     notification_service: NotificationService | None = None,
@@ -431,12 +427,6 @@ def create_app(
         app,
         get_repositories=lambda: repository_service,
         resolve_principal=resolve_principal,
-    )
-    register_v2_evolution_routes(
-        app,
-        get_evolution_service=lambda: evolution_service,
-        resolve_principal=resolve_principal,
-        get_idempotency_store=lambda: idempotency_store,
     )
     register_v2_capability_routes(
         app,
