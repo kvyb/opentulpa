@@ -230,10 +230,7 @@ def _environment_duration(name: str, *, default: float, allow_zero: bool) -> flo
 def _host_application_root() -> Path:
     configured_source = str(os.environ.get("OPENTULPA_SOURCE_ROOT") or "").strip()
     if configured_source:
-        source = Path(configured_source).expanduser().resolve()
-        if not _is_source_checkout(source):
-            raise RuntimeError("OPENTULPA_SOURCE_ROOT is not an OpenTulpa source checkout")
-        return source
+        return _ensure_configured_source_root(Path(configured_source).expanduser())
 
     inferred = Path(__file__).resolve().parents[3]
     if _is_source_checkout(inferred):
@@ -250,6 +247,54 @@ def _host_application_root() -> Path:
     if not package_root.is_dir():
         raise RuntimeError("installed OpenTulpa package resources are unavailable")
     return package_root
+
+
+def _ensure_configured_source_root(source: Path) -> Path:
+    if source.is_symlink():
+        raise RuntimeError("OPENTULPA_SOURCE_ROOT cannot be a symlink")
+    if source.exists():
+        resolved = source.resolve()
+        if _is_source_checkout(resolved) and (resolved / ".git").exists():
+            return resolved
+        try:
+            empty = not any(resolved.iterdir()) if resolved.is_dir() else False
+        except OSError as exc:
+            raise RuntimeError("OPENTULPA_SOURCE_ROOT is unavailable") from exc
+        if not empty:
+            raise RuntimeError("OPENTULPA_SOURCE_ROOT is not an OpenTulpa source checkout")
+    repository = str(os.environ.get("EVOLUTION_SOURCE_REPOSITORY") or "").strip()
+    if not repository:
+        raise RuntimeError(
+            "OPENTULPA_SOURCE_ROOT is missing and EVOLUTION_SOURCE_REPOSITORY is not configured"
+        )
+    ref = str(os.environ.get("OPENTULPA_INSTALL_REF") or "main").strip() or "main"
+    source.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    clone_target = source.parent / f".{source.name}.clone-{secrets.token_hex(8)}"
+    try:
+        completed = subprocess.run(
+            ["git", "clone", "--branch", ref, "--single-branch", repository, str(clone_target)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("OpenTulpa live source checkout could not be cloned")
+        if not (_is_source_checkout(clone_target) and (clone_target / ".git").exists()):
+            raise RuntimeError("cloned OpenTulpa source checkout is invalid")
+        if source.exists():
+            source.rmdir()
+        os.replace(clone_target, source)
+    except (OSError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(clone_target, ignore_errors=True)
+        raise RuntimeError("OpenTulpa live source checkout could not be cloned") from exc
+    except Exception:
+        shutil.rmtree(clone_target, ignore_errors=True)
+        raise
+    resolved = source.resolve()
+    if not (_is_source_checkout(resolved) and (resolved / ".git").exists()):
+        raise RuntimeError("cloned OpenTulpa source checkout is invalid")
+    return resolved
 
 
 def _is_source_checkout(root: Path) -> bool:

@@ -346,6 +346,60 @@ def test_host_application_root_uses_package_resources_without_checkout(
     assert not cli._is_source_checkout(root)  # noqa: SLF001
 
 
+def test_host_application_root_clones_configured_source_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "data" / "source"
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        assert kwargs["check"] is False
+        clone_target = Path(command[-1])
+        (clone_target / "src" / "opentulpa").mkdir(parents=True)
+        (clone_target / "src" / "opentulpa" / "__init__.py").write_text("", encoding="utf-8")
+        (clone_target / ".git").mkdir()
+        (clone_target / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (clone_target / "uv.lock").write_text("", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("OPENTULPA_SOURCE_ROOT", str(source))
+    monkeypatch.setenv("EVOLUTION_SOURCE_REPOSITORY", "https://example.test/opentulpa.git")
+    monkeypatch.setenv("OPENTULPA_INSTALL_REF", "release/ref")
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    root = cli._host_application_root()  # noqa: SLF001
+
+    assert root == source.resolve()
+    assert (source / ".git").is_dir()
+    assert commands == [
+        [
+            "git",
+            "clone",
+            "--branch",
+            "release/ref",
+            "--single-branch",
+            "https://example.test/opentulpa.git",
+            str(commands[0][-1]),
+        ]
+    ]
+    assert str(commands[0][-1]).startswith(str(source.parent / f".{source.name}.clone-"))
+
+
+def test_host_application_root_rejects_empty_configured_source_without_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "data" / "source"
+    source.mkdir(parents=True)
+    monkeypatch.setenv("OPENTULPA_SOURCE_ROOT", str(source))
+    monkeypatch.delenv("EVOLUTION_SOURCE_REPOSITORY", raising=False)
+
+    with pytest.raises(RuntimeError, match="EVOLUTION_SOURCE_REPOSITORY"):
+        cli._host_application_root()  # noqa: SLF001
+
+
 def test_server_reports_live_source_required_status(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(*, public_url: str | None) -> None:
         del public_url

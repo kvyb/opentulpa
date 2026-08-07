@@ -210,8 +210,9 @@ def test_container_and_railway_use_direct_immutable_controller() -> None:
     assert "--require-hashes" in dockerfile
     assert "--only-binary=:all:" in dockerfile
     assert "--resume-retries 10" in dockerfile
-    assert "target=/root/.cache/pip" in dockerfile
-    assert "target=/root/.cache/uv" in dockerfile
+    assert "--mount=type=cache" not in dockerfile
+    assert "target=/root/.cache/pip" not in dockerfile
+    assert "target=/root/.cache/uv" not in dockerfile
     assert dockerfile.index("uv export --frozen") < dockerfile.index("COPY src ./src")
     assert dockerfile.index("pip download") < dockerfile.index("COPY src ./src")
     assert "uv build --wheel --offline --no-build-isolation" in dockerfile
@@ -221,6 +222,9 @@ def test_container_and_railway_use_direct_immutable_controller() -> None:
     assert "COPY --from=controller-build /usr/local/bin/uv /usr/local/bin/uv" in dockerfile
     assert "test ! -L /usr/local/bin/uv && /usr/local/bin/uv --version" in dockerfile
     assert "ENV OPENTULPA_UV_BIN=/usr/local/bin/uv" in dockerfile
+    assert "ENV OPENTULPA_SOURCE_ROOT=/app/opentulpa_data/source" in dockerfile
+    assert "ENV EVOLUTION_SOURCE_REPOSITORY=https://github.com/kvyb/opentulpa.git" in dockerfile
+    assert "ENV OPENTULPA_INSTALL_REF=main" in dockerfile
     assert "ENV OPENTULPA_SOURCE_SEED_ROOT=/opt/opentulpa-source" in dockerfile
     assert "ENV OPENTULPA_TRUSTED_WHEELHOUSE=" in dockerfile
     assert "USER 65532" not in dockerfile

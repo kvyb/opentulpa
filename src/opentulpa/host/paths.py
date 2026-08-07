@@ -24,6 +24,7 @@ _CONTROLLER_ENTRIES = frozenset(
     {
         "bootstrap",
         "product",
+        "source",
         "bun",
         "sandbox_worker",
     }
