@@ -209,6 +209,8 @@ def test_container_and_railway_use_direct_immutable_controller() -> None:
     assert "uv build --wheel" in dockerfile
     assert "--require-hashes" in dockerfile
     assert "--only-binary=:all:" in dockerfile
+    assert "--no-binary=pysher" in dockerfile
+    assert "setuptools==80.9.0" in dockerfile
     assert "--resume-retries 10" in dockerfile
     assert "--mount=type=cache" not in dockerfile
     assert "target=/root/.cache/pip" not in dockerfile

@@ -25,6 +25,8 @@ ENV UV_HTTP_RETRIES=10
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 
+# Pysher 1.0.8 is sdist-only but required by Composio; keep every other
+# dependency binary-only and seed setuptools for the later offline build.
 RUN extras="$(printf '%s' "${OPENTULPA_EXTRAS}" | tr ',' ' ')" \
     && set -- --extra evaluation \
     && for extra in ${extras}; do \
@@ -48,8 +50,18 @@ RUN extras="$(printf '%s' "${OPENTULPA_EXTRAS}" | tr ',' ' ')" \
          --retries 10 \
          --resume-retries 10 \
          --timeout 120 \
+         --only-binary=:all: \
+         --no-deps \
+         --dest /opt/opentulpa-install/controller/generations/image/wheelhouse \
+         'setuptools==80.9.0' \
+    && /tmp/pip-download/bin/pip download \
+         --disable-pip-version-check \
+         --retries 10 \
+         --resume-retries 10 \
+         --timeout 120 \
          --require-hashes \
          --only-binary=:all: \
+         --no-binary=pysher \
          --dest /opt/opentulpa-install/controller/generations/image/wheelhouse \
          --requirement /tmp/controller-requirements.txt \
     && cp /tmp/controller-requirements.txt \
