@@ -115,6 +115,7 @@ def _register_health_routes(
             "lifecycle": app.state.lifecycle_status,
             "consumers_enabled": app.state.consumers_enabled,
             "generation_id": identity.generation_id,
+            "source_commit": identity.source_commit,
             **_deployment_identity(),
         }
 
@@ -129,6 +130,7 @@ def _register_health_routes(
         return JSONResponse(
             content={
                 "generation_id": identity.generation_id,
+                "source_commit": identity.source_commit,
                 "launch_nonce": identity.launch_nonce,
             },
             headers={"Cache-Control": "no-store"},

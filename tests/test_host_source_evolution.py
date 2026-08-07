@@ -27,6 +27,7 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuildError,
     WheelReleaseBuildPolicy,
 )
+from opentulpa.evolution.release_provenance import live_repo_artifact_digest
 from opentulpa.evolution.sandbox import (
     CandidateContainerBackend,
     CandidateProcessBackend,
@@ -38,6 +39,7 @@ from opentulpa.host.evolution import (
     HostEvolutionRuntime,
     HostReleaseActivator,
     TrustedGenerationReleaseProvider,
+    TrustedLiveRepoReleaseBuilder,
     seed_source_repository,
 )
 from opentulpa.host.evolution_composition import (
@@ -46,7 +48,12 @@ from opentulpa.host.evolution_composition import (
     _TrustedHostWheelReleaseBuilder,
     build_host_evolution_runtime,
 )
-from opentulpa.host.runtime import RuntimeGenerationSpec, RuntimeUnavailableError
+from opentulpa.host.runtime import (
+    RuntimeGenerationSpec,
+    RuntimeLiveSourceSpec,
+    RuntimeUnavailableError,
+)
+from opentulpa.host.runtime_environment import LiveSourceRuntimeEnvironment
 
 _EVALUATOR_CONTROLLER_ROOT = Path(sys.executable).absolute().parent.parent
 _EVALUATOR_WHEELHOUSE = Path(
@@ -187,6 +194,22 @@ def _generation_release(*, evaluator: str = f"sha256:{'e' * 64}") -> ReleaseReco
     )
 
 
+def _live_repo_release(source_commit: str = "d" * 40) -> ReleaseRecord:
+    digest = live_repo_artifact_digest(source_commit)
+    return ReleaseRecord(
+        id="release-live-repo",
+        candidate_id="candidate-live-repo",
+        source_commit=source_commit,
+        artifact_digest=digest,
+        manifest_digest=digest,
+        entrypoint=("python", "-P", "-m", "opentulpa"),
+        metadata={
+            "artifact_kind": "live_repo",
+            "image_reference": f"git-commit:{source_commit}",
+        },
+    )
+
+
 class _GenerationStore:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
@@ -237,6 +260,70 @@ class _GenerationRuntime:
         self.generation = generation
 
 
+class _LiveSourceRuntime:
+    def __init__(
+        self,
+        previous: RuntimeLiveSourceSpec | None = None,
+        *,
+        fail: bool = False,
+        failure_status: str = "ready",
+    ) -> None:
+        self.live_source = previous
+        self.status = "ready"
+        self.endpoint = "http://runtime.test"
+        self.fail = fail
+        self.failure_status = failure_status
+        self.verifications: list[RuntimeLiveSourceSpec] = []
+        self.replacements: list[tuple[RuntimeLiveSourceSpec, object | None]] = []
+        self.project_root = Path("/")
+
+    async def verify_live_source(
+        self,
+        live_source: RuntimeLiveSourceSpec,
+    ) -> RuntimeLiveSourceSpec:
+        self.verifications.append(live_source)
+        return live_source
+
+    async def replace_live_source(
+        self,
+        live_source: RuntimeLiveSourceSpec,
+        *,
+        rollback: object | None = None,
+    ) -> None:
+        self.replacements.append((live_source, rollback))
+        if self.fail:
+            self.status = self.failure_status
+            if self.status != "ready":
+                self.endpoint = None
+            raise RuntimeUnavailableError("candidate failed and prior source was restored")
+        self.live_source = live_source
+
+    def set_live_source(self, live_source: RuntimeLiveSourceSpec) -> None:
+        self.live_source = live_source
+
+
+class _RuntimeEnvironmentStore:
+    def __init__(self, tmp_path: Path) -> None:
+        self.interpreter = tmp_path / "runtime-env" / "bin" / "python"
+        self.calls: list[tuple[str, Path | None]] = []
+
+    def prepare(
+        self,
+        source_commit: str,
+        *,
+        workspace: Path | None = None,
+    ) -> LiveSourceRuntimeEnvironment:
+        self.calls.append((source_commit, workspace))
+        return LiveSourceRuntimeEnvironment(
+            id="e" * 64,
+            source_commit=source_commit,
+            python_interpreter=self.interpreter,
+            dependency_lock_hash="f" * 64,
+            pyproject_sha256="1" * 64,
+            install_profile="runtime-no-dev-no-install-project-v1",
+        )
+
+
 def _generation_activator(
     tmp_path: Path,
     *,
@@ -256,6 +343,113 @@ def _generation_activator(
     )
 
 
+@pytest.mark.asyncio
+async def test_live_repo_activation_selects_exact_source_commit(tmp_path: Path) -> None:
+    del tmp_path
+    release = _live_repo_release()
+    runtime = _LiveSourceRuntime()
+    activator = HostReleaseActivator(runtime=runtime)  # type: ignore[arg-type]
+
+    result = await activator.activate(
+        release,
+        activation_id="activation-live-repo",
+        origin=None,
+        reason="test",
+        rollback=False,
+    )
+
+    assert result.status == "active"
+    assert runtime.verifications == [RuntimeLiveSourceSpec(source_commit="d" * 40)]
+    assert runtime.replacements == [
+        (RuntimeLiveSourceSpec(source_commit="d" * 40), None)
+    ]
+    assert runtime.live_source == RuntimeLiveSourceSpec(source_commit="d" * 40)
+
+
+def test_live_repo_release_builder_persists_runtime_environment_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    (workspace / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    _git(workspace, "init")
+    _git(workspace, "config", "user.name", "Candidate Test")
+    _git(workspace, "config", "user.email", "candidate@example.test")
+    _git(workspace, "add", "--all")
+    _git(workspace, "commit", "-m", "candidate")
+    source_commit = _git(workspace, "rev-parse", "HEAD")
+    store = _RuntimeEnvironmentStore(tmp_path)
+    builder = TrustedLiveRepoReleaseBuilder(runtime_environment_store=store)  # type: ignore[arg-type]
+
+    artifact = builder._build(  # noqa: SLF001
+        SimpleNamespace(
+            candidate_id="candidate-1",
+            workspace=workspace,
+            base_commit=source_commit,
+            source_commit=source_commit,
+            dependency_lock_hash="f" * 64,
+            evaluator_version="v1",
+            evaluator_fingerprint="sha256:" + "a" * 64,
+            evaluation_input_sha256="b" * 64,
+        )
+    )
+
+    assert artifact.artifact_kind == "live_repo"
+    assert artifact.metadata["runtime_environment_id"] == "e" * 64
+    assert artifact.metadata["runtime_python_interpreter"] == str(store.interpreter)
+    assert store.calls == [(source_commit, workspace)]
+
+
+@pytest.mark.asyncio
+async def test_live_repo_activation_prepares_runtime_environment_before_replacement(
+    tmp_path: Path,
+) -> None:
+    release = _live_repo_release()
+    runtime = _LiveSourceRuntime()
+    store = _RuntimeEnvironmentStore(tmp_path)
+    activator = HostReleaseActivator(
+        runtime=runtime,  # type: ignore[arg-type]
+        runtime_environment_store=store,  # type: ignore[arg-type]
+    )
+
+    result = await activator.activate(
+        release,
+        activation_id="activation-live-repo-env",
+        origin=None,
+        reason="test",
+        rollback=False,
+    )
+
+    assert result.status == "active"
+    assert runtime.replacements
+    activated = runtime.replacements[0][0]
+    assert activated.runtime_environment_id == "e" * 64
+    assert activated.runtime_python_interpreter == str(store.interpreter)
+    assert store.calls == [("d" * 40, None)]
+
+
+@pytest.mark.asyncio
+async def test_live_repo_activation_reports_rolled_back_previous_source(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    previous = RuntimeLiveSourceSpec(source_commit="c" * 40)
+    runtime = _LiveSourceRuntime(previous, fail=True)
+    activator = HostReleaseActivator(runtime=runtime)  # type: ignore[arg-type]
+
+    result = await activator.activate(
+        _live_repo_release(),
+        activation_id="activation-live-repo-rollback",
+        origin=None,
+        reason="test",
+        rollback=False,
+    )
+
+    assert result.status == "rolled_back"
+    assert runtime.replacements[0][0] == RuntimeLiveSourceSpec(source_commit="d" * 40)
+    assert runtime.live_source == previous
+
+
 def test_host_release_activator_rejects_non_generation_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -268,7 +462,7 @@ def test_host_release_activator_rejects_non_generation_artifacts(
         store=_GenerationStore(),
     )
 
-    with pytest.raises(RuntimeError, match="immutable Python generations"):
+    with pytest.raises(RuntimeError, match="Python generations or live repo commits"):
         activator.generation_spec(release)
 
 

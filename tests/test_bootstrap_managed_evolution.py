@@ -327,6 +327,16 @@ class _EvolutionService:
         self.attempts[attempt.id] = attempt
         return attempt
 
+    async def source_set_runtime_env(self, **kwargs: Any) -> dict[str, Any]:
+        self.source_calls.append(("runtime-env", kwargs))
+        return {
+            "status": "updated",
+            "name": kwargs["name"],
+            "changed": True,
+            "restarted": True,
+            "value": "[set]",
+        }
+
     async def list_candidates(self, **_: Any) -> list[Candidate]:
         return [self.candidate]
 
@@ -410,6 +420,12 @@ async def test_evolution_control_client_is_typed_authenticated_and_digest_checke
             reason="Undo source release",
             audit_context=audit,
         )
+        source_env = await client.source_set_runtime_env(
+            name="TELEGRAM_BOT_TOKEN",
+            value="raw-token-value",
+            idempotency_key="source-env-1",
+            audit_context=audit,
+        )
         promotion = await client.get_promotion_attempt(source_rollback.id)
         contribution = await client.prepare_contribution(
             candidate.id,
@@ -426,6 +442,13 @@ async def test_evolution_control_client_is_typed_authenticated_and_digest_checke
         assert source_dependencies["dependency_base_id"] == "e" * 64
         assert source_release["candidate"]["status"] == "ready"
         assert source_rollback.candidate_id == service.candidate.id
+        assert source_env == {
+            "status": "updated",
+            "name": "TELEGRAM_BOT_TOKEN",
+            "changed": True,
+            "restarted": True,
+            "value": "[set]",
+        }
         assert promotion == source_rollback
         assert contribution == candidate
         assert service.source_calls == [
@@ -470,6 +493,15 @@ async def test_evolution_control_client_is_typed_authenticated_and_digest_checke
                     "expected_current_release_id": "release-current",
                     "expected_target_release_id": "release-prior",
                     "reason": "Undo source release",
+                    "audit_context": audit,
+                },
+            ),
+            (
+                "runtime-env",
+                {
+                    "name": "TELEGRAM_BOT_TOKEN",
+                    "value": "raw-token-value",
+                    "idempotency_key": "source-env-1",
                     "audit_context": audit,
                 },
             ),

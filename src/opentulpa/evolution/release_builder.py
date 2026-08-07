@@ -25,7 +25,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from opentulpa.bootstrap.oci_host import (
     LocalOciCommandRunner,
@@ -128,9 +128,10 @@ class OciReleaseArtifact(BaseModel):
 
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     manifest_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    artifact_kind: Literal["oci_image", "python_generation"] = "oci_image"
+    artifact_kind: Literal["oci_image", "python_generation", "live_repo"] = "oci_image"
     image_reference: str = Field(min_length=1, max_length=300)
     entrypoint: tuple[str, ...] = Field(min_length=1, max_length=64)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ReleaseBuilder(Protocol):

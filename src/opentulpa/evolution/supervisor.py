@@ -72,6 +72,13 @@ logger = logging.getLogger(__name__)
 
 _GENERATION_REFERENCE_RE = re.compile(r"python-generation:([0-9a-f]{64})\Z")
 _COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_LIVE_SOURCE_RUNTIME_METADATA_KEYS = (
+    "runtime_environment_id",
+    "runtime_python_interpreter",
+    "runtime_dependency_lock_hash",
+    "runtime_pyproject_sha256",
+    "runtime_install_profile",
+)
 
 
 class EvolutionSupervisorError(RuntimeError):
@@ -727,7 +734,7 @@ class EvolutionSupervisor:
         ):
             raise EvolutionSupervisorError("candidate has no verified release manifest")
         artifact_kind = str(candidate.metadata.get("artifact_kind") or "")
-        if artifact_kind not in {"oci_image", "python_generation"}:
+        if artifact_kind not in {"oci_image", "python_generation", "live_repo"}:
             raise EvolutionSupervisorError("candidate release artifact kind is invalid")
         evaluation_input_digest = str(candidate.metadata.get("evaluation_input_digest") or "")
         metadata: dict[str, JsonValue] = {
@@ -779,7 +786,7 @@ class EvolutionSupervisor:
             "state_contract_digest",
             "install_profile",
             "controller_protocol",
-        ):
+        ) + _LIVE_SOURCE_RUNTIME_METADATA_KEYS:
             if key in candidate.metadata:
                 metadata[key] = candidate.metadata[key]
         try:
@@ -812,6 +819,7 @@ class EvolutionSupervisor:
                 "evaluator_fingerprint",
                 "evaluator_version",
             )
+            + _LIVE_SOURCE_RUNTIME_METADATA_KEYS
             if key in release.metadata
         }
         return {**provenance, **evidence}
@@ -1016,7 +1024,7 @@ class EvolutionSupervisor:
             passed=True,
             exit_code=0,
             duration_seconds=asyncio.get_running_loop().time() - started,
-            output=f"Verified immutable {artifact.artifact_kind} release manifest.",
+            output=f"Verified {artifact.artifact_kind} release manifest.",
         )
 
     def _artifact_metadata(
@@ -1030,6 +1038,7 @@ class EvolutionSupervisor:
             "manifest_digest": artifact.manifest_digest,
             "image_reference": artifact.image_reference,
             "release_entrypoint": list(artifact.entrypoint),
+            **artifact.metadata,
             **(
                 {"dependency_lock_hash": dependency_lock_hash}
                 if dependency_lock_hash is not None

@@ -29,8 +29,19 @@ import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from opentulpa.evolution.generation_store import GenerationStore, InstalledGeneration
+from opentulpa.evolution.git_security import (
+    GitSecurityError,
+    discover_git_directories,
+    repository_mutation_lock,
+    run_hardened_git,
+)
 from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.host.models import HostConfig
+from opentulpa.host.runtime_environment import (
+    filtered_runtime_dotenv,
+    load_runtime_dotenv,
+    runtime_dotenv_secret_values,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +51,7 @@ _SECRET_LINE = re.compile(
 _GENERATION_ID_PATTERN = r"^[0-9a-f]{64}$"
 _DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_COMMIT_PATTERN = r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
 _PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 _OWNERSHIP_MAX_BYTES = 64 * 1024
 _PLATFORM_ENVIRONMENT_ALLOWLIST = frozenset(
@@ -156,6 +168,76 @@ class RuntimeGenerationSpec(BaseModel):
         )
 
 
+class RuntimeLiveSourceSpec(BaseModel):
+    """Controller-held provenance required to launch one live Git commit."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        populate_by_name=True,
+        strict=True,
+        str_strip_whitespace=True,
+    )
+
+    source_commit: str = Field(pattern=_COMMIT_PATTERN)
+    runtime_environment_id: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    runtime_python_interpreter: str | None = Field(default=None, min_length=1, max_length=4_096)
+    runtime_dependency_lock_hash: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    runtime_pyproject_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    runtime_install_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=_PROFILE_PATTERN,
+    )
+
+    @model_validator(mode="after")
+    def _coherent_runtime_environment(self) -> Self:
+        environment_values = (
+            self.runtime_environment_id,
+            self.runtime_python_interpreter,
+            self.runtime_dependency_lock_hash,
+            self.runtime_pyproject_sha256,
+            self.runtime_install_profile,
+        )
+        if not any(value is not None for value in environment_values):
+            return self
+        if any(value is None for value in environment_values):
+            raise ValueError("live source runtime environment provenance is incomplete")
+        assert self.runtime_python_interpreter is not None
+        interpreter = Path(self.runtime_python_interpreter)
+        if (
+            not interpreter.is_absolute()
+            or "\x00" in self.runtime_python_interpreter
+            or "\n" in self.runtime_python_interpreter
+        ):
+            raise ValueError("live source runtime Python interpreter is invalid")
+        return self
+
+    @property
+    def has_runtime_environment(self) -> bool:
+        return self.runtime_python_interpreter is not None
+
+    @property
+    def python_interpreter_path(self) -> Path:
+        if self.runtime_python_interpreter is None:
+            raise RuntimeUnavailableError("live source runtime environment is unavailable")
+        return Path(self.runtime_python_interpreter)
+
+    @classmethod
+    def from_release_metadata(cls, metadata: Mapping[str, object], *, source_commit: str) -> Self:
+        return cls.model_validate(
+            {
+                "source_commit": source_commit,
+                "runtime_environment_id": metadata.get("runtime_environment_id"),
+                "runtime_python_interpreter": metadata.get("runtime_python_interpreter"),
+                "runtime_dependency_lock_hash": metadata.get("runtime_dependency_lock_hash"),
+                "runtime_pyproject_sha256": metadata.get("runtime_pyproject_sha256"),
+                "runtime_install_profile": metadata.get("runtime_install_profile"),
+            }
+        )
+
+
 class RuntimeLogEntry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -208,8 +290,9 @@ class _OwnershipRecord(BaseModel):
     process_group: int = Field(ge=1)
     host_pid: int = Field(ge=1)
     host_birth: str = Field(min_length=1, max_length=200)
-    mode: Literal["generation"]
-    generation_id: str = Field(pattern=_GENERATION_ID_PATTERN)
+    mode: Literal["generation", "live_source"]
+    generation_id: str | None = Field(default=None, pattern=_GENERATION_ID_PATTERN)
+    source_commit: str | None = Field(default=None, pattern=_COMMIT_PATTERN)
     launch_nonce: str = Field(min_length=16, max_length=200)
     process_birth: str = Field(min_length=1, max_length=200)
     executable: str = Field(min_length=1, max_length=4_096)
@@ -217,6 +300,11 @@ class _OwnershipRecord(BaseModel):
 
     @model_validator(mode="after")
     def _coherent_identity(self) -> Self:
+        if self.mode == "generation":
+            if self.generation_id is None or self.source_commit is not None:
+                raise ValueError("generation ownership identity is incomplete")
+        elif self.source_commit is None or self.generation_id is not None:
+            raise ValueError("live source ownership identity is incomplete")
         if not Path(self.executable).is_absolute() or "\x00" in self.executable:
             raise ValueError("owned executable must be an absolute path")
         if any(not value or "\x00" in value or len(value) > 4_096 for value in self.argv):
@@ -231,14 +319,20 @@ class _LaunchIntent(BaseModel):
 
     format_version: Literal[1] = 1
     host_pid: int = Field(ge=1)
-    mode: Literal["generation"]
-    generation_id: str = Field(pattern=_GENERATION_ID_PATTERN)
+    mode: Literal["generation", "live_source"]
+    generation_id: str | None = Field(default=None, pattern=_GENERATION_ID_PATTERN)
+    source_commit: str | None = Field(default=None, pattern=_COMMIT_PATTERN)
     launch_nonce: str = Field(min_length=16, max_length=200)
     executable: str = Field(min_length=1, max_length=4_096)
     argv: tuple[str, ...] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def _coherent_identity(self) -> Self:
+        if self.mode == "generation":
+            if self.generation_id is None or self.source_commit is not None:
+                raise ValueError("generation launch intent is incomplete")
+        elif self.source_commit is None or self.generation_id is not None:
+            raise ValueError("live source launch intent is incomplete")
         if not Path(self.executable).is_absolute() or "\x00" in self.executable:
             raise ValueError("launch intent executable must be absolute")
         if any(not value or "\x00" in value or len(value) > 4_096 for value in self.argv):
@@ -248,11 +342,27 @@ class _LaunchIntent(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class _LaunchTarget:
-    generation: RuntimeGenerationSpec
+    mode: Literal["generation", "live_source"]
+    generation: RuntimeGenerationSpec | None = None
+    live_source: RuntimeLiveSourceSpec | None = None
 
     @classmethod
     def for_generation(cls, generation: RuntimeGenerationSpec) -> _LaunchTarget:
-        return cls(generation=generation)
+        return cls(mode="generation", generation=generation)
+
+    @classmethod
+    def for_live_source(cls, live_source: RuntimeLiveSourceSpec) -> _LaunchTarget:
+        return cls(mode="live_source", live_source=live_source)
+
+    def require_generation(self) -> RuntimeGenerationSpec:
+        if self.generation is None:
+            raise RuntimeUnavailableError("runtime target is not a generation")
+        return self.generation
+
+    def require_live_source(self) -> RuntimeLiveSourceSpec:
+        if self.live_source is None:
+            raise RuntimeUnavailableError("runtime target is not a live source checkout")
+        return self.live_source
 
 
 @dataclass(slots=True)
@@ -260,8 +370,9 @@ class _Child:
     process: asyncio.subprocess.Process
     endpoint: str
     config: HostConfig
-    generation: RuntimeGenerationSpec
-    installed_generation: InstalledGeneration
+    generation: RuntimeGenerationSpec | None
+    installed_generation: InstalledGeneration | None
+    live_source: RuntimeLiveSourceSpec | None
     launch_nonce: str
     process_group: int
     process_birth: str
@@ -272,12 +383,20 @@ class _Child:
     requested_stop: bool = False
 
     @property
-    def generation_id(self) -> str:
-        return self.generation.generation_id
+    def generation_id(self) -> str | None:
+        return self.generation.generation_id if self.generation is not None else None
+
+    @property
+    def source_commit(self) -> str | None:
+        return self.live_source.source_commit if self.live_source is not None else None
 
     @property
     def target(self) -> _LaunchTarget:
-        return _LaunchTarget.for_generation(self.generation)
+        if self.generation is not None:
+            return _LaunchTarget.for_generation(self.generation)
+        if self.live_source is not None:
+            return _LaunchTarget.for_live_source(self.live_source)
+        raise RuntimeUnavailableError("runtime child target identity is unavailable")
 
 
 class RuntimeSupervisor:
@@ -291,6 +410,7 @@ class RuntimeSupervisor:
         application_root: Path | None = None,
         generation_store: GenerationStore | None = None,
         generation_spec: RuntimeGenerationSpec | Mapping[str, object] | None = None,
+        live_source_spec: RuntimeLiveSourceSpec | Mapping[str, object] | str | None = None,
         control_path: Path | None = None,
         startup_timeout_seconds: float = 90,
         shutdown_timeout_seconds: float = 15,
@@ -353,6 +473,13 @@ class RuntimeSupervisor:
         self._selected_generation = (
             self._coerce_generation_spec(generation_spec) if generation_spec is not None else None
         )
+        self._selected_live_source = (
+            self._coerce_live_source_spec(live_source_spec)
+            if live_source_spec is not None
+            else None
+        )
+        if self._selected_generation is not None and self._selected_live_source is not None:
+            raise ValueError("runtime cannot select both a generation and a live source")
         if self._selected_generation is not None and generation_store is None:
             raise ValueError("a generation store is required for a selected generation")
         self._control_path = (
@@ -460,6 +587,19 @@ class RuntimeSupervisor:
         return self._selected_generation
 
     @property
+    def source_commit(self) -> str | None:
+        child = self._child
+        if child is not None and child.source_commit is not None:
+            return child.source_commit
+        if self._selected_live_source is not None:
+            return self._selected_live_source.source_commit
+        return None
+
+    @property
+    def live_source(self) -> RuntimeLiveSourceSpec | None:
+        return self._selected_live_source
+
+    @property
     def control_path(self) -> Path:
         return self._control_path
 
@@ -477,6 +617,24 @@ class RuntimeSupervisor:
         ):
             raise RuntimeUnavailableError("cannot change generation while runtime is running")
         self._selected_generation = self._coerce_generation_spec(generation)
+        self._selected_live_source = None
+        self._desired_config = None
+        self._desired_target = None
+        self._unexpected_restarts = 0
+
+    def set_live_source(self, live_source: RuntimeLiveSourceSpec | Mapping[str, object] | str) -> None:
+        """Select an exact live Git commit before the runtime starts."""
+
+        if (
+            self._child is not None
+            or self._desired_running
+            or self._operation_task is not None
+            or self._watcher_task is not None
+            or self._status not in {"stopped", "failed"}
+        ):
+            raise RuntimeUnavailableError("cannot change live source while runtime is running")
+        self._selected_live_source = self._coerce_live_source_spec(live_source)
+        self._selected_generation = None
         self._desired_config = None
         self._desired_target = None
         self._unexpected_restarts = 0
@@ -504,6 +662,16 @@ class RuntimeSupervisor:
             raise ValueError("sandbox worker configuration is invalid")
         self._sandbox_url = cleaned_url
         self._sandbox_token = cleaned_token
+
+    async def verify_live_source(
+        self,
+        live_source: RuntimeLiveSourceSpec | Mapping[str, object] | str,
+    ) -> RuntimeLiveSourceSpec:
+        spec = self._coerce_live_source_spec(live_source)
+        await asyncio.to_thread(self._verify_live_source_commit, spec.source_commit)
+        if spec.has_runtime_environment:
+            await asyncio.to_thread(self._live_source_python_interpreter, spec)
+        return spec
 
     async def start(self, config: HostConfig) -> None:
         async with self._lock:
@@ -586,6 +754,35 @@ class RuntimeSupervisor:
             finally:
                 self._release_operation()
 
+    async def replace_live_source(
+        self,
+        live_source: RuntimeLiveSourceSpec | Mapping[str, object] | str,
+        *,
+        rollback: RuntimeLiveSourceSpec | Mapping[str, object] | str | None = None,
+    ) -> None:
+        """Activate one exact live source commit and restore the prior commit on failure."""
+
+        candidate_spec = self._coerce_live_source_spec(live_source)
+        rollback_spec = self._coerce_live_source_spec(rollback) if rollback is not None else None
+        async with self._lock:
+            try:
+                self._claim_operation()
+                await self._ensure_controller_ownership()
+                self._require_launch_safe()
+                config = self._current_config()
+                previous_target = self._current_target()
+                if rollback_spec is not None and previous_target.live_source != rollback_spec:
+                    raise RuntimeUnavailableError(
+                        "rollback source commit does not match the captured previous target"
+                    )
+                await self._replace_target_locked(
+                    config,
+                    candidate=_LaunchTarget.for_live_source(candidate_spec),
+                    previous=previous_target,
+                )
+            finally:
+                self._release_operation()
+
     async def restart_current(self) -> None:
         async with self._lock:
             try:
@@ -596,6 +793,81 @@ class RuntimeSupervisor:
                 target = self._current_target()
                 await self._preflight_target(target)
                 await self._replace_config_locked(config, rollback=config, target=target)
+            finally:
+                self._release_operation()
+
+    async def replace_current_environment(
+        self,
+        *,
+        apply: Callable[[], None],
+        restore: Callable[[], None],
+    ) -> None:
+        """Atomically restart the current target around a host-owned environment update."""
+
+        async with self._lock:
+            try:
+                self._claim_operation()
+                await self._ensure_controller_ownership()
+                self._require_launch_safe()
+                config = self._current_config()
+                target = self._current_target()
+                previous = self._child
+                previous_config = previous.config if previous is not None else self._desired_config
+                previous_target = previous.target if previous is not None else self._desired_target
+                applied = False
+                try:
+                    apply()
+                    applied = True
+                    await self._preflight_target(target)
+                except Exception:
+                    if applied:
+                        with suppress(Exception):
+                            restore()
+                    raise
+                try:
+                    if previous is not None:
+                        self._status = "draining"
+                        await self._stop_child(previous)
+                        self._child = None
+                    self._begin_selection(config, target)
+                    candidate = await self._spawn_target(config, target)
+                except asyncio.CancelledError:
+                    with suppress(Exception):
+                        restore()
+                    await self._restore_after_cancellation(previous_config, previous_target)
+                    raise
+                except Exception:
+                    with suppress(Exception):
+                        restore()
+                    if self._status == "recovery_required":
+                        self._desired_running = False
+                        raise
+                    if previous_config is None or previous_target is None:
+                        self._desired_running = False
+                        raise
+                    self._append_log(
+                        "host",
+                        "runtime environment update failed; restoring previous environment",
+                    )
+                    self._select_target(previous_target)
+                    self._begin_selection(previous_config, previous_target)
+                    self._status = "rolling_back"
+                    try:
+                        restoration = asyncio.create_task(
+                            self._spawn_target(previous_config, previous_target)
+                        )
+                        restored, cancelled = await self._await_failure_restoration(restoration)
+                    except Exception as rollback_error:
+                        self._desired_running = False
+                        self._status = "failed"
+                        self._error = "environment update and rollback runtime failed to start"
+                        self._append_log("host", self._error)
+                        raise RuntimeUnavailableError(self._error) from rollback_error
+                    self._adopt_child(restored)
+                    if cancelled:
+                        raise asyncio.CancelledError from None
+                    raise
+                self._adopt_child(candidate)
             finally:
                 self._release_operation()
 
@@ -792,7 +1064,9 @@ class RuntimeSupervisor:
             self._adopt_child(candidate)
 
     async def _spawn_target(self, config: HostConfig, target: _LaunchTarget) -> _Child:
-        return await self._spawn(config, generation_spec=target.generation)
+        if target.mode == "generation":
+            return await self._spawn(config, generation_spec=target.require_generation())
+        return await self._spawn_live_source(config, live_source=target.require_live_source())
 
     async def _spawn(
         self,
@@ -813,6 +1087,28 @@ class RuntimeSupervisor:
                 self._append_log(
                     "host",
                     "nonce-bound generation exited before readiness; retrying with a new port",
+                )
+        raise RuntimeUnavailableError("runtime launch attempts were exhausted")
+
+    async def _spawn_live_source(
+        self,
+        config: HostConfig,
+        *,
+        live_source: RuntimeLiveSourceSpec,
+    ) -> _Child:
+        attempts = 2 if self._strict_generation_readiness else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._spawn_live_source_attempt(
+                    config,
+                    live_source=live_source,
+                )
+            except _ChildExitedBeforeReadyError:
+                if attempt >= attempts:
+                    raise
+                self._append_log(
+                    "host",
+                    "nonce-bound live source exited before readiness; retrying with a new port",
                 )
         raise RuntimeUnavailableError("runtime launch attempts were exhausted")
 
@@ -903,6 +1199,7 @@ class RuntimeSupervisor:
                 config=config,
                 generation=generation_spec,
                 installed_generation=installed,
+                live_source=None,
                 launch_nonce=launch_nonce,
                 process_group=process.pid,
                 process_birth=process_birth,
@@ -922,6 +1219,7 @@ class RuntimeSupervisor:
                     config=config,
                     generation=generation_spec,
                     installed_generation=installed,
+                    live_source=None,
                     launch_nonce=launch_nonce,
                     process_group=process.pid,
                     process_birth="unverified",
@@ -945,6 +1243,7 @@ class RuntimeSupervisor:
                     config=config,
                     generation=generation_spec,
                     installed_generation=installed,
+                    live_source=None,
                     launch_nonce=launch_nonce,
                     process_group=process.pid,
                     process_birth="unverified",
@@ -976,6 +1275,166 @@ class RuntimeSupervisor:
         self._append_log(
             "host",
             f"runtime revision {config.revision} generation {child.generation_id} is ready",
+        )
+        return child
+
+    async def _spawn_live_source_attempt(
+        self,
+        config: HostConfig,
+        *,
+        live_source: RuntimeLiveSourceSpec,
+    ) -> _Child:
+        port = self._free_port()
+        endpoint = f"http://127.0.0.1:{port}"
+        launch_nonce = secrets.token_urlsafe(24)
+        self._status = "starting"
+        self._error = None
+        self._redaction_values = {
+            value
+            for value in (
+                config.api_key.get_secret_value(),
+                config.internal_runtime_token.get_secret_value(),
+                config.telegram_bot_token.get_secret_value()
+                if config.telegram_bot_token is not None
+                else "",
+                config.telegram_pairing_code.get_secret_value()
+                if config.telegram_pairing_code is not None
+                else "",
+                self._evolution_token or "",
+                self._sandbox_token or "",
+            )
+            if value
+        }
+        self._append_log(
+            "host",
+            f"starting runtime revision {config.revision} source {live_source.source_commit}",
+        )
+
+        child: _Child | None = None
+        process: asyncio.subprocess.Process | None = None
+        intent_written = False
+        executable = self._live_source_python_interpreter(live_source)
+        argv = (str(executable), "-P", "-m", "opentulpa")
+        try:
+            source_root = await asyncio.to_thread(
+                self._checkout_live_source,
+                live_source.source_commit,
+            )
+            cwd = self._live_source_cwd(source_root)
+            runtime_dotenv = self._runtime_dotenv()
+            self._redaction_values.update(runtime_dotenv_secret_values(runtime_dotenv))
+            environment = self._child_environment(
+                config,
+                port=port,
+                live_source=live_source,
+                launch_nonce=launch_nonce,
+                runtime_dotenv=runtime_dotenv,
+            )
+            spawn_options: dict[str, Any] = {
+                "cwd": cwd,
+                "env": environment,
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+            }
+            if os.name == "posix":
+                spawn_options["start_new_session"] = True
+            spawn_argv = self._child_spawn_argv(argv)
+            self._write_launch_intent(
+                live_source=live_source,
+                launch_nonce=launch_nonce,
+                executable=executable,
+                argv=argv,
+            )
+            intent_written = True
+            process = await asyncio.create_subprocess_exec(*spawn_argv, **spawn_options)
+            process_birth = self._capture_process_birth(process.pid)
+            readers = tuple(
+                asyncio.create_task(self._read_stream(stream, name))
+                for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
+                if stream is not None
+            )
+            child = _Child(
+                process=process,
+                endpoint=endpoint,
+                config=config,
+                generation=None,
+                installed_generation=None,
+                live_source=live_source,
+                launch_nonce=launch_nonce,
+                process_group=process.pid,
+                process_birth=process_birth,
+                executable=executable,
+                argv=argv,
+                readers=readers,
+            )
+            self._write_ownership_record(child)
+            self._remove_launch_intent(launch_nonce)
+            intent_written = False
+            await self._wait_ready(child)
+        except asyncio.CancelledError:
+            if child is None and process is not None:
+                child = _Child(
+                    process=process,
+                    endpoint=endpoint,
+                    config=config,
+                    generation=None,
+                    installed_generation=None,
+                    live_source=live_source,
+                    launch_nonce=launch_nonce,
+                    process_group=process.pid,
+                    process_birth="unverified",
+                    executable=executable,
+                    argv=argv,
+                    readers=(),
+                )
+            if child is not None:
+                await self._shield_candidate_cleanup(child)
+                intent_written = False
+            elif intent_written:
+                self._status = "recovery_required"
+                self._error = "runtime spawn was cancelled before child identity was captured"
+            raise
+        except Exception as exc:
+            cleanup_error: Exception | None = None
+            if child is None and process is not None:
+                child = _Child(
+                    process=process,
+                    endpoint=endpoint,
+                    config=config,
+                    generation=None,
+                    installed_generation=None,
+                    live_source=live_source,
+                    launch_nonce=launch_nonce,
+                    process_group=process.pid,
+                    process_birth="unverified",
+                    executable=executable,
+                    argv=argv,
+                    readers=(),
+                )
+            if child is not None:
+                try:
+                    await self._stop_child(child)
+                    intent_written = False
+                except Exception as stop_error:
+                    cleanup_error = stop_error
+            elif intent_written:
+                self._remove_launch_intent(launch_nonce)
+                intent_written = False
+            if cleanup_error is not None:
+                self._status = "recovery_required"
+                self._error = self._safe_error(cleanup_error)
+                raise RuntimeUnavailableError(self._error) from cleanup_error
+            self._status = "failed"
+            self._error = self._safe_error(exc)
+            self._append_log("host", f"runtime failed: {self._error}")
+            logger.error("child runtime failed: %s", self._error)
+            if isinstance(exc, RuntimeUnavailableError):
+                raise
+            raise RuntimeUnavailableError(self._error) from exc
+        self._status = "ready"
+        self._append_log(
+            "host",
+            f"runtime revision {config.revision} source {child.source_commit} is ready",
         )
         return child
 
@@ -1047,11 +1506,11 @@ class RuntimeSupervisor:
         if not self._strict_generation_readiness:
             return True
         payload = response.json()
-        return (
-            isinstance(payload, dict)
-            and payload.get("generation_id") == child.generation_id
-            and payload.get("launch_nonce") == child.launch_nonce
-        )
+        if not isinstance(payload, dict) or payload.get("launch_nonce") != child.launch_nonce:
+            return False
+        if child.generation_id is not None:
+            return payload.get("generation_id") == child.generation_id
+        return payload.get("source_commit") == child.source_commit
 
     async def _adopt_replacement_candidate(
         self,
@@ -1548,9 +2007,13 @@ class RuntimeSupervisor:
         config: HostConfig,
         *,
         port: int,
-        installed_generation: InstalledGeneration,
+        installed_generation: InstalledGeneration | None = None,
+        live_source: RuntimeLiveSourceSpec | None = None,
         launch_nonce: str | None = None,
+        runtime_dotenv: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
+        if (installed_generation is None) == (live_source is None):
+            raise RuntimeUnavailableError("runtime child identity is ambiguous")
         inherited = os.environ
         environment = {
             key: value
@@ -1564,7 +2027,13 @@ class RuntimeSupervisor:
         owner_customer_id = (
             str(inherited.get("OPENTULPA_OWNER_CUSTOMER_ID") or "").strip() or "owner"
         )
-        executable_bin = installed_generation.interpreter_path.parent
+        executable_bin = (
+            installed_generation.interpreter_path.parent
+            if installed_generation is not None
+            else live_source.python_interpreter_path.parent
+            if live_source is not None
+            else Path(sys.executable).resolve().parent
+        )
         environment.update(
             {
                 "HOST": "127.0.0.1",
@@ -1581,20 +2050,39 @@ class RuntimeSupervisor:
                 "PATH": f"{executable_bin}:{_TRUSTED_SYSTEM_PATH}",
             }
         )
-        manifest = installed_generation.manifest
-        environment.update(
-            {
-                "OPENTULPA_APPLICATION_ROOT": str(self._application_root),
-                "OPENTULPA_GENERATION_ID": installed_generation.generation_id,
-                "OPENTULPA_GENERATION_MANIFEST_DIGEST": installed_generation.manifest_digest,
-                "OPENTULPA_GENERATION_SOURCE_COMMIT": manifest.identity.source_commit,
-                "OPENTULPA_GENERATION_SOURCE_TREE_SHA256": (
-                    manifest.identity.source_tree_sha256
-                ),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONNOUSERSITE": "1",
-            }
-        )
+        if live_source is not None:
+            environment.update(
+                runtime_dotenv if runtime_dotenv is not None else self._runtime_dotenv()
+            )
+        base_identity = {
+            "OPENTULPA_APPLICATION_ROOT": str(self._application_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+        if installed_generation is not None:
+            manifest = installed_generation.manifest
+            environment.update(
+                {
+                    **base_identity,
+                    "OPENTULPA_GENERATION_ID": installed_generation.generation_id,
+                    "OPENTULPA_GENERATION_MANIFEST_DIGEST": installed_generation.manifest_digest,
+                    "OPENTULPA_GENERATION_SOURCE_COMMIT": manifest.identity.source_commit,
+                    "OPENTULPA_GENERATION_SOURCE_TREE_SHA256": (
+                        manifest.identity.source_tree_sha256
+                    ),
+                }
+            )
+        else:
+            assert live_source is not None
+            source_root = self._project_root
+            environment.update(
+                {
+                    **base_identity,
+                    "OPENTULPA_LIVE_SOURCE_ROOT": str(source_root),
+                    "OPENTULPA_SOURCE_COMMIT": live_source.source_commit,
+                    "PYTHONPATH": str(source_root / "src"),
+                }
+            )
         if launch_nonce is not None:
             environment["OPENTULPA_LAUNCH_NONCE"] = launch_nonce
         if self._railway_sandbox_bridge is not None:
@@ -1646,6 +2134,24 @@ class RuntimeSupervisor:
         self._require_root_usable(root, label="application")
         self._require_root_usable(self._data_root, label="data")
         return root.resolve(strict=True)
+
+    def _live_source_cwd(self, source_root: Path) -> Path:
+        root = source_root.expanduser().resolve(strict=True)
+        if not self._looks_like_source_checkout(root):
+            raise RuntimeUnavailableError("live source checkout is unavailable")
+        for label, external_root in (
+            ("application", self._application_root),
+            ("data", self._data_root),
+        ):
+            if self._is_relative_to(external_root, root):
+                raise RuntimeUnavailableError(
+                    f"live source {label} root cannot be inside the checkout"
+                )
+        if self._application_root.is_symlink() or not self._application_root.is_dir():
+            raise RuntimeUnavailableError("live source application root is unavailable")
+        self._require_root_usable(self._application_root, label="application")
+        self._require_root_usable(self._data_root, label="data")
+        return root
 
     def _child_spawn_argv(
         self,
@@ -1699,13 +2205,142 @@ class RuntimeSupervisor:
     async def _preflight_target(self, target: _LaunchTarget) -> None:
         if sys.platform.startswith("linux"):
             self._enable_child_subreaper()
+        self._log_isolation_mode()
+        if target.mode == "live_source":
+            live_source = target.require_live_source()
+            try:
+                await asyncio.to_thread(
+                    self._verify_live_source_commit,
+                    live_source.source_commit,
+                )
+            except Exception as exc:
+                raise RuntimeUnavailableError(self._safe_error(exc)) from exc
+            self._live_source_python_interpreter(live_source)
+            self._live_source_cwd(self._project_root)
+            self._runtime_dotenv()
+            self._require_child_cannot_write_controller_or_live_source(self._project_root)
+            return
         try:
-            installed = await self._open_generation(target.generation)
+            installed = await self._open_generation(target.require_generation())
         except Exception as exc:
             raise RuntimeUnavailableError(self._safe_error(exc)) from exc
-        self._log_isolation_mode()
         self._generation_cwd(installed)
         self._require_child_cannot_write_controller_or_generation(installed)
+
+    def _verify_live_source_commit(self, source_commit: str) -> None:
+        root = self._project_root
+        if not self._looks_like_source_checkout(root):
+            raise RuntimeUnavailableError("live source checkout is unavailable")
+        try:
+            _, common_directory = discover_git_directories(root)
+        except GitSecurityError as exc:
+            raise RuntimeUnavailableError("live source Git metadata is unsafe") from exc
+        with repository_mutation_lock(common_directory):
+            resolved = self._run_live_source_git(
+                "rev-parse",
+                "--verify",
+                f"{source_commit}^{{commit}}",
+            ).strip()
+            if resolved != source_commit:
+                raise RuntimeUnavailableError("live source commit provenance is inconsistent")
+            if self._live_source_commit_tracks_runtime_env(source_commit):
+                raise RuntimeUnavailableError("live source release must not contain .env")
+
+    def _checkout_live_source(self, source_commit: str) -> Path:
+        root = self._project_root
+        self._verify_live_source_commit(source_commit)
+        _, common_directory = discover_git_directories(root)
+        with repository_mutation_lock(common_directory):
+            status = self._live_source_dirty_status()
+            if status:
+                raise RuntimeUnavailableError("live source checkout is dirty")
+            self._run_live_source_git("checkout", "--detach", "--force", source_commit)
+            self._run_live_source_git("reset", "--hard", source_commit)
+            head = self._run_live_source_git("rev-parse", "--verify", "HEAD^{commit}").strip()
+            if head != source_commit:
+                raise RuntimeUnavailableError("live source checkout selected the wrong commit")
+            if self._live_source_dirty_status():
+                raise RuntimeUnavailableError("live source checkout is dirty after reset")
+        return root.resolve(strict=True)
+
+    def _live_source_python_interpreter(self, live_source: RuntimeLiveSourceSpec) -> Path:
+        interpreter = live_source.python_interpreter_path
+        if self._is_relative_to(interpreter, self._project_root):
+            raise RuntimeUnavailableError("live source runtime interpreter is inside the checkout")
+        try:
+            metadata = interpreter.stat(follow_symlinks=True)
+        except OSError as exc:
+            raise RuntimeUnavailableError("live source runtime interpreter is unavailable") from exc
+        if not stat.S_ISREG(metadata.st_mode) or not os.access(interpreter, os.X_OK):
+            raise RuntimeUnavailableError("live source runtime interpreter is not executable")
+        return interpreter
+
+    def _runtime_dotenv(self) -> dict[str, str]:
+        return filtered_runtime_dotenv(load_runtime_dotenv(self._project_root / ".env"))
+
+    def _live_source_dirty_status(self) -> str:
+        return self._status_without_untracked_runtime_env(
+            self._run_live_source_git(
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "-z",
+            )
+        )
+
+    @staticmethod
+    def _status_without_untracked_runtime_env(status: str) -> str:
+        dirty: list[str] = []
+        parts = status.split("\0")
+        index = 0
+        while index < len(parts):
+            entry = parts[index]
+            index += 1
+            if not entry:
+                continue
+            code = entry[:2]
+            path = entry[3:] if len(entry) > 3 else ""
+            if code == "??" and path == ".env":
+                continue
+            dirty.append(entry)
+            if (code[:1] in {"R", "C"} or code[1:2] in {"R", "C"}) and index < len(parts):
+                dirty.append(parts[index])
+                index += 1
+        return "\0".join(dirty)
+
+    def _live_source_commit_tracks_runtime_env(self, source_commit: str) -> bool:
+        result = run_hardened_git(
+            self._project_root,
+            ("cat-file", "-e", f"{source_commit}:.env"),
+            env={
+                "GIT_AUTHOR_NAME": "OpenTulpa Host",
+                "GIT_AUTHOR_EMAIL": "host@opentulpa.local",
+                "GIT_COMMITTER_NAME": "OpenTulpa Host",
+                "GIT_COMMITTER_EMAIL": "host@opentulpa.local",
+            },
+            timeout_seconds=120,
+            max_output_bytes=8_192,
+        )
+        if result.truncated:
+            raise RuntimeUnavailableError("live source Git operation failed")
+        return result.returncode == 0
+
+    def _run_live_source_git(self, *arguments: str) -> str:
+        result = run_hardened_git(
+            self._project_root,
+            tuple(arguments),
+            env={
+                "GIT_AUTHOR_NAME": "OpenTulpa Host",
+                "GIT_AUTHOR_EMAIL": "host@opentulpa.local",
+                "GIT_COMMITTER_NAME": "OpenTulpa Host",
+                "GIT_COMMITTER_EMAIL": "host@opentulpa.local",
+            },
+            timeout_seconds=120,
+            max_output_bytes=10 * 1024 * 1024,
+        )
+        if result.returncode != 0 or result.truncated:
+            raise RuntimeUnavailableError("live source Git operation failed")
+        return result.output.decode("utf-8", errors="replace")
 
     def _enable_child_subreaper(self) -> None:
         if self._subreaper_attempted:
@@ -1761,6 +2396,29 @@ class RuntimeSupervisor:
                     "runtime child identity can write a protected controller or generation root"
                 )
 
+    def _require_child_cannot_write_controller_or_live_source(self, source_root: Path) -> None:
+        protected_paths = [self._control_path.parent, source_root]
+        git_path = source_root / ".git"
+        if git_path.is_dir():
+            protected_paths.append(git_path)
+        uid = self._child_uid
+        gid = self._child_gid
+        for path in dict.fromkeys(protected_paths):
+            try:
+                metadata = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeUnavailableError("protected runtime root is unavailable") from exc
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeUnavailableError("protected runtime root is unsafe")
+            if uid is not None and gid is not None:
+                writable = self._mode_allows(metadata, uid=uid, gid=gid, required=0o2)
+            else:
+                writable = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
+            if writable:
+                raise RuntimeUnavailableError(
+                    "runtime child identity can write a protected controller or live source root"
+                )
+
     def _require_root_usable(self, root: Path, *, label: str) -> None:
         try:
             metadata = root.stat(follow_symlinks=False)
@@ -1808,13 +2466,13 @@ class RuntimeSupervisor:
         if self._child_uid is None:
             self._append_log(
                 "host",
-                "generation runtime is using integrity-only same-UID mode; "
+                "runtime is using integrity-only same-UID mode; "
                 "child-UID isolation is unavailable on this controller",
             )
         else:
             self._append_log(
                 "host",
-                f"generation runtime will use dedicated UID/GID "
+                f"runtime will use dedicated UID/GID "
                 f"{self._child_uid}/{self._child_gid}",
             )
         self._isolation_mode_logged = True
@@ -2018,9 +2676,11 @@ class RuntimeSupervisor:
             os.close(descriptor)
 
     def _selected_target(self) -> _LaunchTarget:
-        if self._selected_generation is None:
-            raise RuntimeUnavailableError("no immutable runtime generation is selected")
-        return _LaunchTarget.for_generation(self._selected_generation)
+        if self._selected_generation is not None:
+            return _LaunchTarget.for_generation(self._selected_generation)
+        if self._selected_live_source is not None:
+            return _LaunchTarget.for_live_source(self._selected_live_source)
+        raise RuntimeUnavailableError("no runtime generation or live source is selected")
 
     def _current_target(self) -> _LaunchTarget:
         if self._child is not None:
@@ -2037,7 +2697,12 @@ class RuntimeSupervisor:
         raise RuntimeUnavailableError("runtime is not configured")
 
     def _select_target(self, target: _LaunchTarget) -> None:
-        self._selected_generation = target.generation
+        if target.mode == "generation":
+            self._selected_generation = target.require_generation()
+            self._selected_live_source = None
+        else:
+            self._selected_generation = None
+            self._selected_live_source = target.require_live_source()
 
     async def _ensure_orphan_fenced(self) -> None:
         if self._ownership_checked:
@@ -2236,8 +2901,9 @@ class RuntimeSupervisor:
             process_group=child.process_group,
             host_pid=os.getpid(),
             host_birth=self._capture_process_birth(os.getpid()),
-            mode="generation",
+            mode="generation" if child.generation_id is not None else "live_source",
             generation_id=child.generation_id,
+            source_commit=child.source_commit,
             launch_nonce=child.launch_nonce,
             process_birth=child.process_birth,
             executable=str(child.executable),
@@ -2267,15 +2933,19 @@ class RuntimeSupervisor:
     def _write_launch_intent(
         self,
         *,
-        generation: RuntimeGenerationSpec,
+        generation: RuntimeGenerationSpec | None = None,
+        live_source: RuntimeLiveSourceSpec | None = None,
         launch_nonce: str,
         executable: Path,
         argv: tuple[str, ...],
     ) -> None:
+        if (generation is None) == (live_source is None):
+            raise RuntimeUnavailableError("runtime launch intent identity is ambiguous")
         intent = _LaunchIntent(
             host_pid=os.getpid(),
-            mode="generation",
-            generation_id=generation.generation_id,
+            mode="generation" if generation is not None else "live_source",
+            generation_id=generation.generation_id if generation is not None else None,
+            source_commit=live_source.source_commit if live_source is not None else None,
             launch_nonce=launch_nonce,
             executable=str(executable),
             argv=argv,
@@ -2669,6 +3339,16 @@ class RuntimeSupervisor:
         return RuntimeGenerationSpec.model_validate(value)
 
     @staticmethod
+    def _coerce_live_source_spec(
+        value: RuntimeLiveSourceSpec | Mapping[str, object] | str,
+    ) -> RuntimeLiveSourceSpec:
+        if isinstance(value, RuntimeLiveSourceSpec):
+            return value
+        if isinstance(value, str):
+            return RuntimeLiveSourceSpec(source_commit=value)
+        return RuntimeLiveSourceSpec.model_validate(value)
+
+    @staticmethod
     def _validate_identity_value(value: int | None, *, label: str) -> None:
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise ValueError(f"{label} must be a non-negative integer")
@@ -2710,6 +3390,7 @@ __all__ = [
     "ProcessInspector",
     "ProcessSignaler",
     "RuntimeGenerationSpec",
+    "RuntimeLiveSourceSpec",
     "RuntimeLogEntry",
     "RuntimeProcessIdentity",
     "RuntimeSupervisor",

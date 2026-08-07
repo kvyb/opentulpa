@@ -561,6 +561,15 @@ class EvolutionPort(Protocol):
         audit_context: Mapping[str, str] | None = None,
     ) -> Any: ...
 
+    async def source_set_runtime_env(
+        self,
+        *,
+        name: str,
+        value: str,
+        idempotency_key: str,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> Any: ...
+
 
 class TracePort(Protocol):
     async def trace_list(
@@ -2382,6 +2391,21 @@ class ProductToolApplication:
                     invocation.arguments["expected_target_release_id"]
                 ),
                 reason=str(invocation.arguments["reason"]),
+                audit_context=self._evolution_audit_context(invocation),
+            ),
+        )
+
+    async def source_set_runtime_env(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput:
+        evolution = self._require_evolution(invocation)
+        return await self._idempotent_output(
+            invocation,
+            lambda: evolution.source_set_runtime_env(
+                name=str(invocation.arguments["name"]),
+                value=str(invocation.arguments["value"]),
+                idempotency_key=self._required_key(invocation),
                 audit_context=self._evolution_audit_context(invocation),
             ),
         )

@@ -211,6 +211,13 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
         "idempotency_key",
         "reason",
     }
+    source_env = next(tool for tool in tools if tool.name == "source_set_runtime_env")
+    assert set(source_env.tool_call_schema.model_json_schema()["properties"]) == {
+        "name",
+        "value",
+        "idempotency_key",
+    }
+    assert "Never returns the value" in source_env.description
 
 
 @pytest.mark.asyncio

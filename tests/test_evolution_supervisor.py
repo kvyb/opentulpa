@@ -57,6 +57,7 @@ from opentulpa.evolution.release_builder import (
     ReleaseBuildError,
     ReleaseBuildRequest,
 )
+from opentulpa.evolution.release_provenance import live_repo_artifact_digest
 from opentulpa.evolution.sandbox import TrustedLocalCandidateBackend
 from opentulpa.evolution.supervisor import (
     EvolutionSupervisor,
@@ -127,9 +128,11 @@ class _FakeReleaseBuilder:
         *,
         fail: bool = False,
         artifact_kind: str = "oci_image",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.fail = fail
         self.artifact_kind = artifact_kind
+        self.metadata = dict(metadata or {})
         self.requests: list[ReleaseBuildRequest] = []
 
     async def build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
@@ -138,20 +141,27 @@ class _FakeReleaseBuilder:
             raise ReleaseBuildError("Candidate OCI image build failed.")
         image = hashlib.sha256(f"image:{request.source_commit}".encode()).hexdigest()
         manifest = hashlib.sha256(f"manifest:{request.source_commit}".encode()).hexdigest()
+        artifact_digest = (
+            f"sha256:{manifest}"
+            if self.artifact_kind == "python_generation"
+            else live_repo_artifact_digest(request.source_commit)
+            if self.artifact_kind == "live_repo"
+            else f"sha256:{image}"
+        )
+        manifest_digest = artifact_digest if self.artifact_kind == "live_repo" else f"sha256:{manifest}"
         return OciReleaseArtifact(
             artifact_kind=self.artifact_kind,  # type: ignore[arg-type]
-            artifact_digest=(
-                f"sha256:{manifest}"
-                if self.artifact_kind == "python_generation"
-                else f"sha256:{image}"
-            ),
-            manifest_digest=f"sha256:{manifest}",
+            artifact_digest=artifact_digest,
+            manifest_digest=manifest_digest,
             image_reference=(
                 f"python-generation:{manifest}"
                 if self.artifact_kind == "python_generation"
+                else f"git-commit:{request.source_commit}"
+                if self.artifact_kind == "live_repo"
                 else f"opentulpa-release:{manifest[:32]}"
             ),
             entrypoint=("python", "-m", "site_app"),
+            metadata=self.metadata,
         )
 
 
@@ -965,6 +975,36 @@ async def _release_route(
     candidate = await supervisor.get_candidate(str(edited["candidate"]["id"]))
     assert candidate is not None
     return candidate, PromotionAttempt.model_validate(released["promotion"])
+
+
+@pytest.mark.asyncio
+async def test_live_repo_source_release_preserves_runtime_environment_metadata(
+    tmp_path: Path,
+) -> None:
+    source = _source_repository(tmp_path)
+    runtime_metadata = {
+        "runtime_environment_id": "e" * 64,
+        "runtime_python_interpreter": str(tmp_path / "runtime-env" / "bin" / "python"),
+        "runtime_dependency_lock_hash": "f" * 64,
+        "runtime_pyproject_sha256": "1" * 64,
+        "runtime_install_profile": "runtime-no-dev-no-install-project-v1",
+    }
+    builder = _FakeReleaseBuilder(artifact_kind="live_repo", metadata=runtime_metadata)
+    activator = _FakeReleaseActivator()
+    supervisor = _supervisor(tmp_path, source, builder=builder, activator=activator)
+    await supervisor.start()
+
+    _, attempt = await _release_route(
+        supervisor,
+        route="status",
+        idempotency_key="release-live-repo-runtime-env",
+    )
+    completed = await _terminal_attempt(supervisor, attempt)
+
+    assert completed.status is PromotionAttemptStatus.ACTIVE
+    for key, value in runtime_metadata.items():
+        assert completed.release.metadata[key] == value
+        assert activator.calls[-1]["release"].metadata[key] == value
 
 
 @pytest.mark.asyncio

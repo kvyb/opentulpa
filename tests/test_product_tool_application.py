@@ -675,6 +675,38 @@ async def test_external_delivery_replays_from_durable_idempotency_store(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_source_set_runtime_env_replays_from_durable_idempotency_store(
+    tmp_path: Path,
+) -> None:
+    evolution = _Port(
+        source_set_runtime_env={
+            "status": "updated",
+            "name": "OPENAI_COMPATIBLE_API_KEY",
+            "changed": True,
+            "restarted": True,
+            "value": "[set]",
+        }
+    )
+    application, _ = _application(
+        evolution=evolution,
+        idempotency=IdempotencyStore(tmp_path / "runtime-env-effects.sqlite"),
+    )
+    invocation = _invocation(
+        "source_set_runtime_env",
+        {"name": "OPENAI_COMPATIBLE_API_KEY", "value": "provider-secret"},
+        idempotency_key="runtime-env-replay-1",
+    )
+
+    first = await application.source_set_runtime_env(invocation)
+    replay = await application.source_set_runtime_env(invocation)
+
+    assert first == replay
+    assert first.data["value"] == "[set]"
+    assert [name for name, _ in evolution.calls] == ["source_set_runtime_env"]
+    assert evolution.calls[0][1]["idempotency_key"] == "runtime-env-replay-1"
+
+
+@pytest.mark.asyncio
 async def test_intake_confirmation_token_is_exposed_only_as_model_handle(
     tmp_path: Path,
 ) -> None:

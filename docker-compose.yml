@@ -7,6 +7,7 @@ services:
     environment:
       HOST: 0.0.0.0
       OPENTULPA_DATA_ROOT: /app/opentulpa_data
+      OPENTULPA_SOURCE_ROOT: /app/opentulpa
       PORT: 8000
     ports:
       - "8000:8000"
@@ -17,6 +18,7 @@ services:
       - seccomp=unconfined
       - apparmor=unconfined
     volumes:
+      - .:/app/opentulpa
       - opentulpa_data:/app/opentulpa_data
     command: ["/opt/opentulpa-install/controller/generations/image/bin/opentulpa-host"]
 

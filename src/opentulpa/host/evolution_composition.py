@@ -47,15 +47,24 @@ from opentulpa.evolution.sandbox import (
 from opentulpa.evolution.supervisor import EvolutionSupervisor
 from opentulpa.evolution.workspace import GitCandidateWorkspace
 from opentulpa.host.evolution import (
+    HostEvolutionControlService,
     HostEvolutionRuntime,
     HostReleaseActivator,
     RuntimeEvolutionEventSink,
     TrustedGenerationReleaseProvider,
+    TrustedLiveRepoReleaseBuilder,
+    TrustedLiveRepoReleaseProvider,
+    prepare_live_source_repository,
     seed_source_repository,
 )
 from opentulpa.host.runtime import RuntimeSupervisor
+from opentulpa.host.runtime_environment import (
+    LiveSourceRuntimeEnvironmentStore,
+    RuntimeEnvFileManager,
+)
 
 _EVALUATOR_VERSION = "host-python-generation-v1"
+_LIVE_REPO_EVALUATOR_VERSION = "host-live-repo-v1"
 _INSTALL_PROFILE = "runtime"
 _PACKAGING_METADATA = (
     "MANIFEST.in",
@@ -152,11 +161,7 @@ def build_host_evolution_runtime(
 
     if not settings.evolution_enabled:
         return None
-    configured_seed = str(os.environ.get("OPENTULPA_SOURCE_SEED_ROOT") or "").strip()
-    seed_root = Path(configured_seed or "/opt/opentulpa-source").expanduser()
-    if not seed_root.is_dir():
-        return None
-    _verify_installed_source_seed(seed_root)
+    live_repository = _live_source_repository(runtime)
 
     resolved_data = data_root.expanduser().absolute()
     resolved_control = (
@@ -167,15 +172,109 @@ def build_host_evolution_runtime(
     del product_root
     evolution_root = resolved_control / "evolution"
     _private_directory(evolution_root)
-    repository = seed_source_repository(
-        seed_root=seed_root,
-        repository=evolution_root / "source",
-    )
     worktrees_root = evolution_root / "worktrees"
     initial_worktrees_root = evolution_root / "initial-worktrees"
     artifacts_root = evolution_root / "artifacts"
     for root in (worktrees_root, initial_worktrees_root, artifacts_root):
         _private_directory(root)
+
+    if live_repository is not None:
+        runtime_environment_store = LiveSourceRuntimeEnvironmentStore(
+            source_repository=live_repository,
+            envs_root=resolved_data / "runtime-source-envs",
+            worktrees_root=evolution_root / "runtime-env-worktrees",
+            uv_cli=_trusted_uv_cli(),
+            timeout_seconds=max(900, settings.sandbox_timeout_seconds),
+            max_output_bytes=settings.sandbox_max_output_bytes,
+        )
+        runtime_env_manager = RuntimeEnvFileManager(
+            source_root=live_repository,
+            runtime=runtime,
+        )
+        sandbox_policy = CandidateSandboxPolicy(
+            cpu_limit=settings.sandbox_cpu_limit,
+            memory_limit=settings.sandbox_memory_limit,
+            pid_limit=settings.sandbox_pid_limit,
+            timeout_seconds=max(900, settings.sandbox_timeout_seconds),
+            max_output_bytes=settings.sandbox_max_output_bytes,
+            network_enabled=False,
+        )
+
+        def live_candidate_backend(workspace: Path) -> TrustedLocalCandidateBackend:
+            return TrustedLocalCandidateBackend(
+                workspace=workspace,
+                allowed_root=worktrees_root,
+                policy=sandbox_policy,
+            )
+
+        evaluator_executables = _trusted_local_evaluation_executables()
+        evaluator = CandidateEvaluator(
+            runner=LocalEvaluationRunner(
+                fingerprint_context=lambda: _trusted_local_evaluation_context(
+                    evaluator_executables
+                )
+            ),
+            commands=trusted_default_commands(
+                timeout_seconds=900,
+                executables=evaluator_executables,
+            ),
+        )
+        lineage = GitLineage(live_repository, worktrees_root=worktrees_root)
+        archive = EvolutionArchive(evolution_root / "archive.db")
+        activator = HostReleaseActivator(
+            runtime=runtime,
+            runtime_environment_store=runtime_environment_store,
+        )
+        service = EvolutionSupervisor(
+            archive=archive,
+            workspaces=GitCandidateWorkspace(
+                source_repository=live_repository,
+                worktrees_root=worktrees_root,
+                artifacts_root=artifacts_root,
+            ),
+            candidate_backend_factory=live_candidate_backend,
+            evaluator=evaluator,
+            evaluator_version=_LIVE_REPO_EVALUATOR_VERSION,
+            release_pointer=AtomicReleasePointer(evolution_root / "current_release.json"),
+            source_ref="refs/opentulpa/instance",
+            upstream_repository=settings.evolution_upstream_repository,
+            upstream_ref=settings.evolution_upstream_ref,
+            release_builder=TrustedLiveRepoReleaseBuilder(
+                runtime_environment_store=runtime_environment_store,
+            ),
+            release_activator=activator,
+            lineage=lineage,
+            event_sink=RuntimeEvolutionEventSink(runtime),
+            source_mutation_enabled=True,
+            source_mutation_unavailable_reason=None,
+        )
+        live_initial = TrustedLiveRepoReleaseProvider(
+            source_repository=live_repository,
+            evaluator_version=_LIVE_REPO_EVALUATOR_VERSION,
+            evaluator_fingerprint=lambda: evaluator.fingerprint,
+            runtime_environment_store=runtime_environment_store,
+        )
+        return HostEvolutionRuntime(
+            runtime=runtime,
+            archive=archive,
+            evolution=service,
+            activator=activator,
+            initial_release=live_initial,
+            control_service=HostEvolutionControlService(
+                evolution=service,
+                runtime_env_file_manager=runtime_env_manager,
+            ),
+        )
+
+    configured_seed = str(os.environ.get("OPENTULPA_SOURCE_SEED_ROOT") or "").strip()
+    seed_root = Path(configured_seed or "/opt/opentulpa-source").expanduser()
+    if not seed_root.is_dir():
+        return None
+    _verify_installed_source_seed(seed_root)
+    repository = seed_source_repository(
+        seed_root=seed_root,
+        repository=evolution_root / "source",
+    )
 
     store = generation_store or GenerationStore(
         resolved_data / "runtime-generations",
@@ -393,6 +492,21 @@ def _private_directory(path: Path) -> None:
     ):
         raise RuntimeError("host evolution controller root is unsafe")
     path.chmod(0o700)
+
+
+def _live_source_repository(runtime: RuntimeSupervisor) -> Path | None:
+    raw_root = getattr(runtime, "project_root", None)
+    if raw_root is None:
+        return None
+    root = Path(raw_root).expanduser()
+    if not (
+        root.is_dir()
+        and (root / ".git").exists()
+        and (root / "src" / "opentulpa" / "__init__.py").is_file()
+        and (root / "uv.lock").is_file()
+    ):
+        return None
+    return prepare_live_source_repository(root)
 
 
 def _trusted_local_evaluation_executables() -> EvaluationExecutables:

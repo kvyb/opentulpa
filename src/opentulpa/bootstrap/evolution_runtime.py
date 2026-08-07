@@ -81,7 +81,7 @@ class TrustedSourceReleaseProvider:
             )
         )
         accepted_upstream = await self._accepted_upstream(source_commit)
-        if artifact.artifact_kind not in {"oci_image", "python_generation"}:
+        if artifact.artifact_kind not in {"oci_image", "python_generation", "live_repo"}:
             raise RuntimeError("trusted builder returned a mutable release artifact")
         generation = _GENERATION_REFERENCE_RE.fullmatch(artifact.image_reference)
         if artifact.artifact_kind == "python_generation" and generation is None:
@@ -89,6 +89,7 @@ class TrustedSourceReleaseProvider:
         artifact_metadata: dict[str, JsonValue] = {
             "artifact_kind": artifact.artifact_kind,
             "image_reference": artifact.image_reference,
+            **artifact.metadata,
             **(
                 {"generation_id": generation.group(1)}
                 if artifact.artifact_kind == "python_generation" and generation is not None

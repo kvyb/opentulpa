@@ -34,10 +34,12 @@ from opentulpa.host import runtime as runtime_module
 from opentulpa.host.models import HostConfig
 from opentulpa.host.runtime import (
     RuntimeGenerationSpec,
+    RuntimeLiveSourceSpec,
     RuntimeProcessIdentity,
     RuntimeSupervisor,
     RuntimeUnavailableError,
 )
+from opentulpa.host.runtime_environment import RuntimeEnvFileManager
 
 
 def _config() -> HostConfig:
@@ -281,12 +283,52 @@ def _fake_child(
         config=_config(),
         generation=spec,
         installed_generation=installed,
+        live_source=None,
         launch_nonce=launch_nonce,
         process_group=child_process.pid,
         process_birth="test-birth-identity",
         executable=installed.interpreter_path,
         argv=installed.entrypoint_argv,
         readers=(),
+    )
+
+
+def _fake_live_child(
+    spec: RuntimeLiveSourceSpec,
+    *,
+    process: _FakeProcess | None = None,
+    launch_nonce: str = "n" * 32,
+) -> Any:
+    child_process = process or _FakeProcess()
+    executable = Path(sys.executable).resolve()
+    return runtime_module._Child(
+        process=cast(asyncio.subprocess.Process, child_process),
+        endpoint="http://127.0.0.1:8123",
+        config=_config(),
+        generation=None,
+        installed_generation=None,
+        live_source=spec,
+        launch_nonce=launch_nonce,
+        process_group=child_process.pid,
+        process_birth="test-birth-identity",
+        executable=executable,
+        argv=(str(executable), "-P", "-m", "opentulpa"),
+        readers=(),
+    )
+
+
+def _live_source_spec_with_environment(tmp_path: Path, *, commit: str = "d" * 40) -> RuntimeLiveSourceSpec:
+    interpreter = tmp_path / "runtime-env" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+    return RuntimeLiveSourceSpec(
+        source_commit=commit,
+        runtime_environment_id="e" * 64,
+        runtime_python_interpreter=str(interpreter),
+        runtime_dependency_lock_hash="f" * 64,
+        runtime_pyproject_sha256="1" * 64,
+        runtime_install_profile="runtime-no-dev-no-install-project-v1",
     )
 
 
@@ -412,6 +454,235 @@ async def test_child_environment_hides_interface_secrets_and_logs_redact_exact_v
 
 
 @pytest.mark.asyncio
+async def test_live_source_environment_loads_dotenv_without_leaking_host_owned_keys(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "src" / "opentulpa").mkdir(parents=True)
+    (source / "src" / "opentulpa" / "__init__.py").write_text("", encoding="utf-8")
+    dotenv = source / ".env"
+    dotenv.write_text(
+        "OPENAI_COMPATIBLE_API_KEY=dotenv-provider-secret\n"
+        "TELEGRAM_BOT_TOKEN=dotenv-telegram-secret\n"
+        "PATH=/tmp/hostile-bin\n"
+        "OPENTULPA_OWNER_TOKEN=dotenv-owner-token\n",
+        encoding="utf-8",
+    )
+    dotenv.chmod(0o600)
+    spec = _live_source_spec_with_environment(tmp_path)
+    runtime = RuntimeSupervisor(
+        project_root=source,
+        data_root=tmp_path / "data",
+        live_source_spec=spec,
+    )
+
+    environment = runtime._child_environment(
+        _config(),
+        port=8123,
+        live_source=spec,
+    )
+
+    assert environment["OPENAI_COMPATIBLE_API_KEY"] == "dotenv-provider-secret"
+    assert environment["TELEGRAM_BOT_TOKEN"] == "dotenv-telegram-secret"
+    assert environment["OPENTULPA_OWNER_TOKEN"] == "internal-owner-secret-value"
+    assert environment["PATH"].startswith(f"{spec.python_interpreter_path.parent}:")
+    assert "/tmp/hostile-bin" not in environment["PATH"]
+    assert environment["PYTHONPATH"] == str(source / "src")
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_live_source_retry_reloads_dotenv_and_uses_release_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    (source / "src" / "opentulpa").mkdir(parents=True)
+    (source / "src" / "opentulpa" / "__init__.py").write_text("", encoding="utf-8")
+    dotenv = source / ".env"
+    dotenv.write_text("RUNTIME_API_KEY=first\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+    spec = _live_source_spec_with_environment(tmp_path)
+    runtime = RuntimeSupervisor(
+        project_root=source,
+        data_root=tmp_path / "data",
+        live_source_spec=spec,
+        control_path=tmp_path / "control" / "runtime-child.json",
+    )
+    runtime._child_uid = None
+    runtime._child_gid = None
+    launches: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    attempts = 0
+
+    async def create_process(*argv: str, **options: Any) -> _FakeProcess:
+        process = _FakeProcess()
+        launches.append((argv, dict(options["env"])))
+        return process
+
+    async def wait_ready(child: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            child.process.exit(98)
+            dotenv.write_text("RUNTIME_API_KEY=second\n", encoding="utf-8")
+            dotenv.chmod(0o600)
+            raise runtime_module._ChildExitedBeforeReadyError("first child exited")
+
+    async def terminate(child: Any) -> None:
+        if child.process.returncode is None:
+            child.process.exit(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(runtime, "_checkout_live_source", lambda commit: source)
+    monkeypatch.setattr(runtime, "_live_source_cwd", lambda root: source)
+    monkeypatch.setattr(runtime, "_wait_ready", wait_ready)
+    monkeypatch.setattr(runtime, "_terminate_child_process_group", terminate)
+    monkeypatch.setattr(runtime, "_capture_process_birth", lambda pid: f"test:{pid}")
+
+    child = await runtime._spawn_live_source(_config(), live_source=spec)
+
+    assert attempts == 2
+    assert [launch[0][0] for launch in launches] == [str(spec.python_interpreter_path)] * 2
+    assert [launch[1]["RUNTIME_API_KEY"] for launch in launches] == ["first", "second"]
+    await runtime._stop_child(child)
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_file_manager_restores_dotenv_when_restart_fails(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    dotenv = source / ".env"
+    dotenv.write_text("OPENAI_COMPATIBLE_API_KEY=previous\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+
+    class FailingRuntime:
+        status = "ready"
+
+        async def replace_current_environment(self, *, apply: Any, restore: Any) -> None:
+            apply()
+            restore()
+            raise RuntimeUnavailableError("restart failed")
+
+    manager = RuntimeEnvFileManager(source_root=source, runtime=FailingRuntime())
+
+    result = await manager.set(
+        name="OPENAI_COMPATIBLE_API_KEY",
+        value="updated",
+        idempotency_key="env-update-1",
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_stage"] == "runtime_restart"
+    assert result["rollback_restored"] is True
+    assert result["value"] == "[redacted]"
+    assert dotenv.read_text(encoding="utf-8") == "OPENAI_COMPATIBLE_API_KEY=previous\n"
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_file_manager_rejects_world_readable_existing_dotenv(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    dotenv = source / ".env"
+    dotenv.write_text("OPENAI_COMPATIBLE_API_KEY=previous\n", encoding="utf-8")
+    dotenv.chmod(0o644)
+
+    class Runtime:
+        status = "ready"
+
+        async def replace_current_environment(self, *, apply: Any, restore: Any) -> None:
+            raise AssertionError("unsafe .env files must not restart the runtime")
+
+    result = await RuntimeEnvFileManager(source_root=source, runtime=Runtime()).set(
+        name="OPENAI_COMPATIBLE_API_KEY",
+        value="updated",
+        idempotency_key="env-update-unsafe",
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_stage"] == "env_read"
+    assert result["error"]["code"] == "runtime_env_file_invalid"
+    assert dotenv.read_text(encoding="utf-8") == "OPENAI_COMPATIBLE_API_KEY=previous\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_current_environment_restores_env_when_child_stop_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed, spec = _fake_generation(tmp_path)
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        generation_store=_RecordingGenerationStore(installed),  # type: ignore[arg-type]
+        generation_spec=spec,
+    )
+    previous = _fake_child(installed, spec)
+    runtime._child = previous
+    runtime._status = "ready"
+    applied = False
+    restored = False
+
+    def apply() -> None:
+        nonlocal applied
+        applied = True
+
+    def restore() -> None:
+        nonlocal restored
+        restored = True
+
+    async def stop_child(child: Any) -> None:
+        assert child is previous
+        runtime._status = "recovery_required"
+        raise RuntimeUnavailableError("stop failed")
+
+    async def spawn_target(config: HostConfig, target: Any) -> Any:
+        del config, target
+        raise AssertionError("stop failures must not spawn a replacement child")
+
+    monkeypatch.setattr(runtime, "_ensure_controller_ownership", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(runtime, "_preflight_target", _no_op_async)
+    monkeypatch.setattr(runtime, "_stop_child", stop_child)
+    monkeypatch.setattr(runtime, "_spawn_target", spawn_target)
+
+    with pytest.raises(RuntimeUnavailableError, match="stop failed"):
+        await runtime.replace_current_environment(apply=apply, restore=restore)
+
+    assert applied is True
+    assert restored is True
+    assert runtime._child is previous
+    assert runtime.status == "recovery_required"
+    runtime._child = None
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_file_manager_rejects_host_owned_env_key(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+
+    class Runtime:
+        status = "ready"
+
+        async def replace_current_environment(self, *, apply: Any, restore: Any) -> None:
+            raise AssertionError("protected keys must not restart the runtime")
+
+    result = await RuntimeEnvFileManager(source_root=source, runtime=Runtime()).set(
+        name="PATH",
+        value="/tmp/hostile",
+        idempotency_key="env-update-2",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "runtime_env_key_protected"
+    assert not (source / ".env").exists()
+
+
+@pytest.mark.asyncio
 async def test_generation_runtime_uses_stable_host_railway_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -495,10 +766,10 @@ def test_generation_spec_is_strict_persistable_and_constructible_from_release_me
 
 
 @pytest.mark.asyncio
-async def test_runtime_refuses_to_start_without_an_immutable_generation(tmp_path: Path) -> None:
+async def test_runtime_refuses_to_start_without_a_runtime_target(tmp_path: Path) -> None:
     runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
 
-    with pytest.raises(RuntimeUnavailableError, match="no immutable runtime generation"):
+    with pytest.raises(RuntimeUnavailableError, match="no runtime generation or live source"):
         await runtime.start(_config())
 
     assert runtime.status == "stopped"
@@ -802,6 +1073,9 @@ async def test_failed_generation_candidate_restores_exact_previous_generation(
     async def stop_child(child: Any) -> None:
         child.requested_stop = True
 
+    async def preflight_target(target: Any) -> None:
+        del target
+
     async def spawn_target(config: HostConfig, target: Any) -> Any:
         del config
         assert target.generation is not None
@@ -815,6 +1089,7 @@ async def test_failed_generation_candidate_restores_exact_previous_generation(
         runtime._status = "ready"
 
     monkeypatch.setattr(runtime, "_stop_child", stop_child)
+    monkeypatch.setattr(runtime, "_preflight_target", preflight_target)
     monkeypatch.setattr(runtime, "_spawn_target", spawn_target)
     monkeypatch.setattr(runtime, "_adopt_child", adopt)
 
@@ -824,6 +1099,57 @@ async def test_failed_generation_candidate_restores_exact_previous_generation(
     assert launches == [candidate_spec, previous_spec]
     assert runtime.generation == previous_spec
     assert runtime._child.generation == previous_spec
+    assert runtime.status == "ready"
+    runtime._child = None
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_live_source_candidate_restores_exact_previous_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_spec = RuntimeLiveSourceSpec(source_commit="a" * 40)
+    candidate_spec = RuntimeLiveSourceSpec(source_commit="b" * 40)
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        live_source_spec=previous_spec,
+    )
+    previous = _fake_live_child(previous_spec)
+    runtime._child = previous
+    runtime._status = "ready"
+    launches: list[RuntimeLiveSourceSpec] = []
+
+    async def stop_child(child: Any) -> None:
+        child.requested_stop = True
+
+    async def preflight_target(target: Any) -> None:
+        del target
+
+    async def spawn_target(config: HostConfig, target: Any) -> Any:
+        del config
+        assert target.live_source is not None
+        launches.append(target.live_source)
+        if target.live_source == candidate_spec:
+            raise RuntimeUnavailableError("candidate source is unhealthy")
+        return _fake_live_child(target.live_source)
+
+    def adopt(child: Any) -> None:
+        runtime._child = child
+        runtime._status = "ready"
+
+    monkeypatch.setattr(runtime, "_stop_child", stop_child)
+    monkeypatch.setattr(runtime, "_preflight_target", preflight_target)
+    monkeypatch.setattr(runtime, "_spawn_target", spawn_target)
+    monkeypatch.setattr(runtime, "_adopt_child", adopt)
+
+    with pytest.raises(RuntimeUnavailableError, match="candidate source is unhealthy"):
+        await runtime.replace_live_source(candidate_spec, rollback=previous_spec)
+
+    assert launches == [candidate_spec, previous_spec]
+    assert runtime.live_source == previous_spec
+    assert runtime._child.live_source == previous_spec
     assert runtime.status == "ready"
     runtime._child = None
     await runtime.shutdown()

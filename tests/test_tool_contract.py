@@ -90,6 +90,7 @@ EXPECTED_OPERATIONS = {
     "source_shell",
     "source_release",
     "source_rollback",
+    "source_set_runtime_env",
     "trace_list",
     "trace_get",
 }
@@ -98,7 +99,7 @@ EXPECTED_OPERATIONS = {
 def test_registry_is_complete_unique_and_versioned() -> None:
     names = [spec.name for spec in TOOL_SPECS]
 
-    assert len(names) == 70
+    assert len(names) == 71
     assert len(names) == len(set(names))
     assert set(names) == EXPECTED_OPERATIONS
     assert set(TOOL_SPEC_BY_NAME) == EXPECTED_OPERATIONS
@@ -137,7 +138,7 @@ def test_registry_limits_approval_to_source_shell_policy() -> None:
     assert TOOL_SPEC_BY_NAME["source_shell"].idempotency is IdempotencyMode.NONE
     assert TOOL_SPEC_BY_NAME["sandbox_ssh_diagnostic"].approval is ApprovalMode.POLICY
     assert TOOL_SPEC_BY_NAME["sandbox_ssh_diagnostic"].idempotency is IdempotencyMode.NONE
-    for name in ("source_release", "source_rollback"):
+    for name in ("source_release", "source_rollback", "source_set_runtime_env"):
         assert TOOL_SPEC_BY_NAME[name].idempotency is IdempotencyMode.REQUIRED
 
 
@@ -212,7 +213,7 @@ def test_machine_contract_contains_types_and_exact_registry() -> None:
     schema = tool_contract_json_schema()
 
     assert document["contract_version"] == CONTRACT_VERSION
-    assert len(document["operations"]) == 70
+    assert len(document["operations"]) == 71
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["x-opentulpa-contract-version"] == CONTRACT_VERSION
     assert schema["x-opentulpa-operations"] == document["operations"]

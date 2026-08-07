@@ -389,6 +389,7 @@ def test_generation_health_echoes_exact_runtime_identity(monkeypatch: pytest.Mon
         assert identity.status_code == 200
         assert identity.json() == {
             "generation_id": generation_id,
+            "source_commit": None,
             "launch_nonce": launch_nonce,
         }
 

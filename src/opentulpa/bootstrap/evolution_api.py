@@ -66,6 +66,12 @@ class SourceRollbackRequest(SourceContextRequest):
     reason: str = Field(default="Owner requested rollback", max_length=4_000)
 
 
+class SourceRuntimeEnvSetRequest(SourceContextRequest):
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    name: str = Field(pattern=r"^[A-Z_][A-Z0-9_]{0,127}$")
+    value: str = Field(max_length=65_536)
+
+
 def register_evolution_control_api(
     app: FastAPI,
     *,
@@ -150,6 +156,17 @@ def register_evolution_control_api(
             audit_context=body.audit_context,
         )
         return dict(attempt.model_dump(mode="json"))
+
+    @router.post("/source/runtime-env")
+    async def source_runtime_env_set(body: SourceRuntimeEnvSetRequest) -> dict[str, Any]:
+        return dict(
+            await service.source_set_runtime_env(
+                name=body.name,
+                value=body.value,
+                idempotency_key=body.idempotency_key,
+                audit_context=body.audit_context,
+            )
+        )
 
     @router.get("/candidates")
     async def list_candidates(
@@ -372,6 +389,28 @@ class EvolutionClient:
             },
         )
         return PromotionAttempt.model_validate(result)
+
+    async def source_set_runtime_env(
+        self,
+        *,
+        name: str,
+        value: str,
+        idempotency_key: str,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._mapping(
+            await self._json(
+                "POST",
+                "/source/runtime-env",
+                json={
+                    "name": name,
+                    "value": value,
+                    "idempotency_key": idempotency_key,
+                    "audit_context": dict(audit_context or {}),
+                },
+                timeout=httpx.Timeout(60.0, read=300.0),
+            )
+        )
 
     async def get_candidate(self, candidate_id: str) -> Candidate | None:
         response = await self._request("GET", f"/candidates/{self._identifier(candidate_id)}")

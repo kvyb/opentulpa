@@ -47,10 +47,11 @@ from opentulpa.core.config import get_settings
 from opentulpa.evolution.generation_store import GenerationStore
 from opentulpa.evolution.models import Release
 from opentulpa.host.app import create_host_app
+from opentulpa.host.evolution import prepare_live_source_repository
 from opentulpa.host.evolution_composition import build_host_evolution_runtime
 from opentulpa.host.models import HostConfigInput
 from opentulpa.host.paths import HostPaths
-from opentulpa.host.runtime import RuntimeGenerationSpec, RuntimeSupervisor
+from opentulpa.host.runtime import RuntimeGenerationSpec, RuntimeLiveSourceSpec, RuntimeSupervisor
 from opentulpa.host.service import HostService
 from opentulpa.host.store import HostStore
 from opentulpa.sandbox.supervisor import SandboxWorkerSupervisor
@@ -175,6 +176,10 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         probation_seconds=probation_seconds,
         probation_probe_interval_seconds=probation_probe_interval_seconds,
     )
+    if recovered_generation is None:
+        live_source = _load_current_live_source(project_root)
+        if live_source is not None:
+            runtime.set_live_source(live_source)
     sandbox = SandboxWorkerSupervisor(
         project_root=project_root,
         data_root=paths.control_root / "sandbox-host",
@@ -344,6 +349,25 @@ def _load_current_generation(
             "Run the installer/recovery flow."
         ) from exc
     return spec
+
+
+def _load_current_live_source(project_root: Path) -> RuntimeLiveSourceSpec | None:
+    if not (_is_source_checkout(project_root) and (project_root / ".git").exists()):
+        return None
+    repository = prepare_live_source_repository(project_root)
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD^{commit}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HostInstallRequiredError(
+            "Installed OpenTulpa cannot verify its live source checkout."
+        ) from exc
+    return RuntimeLiveSourceSpec(source_commit=completed.stdout.strip())
 
 
 def _load_or_create_control_cipher(paths: HostPaths) -> AesGcmHostKeyCipher:

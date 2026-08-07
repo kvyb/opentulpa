@@ -38,15 +38,26 @@ from opentulpa.evolution.models import (
     Release,
 )
 from opentulpa.evolution.release_builder import (
+    OciReleaseArtifact,
     ReleaseBuilder,
+    ReleaseBuildError,
     ReleaseBuildRequest,
 )
-from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
+from opentulpa.evolution.release_provenance import (
+    ReleaseArtifactProvenance,
+    live_repo_artifact_digest,
+)
 from opentulpa.evolution.supervisor import EvolutionSupervisor
 from opentulpa.host.runtime import (
     RuntimeGenerationSpec,
+    RuntimeLiveSourceSpec,
     RuntimeSupervisor,
     RuntimeUnavailableError,
+)
+from opentulpa.host.runtime_environment import (
+    LiveSourceRuntimeEnvironmentStore,
+    RuntimeEnvFileManager,
+    RuntimeEnvironmentError,
 )
 
 
@@ -58,6 +69,53 @@ class RuntimeEvolutionEventSink:
 
     async def deliver(self, event: EvolutionEvent) -> None:
         await self._runtime.deliver_evolution_event(event)
+
+
+class HostEvolutionControlService:
+    """Host-only internal API facade for source evolution plus runtime environment writes."""
+
+    def __init__(
+        self,
+        *,
+        evolution: EvolutionSupervisor,
+        runtime_env_file_manager: RuntimeEnvFileManager | None = None,
+    ) -> None:
+        self._evolution = evolution
+        self._runtime_env_file_manager = runtime_env_file_manager
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._evolution, name)
+
+    async def source_set_runtime_env(
+        self,
+        *,
+        name: str,
+        value: str,
+        idempotency_key: str,
+        audit_context: dict[str, str] | None = None,
+    ) -> dict[str, JsonValue]:
+        manager = self._runtime_env_file_manager
+        if manager is None:
+            return {
+                "status": "failed",
+                "name": str(name or "")[:128],
+                "changed": False,
+                "restarted": False,
+                "rollback_restored": True,
+                "failure_stage": "env_write",
+                "error": {
+                    "code": "runtime_env_update_unavailable",
+                    "message": "Runtime .env updates are unavailable in this deployment.",
+                    "retryable": False,
+                },
+                "value": "[redacted]",
+            }
+        return await manager.set(
+            name=name,
+            value=value,
+            idempotency_key=idempotency_key,
+            audit_context=audit_context,
+        )
 
 
 def seed_source_repository(*, seed_root: Path, repository: Path) -> Path:
@@ -277,6 +335,151 @@ class TrustedGenerationReleaseProvider:
                 shutil.rmtree(workspace)
 
 
+class TrustedLiveRepoReleaseBuilder:
+    """Treat an evaluated Git commit as the release artifact."""
+
+    entrypoint: tuple[str, ...] = ("python", "-P", "-m", "opentulpa")
+
+    def __init__(
+        self,
+        *,
+        runtime_environment_store: LiveSourceRuntimeEnvironmentStore | None = None,
+    ) -> None:
+        self._runtime_environment_store = runtime_environment_store
+
+    async def build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
+        return await asyncio.to_thread(self._build, request)
+
+    def _build(self, request: ReleaseBuildRequest) -> OciReleaseArtifact:
+        workspace = request.workspace.expanduser().resolve(strict=True)
+        try:
+            resolved = _git(
+                workspace,
+                "rev-parse",
+                "--verify",
+                f"{request.source_commit}^{{commit}}",
+            ).stdout.strip()
+            if resolved != request.source_commit:
+                raise ReleaseBuildError("candidate source commit is not exact")
+            if _git(
+                workspace,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "-z",
+            ).output:
+                raise ReleaseBuildError("candidate source checkout is dirty")
+        except ReleaseBuildError:
+            raise
+        except Exception as exc:
+            raise ReleaseBuildError("candidate source commit could not be verified") from exc
+        digest = live_repo_artifact_digest(request.source_commit)
+        metadata: dict[str, JsonValue] = {}
+        if self._runtime_environment_store is not None:
+            try:
+                runtime_environment = self._runtime_environment_store.prepare(
+                    request.source_commit,
+                    workspace=workspace,
+                )
+            except RuntimeEnvironmentError as exc:
+                raise ReleaseBuildError(f"{exc.code}: {exc.public_message}") from exc
+            metadata.update(runtime_environment.release_metadata())
+        return OciReleaseArtifact(
+            artifact_kind="live_repo",
+            artifact_digest=digest,
+            manifest_digest=digest,
+            image_reference=f"git-commit:{request.source_commit}",
+            entrypoint=self.entrypoint,
+            metadata=metadata,
+        )
+
+
+class TrustedLiveRepoReleaseProvider:
+    """Seed the initial release from the checked-out trusted source commit."""
+
+    def __init__(
+        self,
+        *,
+        source_repository: Path,
+        evaluator_version: str,
+        evaluator_fingerprint: str | Callable[[], str],
+        runtime_environment_store: LiveSourceRuntimeEnvironmentStore | None = None,
+    ) -> None:
+        self._repository = source_repository.expanduser().resolve(strict=True)
+        self._evaluator_version = evaluator_version
+        self._evaluator_fingerprint = evaluator_fingerprint
+        self._runtime_environment_store = runtime_environment_store
+
+    async def build(self) -> ReleaseRecord:
+        source_commit, lock_hash = await asyncio.to_thread(self._source_identity)
+        evaluator_fingerprint = self._current_evaluator_fingerprint()
+        evaluation_input = hashlib.sha256(
+            (
+                f"{source_commit}:{lock_hash}:{self._evaluator_version}:"
+                f"{evaluator_fingerprint}"
+            ).encode()
+        ).hexdigest()
+        digest = live_repo_artifact_digest(source_commit)
+        suffix = digest.removeprefix("sha256:")[:16]
+        runtime_metadata: dict[str, JsonValue] = {}
+        if self._runtime_environment_store is not None:
+            try:
+                runtime_environment = await asyncio.to_thread(
+                    self._runtime_environment_store.prepare,
+                    source_commit,
+                )
+            except RuntimeEnvironmentError as exc:
+                raise RuntimeError(exc.public_message) from exc
+            runtime_metadata.update(runtime_environment.release_metadata())
+        return ReleaseRecord(
+            id=f"release_initial_{suffix}",
+            candidate_id=f"bootstrap_live_repo_{source_commit[:16]}",
+            source_commit=source_commit,
+            artifact_digest=digest,
+            manifest_digest=digest,
+            entrypoint=TrustedLiveRepoReleaseBuilder.entrypoint,
+            metadata={
+                "artifact_kind": "live_repo",
+                "image_reference": f"git-commit:{source_commit}",
+                **runtime_metadata,
+                "initial": True,
+                "bootstrap_initial": True,
+                "dependency_lock_hash": lock_hash,
+                "evaluator_version": self._evaluator_version,
+                "evaluator_fingerprint": evaluator_fingerprint,
+                "evaluation_input_digest": f"sha256:{evaluation_input}",
+                "base_commit": source_commit,
+                "changed_paths": [],
+                "diff_sha256": hashlib.sha256(b"").hexdigest(),
+            },
+        )
+
+    def _current_evaluator_fingerprint(self) -> str:
+        value = (
+            self._evaluator_fingerprint()
+            if callable(self._evaluator_fingerprint)
+            else self._evaluator_fingerprint
+        )
+        safe_value = str(value or "").strip()
+        if not safe_value:
+            raise RuntimeError("initial release evaluator fingerprint is unavailable")
+        return safe_value
+
+    def source_commit(self) -> str:
+        return self._source_identity()[0]
+
+    def _source_identity(self) -> tuple[str, str]:
+        repository = prepare_live_source_repository(self._repository)
+        _, common_directory = discover_git_directories(repository)
+        with repository_mutation_lock(common_directory):
+            source_commit = _git(repository, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+            lockfile = repository / "uv.lock"
+            if lockfile.is_symlink() or not lockfile.is_file():
+                raise RuntimeError("live source lockfile is unavailable")
+            lock_hash = hashlib.sha256(lockfile.read_bytes()).hexdigest()
+        return source_commit, lock_hash
+
+
 class HostReleaseActivator:
     """Verify immutable generations and health-check them through the host."""
 
@@ -290,6 +493,7 @@ class HostReleaseActivator:
         evaluator_fingerprint_resolver: Callable[[Release | ReleaseRecord], str] | None = None,
         install_profile: str = "runtime",
         controller_protocol: int | None = None,
+        runtime_environment_store: LiveSourceRuntimeEnvironmentStore | None = None,
     ) -> None:
         self._runtime = runtime
         self._generation_store = generation_store
@@ -298,6 +502,7 @@ class HostReleaseActivator:
         self._evaluator_fingerprint_resolver = evaluator_fingerprint_resolver
         self._install_profile = install_profile
         self._controller_protocol = controller_protocol
+        self._runtime_environment_store = runtime_environment_store
         self._lock = asyncio.Lock()
 
     async def activate(
@@ -312,13 +517,26 @@ class HostReleaseActivator:
         del origin, reason, rollback
         async with self._lock:
             try:
-                spec = self.generation_spec(release)
-                await self.verify_generation(
-                    spec,
-                    expected_source_commit=release.source_commit,
+                if self.artifact_kind(release) == "live_repo":
+                    live_spec = await self._prepared_live_source_spec(release)
+                    await self.verify_live_source(live_spec)
+                    if self._runtime.live_source != live_spec or self._runtime.status != "ready":
+                        await self._runtime.replace_live_source(live_spec)
+                else:
+                    generation_spec = self.generation_spec(release)
+                    await self.verify_generation(
+                        generation_spec,
+                        expected_source_commit=release.source_commit,
+                    )
+                    if self._runtime.generation != generation_spec or self._runtime.status != "ready":
+                        await self._runtime.replace_generation(generation_spec)
+            except RuntimeEnvironmentError as exc:
+                return ReleaseActivationResult(
+                    activation_id=activation_id,
+                    status=ReleaseActivationStatus.FAILED,
+                    failure_code=exc.code,
+                    failure_message=exc.public_message,
                 )
-                if self._runtime.generation != spec or self._runtime.status != "ready":
-                    await self._runtime.replace_generation(spec)
             except RuntimeUnavailableError:
                 if (
                     self._runtime.status == "ready"
@@ -356,6 +574,19 @@ class HostReleaseActivator:
             activation_id=activation_id,
             status=ReleaseActivationStatus.ACTIVE,
         )
+
+    async def prepare_runtime(self, release: Release | ReleaseRecord) -> None:
+        if self.artifact_kind(release) == "live_repo":
+            spec = await self._prepared_live_source_spec(release)
+            await self.verify_live_source(spec)
+            self._runtime.set_live_source(spec)
+            return
+        generation = self.generation_spec(release)
+        await self.verify_generation(
+            generation,
+            expected_source_commit=release.source_commit,
+        )
+        self._runtime.set_generation(generation)
 
     def generation_spec(self, release: Release | ReleaseRecord) -> RuntimeGenerationSpec:
         self.artifact_kind(release)
@@ -396,6 +627,37 @@ class HostReleaseActivator:
             controller_protocol=protocol,
         )
 
+    def live_source_spec(self, release: Release | ReleaseRecord) -> RuntimeLiveSourceSpec:
+        provenance = _release_artifact_provenance(release)
+        if provenance.artifact_kind != "live_repo":
+            raise RuntimeError("release is not a live repo commit")
+        return RuntimeLiveSourceSpec.from_release_metadata(
+            release.metadata,
+            source_commit=provenance.source_commit,
+        )
+
+    async def _prepared_live_source_spec(
+        self,
+        release: Release | ReleaseRecord,
+    ) -> RuntimeLiveSourceSpec:
+        spec = self.live_source_spec(release)
+        store = self._runtime_environment_store
+        if store is None:
+            return spec
+        environment = await asyncio.to_thread(store.prepare, spec.source_commit)
+        metadata = environment.release_metadata()
+        if spec.has_runtime_environment:
+            recorded = spec.model_dump(mode="json")
+            if any(recorded.get(key) != value for key, value in metadata.items()):
+                raise RuntimeEnvironmentError(
+                    "runtime_environment_provenance_mismatch",
+                    "Runtime dependency environment provenance is inconsistent.",
+                    stage="dependency_install",
+                )
+        return RuntimeLiveSourceSpec.model_validate(
+            {**spec.model_dump(mode="json"), **metadata}
+        )
+
     async def verify_generation(
         self,
         spec: RuntimeGenerationSpec,
@@ -418,11 +680,14 @@ class HostReleaseActivator:
             raise RuntimeError("Python generation source provenance is inconsistent")
         return installed
 
+    async def verify_live_source(self, spec: RuntimeLiveSourceSpec) -> RuntimeLiveSourceSpec:
+        return await self._runtime.verify_live_source(spec)
+
     @staticmethod
     def artifact_kind(release: Release | ReleaseRecord) -> str:
         kind = str(release.metadata.get("artifact_kind") or "")
-        if kind != "python_generation":
-            raise RuntimeError("host releases must be immutable Python generations")
+        if kind not in {"python_generation", "live_repo"}:
+            raise RuntimeError("host releases must be Python generations or live repo commits")
         return kind
 
 
@@ -437,18 +702,20 @@ class HostEvolutionRuntime:
         evolution: EvolutionSupervisor,
         activator: HostReleaseActivator,
         initial_release: InitialReleaseProvider,
+        control_service: HostEvolutionControlService | None = None,
     ) -> None:
         self._runtime = runtime
         self._archive = archive
         self._evolution = evolution
         self._activator = activator
         self._initial_release = initial_release
+        self._control_service = control_service or HostEvolutionControlService(evolution=evolution)
         self._prepared = False
         self._started = False
 
     @property
-    def service(self) -> EvolutionSupervisor:
-        return self._evolution
+    def service(self) -> HostEvolutionControlService:
+        return self._control_service
 
     async def prepare(self) -> None:
         if self._prepared:
@@ -462,12 +729,7 @@ class HostEvolutionRuntime:
                 current = await self._archive.get_current_release()
         if current is None:
             raise RuntimeError("host evolution has no active source release")
-        generation = self._activator.generation_spec(current)
-        await self._activator.verify_generation(
-            generation,
-            expected_source_commit=current.source_commit,
-        )
-        self._runtime.set_generation(generation)
+        await self._activator.prepare_runtime(current)
         self._prepared = True
 
     async def start(self) -> None:
@@ -748,6 +1010,58 @@ def _safe_seed_archive_path(value: str) -> Path:
     return path
 
 
+def prepare_live_source_repository(repository: Path) -> Path:
+    """Validate the mounted source checkout and seed local lineage refs if needed."""
+
+    source = repository.expanduser().resolve(strict=True)
+    if source.is_symlink() or not (source / "uv.lock").is_file():
+        raise RuntimeError("live source repository is unavailable")
+    if not (source / "src" / "opentulpa" / "__init__.py").is_file():
+        raise RuntimeError("live source repository is not an OpenTulpa checkout")
+    try:
+        _, common_directory = discover_git_directories(source)
+    except Exception as exc:
+        raise RuntimeError("live source Git metadata is unavailable") from exc
+    with repository_mutation_lock(common_directory):
+        if _status_without_untracked_runtime_env(
+            _git(source, "status", "--porcelain=v1", "--untracked-files=all", "-z").output
+        ):
+            raise RuntimeError("live source repository is unexpectedly dirty")
+        head = _git(source, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+        if _git(source, "cat-file", "-e", f"{head}:.env", check=False).returncode == 0:
+            raise RuntimeError("live source repository must not commit .env")
+        upstream = _git(
+            source,
+            "rev-parse",
+            "--verify",
+            "refs/heads/upstream^{commit}",
+            check=False,
+        )
+        if upstream.returncode != 0:
+            _git(source, "branch", "upstream", head)
+    return source
+
+
+def _status_without_untracked_runtime_env(status: bytes) -> bytes:
+    dirty: list[bytes] = []
+    parts = status.split(b"\0")
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        if not entry:
+            continue
+        code = entry[:2]
+        path = entry[3:] if len(entry) > 3 else b""
+        if code == b"??" and path == b".env":
+            continue
+        dirty.append(entry)
+        if (code[:1] in {b"R", b"C"} or code[1:2] in {b"R", b"C"}) and index < len(parts):
+            dirty.append(parts[index])
+            index += 1
+    return b"\0".join(dirty)
+
+
 def _seed_tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     entries = 0
@@ -855,8 +1169,12 @@ class _GitResult:
 
 __all__ = [
     "HostReleaseActivator",
+    "HostEvolutionControlService",
     "HostEvolutionRuntime",
     "RuntimeEvolutionEventSink",
     "TrustedGenerationReleaseProvider",
+    "TrustedLiveRepoReleaseBuilder",
+    "TrustedLiveRepoReleaseProvider",
+    "prepare_live_source_repository",
     "seed_source_repository",
 ]

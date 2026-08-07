@@ -543,6 +543,17 @@ class SourceRollbackArguments(RequiredIdempotencyArguments):
     reason: str = Field(default="Owner requested rollback", max_length=4_000)
 
 
+class SourceSetRuntimeEnvArguments(RequiredIdempotencyArguments):
+    name: str = Field(
+        pattern=r"^[A-Z_][A-Z0-9_]{0,127}$",
+        description="Runtime .env variable name to set in the live checkout.",
+    )
+    value: str = Field(
+        max_length=65_536,
+        description="Raw variable value. Results never echo the value back.",
+    )
+
+
 class TraceListArguments(ToolArguments):
     status: Literal[
         "running",
@@ -638,6 +649,7 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "source_shell": SourceShellArguments,
         "source_release": SourceReleaseArguments,
         "source_rollback": SourceRollbackArguments,
+        "source_set_runtime_env": SourceSetRuntimeEnvArguments,
         "trace_list": TraceListArguments,
         "trace_get": TraceGetArguments,
     }

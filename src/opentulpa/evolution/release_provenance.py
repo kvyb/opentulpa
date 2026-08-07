@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Literal, Self, cast
 
@@ -18,12 +19,18 @@ _DEPENDENCY_BASE_FIELDS = (
 )
 
 
+def live_repo_artifact_digest(source_commit: str) -> str:
+    """Deterministic digest for a release whose artifact is the Git commit itself."""
+
+    return f"sha256:{hashlib.sha256(f'live-repo:{source_commit}'.encode('ascii')).hexdigest()}"
+
+
 class ReleaseArtifactProvenance(BaseModel):
     """The immutable artifact identity carried by evolution and bootstrap releases."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    artifact_kind: Literal["oci_image", "python_generation"]
+    artifact_kind: Literal["oci_image", "python_generation", "live_repo"]
     source_commit: str = Field(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     manifest_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -92,8 +99,16 @@ class ReleaseArtifactProvenance(BaseModel):
                 or self.artifact_digest != self.manifest_digest
             ):
                 raise ValueError("Python generation provenance is inconsistent")
+        elif self.artifact_kind == "live_repo":
+            expected_digest = live_repo_artifact_digest(self.source_commit)
+            if (
+                self.image_reference != f"git-commit:{self.source_commit}"
+                or self.artifact_digest != self.manifest_digest
+                or self.artifact_digest != expected_digest
+            ):
+                raise ValueError("live repo provenance is inconsistent")
         elif self.generation_id is not None:
-            raise ValueError("OCI image provenance cannot carry a generation identity")
+            raise ValueError("non-generation provenance cannot carry a generation identity")
         return self
 
     @classmethod
@@ -155,4 +170,4 @@ class ReleaseArtifactProvenance(BaseModel):
         return cast(dict[str, JsonValue], values)
 
 
-__all__ = ["ReleaseArtifactProvenance"]
+__all__ = ["ReleaseArtifactProvenance", "live_repo_artifact_digest"]

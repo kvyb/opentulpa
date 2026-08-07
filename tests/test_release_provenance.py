@@ -4,7 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from opentulpa.evolution.generation import StateContract
-from opentulpa.evolution.release_provenance import ReleaseArtifactProvenance
+from opentulpa.evolution.release_provenance import (
+    ReleaseArtifactProvenance,
+    live_repo_artifact_digest,
+)
 
 
 def _contract() -> StateContract:
@@ -83,4 +86,41 @@ def test_oci_provenance_rejects_generation_identity() -> None:
             manifest_digest=f"sha256:{'e' * 64}",
             entrypoint=("/app/start",),
             metadata=metadata,
+        )
+
+
+def test_live_repo_provenance_round_trips_commit_artifact() -> None:
+    source_commit = "a" * 40
+    digest = live_repo_artifact_digest(source_commit)
+
+    provenance = ReleaseArtifactProvenance.from_values(
+        source_commit=source_commit,
+        artifact_digest=digest,
+        manifest_digest=digest,
+        entrypoint=("python", "-P", "-m", "opentulpa"),
+        metadata={
+            "artifact_kind": "live_repo",
+            "image_reference": f"git-commit:{source_commit}",
+        },
+    )
+
+    assert provenance.release_metadata() == {
+        "artifact_kind": "live_repo",
+        "image_reference": f"git-commit:{source_commit}",
+    }
+
+
+def test_live_repo_provenance_rejects_unbound_digest() -> None:
+    source_commit = "a" * 40
+
+    with pytest.raises(ValidationError, match="live repo provenance"):
+        ReleaseArtifactProvenance.from_values(
+            source_commit=source_commit,
+            artifact_digest=f"sha256:{'b' * 64}",
+            manifest_digest=f"sha256:{'b' * 64}",
+            entrypoint=("python", "-P", "-m", "opentulpa"),
+            metadata={
+                "artifact_kind": "live_repo",
+                "image_reference": f"git-commit:{source_commit}",
+            },
         )

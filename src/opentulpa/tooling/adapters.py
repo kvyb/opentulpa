@@ -289,6 +289,11 @@ class ProductToolApplication(Protocol):
 
     async def source_rollback(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
+    async def source_set_runtime_env(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput: ...
+
     async def trace_list(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
     async def trace_get(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
@@ -512,6 +517,10 @@ def _description(spec: ToolSpec) -> str:
         "source_resolve_dependencies": (
             "Resolve an exact pyproject dependency proposal through the stable credential-free "
             "OCI resolver, then install its verified lock into the active source candidate."
+        ),
+        "source_set_runtime_env": (
+            "Set one live runtime .env variable through the stable host, restart the child, "
+            "and restore the previous .env if the restart fails. Never returns the value."
         ),
         "sandbox_ssh_diagnostic": (
             "Run one SSH command from the sandbox using an opaque stored private-key or password "
