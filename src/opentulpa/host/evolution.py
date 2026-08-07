@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from opentulpa.bootstrap.models import ReleaseOrigin, ReleaseRecord
 from opentulpa.evolution.activation import (
@@ -403,7 +403,7 @@ class HostEvolutionRuntime:
             return
         await self._archive.start()
         current = await self._archive.get_current_release()
-        if current is None or bool(current.metadata.get("bootstrap_initial")):
+        if current is None or _requires_live_repo_initial_seed(current):
             bundled = await self._initial_release.build()
             if current is None or not _same_release_provenance(current, bundled):
                 await self._seed_initial_lineage(bundled)
@@ -533,8 +533,18 @@ class HostEvolutionRuntime:
 def _same_release_provenance(left: Release | ReleaseRecord, right: ReleaseRecord) -> bool:
     try:
         return _release_artifact_provenance(left) == _release_artifact_provenance(right)
-    except (ValueError, TypeError):
+    except (ValidationError, ValueError, TypeError):
         return False
+
+
+def _requires_live_repo_initial_seed(release: Release | ReleaseRecord) -> bool:
+    if bool(release.metadata.get("bootstrap_initial")):
+        return True
+    try:
+        _release_artifact_provenance(release)
+    except (ValidationError, ValueError, TypeError):
+        return True
+    return False
 
 
 def _release_artifact_provenance(

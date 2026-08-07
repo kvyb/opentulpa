@@ -360,6 +360,22 @@ def test_live_repo_reuse_requires_complete_release_provenance() -> None:
     )
 
 
+def test_legacy_source_overlay_release_requires_live_repo_initial_seed() -> None:
+    from opentulpa.host import evolution as host_evolution
+
+    legacy = _live_repo_release().model_copy(
+        update={
+            "metadata": {
+                "artifact_kind": "source_overlay",
+                "image_reference": "legacy-overlay",
+            }
+        }
+    )
+
+    assert host_evolution._requires_live_repo_initial_seed(legacy)  # noqa: SLF001
+    assert not host_evolution._requires_live_repo_initial_seed(_live_repo_release())  # noqa: SLF001
+
+
 @pytest.mark.skipif(
     not CandidateProcessBackend.is_supported(),
     reason=CandidateProcessBackend.unavailable_reason()
