@@ -316,6 +316,24 @@ def test_host_paths_migrate_known_legacy_product_entries(tmp_path: Path) -> None
     ) == "{}"
 
 
+def test_host_paths_archive_conflicting_top_level_legacy_notifications(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    state = data_root / ".opentulpa"
+    state.mkdir(parents=True)
+    (state / "notifications.db").write_bytes(b"state notifications")
+    (data_root / "notifications.db").write_bytes(b"top notifications")
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(data_root)})
+
+    paths.provision()
+
+    assert (paths.product_root / ".opentulpa/notifications.db").read_bytes() == b"state notifications"
+    assert (
+        paths.product_root / ".opentulpa/notifications.legacy-from-data-root.db"
+    ).read_bytes() == b"top notifications"
+
+
 def test_host_paths_allow_known_controller_entries_during_product_migration(
     tmp_path: Path,
 ) -> None:

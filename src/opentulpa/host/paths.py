@@ -134,6 +134,14 @@ class HostPaths:
             entries = tuple(os.scandir(self.data_root))
         except OSError as exc:
             raise HostPathError("host data root could not be inspected") from exc
+        product_entries = dict(_PRODUCT_ENTRIES)
+        legacy_notifications = self.data_root / "notifications.db"
+        legacy_state_notifications = self.data_root / ".opentulpa" / "notifications.db"
+        if os.path.lexists(legacy_notifications) and os.path.lexists(legacy_state_notifications):
+            archived = Path(".opentulpa/notifications.legacy-from-data-root.db")
+            if os.path.lexists(self.data_root / archived):
+                raise HostPathError("legacy notification archive conflicts during product migration")
+            product_entries["notifications.db"] = archived
         if len(entries) > len(allowed) + len(_PRODUCT_ENTRIES):
             raise HostPathError(
                 "host data root has unknown ambiguous migration entries: "
@@ -147,7 +155,7 @@ class HostPaths:
                 raise HostPathError("host data root entry could not be inspected") from exc
             if stat.S_ISLNK(metadata.st_mode):
                 raise HostPathError("host data root contains a symbolic-link entry")
-            destination = _PRODUCT_ENTRIES.get(entry.name)
+            destination = product_entries.get(entry.name)
             if destination is not None:
                 sources.append((path, self.product_root / destination))
                 continue
@@ -159,10 +167,6 @@ class HostPaths:
             if not stat.S_ISDIR(metadata.st_mode):
                 raise HostPathError("host data root contains a special controller entry")
 
-        legacy_notifications = self.data_root / "notifications.db"
-        legacy_state_notifications = self.data_root / ".opentulpa" / "notifications.db"
-        if os.path.lexists(legacy_notifications) and os.path.lexists(legacy_state_notifications):
-            raise HostPathError("legacy notification stores conflict during product migration")
         for source, destination in sources:
             _validate_regular_tree(source)
             if os.path.lexists(destination):
