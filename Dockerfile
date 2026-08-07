@@ -161,7 +161,7 @@ COPY . /opt/opentulpa-source
 COPY opentulpa.config.yaml \
     /opt/opentulpa-install/controller/generations/image/assets/opentulpa.config.yaml
 RUN /opt/opentulpa-install/controller/generations/image/bin/python -c \
-         'import json, pathlib; from opentulpa.host.evolution_composition import _source_seed_sha256; root=pathlib.Path("/opt/opentulpa-source"); pathlib.Path("/opt/opentulpa-install/source-seed-manifest.json").write_text(json.dumps({"format_version":1,"source_seed_sha256":_source_seed_sha256(root)},sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")' \
+         'import json, pathlib; from opentulpa.host.source_seed import source_seed_sha256; root=pathlib.Path("/opt/opentulpa-source"); pathlib.Path("/opt/opentulpa-install/source-seed-manifest.json").write_text(json.dumps({"format_version":1,"source_seed_sha256":source_seed_sha256(root)},sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")' \
     && : > /opt/opentulpa-install/controller/generations/image/COMPLETE \
     && chmod -R a-w /opt/opentulpa-install /opt/opentulpa-source \
     && chmod -R a+rX /opt/opentulpa-install/controller/generations/image/wheelhouse

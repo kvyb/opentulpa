@@ -223,6 +223,8 @@ def test_container_and_railway_use_direct_immutable_controller() -> None:
     assert "uv sync" not in dockerfile
     assert "COPY --from=controller-build /usr/local/bin/uv /usr/local/bin/uv" in dockerfile
     assert "test ! -L /usr/local/bin/uv && /usr/local/bin/uv --version" in dockerfile
+    assert "_source_seed_sha256" not in dockerfile
+    assert "from opentulpa.host.source_seed import source_seed_sha256" in dockerfile
     assert "ENV OPENTULPA_UV_BIN=/usr/local/bin/uv" in dockerfile
     assert "ENV OPENTULPA_SOURCE_ROOT=/app/opentulpa_data/source" in dockerfile
     assert "ENV EVOLUTION_SOURCE_REPOSITORY=https://github.com/kvyb/opentulpa.git" in dockerfile
