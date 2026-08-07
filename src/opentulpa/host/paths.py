@@ -19,6 +19,14 @@ _PRODUCT_ENTRIES = {
     ".opentulpa": Path(".opentulpa"),
     "tulpa_stuff": Path("tulpa_stuff"),
     "notifications.db": Path(".opentulpa/notifications.db"),
+    "customer_profiles.db": Path("customer_profiles.db"),
+    "deepagents": Path("deepagents"),
+    "file_vault": Path("file_vault"),
+    "file_vault.db": Path("file_vault.db"),
+    "intake_sinks": Path("intake_sinks"),
+    "intake_workflows.db": Path("intake_workflows.db"),
+    "knowledge": Path("knowledge"),
+    "telegram_business.db": Path("telegram_business.db"),
 }
 _CONTROLLER_ENTRIES = frozenset(
     {
@@ -26,6 +34,10 @@ _CONTROLLER_ENTRIES = frozenset(
         "product",
         "source",
         "bun",
+        ".runtime-generations-control",
+        "runtime-generations",
+        "runtime-source-envs",
+        "sandbox-host",
         "sandbox_worker",
     }
 )

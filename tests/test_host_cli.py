@@ -289,12 +289,63 @@ def test_host_paths_migrate_known_legacy_product_entries(tmp_path: Path) -> None
     legacy = data_root / ".opentulpa" / "deepagents"
     legacy.mkdir(parents=True)
     (legacy / "store.db").write_bytes(b"state")
+    (data_root / "customer_profiles.db").write_bytes(b"profiles")
+    (data_root / "file_vault").mkdir()
+    (data_root / "file_vault" / "doc.txt").write_text("doc", encoding="utf-8")
+    (data_root / "file_vault.db").write_bytes(b"files")
+    (data_root / "knowledge").mkdir()
+    (data_root / "knowledge" / "knowledge.db").write_bytes(b"knowledge")
+    (data_root / "telegram_business.db").write_bytes(b"telegram")
+    (data_root / "intake_workflows.db").write_bytes(b"intake")
+    (data_root / "intake_sinks").mkdir()
+    (data_root / "intake_sinks" / "sink.json").write_text("{}", encoding="utf-8")
     paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(data_root)})
 
     paths.provision()
 
     assert not (data_root / ".opentulpa").exists()
     assert (paths.product_root / ".opentulpa/deepagents/store.db").read_bytes() == b"state"
+    assert (paths.product_root / "customer_profiles.db").read_bytes() == b"profiles"
+    assert (paths.product_root / "file_vault" / "doc.txt").read_text(encoding="utf-8") == "doc"
+    assert (paths.product_root / "file_vault.db").read_bytes() == b"files"
+    assert (paths.product_root / "knowledge" / "knowledge.db").read_bytes() == b"knowledge"
+    assert (paths.product_root / "telegram_business.db").read_bytes() == b"telegram"
+    assert (paths.product_root / "intake_workflows.db").read_bytes() == b"intake"
+    assert (paths.product_root / "intake_sinks" / "sink.json").read_text(
+        encoding="utf-8"
+    ) == "{}"
+
+
+def test_host_paths_allow_known_controller_entries_during_product_migration(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    for name in (
+        "bootstrap",
+        "bun",
+        ".runtime-generations-control",
+        "runtime-generations",
+        "runtime-source-envs",
+        "sandbox-host",
+        "sandbox_worker",
+        "source",
+    ):
+        (data_root / name).mkdir(parents=True)
+    paths = HostPaths.from_environment({"OPENTULPA_DATA_ROOT": str(data_root)})
+
+    paths.provision()
+
+    for name in (
+        "bootstrap",
+        "bun",
+        ".runtime-generations-control",
+        "runtime-generations",
+        "runtime-source-envs",
+        "sandbox-host",
+        "sandbox_worker",
+        "source",
+    ):
+        assert (data_root / name).is_dir()
 
 
 def test_host_paths_honor_safe_control_and_product_overrides(tmp_path: Path) -> None:
