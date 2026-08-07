@@ -8,7 +8,7 @@ from typing import Protocol
 
 from pydantic import JsonValue
 
-from opentulpa.evolution.archive import EvolutionArchive
+from opentulpa.evolution.archive import EvolutionArchive, EvolutionArchiveCorruptionError
 from opentulpa.evolution.context import EvolutionAuditContext
 from opentulpa.evolution.models import (
     Candidate,
@@ -64,7 +64,12 @@ class EvolutionEventPublisher:
     async def recover_terminal_events(self) -> None:
         for status in (CandidateStatus.READY, CandidateStatus.FAILED):
             for candidate in await self._archive.list_candidates(status=status, limit=1_000):
-                await self.publish_candidate(candidate)
+                try:
+                    await self.publish_candidate(candidate)
+                except EvolutionArchiveCorruptionError as exc:
+                    if not self._is_recovered_outbox_payload_conflict(exc):
+                        raise
+                    logger.warning("skipping conflicting recovered candidate event: %s", candidate.id)
 
         terminal: dict[str, tuple[PromotionAttempt, Release | None]] = {}
         for release in await self._archive.list_release_history(limit=1_000):
@@ -85,7 +90,12 @@ class EvolutionEventPublisher:
             if attempt is not None and attempt.status is PromotionAttemptStatus.FAILED:
                 terminal[attempt.id] = (attempt, None)
         for attempt, active_release in terminal.values():
-            await self.publish_promotion(attempt, active_release=active_release)
+            try:
+                await self.publish_promotion(attempt, active_release=active_release)
+            except EvolutionArchiveCorruptionError as exc:
+                if not self._is_recovered_outbox_payload_conflict(exc):
+                    raise
+                logger.warning("skipping conflicting recovered promotion event: %s", attempt.id)
 
     async def publish_candidate(self, candidate: Candidate) -> None:
         if candidate.status not in {CandidateStatus.READY, CandidateStatus.FAILED}:
@@ -183,6 +193,10 @@ class EvolutionEventPublisher:
     async def _enqueue(self, event: EvolutionEvent) -> None:
         await self._archive.enqueue_event(event)
         await self.flush()
+
+    @staticmethod
+    def _is_recovered_outbox_payload_conflict(exc: EvolutionArchiveCorruptionError) -> bool:
+        return "evolution event key is bound to another payload" in str(exc)
 
     @staticmethod
     def _candidate_origin(candidate: Candidate) -> dict[str, JsonValue]:
