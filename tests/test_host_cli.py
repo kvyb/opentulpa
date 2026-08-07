@@ -323,6 +323,7 @@ def test_host_paths_allow_known_controller_entries_during_product_migration(
     for name in (
         "bootstrap",
         "bun",
+        "lost+found",
         ".runtime-generations-control",
         "runtime-generations",
         "runtime-source-envs",
@@ -338,6 +339,7 @@ def test_host_paths_allow_known_controller_entries_during_product_migration(
     for name in (
         "bootstrap",
         "bun",
+        "lost+found",
         ".runtime-generations-control",
         "runtime-generations",
         "runtime-source-envs",

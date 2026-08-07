@@ -34,6 +34,7 @@ _CONTROLLER_ENTRIES = frozenset(
         "product",
         "source",
         "bun",
+        "lost+found",
         ".runtime-generations-control",
         "runtime-generations",
         "runtime-source-envs",
