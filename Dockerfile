@@ -25,9 +25,7 @@ ENV UV_HTTP_RETRIES=10
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 
-RUN --mount=type=cache,id=cacheKey-opentulpa-controller-uv,target=/root/.cache/uv,sharing=locked \
-    --mount=type=cache,id=cacheKey-opentulpa-controller-pip,target=/root/.cache/pip,sharing=locked \
-    extras="$(printf '%s' "${OPENTULPA_EXTRAS}" | tr ',' ' ')" \
+RUN extras="$(printf '%s' "${OPENTULPA_EXTRAS}" | tr ',' ' ')" \
     && set -- --extra evaluation \
     && for extra in ${extras}; do \
          case "${extra}" in \
@@ -67,8 +65,7 @@ COPY README.md opentulpa.config.yaml ./
 COPY src ./src
 COPY railway_sandbox_bridge ./railway_sandbox_bridge
 
-RUN --mount=type=cache,id=cacheKey-opentulpa-controller-uv,target=/root/.cache/uv,sharing=locked \
-    uv build --wheel --offline --no-build-isolation --out-dir /tmp/controller-wheel . \
+RUN uv build --wheel --offline --no-build-isolation --out-dir /tmp/controller-wheel . \
     && cp /tmp/controller-wheel/*.whl \
          /opt/opentulpa-install/controller/generations/image/wheels/ \
     && uv pip install \
