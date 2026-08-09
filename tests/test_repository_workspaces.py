@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
-import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from opentulpa.api.routes.v2_repositories import register_v2_repository_routes
 from opentulpa.deep_agent.sandbox import TenantContainerPolicy
+from opentulpa.evolution.sandbox import CandidateProcessBackend
 from opentulpa.repositories.models import (
     RepositoryProvider,
     RepositoryWorkspace,
@@ -750,12 +749,9 @@ def test_local_provider_uses_process_sandbox_without_oci(
 
 
 @pytest.mark.skipif(
-    os.name != "posix"
-    or not hasattr(os, "geteuid")
-    or os.geteuid() != 0
-    or shutil.which("setpriv") is None
-    or shutil.which("prlimit") is None,
-    reason="Linux root process isolation is required",
+    not CandidateProcessBackend.is_supported(),
+    reason=CandidateProcessBackend.unavailable_reason()
+    or "root Linux bubblewrap isolation is required",
 )
 def test_process_repository_backend_runs_git_without_host_credentials(
     tmp_path: Any,
