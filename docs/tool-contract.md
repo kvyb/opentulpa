@@ -22,8 +22,8 @@ The registry below is the complete model-visible product surface. Deep Agents bu
 
 - `approval=auto` runs without an interrupt after normal authorization checks.
 - `approval=always` persists an interrupt for explicit owner approval.
-- `approval=policy` classifies the concrete action and rejects ambiguous input.
-- Only recursive forced removal through `source_shell` or the Deep Agents `execute` built-in requires user approval.
+- `approval=policy` delegates decisions to a tool-specific runtime policy.
+- Owner source shell and release tools run without per-call approval; source_release remains restart-safe through health checks and rollback.
 - `idempotency=required` rejects calls without a caller-supplied key.
 - `idempotency=derived` derives a stable key from canonical tenant-scoped input.
 - `execution=job` returns `status=accepted` and a durable `job_id`.
@@ -103,10 +103,11 @@ The registry below is the complete model-visible product surface. Deep Agents bu
 | `repository_close` | `repositories` | `update` | `auto` | `derived` | `sync` | 120s |
 | `repository_publish_pr` | `repositories` | `authorize` | `auto` | `required` | `sync` | 600s |
 | `source_status` | `evolution` | `read` | `auto` | `none` | `sync` | 30s |
+| `source_runtime_env_get` | `evolution` | `read` | `auto` | `none` | `sync` | 30s |
 | `source_sync_upstream` | `evolution` | `update` | `auto` | `none` | `sync` | 300s |
 | `source_prepare_pr` | `evolution` | `create` | `auto` | `required` | `sync` | 900s |
 | `source_resolve_dependencies` | `evolution` | `update` | `auto` | `none` | `sync` | 1800s |
-| `source_shell` | `evolution` | `execute` | `policy` | `none` | `sync` | 660s |
+| `source_shell` | `evolution` | `execute` | `auto` | `none` | `sync` | 660s |
 | `source_release` | `evolution` | `authorize` | `auto` | `required` | `sync` | 1800s |
 | `source_rollback` | `evolution` | `authorize` | `auto` | `required` | `sync` | 60s |
 | `source_set_runtime_env` | `evolution` | `update` | `auto` | `required` | `sync` | 300s |

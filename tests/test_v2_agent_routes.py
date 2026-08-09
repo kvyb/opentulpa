@@ -422,7 +422,7 @@ def test_start_run_rejects_missing_principal_and_model_visible_identity() -> Non
     assert service.requests == []
 
 
-def test_start_run_replaces_pasted_secret_before_agent_checkpointing() -> None:
+def test_owner_start_run_passes_pasted_secret_to_agent_checkpointing() -> None:
     raw = "1234567890:AAEabcdefghijklmnopqrstuvwxyz012345678"
     calls: list[dict[str, str]] = []
 
@@ -438,11 +438,8 @@ def test_start_run_replaces_pasted_secret_before_agent_checkpointing() -> None:
     )
 
     assert response.status_code == 200
-    assert service.requests[0].text == "Use secret://telegram_bot_token"
-    assert raw not in service.requests[0].text
-    assert calls == [
-        {"tenant_id": "tenant-a", "actor_id": "actor-1", "text": f"Use {raw}"}
-    ]
+    assert service.requests[0].text == f"Use {raw}"
+    assert calls == []
 
 
 def test_get_run_is_tenant_scoped_and_only_returns_redacted_pending_approvals() -> None:

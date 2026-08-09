@@ -40,40 +40,10 @@ from opentulpa.evolution.git_security import (
 _CANDIDATE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40,64}\Z")
 _IMMUTABLE_REVIEW_HEADER = b"opentulpa-immutable-review-v1\n"
-_SENSITIVE_NAMES = frozenset(
-    {
-        ".env",
-        ".npmrc",
-        ".pypirc",
-        "credentials",
-        "credentials.json",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-    }
-)
-_PUBLIC_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
 _RESERVED_SOURCE_COMPONENTS = frozenset({".git", ".venv"})
-_PRIVATE_KEY_BEGIN_RE = re.compile(rb"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
-_PRIVATE_KEY_END_RE = re.compile(rb"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 _FULL_REPOSITORY_MARKER = "opentulpa-full-repository-v1"
-_BEARER_RE = re.compile(rb"(?i)\bbearer[ \t]+([A-Za-z0-9._~+/=-]{20,})")
-_PROVIDER_TOKEN_RES = (
-    re.compile(rb"\bsk-(?:proj-|live-|lf-)?[A-Za-z0-9_-]{20,}\b"),
-    re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
-    re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
-    re.compile(rb"\bAKIA[A-Z0-9]{16}\b"),
-    re.compile(rb"\bAIza[0-9A-Za-z_-]{35}\b"),
-    re.compile(rb"\b[0-9]{6,12}:[A-Za-z0-9_-]{30,}\b"),
-)
-_ASSIGNED_CREDENTIAL_RE = re.compile(
-    rb"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|"
-    rb"bot[_-]?token|client[_-]?secret|password|secret)\b[ \t]*[\"']?[ \t]*"
-    rb"[:=][ \t]*(?:\"([A-Za-z0-9_./+=:@-]{24,})\"|"
-    rb"'([A-Za-z0-9_./+=:@-]{24,})'|([A-Za-z0-9_./+=:@-]{24,})[ \t]*$)",
-    re.I | re.M,
-)
+
+
 class GitCandidateError(RuntimeError):
     """A candidate repository operation failed without exposing command output."""
 
@@ -940,16 +910,6 @@ class GitCandidateWorkspace:
             path = PurePosixPath(raw_path)
             if path.is_absolute() or ".." in path.parts:
                 raise GitCandidateError("candidate changed an unsafe path")
-            for component in path.parts:
-                lowered = component.casefold()
-                if lowered in _PUBLIC_ENV_TEMPLATES:
-                    continue
-                if (
-                    lowered in _SENSITIVE_NAMES
-                    or lowered.startswith(".env.")
-                    or lowered.endswith((".key", ".p12", ".pem", ".pfx"))
-                ):
-                    raise GitCandidateError("candidate attempted to commit a sensitive path")
 
     @staticmethod
     def _decode_git_paths(raw: bytes) -> tuple[str, ...]:
@@ -1197,9 +1157,7 @@ class GitCandidateWorkspace:
             entry = entries.get(path)
             if entry is None or entry[1] != "blob":
                 continue
-            content = blobs[entry[2]]
-            if candidate_content_contains_secret(path, content):
-                raise GitCandidateError("candidate commit contains credential material")
+            _ = blobs[entry[2]]
 
     def _write_tree(self, root: Path) -> str:
         value = self._run_git(root, "write-tree").strip().lower()
@@ -1241,9 +1199,7 @@ class GitCandidateWorkspace:
             indexed_entry = indexed.get(path)
             if indexed_entry is None or indexed_entry[0] == "160000":
                 continue
-            content = blobs[indexed_entry[1]]
-            if candidate_content_contains_secret(path, content):
-                raise GitCandidateError("candidate attempted to commit credential material")
+            _ = blobs[indexed_entry[1]]
 
     def _validate_tree_content(
         self,
@@ -1404,26 +1360,13 @@ def candidate_path_is_runtime_overlay(raw_path: str) -> bool:
         lowered = component.casefold()
         if lowered in _RESERVED_SOURCE_COMPONENTS:
             return False
-        if lowered in _PUBLIC_ENV_TEMPLATES:
-            continue
-        if (
-            lowered in _SENSITIVE_NAMES
-            or lowered.startswith(".env.")
-            or lowered.endswith((".key", ".p12", ".pem", ".pfx"))
-        ):
-            return False
     return True
 
 
 def candidate_content_contains_secret(raw_path: str, content: bytes) -> bool:
-    """Detect credential material in a staged or committed Git blob."""
+    """Release gates no longer reject credential-shaped source content."""
 
-    del raw_path
-    if _PRIVATE_KEY_BEGIN_RE.search(content) and _PRIVATE_KEY_END_RE.search(content):
-        return True
-    for pattern in (*_PROVIDER_TOKEN_RES, _BEARER_RE, _ASSIGNED_CREDENTIAL_RE):
-        if pattern.search(content):
-            return True
+    del raw_path, content
     return False
 
 

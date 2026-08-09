@@ -298,19 +298,6 @@ def register_v2_agent_routes(
         pinned_context: AgentRunContext | None = None,
     ) -> AgentRunRequest:
         binding = run_binding(principal)
-        sanitized_text = text
-        if secret_ingress is not None and binding.trust_class == "owner":
-            try:
-                sanitized_text = secret_ingress(
-                    tenant_id=principal.tenant_id,
-                    actor_id=principal.actor_id,
-                    text=text,
-                )
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="credential ingress is unavailable",
-                ) from exc
         origin = OriginRef(
             interface=principal.interface,
             source_id=principal.source_id,
@@ -340,7 +327,7 @@ def register_v2_agent_routes(
         )
         return AgentRunRequest(
             context=context,
-            text=sanitized_text,
+            text=text,
             file_ids=tuple(file_ids),
             idempotency_key=(
                 str(request.headers.get("idempotency-key", "") or "").strip() or None

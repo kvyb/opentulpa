@@ -41,6 +41,14 @@ class _EvolutionService:
             "output": "tests passed\n",
         }
 
+    async def source_runtime_env_get(self, **kwargs: Any) -> dict[str, Any]:
+        self.source_calls.append(("runtime-env-read", kwargs))
+        return {
+            "available": True,
+            "variables": [{"name": "TELEGRAM_BOT_TOKEN", "value": "raw-token-value"}],
+            "count": 1,
+        }
+
     async def source_sync_upstream(self, **kwargs: Any) -> dict[str, Any]:
         self.source_calls.append(("sync-upstream", kwargs))
         return {
@@ -131,6 +139,7 @@ async def test_evolution_control_client_is_authenticated_and_source_only(
 
         candidate = await client.get_candidate("candidate_test")
         source_status = await client.source_status(audit_context=audit)
+        source_env_read = await client.source_runtime_env_get(audit_context=audit)
         source_env = await client.source_set_runtime_env(
             name="TELEGRAM_BOT_TOKEN",
             value="raw-token-value",
@@ -143,6 +152,11 @@ async def test_evolution_control_client_is_authenticated_and_source_only(
 
     assert candidate == service.candidate
     assert source_status["candidate_id"] == "candidate_test"
+    assert source_env_read == {
+        "available": True,
+        "variables": [{"name": "TELEGRAM_BOT_TOKEN", "value": "raw-token-value"}],
+        "count": 1,
+    }
     assert source_env == {
         "status": "updated",
         "name": "TELEGRAM_BOT_TOKEN",
@@ -153,6 +167,7 @@ async def test_evolution_control_client_is_authenticated_and_source_only(
     assert unauthorized.status_code == 401
     assert service.source_calls == [
         ("status", {"audit_context": audit}),
+        ("runtime-env-read", {"audit_context": audit}),
         (
             "runtime-env",
             {

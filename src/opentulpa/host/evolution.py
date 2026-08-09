@@ -88,6 +88,17 @@ class HostEvolutionControlService:
     def __getattr__(self, name: str) -> object:
         return getattr(self._evolution, name)
 
+    async def source_runtime_env_get(
+        self,
+        *,
+        audit_context: dict[str, str] | None = None,
+    ) -> dict[str, JsonValue]:
+        del audit_context
+        manager = self._runtime_env_file_manager
+        if manager is None:
+            return {"available": False, "variables": [], "count": 0}
+        return await manager.read()
+
     async def source_set_runtime_env(
         self,
         *,

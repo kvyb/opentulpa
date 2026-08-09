@@ -298,7 +298,7 @@ def test_candidate_recovery_rejects_dirty_worktree(tmp_path: Path) -> None:
     manager.remove(workspace)
 
 
-def test_candidate_rejects_unsafe_ids_and_sensitive_files(tmp_path: Path) -> None:
+def test_candidate_rejects_unsafe_ids_and_allows_env_files(tmp_path: Path) -> None:
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
@@ -312,9 +312,9 @@ def test_candidate_rejects_unsafe_ids_and_sensitive_files(tmp_path: Path) -> Non
     workspace = manager.create(candidate_id="candidate_safe")
     (workspace.path / ".env").write_text("TOKEN=private\n", encoding="utf-8")
 
-    with pytest.raises(GitCandidateError, match="sensitive"):
-        manager.commit(workspace, message="Unsafe")
+    commit = manager.commit(workspace, message="Allow owner env file")
 
+    assert commit.source_commit != commit.base_commit
     assert (source / ".env").exists() is False
     manager.remove(workspace)
 
@@ -323,9 +323,9 @@ def test_candidate_rejects_unsafe_ids_and_sensitive_files(tmp_path: Path) -> Non
     "sensitive_path",
     (".env.production", ".npmrc", "private.p12", "nested/credentials.json"),
 )
-def test_candidate_classification_rejects_secret_paths(sensitive_path: str) -> None:
-    assert candidate_path_is_promotable(sensitive_path) is False
-    assert candidate_path_is_runtime_overlay(sensitive_path) is False
+def test_candidate_classification_allows_secret_paths(sensitive_path: str) -> None:
+    assert candidate_path_is_promotable(sensitive_path) is True
+    assert candidate_path_is_runtime_overlay(sensitive_path) is True
 
 
 def test_candidate_diff_includes_untracked_files(tmp_path: Path) -> None:
@@ -373,7 +373,7 @@ def test_candidate_can_commit_public_environment_template(tmp_path: Path) -> Non
         "-----END PRIVATE KEY-----\n",
     ),
 )
-def test_candidate_rejects_real_credential_content_before_commit(
+def test_candidate_allows_credential_shaped_content_before_commit(
     tmp_path: Path,
     content: str,
 ) -> None:
@@ -384,13 +384,11 @@ def test_candidate_rejects_real_credential_content_before_commit(
         artifacts_root=tmp_path / "artifacts",
     )
     workspace = manager.create(candidate_id="candidate_credential")
-    previous_head = manager.head(workspace)
     (workspace.path / "settings.py").write_text(content, encoding="utf-8")
 
-    with pytest.raises(GitCandidateError, match="credential material"):
-        manager.commit(workspace, message="Do not commit the token")
+    commit = manager.commit(workspace, message="Allow owner credential material")
 
-    assert manager.head(workspace) == previous_head
+    assert commit.source_commit != commit.base_commit
     manager.remove(workspace)
 
 
@@ -446,7 +444,7 @@ def test_candidate_review_evidence_ignores_worktree_attributes(tmp_path: Path) -
     assert review.patch_path.read_bytes() == approved
 
 
-def test_candidate_rejects_marker_labeled_test_credential_fixture(tmp_path: Path) -> None:
+def test_candidate_allows_marker_labeled_test_credential_fixture(tmp_path: Path) -> None:
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
@@ -462,9 +460,9 @@ def test_candidate_rejects_marker_labeled_test_credential_fixture(tmp_path: Path
         encoding="utf-8",
     )
 
-    with pytest.raises(GitCandidateError, match="credential material"):
-        manager.commit(workspace, message="Add explicit credential fixture")
+    commit = manager.commit(workspace, message="Add explicit credential fixture")
 
+    assert commit.source_commit != commit.base_commit
     manager.remove(workspace)
 
 
@@ -781,7 +779,7 @@ def test_candidate_adoption_rejects_canonical_and_unrelated_worktrees(tmp_path: 
         manager.adopt(CandidateWorkspace("unrelated", unrelated, base))
 
 
-def test_candidate_commit_rejects_secret_in_adopted_descendant_history(tmp_path: Path) -> None:
+def test_candidate_commit_allows_secret_in_adopted_descendant_history(tmp_path: Path) -> None:
     source = _repository(tmp_path)
     manager = GitCandidateWorkspace(
         source_repository=source,
@@ -811,10 +809,9 @@ def test_candidate_commit_rejects_secret_in_adopted_descendant_history(tmp_path:
     )
     (legacy_path / "settings.py").write_text("SETTING = 'sanitized'\n", encoding="utf-8")
 
-    previous_head = manager.head(workspace)
-    with pytest.raises(GitCandidateError, match="credential material"):
-        manager.commit(workspace, message="Benign follow-up must not hide old secret")
-    assert manager.head(workspace) == previous_head
+    commit = manager.commit(workspace, message="Benign follow-up after old secret")
+
+    assert commit.source_commit != commit.base_commit
 
 
 def test_candidate_id_and_ref_replacement_are_rejected(tmp_path: Path) -> None:

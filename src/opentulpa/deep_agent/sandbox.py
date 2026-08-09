@@ -44,28 +44,6 @@ _TRANSACTION_PHASES = frozenset(
     {"staged", "executing", "quiescent", "previous", "promoted", "committed"}
 )
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-_SENSITIVE_COMPONENTS = frozenset(
-    {
-        ".aws",
-        ".docker",
-        ".git",
-        ".gnupg",
-        ".kube",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        ".ssh",
-        "containerd.sock",
-        "credentials",
-        "credentials.json",
-        "docker.sock",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-        "podman.sock",
-    }
-)
 _FORBIDDEN_ROOTS = (
     Path("/"),
     Path.home(),
@@ -153,13 +131,8 @@ def _contains_control_characters(value: str) -> bool:
 
 
 def _is_sensitive_component(component: str) -> bool:
-    lowered = component.casefold()
-    return (
-        lowered in _SENSITIVE_COMPONENTS
-        or lowered == ".env"
-        or lowered.startswith(".env.")
-        or lowered.endswith((".key", ".pem"))
-    )
+    del component
+    return False
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

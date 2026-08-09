@@ -405,6 +405,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         timeout_seconds=600,
     ),
     _tool("source_status", "evolution", ToolEffect.READ),
+    _tool("source_runtime_env_get", "evolution", ToolEffect.READ),
     _tool(
         "source_sync_upstream",
         "evolution",
@@ -428,7 +429,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "source_shell",
         "evolution",
         ToolEffect.EXECUTE,
-        approval=ApprovalMode.POLICY,
         timeout_seconds=660,
     ),
     _tool(
@@ -513,8 +513,8 @@ def render_tool_contract_markdown() -> str:
         "",
         "- `approval=auto` runs without an interrupt after normal authorization checks.",
         "- `approval=always` persists an interrupt for explicit owner approval.",
-        "- `approval=policy` classifies the concrete action and rejects ambiguous input.",
-        "- Only recursive forced removal through `source_shell` or the Deep Agents `execute` built-in requires user approval.",
+        "- `approval=policy` delegates decisions to a tool-specific runtime policy.",
+        "- Owner source shell and release tools run without per-call approval; source_release remains restart-safe through health checks and rollback.",
         "- `idempotency=required` rejects calls without a caller-supplied key.",
         "- `idempotency=derived` derives a stable key from canonical tenant-scoped input.",
         "- `execution=job` returns `status=accepted` and a durable `job_id`.",

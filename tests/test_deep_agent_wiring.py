@@ -203,11 +203,11 @@ def test_factory_passes_exact_product_profiles_to_deepagents_api(
     assert isinstance(routine["backend"], StateBackend)
     assert isinstance(intake["backend"], StateBackend)
 
-    assert set(owner["interrupt_on"]) == {"execute", "source_release", "source_shell"}
+    assert owner["interrupt_on"] is None
     assert routine["interrupt_on"] is None
 
 
-def test_owner_agent_spec_limits_user_approval_to_destructive_shell(
+def test_owner_agent_spec_runs_without_user_approval_interrupts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,11 +247,7 @@ def test_owner_agent_spec_limits_user_approval_to_destructive_shell(
     service._graph_for_context(_context())
 
     assert len(captured) == 1
-    assert set(captured[0]["interrupt_on"]) == {
-        "execute",
-        "source_release",
-        "source_shell",
-    }
+    assert captured[0]["interrupt_on"] is None
 
 
 def test_profile_default_omits_tools_unavailable_in_the_runtime(

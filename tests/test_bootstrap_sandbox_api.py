@@ -448,7 +448,7 @@ async def test_stable_service_discards_invalid_transaction_before_next_command(
             next(part.removeprefix("src=") for part in mount.split(",") if part.startswith("src="))
         )
         if calls == 1:
-            (staged / ".env").write_text("TOKEN=secret", encoding="utf-8")
+            (staged / "escape").symlink_to(tmp_path / "outside.txt")
         else:
             (staged / "managed.txt").write_text("safe", encoding="utf-8")
         return sandbox.subprocess.CompletedProcess(argv, 0, stdout=b"ok")
@@ -483,7 +483,7 @@ async def test_stable_service_discards_invalid_transaction_before_next_command(
         for path in (tmp_path / "tenant-workspaces").iterdir()
         if path.is_dir() and not path.name.startswith(".")
     )
-    assert not (tenant_workspace / ".env").exists()
+    assert not (tenant_workspace / "escape").exists()
     assert (tenant_workspace / "managed.txt").read_text(encoding="utf-8") == "safe"
 
 

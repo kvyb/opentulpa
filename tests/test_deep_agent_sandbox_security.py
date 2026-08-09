@@ -145,17 +145,10 @@ def test_scratch_execution_has_no_host_mount_and_leaves_no_workspace(
     [
         "../outside.txt",
         "/safe/../../outside.txt",
-        "~/.ssh/key",
-        ".env",
-        ".env.production",
-        ".git/config",
-        ".ssh/id_rsa",
-        "credentials.json",
-        "docker.sock",
         "safe\\..\\outside.txt",
     ],
 )
-def test_workspace_file_operations_reject_traversal_and_sensitive_paths(
+def test_workspace_file_operations_reject_traversal(
     tmp_path: Path,
     path: str,
 ) -> None:
@@ -164,7 +157,7 @@ def test_workspace_file_operations_reject_traversal_and_sensitive_paths(
         workspaces_root=tmp_path / "workspaces",
     )
 
-    with pytest.raises(ValueError, match="workspace path|sensitive workspace"):
+    with pytest.raises(ValueError, match="workspace path"):
         backend.write(path, "secret")
 
     assert not (tmp_path / "outside.txt").exists()
@@ -208,7 +201,7 @@ def test_symlink_and_special_file_make_workspace_fail_closed(
     assert calls == 0
 
 
-@pytest.mark.parametrize("poison", ["env", "symlink", "hardlink", "oversized", "fifo"])
+@pytest.mark.parametrize("poison", ["symlink", "hardlink", "oversized", "fifo"])
 def test_invalid_command_workspace_is_discarded_and_next_command_recovers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -226,9 +219,7 @@ def test_invalid_command_workspace_is_discarded_and_next_command_recovers(
         if calls == 2:
             (staged / "recovered.txt").write_text("safe", encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout=b"recovered")
-        if poison == "env":
-            (staged / ".env").write_text("TOKEN=secret", encoding="utf-8")
-        elif poison == "symlink":
+        if poison == "symlink":
             (staged / "escape").symlink_to(outside)
         elif poison == "hardlink":
             os.link(staged / "notes.txt", staged / "notes-alias.txt")
@@ -426,7 +417,7 @@ def test_failed_transaction_does_not_block_or_mutate_another_tenant(
         staged = _mounted_workspace(argv)
         rendezvous.wait(timeout=2)
         if argv[-1] == "poison":
-            (staged / ".env").write_text("TOKEN=secret", encoding="utf-8")
+            os.mkfifo(staged / "agent.pipe")
         else:
             (staged / "safe.txt").write_text("tenant-b", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, stdout=b"ok")
@@ -447,7 +438,7 @@ def test_failed_transaction_does_not_block_or_mutate_another_tenant(
     assert result_a.exit_code == 126
     assert result_b.exit_code == 0
     assert (tenant_a.workspace / "notes.txt").read_text(encoding="utf-8") == "a"
-    assert not (tenant_a.workspace / ".env").exists()
+    assert not (tenant_a.workspace / "agent.pipe").exists()
     assert (tenant_b.workspace / "notes.txt").read_text(encoding="utf-8") == "b"
     assert (tenant_b.workspace / "safe.txt").read_text(encoding="utf-8") == "tenant-b"
 
@@ -483,21 +474,26 @@ def test_timeout_output_is_capped_and_timeout_cannot_exceed_policy(
     assert response.output.endswith("command timed out after 3s")
 
 
-def test_sensitive_workspace_content_is_never_mounted(
+def test_runtime_env_workspace_content_is_mounted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sandbox.subprocess, "run", _successful_run)
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        del kwargs
+        payload = (_mounted_workspace(argv) / ".env").read_bytes()
+        return subprocess.CompletedProcess(argv, 0, stdout=payload)
+
+    monkeypatch.setattr(sandbox.subprocess, "run", run)
     backend = TenantContainerBackend(
         tenant_id="tenant-a",
         workspaces_root=tmp_path / "workspaces",
     )
-    (backend.workspace / ".env").write_text("TOKEN=secret")
+    (backend.workspace / ".env").write_text("TOKEN=test", encoding="utf-8")
 
     response = backend.execute("env")
 
-    assert response.exit_code == 126
-    assert "secret" not in response.output
+    assert response.exit_code == 0
+    assert response.output == "TOKEN=test"
 
 
 def test_real_subprocess_timeout_removes_orphan_before_discarding_stage(tmp_path: Path) -> None:

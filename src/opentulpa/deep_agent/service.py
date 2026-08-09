@@ -23,7 +23,6 @@ from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
 from deepagents.middleware.filesystem import FilesystemPermission
 from langchain.agents.middleware import (
     AgentMiddleware,
-    InterruptOnConfig,
     ModelCallLimitMiddleware,
 )
 from langchain_core.language_models import ModelProfile
@@ -66,10 +65,6 @@ from opentulpa.deep_agent.sandbox import (
     TenantContainerPolicy,
     TenantExecutionProvider,
     TenantSandboxBackend,
-)
-from opentulpa.deep_agent.shell_policy import (
-    ShellCommandDisposition,
-    classify_shell_command,
 )
 from opentulpa.deep_agent.voice import AudioTranscriber, VoiceAttachmentProcessor
 from opentulpa.inference.codex import is_transient as is_codex_transient
@@ -180,13 +175,6 @@ _INTAKE_PRODUCT_TOOL_NAMES = frozenset(
 _FILESYSTEM_TOOL_NAMES = frozenset(
     {"edit_file", "execute", "glob", "grep", "ls", "read_file", "write_file"}
 )
-_OWNER_DECISIONS: tuple[
-    Literal["approve"],
-    Literal["edit"],
-    Literal["reject"],
-] = ("approve", "edit", "reject")
-
-
 def _bounded_trace_value(value: Any) -> Any:
     safe_value = _sanitize_trace_value(redact_for_langfuse(value))
     encoded = json.dumps(safe_value, ensure_ascii=False, sort_keys=True, default=str)
@@ -317,18 +305,6 @@ def _is_model_provider_failure(error: BaseException) -> bool:
     return _is_provider_fallback_error(error) or is_codex_transient(error)
 
 
-def _shell_command_requires_approval(request: Any) -> bool:
-    """Interrupt only shell calls classified as recursive forced removal."""
-
-    raw_arguments = request.tool_call.get("args", {})
-    if not isinstance(raw_arguments, dict):
-        return False
-    command = raw_arguments.get("command")
-    if not isinstance(command, str):
-        return False
-    return classify_shell_command(command) is ShellCommandDisposition.REQUIRE_APPROVAL
-
-
 class AgentRunObserver(Protocol):
     """Receive redacted persisted terminal snapshots outside the agent loop."""
 
@@ -367,32 +343,6 @@ class _DenyToolsMiddleware(AgentMiddleware):
             return ToolMessage(
                 content="This AgentSpec is not permitted to use that tool.",
                 tool_call_id=str(request.tool_call.get("id", "denied-tool-call")),
-                name=name,
-                status="error",
-            )
-        return await handler(request)
-
-
-class _ShellCommandPolicyMiddleware(AgentMiddleware):
-    """Reject shell calls that are ambiguous or bypass restart-safe source release."""
-
-    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
-        tool_call = request.tool_call
-        name = str(tool_call.get("name", ""))
-        arguments = tool_call.get("args", {})
-        command = arguments.get("command") if isinstance(arguments, dict) else None
-        if (
-            name in {"execute", "source_shell"}
-            and isinstance(command, str)
-            and classify_shell_command(command) is ShellCommandDisposition.REJECT
-        ):
-            return ToolMessage(
-                content=(
-                    "This shell command is not permitted because it cannot be classified safely "
-                    "or it invokes a blocked Docker lifecycle command. Use a literal safe "
-                    "command, or use source_release for self-updates."
-                ),
-                tool_call_id=str(tool_call.get("id", "rejected-shell-call")),
                 name=name,
                 status="error",
             )
@@ -2155,15 +2105,9 @@ class DeepAgentService:
             provider="api",
         )
         owner_tools = [tool for tool in self._tools if tool.name in _OWNER_PRODUCT_TOOL_NAMES]
-        owner_interrupt_on = self._owner_interrupt_for_tools(
-            {tool.name for tool in owner_tools} | {"execute"}
-        )
         routine_tools = [tool for tool in owner_tools if tool.name in _ROUTINE_PRODUCT_TOOL_NAMES]
         intake_tools = [tool for tool in owner_tools if tool.name in _INTAKE_PRODUCT_TOOL_NAMES]
-        middleware = [
-            _ShellCommandPolicyMiddleware(),
-            *self._provider_fallback_middleware(),
-        ]
+        middleware = self._provider_fallback_middleware()
 
         return {
             "owner": create_deep_agent(
@@ -2174,7 +2118,7 @@ class DeepAgentService:
                 skills=["/skills/"],
                 memory=["/memories/AGENTS.md"],
                 backend=self._owner_backend(),
-                interrupt_on=owner_interrupt_on,
+                interrupt_on=None,
                 context_schema=AgentRunContext,
                 checkpointer=self._checkpointer,
                 store=self._store,
@@ -2258,13 +2202,6 @@ class DeepAgentService:
         assert self._store is not None
         active_dynamic = dynamic or self._dynamic_snapshot(spec.tenant_id)
         tools = self._tools_for_spec(spec, dynamic=active_dynamic)
-        tool_names = {tool.name for tool in tools}
-        interrupt_on: dict[str, bool | InterruptOnConfig] = {}
-        if spec.runtime_profile == AgentRunKind.OWNER.value:
-            owner_tool_names = set(tool_names)
-            if spec.workspace_scope == "read_write":
-                owner_tool_names.add("execute")
-            interrupt_on = self._owner_interrupt_for_tools(owner_tool_names)
         backend, uses_store = self._backend_for_spec(spec)
         denied: set[str] = set()
         permissions: list[FilesystemPermission] = []
@@ -2312,8 +2249,7 @@ class DeepAgentService:
             ModelCallLimitMiddleware(
                 run_limit=spec.max_model_calls,
                 exit_behavior="error",
-            ),
-            _ShellCommandPolicyMiddleware(),
+            )
         ]
         middleware.extend(self._middleware_for_plan(active_plan, resolved_model))
         if denied:
@@ -2324,7 +2260,7 @@ class DeepAgentService:
             "tools": tools,
             "system_prompt": self._prompt_for_spec(spec),
             "backend": backend,
-            "interrupt_on": interrupt_on or None,
+            "interrupt_on": None,
             "context_schema": AgentRunContext,
             "checkpointer": self._checkpointer,
             "middleware": middleware,
@@ -2836,22 +2772,6 @@ class DeepAgentService:
                 "/workspace/": workspace,
             },
         )
-
-    @staticmethod
-    def _owner_interrupt_for_tools(
-        tool_names: set[str],
-    ) -> dict[str, bool | InterruptOnConfig]:
-        policy: dict[str, bool | InterruptOnConfig] = {
-            name: InterruptOnConfig(
-                allowed_decisions=list(_OWNER_DECISIONS),
-                when=_shell_command_requires_approval,
-            )
-            for name in {"execute", "source_shell"}.intersection(tool_names)
-        }
-        if "source_release" in tool_names:
-            # Keep release handoff restart-safe without surfacing an approval.
-            policy["source_release"] = InterruptOnConfig(allowed_decisions=list(_OWNER_DECISIONS))
-        return policy
 
     @staticmethod
     def _validate_product_tools(tools: Sequence[BaseTool]) -> tuple[BaseTool, ...]:

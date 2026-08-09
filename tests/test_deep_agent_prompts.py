@@ -42,11 +42,10 @@ def test_owner_prompt_treats_tools_and_approvals_as_runtime_state() -> None:
     assert "actual model-provided tools and schemas are authoritative" in prompt
     assert "when the active agentspec permits them" in prompt
     assert "when workspace access is available" in prompt
-    assert "without per-call approval pauses except execute or source_shell" in prompt
-    assert "recursive forced removal such as `rm -rf`" in prompt
-    assert "ambiguous dynamic construction is rejected" in prompt
+    assert "without per-call approval pauses" in prompt
+    assert "shell commands are trusted owner actions" in prompt
     assert "complete read-only discovery" in prompt
-    assert "other accepted calls execute immediately" in prompt
+    assert "accepted calls execute immediately" in prompt
     assert "restricted background agents retain tool, isolation, and tenant boundaries" in prompt
     assert "do not request per-call approvals" in prompt
 
@@ -61,7 +60,7 @@ def test_owner_prompt_uses_content_fetch_for_unconfigured_search() -> None:
 
 def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:
     prompt = " ".join(OWNER_PROMPT.casefold().split())
-    assert "use source_shell only" in prompt
+    assert "use source_shell for opentulpa source" in prompt
     assert "for any external git repository, start with repository_open" in prompt
     assert "never use opentulpa source tools" in prompt
     assert "composio integration tools execute through the trusted host" in prompt
@@ -80,23 +79,17 @@ def test_owner_prompt_distinguishes_source_availability_from_session_state() -> 
     prompt = " ".join(OWNER_PROMPT.casefold().split())
     assert "available means usable" in prompt
     assert "active means an open candidate, not unavailable self-update" in prompt
-    assert "never restart, stop, or redeploy opentulpa through execute" in prompt
-    assert "docker, or service-manager commands" in prompt
-    assert "activate source changes only through source_release" in prompt
+    assert "activate self-updates through source_release" in prompt
+    assert "runtime healthcheck and rollback path run" in prompt
 
 
-def test_owner_prompt_uses_handle_based_secret_ingress() -> None:
-    assert "`SERVICE_API_KEY=<value>`" in OWNER_PROMPT
-    assert "`SERVICE_TOKEN=<value>`" in OWNER_PROMPT
-    assert '`<secret name="SERVICE_CREDENTIAL">...</secret>`' in OWNER_PROMPT
-    assert '<secret name="SSH_PRIVATE_KEY">' in OWNER_PROMPT
-    assert '<secret name="SSH_PASSWORD">' in OWNER_PROMPT
-    assert "matching `secret_type`" in OWNER_PROMPT
-    assert "never put credentials in commands" in OWNER_PROMPT
-    assert "use unnamed/redacted secret tags" in OWNER_PROMPT
-    assert "`secret://<handle_id>`" in OWNER_PROMPT
+def test_owner_prompt_allows_plaintext_runtime_env_inspection() -> None:
+    assert "owner may paste credentials" in OWNER_PROMPT
+    assert "plaintext env values" in OWNER_PROMPT
+    assert "source_runtime_env_get" in OWNER_PROMPT
+    assert "source_set_runtime_env" in OWNER_PROMPT
+    assert "Never repeat credential values" in OWNER_PROMPT
     assert "`COMPOSIO_API_KEY=<value>`" in OWNER_PROMPT
-    assert "Never send the owner to a separate host UI, CLI" in OWNER_PROMPT
 
 
 def test_owner_prompt_keeps_persona_owner_controlled() -> None:

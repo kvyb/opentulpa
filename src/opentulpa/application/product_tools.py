@@ -508,6 +508,12 @@ class EvolutionPort(Protocol):
         audit_context: Mapping[str, str] | None = None,
     ) -> Any: ...
 
+    async def source_runtime_env_get(
+        self,
+        *,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> Any: ...
+
     async def source_shell(
         self,
         *,
@@ -2219,6 +2225,18 @@ class ProductToolApplication:
         return await self._output(
             invocation,
             lambda: evolution.source_status(
+                audit_context=self._evolution_audit_context(invocation),
+            ),
+        )
+
+    async def source_runtime_env_get(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput:
+        evolution = self._require_evolution(invocation)
+        return await self._output(
+            invocation,
+            lambda: evolution.source_runtime_env_get(
                 audit_context=self._evolution_audit_context(invocation),
             ),
         )

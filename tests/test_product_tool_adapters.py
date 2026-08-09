@@ -131,10 +131,7 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
         properties = schema.get("properties", {})
         spec = TOOL_SPEC_BY_NAME[tool.name]
         assert f"Effect: {spec.effect.value}" in tool.description
-        if tool.name == "source_shell":
-            approval = "policy (recursive forced removal only)"
-        else:
-            approval = "policy" if spec.approval.value == "policy" else "auto"
+        approval = "policy" if spec.approval.value == "policy" else "auto"
         assert f"approval: {approval}" in tool.description
         assert f"execution: {spec.execution.value}" in tool.description
         assert "runtime" not in properties
@@ -176,6 +173,9 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     assert source_status.tool_call_schema.model_json_schema()["properties"] == {}
     assert "available reports whether self-update is usable" in source_status.description
     assert "candidate session" in source_status.description
+    source_env_get = next(tool for tool in tools if tool.name == "source_runtime_env_get")
+    assert source_env_get.tool_call_schema.model_json_schema()["properties"] == {}
+    assert "Returns current variable names and values" in source_env_get.description
     source_sync = next(tool for tool in tools if tool.name == "source_sync_upstream")
     assert set(source_sync.tool_call_schema.model_json_schema()["properties"]) == {
         "expected_active_release_id"
@@ -359,7 +359,7 @@ async def test_job_tools_require_job_acceptance_and_return_accepted_envelope() -
 
 
 @pytest.mark.asyncio
-async def test_results_and_expected_errors_are_sanitized() -> None:
+async def test_results_are_model_visible_and_expected_errors_are_sanitized() -> None:
     output_application, _ = _application(
         lambda invocation: ProductToolOutput(
             data={"token": "secret-value", "result": "safe"},
@@ -371,7 +371,7 @@ async def test_results_and_expected_errors_are_sanitized() -> None:
         context=_context(),
         raw_arguments={"file_id": "file-1"},
     )
-    assert output["data"] == {"token": "[redacted]", "result": "safe"}
+    assert output["data"] == {"token": "secret-value", "result": "safe"}
 
     public_error_application, _ = _application(
         lambda invocation: ProductToolApplicationError(

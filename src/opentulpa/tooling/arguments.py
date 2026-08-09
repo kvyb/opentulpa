@@ -643,6 +643,7 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "repository_close": RepositoryCloseArguments,
         "repository_publish_pr": RepositoryPublishPullRequestArguments,
         "source_status": SourceStatusArguments,
+        "source_runtime_env_get": ToolArguments,
         "source_sync_upstream": SourceSyncUpstreamArguments,
         "source_prepare_pr": SourcePreparePullRequestArguments,
         "source_resolve_dependencies": SourceResolveDependenciesArguments,

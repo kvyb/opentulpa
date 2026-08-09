@@ -575,6 +575,28 @@ class RuntimeEnvFileManager:
         self._runtime = runtime
         self._lock = asyncio.Lock()
 
+    async def read(self) -> dict[str, JsonValue]:
+        try:
+            async with self._lock:
+                payload = await asyncio.to_thread(self._read_payload)
+                values = parse_dotenv_payload(payload or b"")
+        except RuntimeEnvironmentError as exc:
+            return {
+                "available": False,
+                "variables": [],
+                "count": 0,
+                "error": {
+                    "code": exc.code,
+                    "message": exc.public_message,
+                    "retryable": False,
+                },
+            }
+        variables: list[JsonValue] = [
+            {"name": name, "value": value, "set": True}
+            for name, value in sorted(values.items())
+        ]
+        return {"available": True, "variables": variables, "count": len(variables)}
+
     async def set(
         self,
         *,

@@ -17,7 +17,6 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, create_model
 
-from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.tooling.arguments import OPERATION_ARGUMENT_SCHEMAS
 from opentulpa.tooling.contract import (
     TOOL_SPEC_BY_NAME,
@@ -268,6 +267,11 @@ class ProductToolApplication(Protocol):
 
     async def source_status(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
+    async def source_runtime_env_get(
+        self,
+        invocation: ProductToolInvocation,
+    ) -> ProductToolOutput: ...
+
     async def source_sync_upstream(
         self,
         invocation: ProductToolInvocation,
@@ -417,7 +421,7 @@ async def _execute_product_tool(
         status = ToolStatus.ACCEPTED if spec.execution is ExecutionMode.JOB else ToolStatus.OK
         result = ToolResult[Any](
             status=status,
-            data=redact_for_langfuse(output.data),
+            data=output.data,
             job_id=output.job_id,
             idempotency_key=idempotency_key,
             audit_id=audit_id,
@@ -518,9 +522,17 @@ def _description(spec: ToolSpec) -> str:
             "Resolve an exact pyproject dependency proposal through the stable credential-free "
             "OCI resolver, then install its verified lock into the active source candidate."
         ),
+        "source_shell": (
+            "Run a shell command in the OpenTulpa source control environment for inspection, "
+            "edits, tests, or release preparation."
+        ),
         "source_set_runtime_env": (
             "Set one live runtime .env variable through the stable host, restart the child, "
             "and restore the previous .env if the restart fails. Never returns the value."
+        ),
+        "source_runtime_env_get": (
+            "Read the live runtime .env through the stable host. Owner-only. Returns current "
+            "variable names and values to the model so it can diagnose and repair configuration."
         ),
         "sandbox_ssh_diagnostic": (
             "Run one SSH command from the sandbox using an opaque stored private-key or password "
@@ -530,10 +542,7 @@ def _description(spec: ToolSpec) -> str:
     if description is None:
         action = spec.name.replace("_", " ")
         description = f"{action.capitalize()} for the authenticated OpenTulpa tenant."
-    if spec.name == "source_shell":
-        approval = "policy (recursive forced removal only)"
-    else:
-        approval = "policy" if spec.approval is ApprovalMode.POLICY else spec.approval.value
+    approval = "policy" if spec.approval is ApprovalMode.POLICY else spec.approval.value
     return (
         f"{description} "
         f"Effect: {spec.effect.value}; approval: {approval}; "

@@ -103,6 +103,10 @@ def register_evolution_control_api(
     async def source_status(body: SourceContextRequest) -> dict[str, Any]:
         return dict(await service.source_status(audit_context=body.audit_context))
 
+    @router.post("/source/runtime-env/read")
+    async def source_runtime_env_get(body: SourceContextRequest) -> dict[str, Any]:
+        return dict(await service.source_runtime_env_get(audit_context=body.audit_context))
+
     @router.post("/source/shell")
     async def source_shell(body: SourceShellRequest) -> dict[str, Any]:
         return dict(
@@ -282,6 +286,19 @@ class EvolutionClient:
             await self._json(
                 "POST",
                 "/source/status",
+                json={"audit_context": dict(audit_context or {})},
+            )
+        )
+
+    async def source_runtime_env_get(
+        self,
+        *,
+        audit_context: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._mapping(
+            await self._json(
+                "POST",
+                "/source/runtime-env/read",
                 json={"audit_context": dict(audit_context or {})},
             )
         )
