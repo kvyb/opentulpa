@@ -87,7 +87,7 @@ class SubprocessWorkerHost:
     stable OCI authority, which enforces those boundaries and rollback fencing.
     """
 
-    _INHERITED_ENVIRONMENT = ("PATH", "LANG", "LC_ALL", "TMPDIR")
+    _INHERITED_ENVIRONMENT = ("PATH", "LANG", "LC_ALL", "TMPDIR", "PYTHONPATH")
 
     def __init__(
         self,

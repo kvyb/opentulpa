@@ -151,7 +151,7 @@ def test_serve_uses_stable_host_when_public_url_is_present(tmp_path: Path) -> No
     assert "Telegram webhook secret" not in result.stdout
 
 
-def test_serve_requires_bot_token_and_owner_id_together() -> None:
+def test_serve_accepts_bot_token_without_owner_id() -> None:
     result = _run_start(
         "serve",
         "--run-only",
@@ -163,8 +163,8 @@ def test_serve_requires_bot_token_and_owner_id_together() -> None:
         env=EMPTY_REQUIRED_ENV,
     )
 
-    assert result.returncode == 1
-    assert "requires both --telegram-bot-token and --telegram-user-id" in result.stderr
+    assert result.returncode == 0
+    assert "python -m opentulpa.host" in result.stdout
 
 
 def test_serve_does_not_persist_command_line_secrets_in_dotenv(tmp_path: Path) -> None:

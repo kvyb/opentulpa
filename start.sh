@@ -64,8 +64,8 @@ Options:
   --dry-run             Print commands without running them
   --api-key KEY         OpenAI-compatible model API key
   --telegram-bot-token TOKEN
-                        Telegram bot token; requires --telegram-user-id
-  --telegram-user-id ID Telegram numeric owner ID; requires --telegram-bot-token
+                        Telegram bot token; owner ID is optional
+  --telegram-user-id ID Optional numeric owner ID; otherwise pair in Telegram
   --owner-token TOKEN   Optional remote Agent API owner token
   --host HOST           Bind host (local default: 127.0.0.1)
   --port PORT           Server port (default: PORT or 8000)
@@ -708,8 +708,9 @@ configure_serve() {
 
   env_is_set "TELEGRAM_BOT_TOKEN" && bot_configured=1
   telegram_allowlist_is_set && owner_configured=1
-  [[ "${bot_configured}" == "${owner_configured}" ]] \
-    || die "Telegram requires both --telegram-bot-token and --telegram-user-id"
+  if [[ "${owner_configured}" == "1" && "${bot_configured}" != "1" ]]; then
+    die "--telegram-user-id requires --telegram-bot-token"
+  fi
 
   RUNTIME_MODE="server"
 }

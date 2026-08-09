@@ -142,7 +142,7 @@ def build_host_application() -> tuple[Any, str, str, Path]:
             telegram_bot_token=SecretStr(telegram_token) if telegram_token else None,
             telegram_user_id=telegram_id if telegram_token else None,
         )
-    elif active is not None and active.telegram_bot_token is None and telegram_token and telegram_id:
+    elif active is not None and active.telegram_bot_token is None and telegram_token:
         bootstrap = HostConfigInput(
             expected_revision=active.revision,
             base_url=active.base_url,

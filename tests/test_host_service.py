@@ -188,7 +188,7 @@ async def test_failed_candidate_keeps_previous_revision_and_runtime(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_telegram_is_validated_stored_as_handle_and_activated(tmp_path: Path) -> None:
+async def test_telegram_token_only_is_validated_stored_and_activated(tmp_path: Path) -> None:
     requests: list[tuple[str, str, dict[str, object] | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -238,11 +238,11 @@ async def test_telegram_is_validated_stored_as_handle_and_activated(tmp_path: Pa
             api_key=SecretStr("provider-secret"),
             base_url="https://models.example",
             telegram_bot_token=SecretStr("123:telegram-secret"),
-            telegram_user_id=7,
         )
     )
 
     assert view.telegram_configured is True
+    assert view.telegram_pairing_required is True
     pending = next(body for method, path, body in requests if path == "/v2/secrets/pending")
     assert pending == {
         "id": "telegram-bot-token",

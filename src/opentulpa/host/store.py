@@ -196,10 +196,16 @@ class HostStore:
                 if active.telegram_bot_token is not None
                 else None
             )
-        if (telegram_token is None) != (value.telegram_user_id is None):
-            raise ValueError("Telegram bot token and user ID must be configured together")
+        if telegram_token is None and value.telegram_user_id is not None:
+            raise ValueError("Telegram bot token is required when a user ID is configured")
         internal_token = secrets.token_urlsafe(48)
-        pairing_code = secrets.token_urlsafe(9) if telegram_token else None
+        pairing_code = (
+            telegram_token[-8:]
+            if telegram_token and value.telegram_user_id is None
+            else secrets.token_urlsafe(9)
+            if telegram_token
+            else None
+        )
         with self._lock, closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(

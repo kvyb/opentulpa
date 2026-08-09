@@ -73,8 +73,9 @@
               <div class="divider"><span>OPTIONAL INTERFACE</span></div>
               <div class="form-grid two">
                 <label>TELEGRAM BOT TOKEN<input id="telegram-token" type="password" autocomplete="off" placeholder="123456:bot-token"></label>
-                <label>TELEGRAM USER ID<input id="telegram-user-id" inputmode="numeric" pattern="[0-9]*" placeholder="numeric owner id"></label>
+                <label>TELEGRAM USER ID (OPTIONAL)<input id="telegram-user-id" inputmode="numeric" pattern="[0-9]*" placeholder="numeric owner id"></label>
               </div>
+              <p class="muted">Without a user ID, pair in Telegram with <code>/start</code> followed by the last 8 characters of the bot token.</p>
               <div class="actions">
                 <button id="apply-button" type="submit">VALIDATE + START</button>
                 <button id="restart-button" class="secondary hidden" type="button">RESTART RUNTIME</button>

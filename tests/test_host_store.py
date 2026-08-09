@@ -77,6 +77,21 @@ def test_configuration_is_encrypted_revisioned_and_atomic(tmp_path: Path) -> Non
         )
 
 
+def test_first_configuration_accepts_telegram_token_without_owner_id(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    config = store.stage(
+        HostConfigInput(
+            api_key=SecretStr("provider-secret"),
+            telegram_bot_token=SecretStr("123456789:abcdefghijklmnopqrstuvwxyzABCDEFGH"),
+        )
+    )
+
+    assert config.telegram_user_id is None
+    assert config.telegram_pairing_code == SecretStr("ABCDEFGH")
+    assert store.view(config).telegram_pairing_required is True
+
+
 def test_host_database_has_exactly_one_active_revision(tmp_path: Path) -> None:
     store = _store(tmp_path)
     one = store.stage(HostConfigInput(api_key=SecretStr("secret-one")))

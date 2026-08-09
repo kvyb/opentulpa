@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -368,6 +369,46 @@ async def test_subprocess_host_starts_without_a_shell_and_stops_cleanly() -> Non
 
     await manager.stop("timer-main")
     assert manager.active("timer-main") is None
+
+
+@pytest.mark.asyncio
+async def test_subprocess_host_inherits_live_source_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "src"
+    package = source / "live_worker"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "ready = Path(os.environ['OPENTULPA_WORKER_READY_FILE'])\n"
+        "ready.write_text(str(os.getpid()), encoding='ascii')\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(source))
+    worker = WorkerSpec(
+        name="live_source_worker",
+        kind=WorkerKind.INTERFACE,
+        protocol="agent-interface-v1",
+        command=(sys.executable, "-m", "live_worker"),
+        healthcheck=HealthCheck(kind="ready_file"),
+        resources=ResourceLimits(startup_timeout_seconds=1),
+    )
+    manifest = CapabilityManifest(
+        name="live_source",
+        version="1.0.0",
+        workers=(worker,),
+        eval_commands=(EvalCommand(argv=("pytest", "-q")),),
+    )
+    manager = CapabilityWorkerManager(SubprocessWorkerHost(cwd=tmp_path))
+
+    active = await manager.start(instance_id="live-source-main", manifest=manifest)
+
+    assert len(active.handles) == 1
+    assert await manager.healthy("live-source-main") is True
+    await manager.stop("live-source-main")
 
 
 @pytest.mark.asyncio
