@@ -8,6 +8,7 @@ import pytest
 from pydantic import SecretStr
 
 from opentulpa.host.models import HostConfig, HostConfigInput
+from opentulpa.host.runtime import RuntimeUnavailableError
 from opentulpa.host.service import HostActivationError, HostService
 from opentulpa.host.store import HostStore
 from opentulpa.secrets.cipher import AesGcmHostKeyCipher
@@ -184,6 +185,35 @@ async def test_failed_candidate_keeps_previous_revision_and_runtime(tmp_path: Pa
     assert runtime.replacements == [first.revision + 1, first.revision]
     assert service.configured_revisions == [first.revision + 1, first.revision]
     assert store.get(first.revision + 1).status == "failed"  # type: ignore[union-attr]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_candidate_preserves_runtime_unavailable_message(tmp_path: Path) -> None:
+    store = HostStore(tmp_path / "host.db", cipher=AesGcmHostKeyCipher(b"r" * 32))
+    first = store.stage(HostConfigInput(api_key=SecretStr("first-secret")))
+    first = store.activate(first.revision)
+
+    class FailingRuntime(_Runtime):
+        async def replace(self, config: HostConfig, *, rollback: HostConfig | None) -> None:
+            del config, rollback
+            raise RuntimeUnavailableError("recorded runtime process could not be inspected")
+
+    runtime = FailingRuntime()
+    runtime.current = first
+    service = _Service(store=store, runtime=runtime)
+
+    with pytest.raises(HostActivationError, match="recorded runtime process"):
+        await service.apply(
+            HostConfigInput(
+                expected_revision=first.revision,
+                api_key=SecretStr("candidate-secret"),
+            )
+        )
+
+    failed = store.get(first.revision + 1)
+    assert failed is not None
+    assert failed.error == "recorded runtime process could not be inspected"
     await service.shutdown()
 
 

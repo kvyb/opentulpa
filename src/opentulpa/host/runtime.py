@@ -1543,12 +1543,18 @@ class RuntimeSupervisor:
         expected: RuntimeProcessIdentity,
         observed: RuntimeProcessIdentity,
     ) -> bool:
+        nonce_matches = (
+            expected.launch_nonce is not None
+            and (
+                observed.launch_nonce == expected.launch_nonce
+                or observed.launch_nonce is None
+            )
+        )
         return (
             expected.pid == observed.pid
             and expected.process_birth is not None
             and expected.process_birth == observed.process_birth
-            and expected.launch_nonce is not None
-            and expected.launch_nonce == observed.launch_nonce
+            and nonce_matches
             and expected.executable.resolve() == observed.executable.resolve()
             and expected.argv == observed.argv
         )
@@ -2722,7 +2728,6 @@ class RuntimeSupervisor:
             raise RuntimeUnavailableError("safe runtime process inspection is unavailable")
         try:
             raw_argv = (proc_root / "cmdline").read_bytes()
-            raw_environment = (proc_root / "environ").read_bytes()
             parent_pid, process_group, process_birth = (
                 RuntimeSupervisor._linux_process_metadata(proc_root)
             )
@@ -2740,10 +2745,15 @@ class RuntimeSupervisor:
                 return None
             raise RuntimeUnavailableError("recorded runtime executable could not be inspected") from exc
         launch_nonce = None
-        for entry in raw_environment.split(b"\0"):
-            if entry.startswith(b"OPENTULPA_LAUNCH_NONCE="):
-                launch_nonce = entry.partition(b"=")[2].decode("ascii", errors="strict")
-                break
+        try:
+            raw_environment = (proc_root / "environ").read_bytes()
+        except OSError:
+            raw_environment = b""
+        if raw_environment:
+            for entry in raw_environment.split(b"\0"):
+                if entry.startswith(b"OPENTULPA_LAUNCH_NONCE="):
+                    launch_nonce = entry.partition(b"=")[2].decode("ascii", errors="strict")
+                    break
         return RuntimeProcessIdentity(
             pid=pid,
             process_group=process_group,

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from opentulpa.host.models import HostConfig, HostConfigInput, HostConfigView
-from opentulpa.host.runtime import RuntimeSupervisor
+from opentulpa.host.runtime import RuntimeSupervisor, RuntimeUnavailableError
 from opentulpa.host.store import HostStore
 
 
@@ -267,8 +267,9 @@ class HostService:
 
     @staticmethod
     def _safe_error(error: Exception) -> str:
-        if isinstance(error, HostActivationError):
-            return str(error)[:1_000]
+        if isinstance(error, (HostActivationError, RuntimeUnavailableError)):
+            message = str(error).strip()
+            return message[:1_000] if message else "The runtime could not activate this configuration."
         return "The runtime could not activate this configuration."
 
 

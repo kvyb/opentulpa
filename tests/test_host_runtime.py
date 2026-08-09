@@ -499,6 +499,48 @@ async def test_host_passes_telegram_owner_identity_without_writing_child_state(
 
 
 @pytest.mark.asyncio
+async def test_runtime_signal_accepts_unreadable_launch_nonce_for_same_process(
+    tmp_path: Path,
+) -> None:
+    executable = Path(sys.executable).resolve()
+    expected = RuntimeProcessIdentity(
+        pid=12_345,
+        process_group=12_345,
+        executable=executable,
+        argv=(str(executable), "-m", "opentulpa"),
+        process_birth="process-birth-1",
+        launch_nonce="launch-nonce-1",
+    )
+    observed = RuntimeProcessIdentity(
+        pid=expected.pid,
+        process_group=expected.process_group,
+        executable=expected.executable,
+        argv=expected.argv,
+        process_birth=expected.process_birth,
+        launch_nonce=None,
+    )
+    signals: list[tuple[RuntimeProcessIdentity, signal.Signals]] = []
+
+    def inspect_process(pid: int) -> RuntimeProcessIdentity | None:
+        assert pid == expected.pid
+        return observed
+
+    def fence_process(identity: RuntimeProcessIdentity, selected: signal.Signals) -> None:
+        signals.append((identity, selected))
+
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        process_inspector=inspect_process,
+        process_fencer=fence_process,
+    )
+
+    assert await runtime._signal_verified_identity(expected, signal.SIGTERM) is True
+    assert signals == [(expected, signal.SIGTERM)]
+    await runtime._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_runtime_refuses_to_start_without_a_runtime_target(tmp_path: Path) -> None:
     runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
 

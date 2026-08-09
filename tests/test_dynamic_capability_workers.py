@@ -311,6 +311,46 @@ async def test_worker_hosts_reject_runtime_environment_secret_overrides(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_subprocess_worker_inherits_runtime_launch_nonce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", "runtime-launch-nonce")
+    captured = tmp_path / "nonce.txt"
+    script = (
+        "import os, pathlib, time; "
+        f"pathlib.Path({str(captured)!r}).write_text("
+        "os.environ.get('OPENTULPA_LAUNCH_NONCE', ''), encoding='ascii'); "
+        "pathlib.Path(os.environ['OPENTULPA_WORKER_READY_FILE']).write_text("
+        "str(os.getpid()), encoding='ascii'); "
+        "time.sleep(60)"
+    )
+    manager = CapabilityWorkerManager(SubprocessWorkerHost(cwd=tmp_path))
+
+    active = await manager.start(
+        instance_id="nonce-main",
+        manifest=CapabilityManifest(
+            name="nonce",
+            version="1.0.0",
+            eval_commands=(EvalCommand(argv=("pytest", "-q")),),
+            workers=(
+                WorkerSpec(
+                    name="nonce",
+                    kind=WorkerKind.INTERFACE,
+                    protocol="agent-interface-v1",
+                    command=(sys.executable, "-c", script),
+                    healthcheck=HealthCheck(kind="ready_file"),
+                ),
+            ),
+        ),
+    )
+
+    assert captured.read_text(encoding="ascii") == "runtime-launch-nonce"
+    await manager.stop(active.instance_id)
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
 async def test_manager_leaves_stdio_mcp_process_lifecycle_to_tool_runtime() -> None:
     manifest = CapabilityManifest(
         name="weather",
