@@ -488,7 +488,13 @@ async def test_host_passes_telegram_owner_identity_without_writing_child_state(
 
     token_only = _config().model_copy(update={"telegram_user_id": None})
     pairing_environment = runtime._child_environment(token_only, port=8123, live_source=spec)
-    assert "OPENTULPA_TELEGRAM_OWNER_ID" not in pairing_environment
+    assert pairing_environment["OPENTULPA_TELEGRAM_OWNER_ID"] == ""
+
+    no_telegram = _config().model_copy(
+        update={"telegram_bot_token": None, "telegram_user_id": None}
+    )
+    disabled_environment = runtime._child_environment(no_telegram, port=8123, live_source=spec)
+    assert "OPENTULPA_TELEGRAM_OWNER_ID" not in disabled_environment
     await runtime.shutdown()
 
 

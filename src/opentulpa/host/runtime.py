@@ -1671,8 +1671,10 @@ class RuntimeSupervisor:
             environment["OPENTULPA_TELEGRAM_PAIRING_CODE"] = (
                 config.telegram_pairing_code.get_secret_value()
             )
-        if config.telegram_user_id is not None:
-            environment["OPENTULPA_TELEGRAM_OWNER_ID"] = str(config.telegram_user_id)
+        if config.telegram_bot_token is not None:
+            environment["OPENTULPA_TELEGRAM_OWNER_ID"] = (
+                str(config.telegram_user_id) if config.telegram_user_id is not None else ""
+            )
         return environment
 
     def _live_source_cwd(self, source_root: Path) -> Path:

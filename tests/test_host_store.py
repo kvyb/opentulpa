@@ -92,6 +92,32 @@ def test_first_configuration_accepts_telegram_token_without_owner_id(tmp_path: P
     assert store.view(config).telegram_pairing_required is True
 
 
+def test_later_edit_preserves_token_only_telegram_configuration(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.stage(
+        HostConfigInput(
+            api_key=SecretStr("provider-secret"),
+            telegram_bot_token=SecretStr("not-a-real-token-ABCDEFGH"),
+        )
+    )
+    store.activate(first.revision)
+
+    second = store.stage(
+        HostConfigInput(
+            expected_revision=first.revision,
+            api_key=None,
+            model="z-ai/glm-5.2",
+            telegram_bot_token=None,
+            telegram_user_id=None,
+        )
+    )
+
+    assert second.telegram_bot_token is not None
+    assert second.telegram_bot_token.get_secret_value() == "not-a-real-token-ABCDEFGH"
+    assert second.telegram_user_id is None
+    assert second.telegram_pairing_code == SecretStr("ABCDEFGH")
+
+
 def test_host_database_has_exactly_one_active_revision(tmp_path: Path) -> None:
     store = _store(tmp_path)
     one = store.stage(HostConfigInput(api_key=SecretStr("secret-one")))

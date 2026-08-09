@@ -190,7 +190,7 @@ class HostStore:
             if value.telegram_bot_token is not None
             else None
         )
-        if telegram_token is None and value.telegram_user_id is not None and active is not None:
+        if telegram_token is None and active is not None:
             telegram_token = (
                 active.telegram_bot_token.get_secret_value()
                 if active.telegram_bot_token is not None
