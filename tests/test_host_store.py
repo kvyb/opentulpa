@@ -83,7 +83,7 @@ def test_first_configuration_accepts_telegram_token_without_owner_id(tmp_path: P
     config = store.stage(
         HostConfigInput(
             api_key=SecretStr("provider-secret"),
-            telegram_bot_token=SecretStr("123456789:abcdefghijklmnopqrstuvwxyzABCDEFGH"),
+            telegram_bot_token=SecretStr("not-a-real-token-ABCDEFGH"),
         )
     )
 
