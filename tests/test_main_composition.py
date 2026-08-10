@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -166,6 +168,80 @@ def test_secret_vault_refuses_a_group_readable_host_key(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="permissions"):
         load_or_create_host_cipher(tmp_path)
+
+
+def test_owner_tenant_id_is_persisted_across_profile_changes(tmp_path: Path) -> None:
+    class Profiles:
+        storage_ids = ["tenant-a"]
+
+        def resolve_customer_id(self, customer_id: str) -> str:
+            return customer_id
+
+        def resolve_telegram_customer_id(self, telegram_user_id: str) -> str:
+            return f"telegram_{telegram_user_id}"
+
+        def list_profiles(self) -> list[Any]:
+            return [SimpleNamespace(storage_user_id=value) for value in self.storage_ids]
+
+    settings = _settings(tmp_path)
+    data_root = tmp_path / ".opentulpa"
+    profiles = Profiles()
+
+    assert main_module._resolve_owner_tenant_id(settings, profiles, data_root=data_root) == "tenant-a"
+    assert (data_root / "bootstrap" / "owner-tenant-id").read_text(encoding="utf-8").strip() == "tenant-a"
+
+    profiles.storage_ids = ["tenant-a", "tenant-b"]
+
+    assert main_module._resolve_owner_tenant_id(settings, profiles, data_root=data_root) == "tenant-a"
+
+
+def test_configured_owner_tenant_id_updates_persisted_identity(tmp_path: Path) -> None:
+    class Profiles:
+        def resolve_customer_id(self, customer_id: str) -> str:
+            return {"configured-owner": "tenant-b"}.get(customer_id, customer_id)
+
+        def resolve_telegram_customer_id(self, telegram_user_id: str) -> str:
+            return f"telegram_{telegram_user_id}"
+
+        def list_profiles(self) -> list[Any]:
+            return [SimpleNamespace(storage_user_id="tenant-a")]
+
+    data_root = tmp_path / ".opentulpa"
+    settings = _settings(tmp_path, opentulpa_owner_customer_id="configured-owner")
+
+    assert main_module._resolve_owner_tenant_id(settings, Profiles(), data_root=data_root) == "tenant-b"
+    assert (data_root / "bootstrap" / "owner-tenant-id").read_text(encoding="utf-8").strip() == "tenant-b"
+
+
+def test_owner_tenant_id_adopts_single_existing_codex_credential(tmp_path: Path) -> None:
+    class Profiles:
+        def resolve_customer_id(self, customer_id: str) -> str:
+            return customer_id
+
+        def resolve_telegram_customer_id(self, telegram_user_id: str) -> str:
+            return f"telegram_{telegram_user_id}"
+
+        def list_profiles(self) -> list[Any]:
+            return [
+                SimpleNamespace(storage_user_id="tenant-a"),
+                SimpleNamespace(storage_user_id="tenant-b"),
+            ]
+
+    data_root = tmp_path / ".opentulpa"
+    db_path = data_root / "deepagents" / "inference.db"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE codex_credentials (tenant_id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO codex_credentials VALUES ('tenant-codex')")
+
+    assert (
+        main_module._resolve_owner_tenant_id(_settings(tmp_path), Profiles(), data_root=data_root)
+        == "tenant-codex"
+    )
+    assert (
+        (data_root / "bootstrap" / "owner-tenant-id").read_text(encoding="utf-8").strip()
+        == "tenant-codex"
+    )
 
 
 def test_build_application_composes_only_v2_product_services(

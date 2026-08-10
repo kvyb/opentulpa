@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import shutil
+import sqlite3
 import stat
 import sys
 import threading
@@ -541,20 +542,102 @@ def _capability_worker_host(project_root: Path) -> CapabilityWorkerClient | Subp
 def _resolve_owner_tenant_id(
     settings: Settings,
     profiles: CustomerProfileService,
+    *,
+    data_root: Path,
 ) -> str:
     configured = str(settings.opentulpa_owner_customer_id or "").strip()
     if configured:
-        return profiles.resolve_customer_id(configured) or configured
+        resolved = profiles.resolve_customer_id(configured) or configured
+        _persist_owner_tenant_id(data_root, resolved)
+        return resolved
+
+    persisted = _load_owner_tenant_id(data_root)
+    if persisted:
+        return persisted
 
     allowed_ids = parse_csv_set(settings.telegram_allowed_user_ids)
     numeric_ids = sorted(value for value in allowed_ids if value.isdigit())
     if numeric_ids:
-        return profiles.resolve_telegram_customer_id(numeric_ids[0])
+        resolved = profiles.resolve_telegram_customer_id(numeric_ids[0])
+        _persist_owner_tenant_id(data_root, resolved)
+        return resolved
+
+    codex_tenant = _single_codex_credential_tenant(data_root)
+    if codex_tenant:
+        _persist_owner_tenant_id(data_root, codex_tenant)
+        return codex_tenant
 
     storage_ids = {profile.storage_user_id for profile in profiles.list_profiles()}
-    if len(storage_ids) == 1:
-        return next(iter(storage_ids))
-    return "owner"
+    resolved = next(iter(storage_ids)) if len(storage_ids) == 1 else "owner"
+    _persist_owner_tenant_id(data_root, resolved)
+    return resolved
+
+
+def _owner_tenant_id_path(data_root: Path) -> Path:
+    return data_root.resolve() / "bootstrap" / "owner-tenant-id"
+
+
+def _safe_owner_tenant_id(value: object) -> str:
+    resolved = str(value or "").strip()
+    if not resolved or len(resolved) > 200 or any(ord(char) < 32 for char in resolved):
+        raise RuntimeError("owner tenant id is invalid")
+    return resolved
+
+
+def _load_owner_tenant_id(data_root: Path) -> str | None:
+    path = _owner_tenant_id_path(data_root)
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("owner tenant id state must be a regular file")
+    return _safe_owner_tenant_id(path.read_text(encoding="utf-8"))
+
+
+def _persist_owner_tenant_id(data_root: Path, tenant_id: str) -> None:
+    safe_tenant = _safe_owner_tenant_id(tenant_id)
+    path = _owner_tenant_id_path(data_root)
+    parent = path.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = parent.lstat()
+    if parent.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("owner tenant id state directory is unsafe")
+    parent.chmod(0o700)
+    if path.exists():
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("owner tenant id state must be a regular file")
+        current = _safe_owner_tenant_id(path.read_text(encoding="utf-8"))
+        if current == safe_tenant:
+            return
+
+    tmp_path = parent / f".{path.name}.{os.getpid()}.tmp"
+    descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(f"{safe_tenant}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, path)
+        path.chmod(0o600)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _single_codex_credential_tenant(data_root: Path) -> str | None:
+    db_path = data_root.resolve() / "deepagents" / "inference.db"
+    if not db_path.exists():
+        return None
+    if db_path.is_symlink() or not db_path.is_file():
+        raise RuntimeError("inference credential store must be a regular file")
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT tenant_id FROM codex_credentials ORDER BY tenant_id"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    tenants = tuple(dict.fromkeys(_safe_owner_tenant_id(row[0]) for row in rows))
+    return tenants[0] if len(tenants) == 1 else None
 
 
 def _seed_missing_directory_entries(source_dir: Path, target_dir: Path) -> None:
@@ -1032,7 +1115,11 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             project_root=project_root,
             settings=settings,
         )
-        owner_tenant_id = _resolve_owner_tenant_id(settings, profiles)
+        owner_tenant_id = _resolve_owner_tenant_id(
+            settings,
+            profiles,
+            data_root=data_root,
+        )
         composio_vault_cache: dict[str, Any] = {"revision": None, "value": ""}
 
         def resolve_vault_secret(
