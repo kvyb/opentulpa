@@ -271,6 +271,8 @@ async def test_live_source_retry_reloads_dotenv_and_uses_release_interpreter(
     )
     runtime._child_uid = None
     runtime._child_gid = None
+    runtime._subreaper_enabled = True
+    runtime._descendant_inspector = lambda leader_pid, launch_nonce: ()
     launches: list[tuple[tuple[str, ...], dict[str, str]]] = []
     attempts = 0
 
@@ -813,6 +815,8 @@ async def test_explicit_stop_fails_closed_when_containment_preflight_fails(
         data_root=tmp_path / "data",
         live_source_spec=spec,
     )
+    runtime._subreaper_enabled = True
+    runtime._descendant_inspector = lambda leader_pid, launch_nonce: ()
     child = _fake_live_child(spec)
     runtime._child = child
     runtime._status = "ready"
@@ -1214,6 +1218,8 @@ async def test_candidate_is_routed_during_probation_and_commits_after_probe(
         probation_seconds=1,
         client=client,
     )
+    runtime._subreaper_enabled = True
+    runtime._descendant_inspector = lambda leader_pid, launch_nonce: ()
     previous = _fake_live_child(previous_spec)
     runtime._child = previous
     runtime._status = "ready"
