@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from opentulpa.evolution.process import BoundedProcessResult
 from opentulpa.host.evolution import (
     HostEvolutionControlService,
     SourceEvolutionError,
@@ -14,7 +16,10 @@ from opentulpa.host.evolution import (
     _TrustedSourceWorkspace,
 )
 from opentulpa.host.runtime import RuntimeLiveSourceSpec
-from opentulpa.host.runtime_environment import LiveSourceRuntimeEnvironment
+from opentulpa.host.runtime_environment import (
+    LiveSourceRuntimeEnvironment,
+    LiveSourceRuntimeEnvironmentStore,
+)
 
 
 def _seed(tmp_path: Path) -> tuple[Path, str]:
@@ -88,6 +93,43 @@ def test_trusted_workspace_refuses_to_activate_credential_files(
         workspace.commit("Do not commit this")
 
     assert credential_path in "\n".join(workspace.changes())
+
+
+def test_runtime_environment_records_final_interpreter_path(tmp_path: Path) -> None:
+    source, commit = _seed(tmp_path)
+    uv = tmp_path / "uv"
+    python = tmp_path / "python"
+    for executable in (uv, python):
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o700)
+
+    def run_uv(*args: Any, **kwargs: Any) -> BoundedProcessResult:
+        del args
+        target = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
+        interpreter = target / "bin" / "python"
+        interpreter.parent.mkdir()
+        interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+        interpreter.chmod(0o700)
+        return BoundedProcessResult(returncode=0, output=b"", truncated=False, timed_out=False)
+
+    envs = tmp_path / "runtime-envs"
+    store = LiveSourceRuntimeEnvironmentStore(
+        source_repository=source,
+        envs_root=envs,
+        worktrees_root=tmp_path / "runtime-worktrees",
+        uv_cli=str(uv),
+        python_executable=str(python),
+        runner=run_uv,
+    )
+
+    environment = store.prepare(commit)
+    expected = envs / environment.id / "bin" / "python"
+    metadata = json.loads((expected.parents[1] / "runtime-env.json").read_text(encoding="utf-8"))
+
+    assert environment.python_interpreter == expected
+    assert expected.is_file()
+    assert metadata["python_interpreter"] == str(expected)
+    assert store.prepare(commit).python_interpreter == expected
 
 
 def test_activation_journal_is_idempotent_and_persists_release_state(tmp_path: Path) -> None:
