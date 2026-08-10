@@ -137,7 +137,7 @@ async def test_evolution_sink_delivers_failure_to_original_owner_thread(tmp_path
 @pytest.mark.parametrize(
     ("event_type", "status", "expected_text"),
     [
-        ("build.preparing", "preparing", "Preparing and testing a new OpenTulpa build."),
+        ("build.preparing", "preparing", "Preparing a new OpenTulpa build."),
         ("build.switching", "switching", "Switching to the new OpenTulpa build now."),
         ("build.active", "active", "The new OpenTulpa build is active."),
         (

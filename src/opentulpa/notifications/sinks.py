@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 _EVOLUTION_EVENT_TEXT = {
-    "build.preparing": "Preparing and testing a new OpenTulpa build.",
+    "build.preparing": "Preparing a new OpenTulpa build.",
     "build.switching": "Switching to the new OpenTulpa build now.",
     "build.active": "The new OpenTulpa build is active.",
     "promotion.failed": "The new build failed; OpenTulpa kept or restored the previous build.",

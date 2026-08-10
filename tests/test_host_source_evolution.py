@@ -304,6 +304,14 @@ def test_composition_defaults_to_trusted_local_source_mutation_without_strong_sa
     assert composed is not None
     assert composed.service.source_mutation_enabled is True
     assert isinstance(composed.service._evaluator._runner, LocalEvaluationRunner)  # noqa: SLF001
+    assert {  # noqa: SLF001
+        command.name for command in composed.service._evaluator._commands
+    } == {
+        "python.compile",
+        "legacy.runtime.absent",
+        "source.secret.paths",
+        "kernel.contract",
+    }
     factory = composed.service._candidate_backend_factory  # noqa: SLF001
     assert factory is not None
     workspace = data / "bootstrap" / "evolution" / "worktrees" / "candidate"

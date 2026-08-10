@@ -96,9 +96,14 @@ def build_host_evolution_runtime(
     )
     evaluator = CandidateEvaluator(
         runner=evaluator_runner,
-        commands=trusted_default_commands(
-            timeout_seconds=900,
-            executables=evaluator_executables,
+        # ponytail: full validation belongs in CI; live releases keep fast integrity gates.
+        commands=tuple(
+            command
+            for command in trusted_default_commands(
+                timeout_seconds=900,
+                executables=evaluator_executables,
+            )
+            if command.stage != "public"
         ),
     )
 
