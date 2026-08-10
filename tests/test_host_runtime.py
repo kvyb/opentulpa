@@ -337,6 +337,8 @@ async def test_runtime_env_file_manager_restores_dotenv_when_restart_fails(
     assert result["status"] == "failed"
     assert result["failure_stage"] == "runtime_restart"
     assert result["rollback_restored"] is True
+    assert result["file_rollback_restored"] is True
+    assert result["runtime_restored"] is True
     assert result["value"] == "[redacted]"
     assert dotenv.read_text(encoding="utf-8") == "OPENAI_COMPATIBLE_API_KEY=previous\n"
 
@@ -394,29 +396,63 @@ async def test_replace_current_environment_restores_env_when_child_stop_fails(
         nonlocal restored
         restored = True
 
-    async def stop_child(child: Any) -> None:
+    def inspect_descendants(child: Any) -> tuple[RuntimeProcessIdentity, ...]:
         assert child is previous
-        runtime._status = "recovery_required"
-        raise RuntimeUnavailableError("stop failed")
+        raise RuntimeUnavailableError("process table unavailable")
 
-    async def spawn_target(config: HostConfig, target: Any) -> Any:
-        del config, target
-        raise AssertionError("stop failures must not spawn a replacement child")
+    async def terminate(child: Any) -> None:
+        del child
+        raise AssertionError("containment preflight failures must not signal the child")
 
     monkeypatch.setattr(runtime, "_ensure_controller_ownership", lambda: asyncio.sleep(0))
     monkeypatch.setattr(runtime, "_preflight_target", _no_op_async)
-    monkeypatch.setattr(runtime, "_stop_child", stop_child)
-    monkeypatch.setattr(runtime, "_spawn_target", spawn_target)
+    monkeypatch.setattr(runtime, "_owned_descendants", inspect_descendants)
+    monkeypatch.setattr(runtime, "_terminate_child_process_group", terminate)
 
-    with pytest.raises(RuntimeUnavailableError, match="stop failed"):
+    with pytest.raises(RuntimeUnavailableError, match="containment preflight failed"):
         await runtime.replace_current_environment(apply=apply, restore=restore)
 
     assert applied is True
     assert restored is True
     assert runtime._child is previous
-    assert runtime.status == "recovery_required"
+    assert previous.requested_stop is False
+    assert previous.process.returncode is None
+    assert runtime.status == "ready"
     runtime._child = None
     await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_file_manager_does_not_claim_runtime_rollback_when_degraded(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    dotenv = source / ".env"
+    dotenv.write_text("COMPOSIO_API_KEY=previous\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+
+    class DegradedRuntime:
+        status = "ready"
+
+        async def replace_current_environment(self, *, apply: Any, restore: Any) -> None:
+            apply()
+            restore()
+            self.status = "recovery_required"
+            raise RuntimeUnavailableError("runtime descendants could not be enumerated")
+
+    result = await RuntimeEnvFileManager(source_root=source, runtime=DegradedRuntime()).set(
+        name="COMPOSIO_API_KEY",
+        value="updated",
+        idempotency_key="env-update-degraded",
+    )
+
+    assert result["status"] == "failed"
+    assert result["rollback_restored"] is False
+    assert result["file_rollback_restored"] is True
+    assert result["runtime_restored"] is False
+    assert "runtime is recovery_required" in result["error"]["message"]
+    assert dotenv.read_text(encoding="utf-8") == "COMPOSIO_API_KEY=previous\n"
 
 
 @pytest.mark.asyncio
@@ -538,6 +574,264 @@ async def test_runtime_signal_accepts_unreadable_launch_nonce_for_same_process(
     assert await runtime._signal_verified_identity(expected, signal.SIGTERM) is True
     assert signals == [(expected, signal.SIGTERM)]
     await runtime._client.aclose()
+
+
+def test_descendant_scan_ignores_unrelated_foreign_uid_host_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+    runtime._child_uid = 65_532
+    runtime._child_gid = 65_532
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime_module.os, "getpid", lambda: 100)
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_table",
+        lambda: {
+            201: runtime_module._LinuxProcessMetadata(
+                parent_pid=100,
+                process_group=1,
+                process_birth="linux:1",
+                proc_uid=0,
+            )
+        },
+    )
+    uid_reads: list[Path] = []
+
+    def read_uids(path: Path) -> tuple[int, tuple[int, int, int, int]]:
+        uid_reads.append(path)
+        raise PermissionError(13, "unrelated status is hidden")
+
+    monkeypatch.setattr(runtime, "_linux_process_uids", read_uids)
+
+    assert runtime._inspect_linux_descendants(200, "launch-nonce") == ()
+    assert uid_reads == []
+
+
+def test_descendant_scan_includes_runtime_uid_adopted_orphan_with_unreadable_nonce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_nonce = "launch-nonce"
+    identity = RuntimeProcessIdentity(
+        pid=201,
+        parent_pid=100,
+        process_group=777,
+        process_birth="linux:1",
+        executable=Path("/runtime-worker"),
+        argv=("/runtime-worker",),
+        launch_nonce=None,
+    )
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        process_inspector=lambda pid: identity if pid == identity.pid else None,
+    )
+    runtime._child_uid = 65_532
+    runtime._child_gid = 65_532
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime_module.os, "getpid", lambda: 100)
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_table",
+        lambda: {
+            identity.pid: runtime_module._LinuxProcessMetadata(
+                parent_pid=identity.parent_pid,
+                process_group=identity.process_group,
+                process_birth=identity.process_birth,
+                proc_uid=65_532,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_uids",
+        lambda path: (65_532, (65_532, 65_532, 65_532, 65_532)),
+    )
+
+    descendants = runtime._inspect_linux_descendants(200, launch_nonce)
+
+    assert len(descendants) == 1
+    assert descendants[0].pid == identity.pid
+    assert descendants[0].process_birth == identity.process_birth
+    assert descendants[0].launch_nonce == launch_nonce
+
+
+def test_descendant_scan_accepts_unreadable_nonce_for_structural_descendant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_nonce = "launch-nonce"
+    observed = RuntimeProcessIdentity(
+        pid=201,
+        parent_pid=200,
+        process_group=200,
+        process_birth="linux:1",
+        executable=Path("/runtime-worker"),
+        argv=("/runtime-worker",),
+        launch_nonce=None,
+    )
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        process_inspector=lambda pid: observed if pid == observed.pid else None,
+    )
+    runtime._child_uid = 65_532
+    runtime._child_gid = 65_532
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_table",
+        lambda: {
+            observed.pid: runtime_module._LinuxProcessMetadata(
+                parent_pid=200,
+                process_group=observed.process_group,
+                process_birth=observed.process_birth,
+                proc_uid=65_532,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_uids",
+        lambda path: (65_532, (65_532, 65_532, 65_532, 65_532)),
+    )
+
+    descendants = runtime._inspect_linux_descendants(200, launch_nonce)
+
+    assert len(descendants) == 1
+    assert descendants[0].pid == observed.pid
+    assert descendants[0].process_birth == observed.process_birth
+    assert descendants[0].launch_nonce == launch_nonce
+
+
+def test_non_root_descendant_scan_does_not_inspect_unrelated_same_uid_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+    runtime._child_uid = None
+    runtime._child_gid = None
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_module.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_table",
+        lambda: {
+            201: runtime_module._LinuxProcessMetadata(
+                parent_pid=1,
+                process_group=1,
+                process_birth="linux:1",
+                proc_uid=501,
+            )
+        },
+    )
+    uid_reads: list[Path] = []
+
+    def read_uids(path: Path) -> tuple[int, tuple[int, int, int, int]]:
+        uid_reads.append(path)
+        raise PermissionError(13, "unrelated status is hidden")
+
+    monkeypatch.setattr(runtime, "_linux_process_uids", read_uids)
+
+    assert runtime._inspect_linux_descendants(200, "launch-nonce") == ()
+    assert uid_reads == []
+
+
+def test_descendant_scan_fails_closed_when_runtime_uid_status_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = RuntimeSupervisor(project_root=tmp_path, data_root=tmp_path / "data")
+    runtime._child_uid = 65_532
+    runtime._child_gid = 65_532
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_table",
+        lambda: {
+            201: runtime_module._LinuxProcessMetadata(
+                parent_pid=1,
+                process_group=1,
+                process_birth="linux:1",
+                proc_uid=65_532,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_linux_process_uids",
+        lambda path: (_ for _ in ()).throw(PermissionError(13, "hidden")),
+    )
+    monkeypatch.setattr(runtime, "_pid_alive", lambda pid: True)
+
+    with pytest.raises(
+        RuntimeUnavailableError,
+        match=r"UID inspection failed for pid 201 \(PermissionError, errno=13\)",
+    ):
+        runtime._inspect_linux_descendants(200, "launch-nonce")
+
+
+def test_process_table_error_preserves_safe_pid_and_errno(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "42"
+    process_root.mkdir(parents=True)
+
+    def fail_metadata(path: Path) -> tuple[int, int, str]:
+        assert path == process_root
+        raise PermissionError(13, "hidden")
+
+    monkeypatch.setattr(
+        RuntimeSupervisor,
+        "_linux_process_metadata",
+        staticmethod(fail_metadata),
+    )
+
+    with pytest.raises(
+        RuntimeUnavailableError,
+        match=r"pid 42 \(PermissionError, errno=13\)",
+    ):
+        RuntimeSupervisor._linux_process_table(proc_root)
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_fails_closed_when_containment_preflight_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = RuntimeLiveSourceSpec(source_commit="a" * 40)
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        live_source_spec=spec,
+    )
+    child = _fake_live_child(spec)
+    runtime._child = child
+    runtime._status = "ready"
+    monkeypatch.setattr(
+        runtime,
+        "_owned_descendants",
+        lambda selected: (_ for _ in ()).throw(RuntimeUnavailableError("proc unavailable")),
+    )
+
+    with pytest.raises(RuntimeUnavailableError, match="containment preflight failed"):
+        await runtime.stop()
+
+    assert runtime.status == "recovery_required"
+    assert runtime.endpoint is None
+    assert child.requested_stop is False
+    assert child.process.returncode is None
+    runtime._child = None
+    runtime._status = "stopped"
+    await runtime.shutdown()
 
 
 @pytest.mark.asyncio

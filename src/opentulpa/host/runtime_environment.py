@@ -617,17 +617,35 @@ class RuntimeEnvFileManager:
                     stage="env_write",
                 )
         except RuntimeEnvironmentError as exc:
-            return self._failure_result(str(name or "")[:128], exc, rollback_restored=True)
+            runtime_restored = self._runtime_is_healthy()
+            return self._failure_result(
+                str(name or "")[:128],
+                exc,
+                file_rollback_restored=True,
+                runtime_restored=runtime_restored,
+            )
         async with self._lock:
             try:
                 previous = await asyncio.to_thread(self._read_payload)
             except RuntimeEnvironmentError as exc:
-                return self._failure_result(safe_name, exc, rollback_restored=True)
+                runtime_restored = self._runtime_is_healthy()
+                return self._failure_result(
+                    safe_name,
+                    exc,
+                    file_rollback_restored=True,
+                    runtime_restored=runtime_restored,
+                )
             try:
                 parsed = parse_dotenv_payload(previous or b"")
                 new_payload = self._updated_payload(previous, parsed, name=safe_name, value=safe_value)
             except RuntimeEnvironmentError as exc:
-                return self._failure_result(safe_name, exc, rollback_restored=True)
+                runtime_restored = self._runtime_is_healthy()
+                return self._failure_result(
+                    safe_name,
+                    exc,
+                    file_rollback_restored=True,
+                    runtime_restored=runtime_restored,
+                )
 
             state = {"applied": False}
 
@@ -645,18 +663,38 @@ class RuntimeEnvFileManager:
                 )
             except Exception as exc:
                 stage = "runtime_restart" if state["applied"] else "env_write"
-                restored = await asyncio.to_thread(self._payload_matches, previous)
+                file_restored = await asyncio.to_thread(self._payload_matches, previous)
+                runtime_restored = self._runtime_is_healthy()
+                if file_restored and runtime_restored:
+                    message = (
+                        "Runtime .env update failed; the previous environment and runtime "
+                        "were restored."
+                    )
+                elif file_restored:
+                    message = (
+                        "Runtime .env update failed; the previous .env file was restored, "
+                        f"but the runtime is {self._runtime.status}."
+                    )
+                elif runtime_restored:
+                    message = (
+                        "Runtime .env update failed and the previous .env file could not be "
+                        "restored; the runtime remains healthy."
+                    )
+                else:
+                    message = (
+                        "Runtime .env update failed; neither the previous .env file nor the "
+                        "runtime could be restored."
+                    )
                 error = RuntimeEnvironmentError(
                     "runtime_env_update_failed",
-                    "Runtime .env update failed; previous environment was restored."
-                    if restored
-                    else "Runtime .env update failed and previous environment could not be restored.",
+                    message,
                     stage=stage,
                 )
                 return self._failure_result(
                     safe_name,
                     error,
-                    rollback_restored=restored,
+                    file_rollback_restored=file_restored,
+                    runtime_restored=runtime_restored,
                     cause=exc,
                 )
         return {
@@ -673,7 +711,8 @@ class RuntimeEnvFileManager:
         name: str,
         error: RuntimeEnvironmentError,
         *,
-        rollback_restored: bool,
+        file_rollback_restored: bool,
+        runtime_restored: bool,
         cause: Exception | None = None,
     ) -> dict[str, JsonValue]:
         del cause
@@ -682,7 +721,9 @@ class RuntimeEnvFileManager:
             "name": name,
             "changed": False,
             "restarted": False,
-            "rollback_restored": rollback_restored,
+            "rollback_restored": file_rollback_restored and runtime_restored,
+            "file_rollback_restored": file_rollback_restored,
+            "runtime_restored": runtime_restored,
             "failure_stage": error.stage,
             "error": {
                 "code": error.code,
@@ -691,6 +732,9 @@ class RuntimeEnvFileManager:
             },
             "value": "[redacted]",
         }
+
+    def _runtime_is_healthy(self) -> bool:
+        return self._runtime.status in {"ready", "probation"}
 
     def _read_payload(self) -> bytes | None:
         return read_runtime_dotenv_payload(self._path)

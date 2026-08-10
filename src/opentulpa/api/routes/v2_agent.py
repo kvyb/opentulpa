@@ -41,7 +41,14 @@ class AgentPrincipal(V2Principal, Protocol):
 
 
 class AgentRunService(Protocol):
-    async def open_stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]: ...
+    async def open_stream(
+        self,
+        request: AgentRunRequest,
+        *,
+        text_transform: Callable[[str], str] | None = None,
+        before_create: Callable[[], Awaitable[Any]] | None = None,
+        replace_run_id: str | None = None,
+    ) -> AsyncIterator[AgentRunEvent]: ...
 
     def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]: ...
 
@@ -334,6 +341,15 @@ def register_v2_agent_routes(
             ),
         )
 
+    def owner_text_transform(principal: ResolvedV2Principal) -> Callable[[str], str] | None:
+        if secret_ingress is None or principal.trust_class != "owner":
+            return None
+        return lambda text: secret_ingress(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.actor_id,
+            text=text,
+        )
+
     @app.post("/v2/agent/threads", status_code=201)
     async def create_agent_thread(
         body: AgentThreadCreateRequest,
@@ -431,7 +447,13 @@ def register_v2_agent_routes(
             file_ids=body.file_ids,
         )
         try:
-            events = await service_or_503().open_stream(run_request)
+            service = service_or_503()
+            text_transform = owner_text_transform(principal)
+            events = (
+                await service.open_stream(run_request, text_transform=text_transform)
+                if text_transform is not None
+                else await service.open_stream(run_request)
+            )
         except AgentRunIdempotencyConflictError as exc:
             raise HTTPException(
                 status_code=409,
@@ -472,9 +494,13 @@ def register_v2_agent_routes(
             file_ids=body.file_ids,
             pinned_context=snapshot.context,
         )
-        await service.cancel(run_id)
         try:
-            events = await service.open_stream(run_request)
+            events = await service.open_stream(
+                run_request,
+                text_transform=owner_text_transform(principal),
+                before_create=lambda: service.cancel(run_id),
+                replace_run_id=run_id,
+            )
         except AgentRunIdempotencyConflictError as exc:
             raise HTTPException(
                 status_code=409,

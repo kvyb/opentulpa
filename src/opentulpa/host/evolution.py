@@ -114,7 +114,9 @@ class HostEvolutionControlService:
                 "name": str(name or "")[:128],
                 "changed": False,
                 "restarted": False,
-                "rollback_restored": True,
+                "rollback_restored": False,
+                "file_rollback_restored": False,
+                "runtime_restored": False,
                 "failure_stage": "env_write",
                 "error": {
                     "code": "runtime_env_update_unavailable",

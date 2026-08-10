@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -1894,6 +1895,67 @@ async def test_run_idempotency_rejects_changed_request_identity_or_payload(
                 await service.open_stream(changed)
     finally:
         await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_run_idempotency_is_admitted_before_text_transformation(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["Only once"]))
+    request = AgentRunRequest(
+        context=_context(),
+        text="COMPOSIO_API_KEY=first-secret-value",
+        idempotency_key="telegram:secret:42",
+    )
+    transformed: list[str] = []
+
+    def transform(text: str) -> str:
+        transformed.append(text)
+        return "COMPOSIO_API_KEY=secret://composio_api_key"
+
+    await service.start()
+    try:
+        first = [event async for event in await service.open_stream(request, text_transform=transform)]
+        replay = [event async for event in await service.open_stream(request, text_transform=transform)]
+        changed = replace(request, text="COMPOSIO_API_KEY=changed-secret-value")
+        with pytest.raises(AgentRunIdempotencyConflictError):
+            await service.open_stream(changed, text_transform=transform)
+        assert service._runs_db is not None
+        cursor = await service._runs_db.execute(
+            "SELECT request_text FROM agent_runs WHERE idempotency_key = ?",
+            (request.idempotency_key,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    finally:
+        await service.shutdown()
+
+    assert first == replay
+    assert transformed == [request.text]
+    assert row is not None
+    assert str(row["request_text"]) == "COMPOSIO_API_KEY=[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_text_transformation_failure_does_not_run_replacement_callback(tmp_path: Path) -> None:
+    service = _service(tmp_path, _ToolCapableTextModel(responses=["unused"]))
+    callbacks: list[str] = []
+
+    async def before_create() -> None:
+        callbacks.append("cancelled")
+
+    await service.start()
+    try:
+        with pytest.raises(RuntimeError, match="ingress failed"):
+            await service.open_stream(
+                AgentRunRequest(context=_context(), text="store this"),
+                text_transform=lambda text: (_ for _ in ()).throw(
+                    RuntimeError("ingress failed")
+                ),
+                before_create=before_create,
+            )
+    finally:
+        await service.shutdown()
+
+    assert callbacks == []
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -674,6 +674,7 @@ class DeepAgentService:
         self._checkpointer: AsyncSqliteSaver | None = None
         self._store: AsyncSqliteStore | None = None
         self._runs_db: aiosqlite.Connection | None = None
+        self._run_admission_lock = asyncio.Lock()
         self._run_event_lock = asyncio.Lock()
         self._run_event_conditions: WeakValueDictionary[str, asyncio.Condition] = (
             WeakValueDictionary()
@@ -892,13 +893,40 @@ class DeepAgentService:
             raise RuntimeError(f"agent run {run_id} was not persisted")
         return snapshot
 
-    async def open_stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
+    async def open_stream(
+        self,
+        request: AgentRunRequest,
+        *,
+        text_transform: Callable[[str], str] | None = None,
+        before_create: Callable[[], Awaitable[Any]] | None = None,
+        replace_run_id: str | None = None,
+    ) -> AsyncIterator[AgentRunEvent]:
         """Persist and validate a run before an HTTP server commits SSE headers."""
 
         self._require_started()
-        prepared = await self._prepare_run(request)
+        request_digest = self._request_digest(request)
+        async with self._run_admission_lock:
+            existing_run_id = await self._idempotent_run_id(request, request_digest)
+            if existing_run_id is not None:
+                return self.events(existing_run_id)
+            await self._require_checkpoint_available(
+                request,
+                allowed_run_id=replace_run_id,
+            )
+            prepared_request = (
+                replace(request, text=text_transform(request.text))
+                if text_transform is not None
+                else request
+            )
+            if before_create is not None:
+                await before_create()
+                await self._require_checkpoint_available(request)
+            prepared = await self._prepare_run(
+                prepared_request,
+                request_digest=request_digest,
+            )
         if prepared.created:
-            self._schedule_run(request, prepared)
+            self._schedule_run(prepared_request, prepared)
         return self.events(prepared.run_id)
 
     async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
@@ -911,7 +939,12 @@ class DeepAgentService:
             if callable(close):
                 await close()
 
-    async def _prepare_run(self, request: AgentRunRequest) -> _PreparedRun:
+    async def _prepare_run(
+        self,
+        request: AgentRunRequest,
+        *,
+        request_digest: str | None = None,
+    ) -> _PreparedRun:
         run_id = new_short_id("run", suffix_chars=10)
         checkpoint_thread_id = self._checkpoint_thread_id(request.context)
         dynamic = self._dynamic_snapshot(request.context.tenant_id)
@@ -923,7 +956,7 @@ class DeepAgentService:
             request_text=request.text,
             file_ids=request.file_ids,
             idempotency_key=request.idempotency_key,
-            request_digest=self._request_digest(request),
+            request_digest=request_digest or self._request_digest(request),
             dynamic_generation=dynamic.generation,
             dynamic_digest=self._dynamic_digest(dynamic),
             inference_plan=inference_plan,
@@ -938,6 +971,54 @@ class DeepAgentService:
             created=persisted_run_id == run_id,
             inference_plan=inference_plan,
         )
+
+    async def _idempotent_run_id(
+        self,
+        request: AgentRunRequest,
+        request_digest: str,
+    ) -> str | None:
+        if request.idempotency_key is None:
+            return None
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT run_id, request_digest FROM agent_runs
+            WHERE tenant_id = ? AND idempotency_key = ?
+            """,
+            (request.context.tenant_id, request.idempotency_key),
+        )
+        existing = await cursor.fetchone()
+        await cursor.close()
+        if existing is None:
+            return None
+        if str(existing["request_digest"] or "") != request_digest:
+            raise AgentRunIdempotencyConflictError(
+                "the idempotency key belongs to a different agent run request"
+            )
+        return str(existing["run_id"])
+
+    async def _require_checkpoint_available(
+        self,
+        request: AgentRunRequest,
+        *,
+        allowed_run_id: str | None = None,
+    ) -> None:
+        db = self._require_runs_db()
+        cursor = await db.execute(
+            """
+            SELECT run_id FROM agent_runs
+            WHERE checkpoint_thread_id = ?
+              AND status IN ('running', 'interrupted', 'resume_pending')
+            LIMIT 1
+            """,
+            (self._checkpoint_thread_id(request.context),),
+        )
+        active = await cursor.fetchone()
+        await cursor.close()
+        if active is not None and str(active["run_id"]) != str(allowed_run_id or ""):
+            raise AgentRunCheckpointConflictError(
+                "the checkpoint thread already has an unresolved agent run"
+            )
 
     def _schedule_run(
         self,

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,9 +38,26 @@ class _FakeAgentService:
     stream_error: Exception | None = None
     thread_tenant: str = "tenant-a"
 
-    async def open_stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
+    async def open_stream(
+        self,
+        request: AgentRunRequest,
+        *,
+        text_transform: Callable[[str], str] | None = None,
+        before_create: Callable[[], Awaitable[Any]] | None = None,
+        replace_run_id: str | None = None,
+    ) -> AsyncIterator[AgentRunEvent]:
+        del replace_run_id
         if self.stream_error is not None:
             raise self.stream_error
+        if text_transform is not None:
+            request = AgentRunRequest(
+                context=request.context,
+                text=text_transform(request.text),
+                file_ids=request.file_ids,
+                idempotency_key=request.idempotency_key,
+            )
+        if before_create is not None:
+            await before_create()
         return self.stream(request)
 
     async def stream(self, request: AgentRunRequest) -> AsyncIterator[AgentRunEvent]:
@@ -376,10 +393,14 @@ def test_thread_routes_are_server_owned_and_tenant_scoped() -> None:
 
 
 def test_idempotency_conflict_returns_409_before_sse_headers() -> None:
+    ingress_calls: list[dict[str, str]] = []
     service = _FakeAgentService(
         stream_error=AgentRunIdempotencyConflictError("request digest changed")
     )
-    client, _ = _client(service)
+    client, _ = _client(
+        service,
+        secret_ingress=lambda **kwargs: ingress_calls.append(kwargs) or "secret://stored",
+    )
 
     response = client.post(
         "/v2/agent/runs",
@@ -396,6 +417,7 @@ def test_idempotency_conflict_returns_409_before_sse_headers() -> None:
     assert response.json() == {
         "detail": "idempotency key belongs to a different agent run request"
     }
+    assert ingress_calls == []
 
 
 def test_start_run_rejects_missing_principal_and_model_visible_identity() -> None:
@@ -422,7 +444,7 @@ def test_start_run_rejects_missing_principal_and_model_visible_identity() -> Non
     assert service.requests == []
 
 
-def test_owner_start_run_passes_pasted_secret_to_agent_checkpointing() -> None:
+def test_owner_start_run_ingests_pasted_secret_before_agent_checkpointing() -> None:
     raw = "1234567890:AAEabcdefghijklmnopqrstuvwxyz012345678"
     calls: list[dict[str, str]] = []
 
@@ -438,8 +460,14 @@ def test_owner_start_run_passes_pasted_secret_to_agent_checkpointing() -> None:
     )
 
     assert response.status_code == 200
-    assert service.requests[0].text == f"Use {raw}"
-    assert calls == []
+    assert service.requests[0].text == "Use secret://telegram_bot_token"
+    assert calls == [
+        {
+            "tenant_id": "tenant-a",
+            "actor_id": "actor-1",
+            "text": f"Use {raw}",
+        }
+    ]
 
 
 def test_get_run_is_tenant_scoped_and_only_returns_redacted_pending_approvals() -> None:
@@ -598,6 +626,34 @@ def test_steer_cancels_active_run_and_continues_on_its_owned_thread() -> None:
         json={"text": "Take over", "file_ids": []},
     )
     assert wrong_tenant.status_code == 404
+
+
+def test_steer_ingests_pasted_secret_before_continuing_run() -> None:
+    raw = "COMPOSIO_API_KEY=ak_live_composio_abcdefghijklmnopqrstuvwxyz"
+    calls: list[dict[str, str]] = []
+
+    def ingress(**kwargs: str) -> str:
+        calls.append(kwargs)
+        return "COMPOSIO_API_KEY=secret://composio_api_key"
+
+    service = _FakeAgentService(snapshots={"run_123": _snapshot(status="running")})
+    client, _ = _client(service, secret_ingress=ingress)
+
+    response = client.post(
+        "/v2/agent/runs/run_123/steer",
+        headers={"x-tenant-id": "tenant-a", "x-actor-id": "actor-9"},
+        json={"text": raw, "file_ids": []},
+    )
+
+    assert response.status_code == 200
+    assert service.requests[-1].text == "COMPOSIO_API_KEY=secret://composio_api_key"
+    assert calls == [
+        {
+            "tenant_id": "tenant-a",
+            "actor_id": "actor-9",
+            "text": raw,
+        }
+    ]
 
 
 def test_steer_rejects_a_run_that_is_no_longer_active() -> None:

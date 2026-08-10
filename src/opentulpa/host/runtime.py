@@ -20,7 +20,7 @@ import sys
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -78,6 +78,10 @@ class _ChildExitedBeforeReadyError(RuntimeUnavailableError):
 
 class _RuntimeProbeError(RuntimeUnavailableError):
     """A nonce-bound runtime did not satisfy one strict health probe."""
+
+
+class _ChildContainmentPreflightError(RuntimeUnavailableError):
+    """The current child could not be proven containable before any signal was sent."""
 
 
 class RuntimeLiveSourceSpec(BaseModel):
@@ -179,10 +183,6 @@ class _LinuxProcessMetadata:
     process_group: int
     process_birth: str
     proc_uid: int
-    status_uids: tuple[int, int, int, int]
-
-    def owned_by(self, uid: int) -> bool:
-        return self.proc_uid == uid and all(value == uid for value in self.status_uids)
 
 
 ProcessInspector = Callable[[int], RuntimeProcessIdentity | None]
@@ -530,8 +530,7 @@ class RuntimeSupervisor:
                 previous_config = previous.config if previous is not None else None
                 previous_target = previous.target if previous is not None else None
                 if previous is not None:
-                    self._status = "draining"
-                    await self._stop_child(previous)
+                    await self._drain_child_for_replacement(previous)
                     self._child = None
                 self._begin_selection(config, target)
                 try:
@@ -634,8 +633,7 @@ class RuntimeSupervisor:
                     raise
                 try:
                     if previous is not None:
-                        self._status = "draining"
-                        await self._stop_child(previous)
+                        await self._drain_child_for_replacement(previous)
                         self._child = None
                     self._begin_selection(config, target)
                     candidate = await self._spawn_target(config, target)
@@ -643,6 +641,10 @@ class RuntimeSupervisor:
                     with suppress(Exception):
                         restore()
                     await self._restore_after_cancellation(previous_config, previous_target)
+                    raise
+                except _ChildContainmentPreflightError:
+                    with suppress(Exception):
+                        restore()
                     raise
                 except Exception:
                     with suppress(Exception):
@@ -690,8 +692,7 @@ class RuntimeSupervisor:
         old_child = self._child
         previous_config = old_child.config if old_child is not None else config
         if old_child is not None:
-            self._status = "draining"
-            await self._stop_child(old_child)
+            await self._drain_child_for_replacement(old_child)
             self._child = None
         self._select_target(candidate)
         self._begin_selection(config, candidate)
@@ -829,8 +830,7 @@ class RuntimeSupervisor:
                 "rollback configuration does not match the captured previous configuration"
             )
         if previous is not None:
-            self._status = "draining"
-            await self._stop_child(previous)
+            await self._drain_child_for_replacement(previous)
             self._child = None
         self._begin_selection(config, target)
         try:
@@ -1308,6 +1308,14 @@ class RuntimeSupervisor:
                 self._watcher_task = None
 
     async def _stop_child(self, child: _Child) -> None:
+        try:
+            self._owned_descendants(child)
+        except Exception as exc:
+            self._status = "recovery_required"
+            self._error = "runtime stop containment preflight failed"
+            raise _ChildContainmentPreflightError(
+                self._error
+            ) from exc
         child.requested_stop = True
         terminated = False
         try:
@@ -1331,6 +1339,17 @@ class RuntimeSupervisor:
             if terminated:
                 self._remove_ownership_record(child.launch_nonce)
                 self._remove_launch_intent(child.launch_nonce)
+
+    async def _drain_child_for_replacement(self, child: _Child) -> None:
+        previous_status = self._status
+        previous_error = self._error
+        self._status = "draining"
+        try:
+            await self._stop_child(child)
+        except _ChildContainmentPreflightError:
+            self._status = previous_status
+            self._error = previous_error
+            raise
 
     async def _terminate_child_process_group(self, child: _Child) -> None:
         if sys.platform.startswith("linux"):
@@ -1458,7 +1477,10 @@ class RuntimeSupervisor:
         try:
             descendants = self._descendant_inspector(child.process.pid, child.launch_nonce)
         except Exception as exc:
-            raise RuntimeUnavailableError("runtime descendants could not be enumerated") from exc
+            detail = self._safe_error(exc)
+            message = f"runtime descendants could not be enumerated: {detail}"
+            self._append_log("host", message)
+            raise RuntimeUnavailableError(message) from exc
         for descendant in descendants:
             if (
                 descendant.pid == child.process.pid
@@ -2619,20 +2641,45 @@ class RuntimeSupervisor:
             raise RuntimeUnavailableError("runtime child identity is unavailable")
         # Root production reserves a UID for the runtime. Non-root recovery scans
         # same-UID processes and accepts only those retaining the private launch nonce.
-        runtime_owned = {
-            pid
-            for pid, metadata in processes.items()
-            if pid != leader_pid and metadata.owned_by(runtime_uid)
-        }
-        candidates = descendants | group_members | adopted | runtime_owned
+        scan_uid_orphans = root_isolated or (
+            expected_executable is not None and expected_argv is not None
+        )
+        runtime_uid_candidates = (
+            {
+                pid
+                for pid, metadata in processes.items()
+                if pid != leader_pid and metadata.proc_uid == runtime_uid
+            }
+            if scan_uid_orphans
+            else set()
+        )
+        candidates = descendants | group_members | adopted | runtime_uid_candidates
         identities: list[RuntimeProcessIdentity] = []
         for pid in sorted(candidates):
             metadata = processes[pid]
             structurally_bound = pid in descendants or pid in group_members
-            if structurally_bound and not metadata.owned_by(runtime_uid):
+            # A subreaper's direct children also include host-managed workers.
+            # Adoption alone does not prove that a process belongs to this runtime.
+            containment_bound = structurally_bound
+            if containment_bound and metadata.proc_uid != runtime_uid:
                 raise RuntimeUnavailableError("runtime descendant ownership changed")
-            if not structurally_bound and pid not in runtime_owned:
+            if not containment_bound and pid not in runtime_uid_candidates:
                 continue
+            try:
+                proc_uid, status_uids = self._linux_process_uids(Path("/proc") / str(pid))
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeUnavailableError) as exc:
+                if not self._pid_alive(pid):
+                    continue
+                detail = self._process_inspection_error(exc)
+                raise RuntimeUnavailableError(
+                    f"runtime process UID inspection failed for pid {pid} ({detail})"
+                ) from exc
+            if proc_uid != metadata.proc_uid:
+                raise RuntimeUnavailableError("runtime process ownership changed during inspection")
+            if proc_uid != runtime_uid or any(value != runtime_uid for value in status_uids):
+                raise RuntimeUnavailableError("runtime process UID state is ambiguous")
             identity = self._process_inspector(pid)
             if identity is None:
                 continue
@@ -2643,6 +2690,17 @@ class RuntimeSupervisor:
             ):
                 raise RuntimeUnavailableError("runtime descendant changed during inspection")
             if identity.launch_nonce != launch_nonce:
+                if (
+                    identity.launch_nonce is None
+                    and root_isolated
+                    and pid in runtime_uid_candidates
+                ):
+                    # Linux may hide environ after the runtime UID drop. The reserved
+                    # runtime UID plus birth, group, executable, and argv still prove
+                    # this process before pidfd fencing, including adopted orphans.
+                    identity = replace(identity, launch_nonce=launch_nonce)
+                    identities.append(identity)
+                    continue
                 if (
                     not root_isolated
                     and expected_executable is not None
@@ -2656,7 +2714,7 @@ class RuntimeSupervisor:
                     raise RuntimeUnavailableError(
                         "a possible runtime descendant removed its launch identity"
                     )
-                if structurally_bound or (root_isolated and pid in runtime_owned):
+                if containment_bound or (root_isolated and pid in runtime_uid_candidates):
                     raise RuntimeUnavailableError(
                         "a runtime descendant removed its launch identity"
                     )
@@ -2681,10 +2739,11 @@ class RuntimeSupervisor:
         }
 
     @staticmethod
-    def _linux_process_table() -> dict[int, _LinuxProcessMetadata]:
+    def _linux_process_table(proc_root: Path | None = None) -> dict[int, _LinuxProcessMetadata]:
         processes: dict[int, _LinuxProcessMetadata] = {}
+        root = proc_root or Path("/proc")
         try:
-            entries = tuple(Path("/proc").iterdir())
+            entries = tuple(root.iterdir())
         except OSError as exc:
             raise RuntimeUnavailableError("Linux process table could not be enumerated") from exc
         for entry in entries:
@@ -2692,19 +2751,20 @@ class RuntimeSupervisor:
                 continue
             try:
                 parent_pid, process_group, process_birth = RuntimeSupervisor._linux_process_metadata(entry)
-                proc_uid, status_uids = RuntimeSupervisor._linux_process_uids(entry)
+                proc_uid = entry.stat(follow_symlinks=False).st_uid
             except FileNotFoundError:
                 continue
             except (OSError, RuntimeUnavailableError) as exc:
+                detail = RuntimeSupervisor._process_inspection_error(exc)
                 raise RuntimeUnavailableError(
-                    "Linux process table containment could not be proven"
+                    "Linux process table containment could not be proven for "
+                    f"pid {entry.name} ({detail})"
                 ) from exc
             processes[int(entry.name)] = _LinuxProcessMetadata(
                 parent_pid=parent_pid,
                 process_group=process_group,
                 process_birth=process_birth,
                 proc_uid=proc_uid,
-                status_uids=status_uids,
             )
         return processes
 
@@ -2827,6 +2887,12 @@ class RuntimeSupervisor:
     def _safe_error(error: Exception) -> str:
         text = str(error or "runtime failed").strip()
         return _SECRET_LINE.sub(r"\1\2[redacted]", text)[:1_000]
+
+    @staticmethod
+    def _process_inspection_error(error: Exception) -> str:
+        error_type = type(error).__name__
+        error_number = getattr(error, "errno", None)
+        return f"{error_type}, errno={error_number}" if error_number is not None else error_type
 
     @staticmethod
     def _coerce_live_source_spec(
