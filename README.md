@@ -49,7 +49,7 @@ from exact Git commits selected by that controller.
 2. `source_activate` commits the current worktree and records an idempotent activation in
    SQLite before any runtime change.
 3. The host prepares a dependency environment keyed by `pyproject.toml`, `uv.lock`, Python,
-   and install profile without running dependency build scripts, then safely compiles the source.
+   install profile, and configured optional bundles, then safely compiles the source.
 4. The runtime supervisor selects the exact commit; child startup exercises imports and the tool
    contract before strict readiness and live probation record it as active.
 5. A failed activation restores the exact prior commit. `source_rollback` activates the
