@@ -181,3 +181,62 @@ def test_secret_service_resolves_one_shot_ssh_password_mount(tmp_path: Path) -> 
     )
 
     assert material.get_secret_value() == "test-password"
+
+
+def test_secret_service_resolves_name_bound_runtime_environment_material(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    service = SecretVaultService(vault)
+    pending = vault.create_pending(
+        tenant_id="tenant-a",
+        secret_id="composio_api_key",
+        name="composio_api_key",
+        scopes=("composio.manage", "composio.invoke"),
+        created_by="owner",
+    )
+    vault.fulfill(
+        tenant_id="tenant-a",
+        secret_id=pending.id,
+        expected_revision=1,
+        value="composio-secret",
+        updated_by="owner",
+    )
+
+    material = service.resolve_for_runtime_environment(
+        tenant_id="tenant-a",
+        actor_id="owner",
+        secret_id=pending.id,
+        environment_name="COMPOSIO_API_KEY",
+    )
+
+    assert material.get_secret_value() == "composio-secret"
+    with pytest.raises(SecretGrantError, match="name does not match"):
+        service.resolve_for_runtime_environment(
+            tenant_id="tenant-a",
+            actor_id="owner",
+            secret_id=pending.id,
+            environment_name="OTHER_API_KEY",
+        )
+
+    wrong_scope = vault.create_pending(
+        tenant_id="tenant-a",
+        secret_id="wrong_scope_composio",
+        name="composio_api_key",
+        scopes=("credential.use",),
+        created_by="owner",
+    )
+    vault.fulfill(
+        tenant_id="tenant-a",
+        secret_id=wrong_scope.id,
+        expected_revision=1,
+        value="wrong-scope-secret",
+        updated_by="owner",
+    )
+    with pytest.raises(SecretGrantError, match="scope is not allowed"):
+        service.resolve_for_runtime_environment(
+            tenant_id="tenant-a",
+            actor_id="owner",
+            secret_id=wrong_scope.id,
+            environment_name="COMPOSIO_API_KEY",
+        )

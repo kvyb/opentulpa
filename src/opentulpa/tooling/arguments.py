@@ -548,10 +548,24 @@ class SourceSetRuntimeEnvArguments(RequiredIdempotencyArguments):
         pattern=r"^[A-Z_][A-Z0-9_]{0,127}$",
         description="Runtime .env variable name to set in the live checkout.",
     )
-    value: str = Field(
+    value: str | None = Field(
+        default=None,
         max_length=65_536,
-        description="Raw variable value. Results never echo the value back.",
+        description="Non-secret variable value. Use secret_id for credentials.",
     )
+    secret_id: ProtocolSlug | None = Field(
+        default=None,
+        description=(
+            "Tenant-owned secret handle whose name matches the runtime variable. "
+            "Never provide plaintext credentials."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def require_one_value_source(self) -> SourceSetRuntimeEnvArguments:
+        if (self.value is None) == (self.secret_id is None):
+            raise ValueError("exactly one of value or secret_id is required")
+        return self
 
 
 class TraceListArguments(ToolArguments):

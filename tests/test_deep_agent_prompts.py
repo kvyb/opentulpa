@@ -83,13 +83,15 @@ def test_owner_prompt_distinguishes_source_availability_from_session_state() -> 
     assert "runtime healthcheck and rollback path run" in prompt
 
 
-def test_owner_prompt_allows_plaintext_runtime_env_inspection() -> None:
-    assert "owner may paste credentials" in OWNER_PROMPT
-    assert "plaintext env values" in OWNER_PROMPT
+def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
+    assert "Secret ingress replaces owner credentials" in OWNER_PROMPT
+    assert "secret://<id>" in OWNER_PROMPT
     assert "source_runtime_env_get" in OWNER_PROMPT
     assert "source_set_runtime_env" in OWNER_PROMPT
+    assert "secret_id" in OWNER_PROMPT
     assert "Never repeat credential values" in OWNER_PROMPT
-    assert "`COMPOSIO_API_KEY=<value>`" in OWNER_PROMPT
+    assert "Do not ask the owner to resend" in OWNER_PROMPT
+    assert "fresh idempotency key" in OWNER_PROMPT
 
 
 def test_owner_prompt_keeps_persona_owner_controlled() -> None:

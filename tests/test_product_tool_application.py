@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import os
 import subprocess
 from collections.abc import Callable
@@ -704,6 +705,148 @@ async def test_source_set_runtime_env_replays_from_durable_idempotency_store(
     assert first.data["value"] == "[set]"
     assert [name for name, _ in evolution.calls] == ["source_set_runtime_env"]
     assert evolution.calls[0][1]["idempotency_key"] == "runtime-env-replay-1"
+
+
+@pytest.mark.asyncio
+async def test_source_set_runtime_env_redeems_secret_handle_inside_trusted_boundary(
+    tmp_path: Path,
+) -> None:
+    secret_handles = _Port(
+        resolve_for_runtime_environment=SecretStr("provider-secret"),
+    )
+    evolution = _Port(
+        source_set_runtime_env={
+            "status": "updated",
+            "name": "COMPOSIO_API_KEY",
+            "changed": True,
+            "restarted": True,
+            "value": "[set]",
+        }
+    )
+    application, _ = _application(
+        evolution=evolution,
+        secret_handles=secret_handles,
+        idempotency=IdempotencyStore(tmp_path / "runtime-env-secret-effects.sqlite"),
+    )
+    invocation = _invocation(
+        "source_set_runtime_env",
+        {"name": "COMPOSIO_API_KEY", "secret_id": "composio_api_key"},
+        idempotency_key="runtime-env-secret-1",
+    )
+
+    result = await application.source_set_runtime_env(invocation)
+
+    assert result.data["status"] == "updated"
+    assert result.data["value"] == "[set]"
+    assert secret_handles.calls == [
+        (
+            "resolve_for_runtime_environment",
+            {
+                "tenant_id": "tenant-a",
+                "actor_id": "owner-1",
+                "secret_id": "composio_api_key",
+                "environment_name": "COMPOSIO_API_KEY",
+            },
+        )
+    ]
+    assert evolution.calls[0][1]["value"] == "provider-secret"
+
+
+@pytest.mark.asyncio
+async def test_source_set_runtime_env_surfaces_legacy_failure_and_accepts_fresh_key(
+    tmp_path: Path,
+) -> None:
+    idempotency = IdempotencyStore(tmp_path / "runtime-env-legacy-effects.sqlite")
+    invocation = _invocation(
+        "source_set_runtime_env",
+        {"name": "COMPOSIO_API_KEY", "value": "provider-secret"},
+        idempotency_key="legacy-runtime-env-key",
+    )
+    canonical = json.dumps(
+        {
+            "operation": invocation.spec.name,
+            "version": invocation.spec.version,
+            "arguments": invocation.arguments,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    await idempotency.execute(
+        tenant_id="tenant-a",
+        operation="source_set_runtime_env",
+        idempotency_key="legacy-runtime-env-key",
+        request_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+        invoke=lambda: {
+            "status": "failed",
+            "name": "COMPOSIO_API_KEY",
+            "changed": False,
+            "rollback_restored": True,
+        },
+    )
+    evolution = _Port(
+        source_set_runtime_env={
+            "status": "updated",
+            "name": "COMPOSIO_API_KEY",
+            "changed": True,
+            "restarted": True,
+            "value": "[set]",
+        }
+    )
+    application, _ = _application(evolution=evolution, idempotency=idempotency)
+
+    with pytest.raises(ProductToolApplicationError) as legacy_error:
+        await application.source_set_runtime_env(invocation)
+
+    assert legacy_error.value.code == "runtime_env_update_failed"
+    assert legacy_error.value.retryable is True
+    assert evolution.calls == []
+
+    retry = await application.source_set_runtime_env(
+        _invocation(
+            "source_set_runtime_env",
+            {"name": "COMPOSIO_API_KEY", "value": "provider-secret"},
+            idempotency_key="fresh-runtime-env-key",
+        )
+    )
+
+    assert retry.data["status"] == "updated"
+    assert [name for name, _ in evolution.calls] == ["source_set_runtime_env"]
+
+
+@pytest.mark.asyncio
+async def test_source_set_runtime_env_marks_rolled_back_update_as_failed_effect(
+    tmp_path: Path,
+) -> None:
+    evolution = _Port(
+        source_set_runtime_env={
+            "status": "failed",
+            "name": "COMPOSIO_API_KEY",
+            "changed": False,
+            "rollback_restored": True,
+            "error": {"code": "runtime_env_update_failed"},
+        }
+    )
+    application, _ = _application(
+        evolution=evolution,
+        idempotency=IdempotencyStore(tmp_path / "runtime-env-failed-effects.sqlite"),
+    )
+    invocation = _invocation(
+        "source_set_runtime_env",
+        {"name": "COMPOSIO_API_KEY", "value": "provider-secret"},
+        idempotency_key="runtime-env-failure-1",
+    )
+
+    with pytest.raises(ProductToolApplicationError) as error:
+        await application.source_set_runtime_env(invocation)
+
+    assert error.value.code == "runtime_env_update_failed"
+    assert error.value.retryable is True
+    with pytest.raises(ProductToolApplicationError) as replay_error:
+        await application.source_set_runtime_env(invocation)
+    assert replay_error.value.code == "conflict"
+    assert [name for name, _ in evolution.calls] == ["source_set_runtime_env"]
 
 
 @pytest.mark.asyncio

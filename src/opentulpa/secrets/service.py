@@ -17,6 +17,14 @@ from opentulpa.secrets.vault import (
 
 logger = logging.getLogger(__name__)
 
+_RUNTIME_ENVIRONMENT_SCOPES = {
+    "browser_use_api_key": "browser.manage",
+    "composio_api_key": "composio.manage",
+    "daytona_api_key": "daytona.manage",
+    "gh_token": "github.read",
+    "github_token": "github.read",
+}
+
 SecretChangeListener = Callable[..., None]
 
 
@@ -63,6 +71,39 @@ class SecretVaultService:
         material = self._vault.redeem_grant(
             token=grant.token,
             capability_id="sandbox_ssh_diagnostic",
+            scope=scope,
+        )
+        return material.value
+
+    def resolve_for_runtime_environment(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        secret_id: str,
+        environment_name: str,
+    ) -> SecretStr:
+        """Redeem one owner secret for a host-controlled runtime environment write."""
+
+        del actor_id
+        handle = self._vault.get_handle(tenant_id=tenant_id, secret_id=secret_id)
+        if handle is None or handle.state is not SecretState.ACTIVE:
+            raise SecretGrantError("runtime environment secret handle is unavailable")
+        if handle.name.casefold() != str(environment_name or "").strip().casefold():
+            raise SecretGrantError("runtime environment secret name does not match")
+        scope = _RUNTIME_ENVIRONMENT_SCOPES.get(handle.name.casefold(), "credential.use")
+        if scope not in handle.scopes:
+            raise SecretGrantError("runtime environment secret scope is not allowed")
+        grant = self._vault.issue_grant(
+            tenant_id=tenant_id,
+            secret_id=handle.id,
+            capability_id="runtime_environment",
+            scopes=(scope,),
+            ttl_seconds=60,
+        )
+        material = self._vault.redeem_grant(
+            token=grant.token,
+            capability_id="runtime_environment",
             scope=scope,
         )
         return material.value

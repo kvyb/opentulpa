@@ -215,9 +215,41 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     assert set(source_env.tool_call_schema.model_json_schema()["properties"]) == {
         "name",
         "value",
+        "secret_id",
         "idempotency_key",
     }
+    assert "opaque secret handle" in source_env.description
     assert "Never returns the value" in source_env.description
+
+
+def test_runtime_env_arguments_require_exactly_one_value_source() -> None:
+    schema = OPERATION_ARGUMENT_SCHEMAS["source_set_runtime_env"]
+
+    secret = schema.model_validate(
+        {
+            "name": "COMPOSIO_API_KEY",
+            "secret_id": "composio_api_key",
+            "idempotency_key": "runtime-env-secret-1",
+        }
+    )
+    assert secret.secret_id == "composio_api_key"
+    assert secret.value is None
+    with pytest.raises(ValueError, match="exactly one"):
+        schema.model_validate(
+            {
+                "name": "COMPOSIO_API_KEY",
+                "idempotency_key": "runtime-env-missing-1",
+            }
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        schema.model_validate(
+            {
+                "name": "COMPOSIO_API_KEY",
+                "value": "plaintext",
+                "secret_id": "composio_api_key",
+                "idempotency_key": "runtime-env-both-1",
+            }
+        )
 
 
 @pytest.mark.asyncio

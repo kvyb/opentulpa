@@ -528,7 +528,8 @@ def _description(spec: ToolSpec) -> str:
         ),
         "source_set_runtime_env": (
             "Set one live runtime .env variable through the stable host, restart the child, "
-            "and restore the previous .env if the restart fails. Never returns the value."
+            "and restore the previous .env if the restart fails. For credentials, pass the "
+            "opaque secret handle as secret_id; never pass plaintext. Never returns the value."
         ),
         "source_runtime_env_get": (
             "Read the live runtime .env through the stable host. Owner-only. Returns current "

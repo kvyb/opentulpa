@@ -29,7 +29,7 @@ The registry below is the complete model-visible product surface. Deep Agents bu
 - `execution=job` returns `status=accepted` and a durable `job_id`.
 - Every service validates tenant ownership; errors are sanitized before entering `ToolResult`.
 - `intake_draft_prepare` returns a hash-bound one-time `confirmation_handle`; only `intake_draft_activate` accepts it.
-- Secret handle tools expose metadata and revocation only. Owner-only `source_set_runtime_env` may write raw deployment secrets/config into the host-owned `.env`; results redact values and `.env` is excluded from source releases. Trusted adapters and declared capability bindings redeem only the scope they require.
+- Secret handle tools expose metadata and revocation only. Owner-only `source_set_runtime_env` redeems tenant secret handles inside the trusted application boundary before writing the host-owned `.env`; results redact values and `.env` is excluded from source releases. Trusted adapters and declared capability bindings redeem only the scope they require.
 - Capability activation accepts config plus opaque secret-handle bindings only and requires an exact passing test attestation.
 - `trace_list` is newest-first; pass the last returned `run_id` as `before_run_id` to read the next page.
 

@@ -194,6 +194,26 @@ def test_ingress_stores_arbitrary_named_credentials_before_model_input(
     _assert_absent_from_database(vault, composio, daytona, github)
 
 
+def test_ingress_recognizes_composio_key_in_natural_language(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    composio = "ak_test_composio_abcdefghijklmnopqrstuvwxyz"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"This is the Composio key - {composio} - can you save it?",
+    )
+
+    assert result.text == (
+        "This is the Composio key - secret://composio_api_key - can you save it?"
+    )
+    assert [handle.id for handle in result.handles] == ["composio_api_key"]
+    handle = vault.get_handle(tenant_id="tenant-a", secret_id="composio_api_key")
+    assert handle is not None
+    assert handle.name == "composio_api_key"
+    _assert_absent_from_database(vault, composio)
+
+
 def test_ingress_supports_named_multiline_secret_blocks(tmp_path: Path) -> None:
     ingress, vault = _ingress(tmp_path)
     private_key = (

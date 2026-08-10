@@ -107,6 +107,16 @@ _PLACEHOLDER_VALUES = frozenset(
 
 _PATTERNS: tuple[_CredentialPattern, ...] = (
     _CredentialPattern(
+        kind="composio",
+        handle_id="composio_api_key",
+        name="composio_api_key",
+        scopes=("composio.manage", "composio.invoke"),
+        expression=re.compile(
+            r"(?<![A-Za-z0-9_-])(?P<value>ak_[A-Za-z0-9][A-Za-z0-9_-]{15,199})"
+            r"(?![A-Za-z0-9_-])"
+        ),
+    ),
+    _CredentialPattern(
         kind="telegram",
         handle_id="telegram_bot_token",
         name="telegram_bot_token",

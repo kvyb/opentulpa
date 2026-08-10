@@ -27,6 +27,7 @@ from opentulpa.repositories.service import RepositoryWorkspaceError
 from opentulpa.sandbox.client import SandboxSecretFileMount
 from opentulpa.schedules.models import ScheduleWrite
 from opentulpa.secrets.models import SecretHandle, SecretState
+from opentulpa.secrets.vault import SecretGrantError
 from opentulpa.specs.models import AgentSpecWrite, TriggerSpec, TriggerSpecWrite
 from opentulpa.specs.protocol import AgentSpecRef
 from opentulpa.tooling.adapters import (
@@ -345,6 +346,15 @@ class SecretHandlePort(Protocol):
         secret_id: str,
         scope: str,
         mount_type: str,
+    ) -> SecretStr: ...
+
+    def resolve_for_runtime_environment(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        secret_id: str,
+        environment_name: str,
     ) -> SecretStr: ...
 
     def revoke(
@@ -2418,15 +2428,51 @@ class ProductToolApplication:
         invocation: ProductToolInvocation,
     ) -> ProductToolOutput:
         evolution = self._require_evolution(invocation)
-        return await self._idempotent_output(
-            invocation,
-            lambda: evolution.source_set_runtime_env(
-                name=str(invocation.arguments["name"]),
-                value=str(invocation.arguments["value"]),
-                idempotency_key=self._required_key(invocation),
-                audit_context=self._evolution_audit_context(invocation),
-            ),
-        )
+
+        async def update() -> Any:
+            secret_id = invocation.arguments.get("secret_id")
+            if secret_id is not None:
+                secret_service = self._require_secret_handles(invocation)
+                try:
+                    secret = secret_service.resolve_for_runtime_environment(
+                        tenant_id=invocation.context.tenant_id,
+                        actor_id=invocation.context.actor_id,
+                        secret_id=str(secret_id),
+                        environment_name=str(invocation.arguments["name"]),
+                    )
+                except SecretGrantError as exc:
+                    raise ProductToolApplicationError(
+                        "secret_handle_unavailable",
+                        "The runtime environment secret handle is unavailable or mismatched.",
+                    ) from exc
+                value = secret.get_secret_value()
+            else:
+                value = str(invocation.arguments["value"])
+            result = await _resolve(
+                evolution.source_set_runtime_env(
+                    name=str(invocation.arguments["name"]),
+                    value=value,
+                    idempotency_key=self._required_key(invocation),
+                    audit_context=self._evolution_audit_context(invocation),
+                )
+            )
+            if isinstance(result, Mapping) and result.get("status") == "failed":
+                raise ProductToolApplicationError(
+                    "runtime_env_update_failed",
+                    "The runtime environment update failed and was not applied.",
+                    retryable=result.get("rollback_restored") is True,
+                )
+            return result
+
+        output = await self._idempotent_output(invocation, update)
+        if isinstance(output.data, Mapping) and output.data.get("status") == "failed":
+            raise ProductToolApplicationError(
+                "runtime_env_update_failed",
+                "The previous runtime environment update failed and was not applied. "
+                "Retry with a fresh idempotency key.",
+                retryable=output.data.get("rollback_restored") is True,
+            )
+        return output
 
     async def trace_list(self, invocation: ProductToolInvocation) -> ProductToolOutput:
         traces = self._require_traces(invocation)
