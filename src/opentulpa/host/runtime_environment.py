@@ -215,7 +215,7 @@ class LiveSourceRuntimeEnvironmentStore:
                 environment = LiveSourceRuntimeEnvironment(
                     id=env_id,
                     source_commit=source_commit,
-                    python_interpreter=interpreter,
+                    python_interpreter=target / interpreter.relative_to(staging),
                     dependency_lock_hash=lock_hash,
                     pyproject_sha256=pyproject_hash,
                     install_profile=self._install_profile,
