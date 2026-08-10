@@ -100,7 +100,7 @@ async def test_evolution_sink_delivers_failure_to_original_owner_thread(tmp_path
     event = EvolutionEvent(
         event_key="candidate:candidate-1:completed:failed",
         event_type="candidate.failed",
-        candidate_id="candidate-1",
+        release_id="release-1",
         origin={
             "tenant_id": "tenant-a",
             "actor_id": "owner",
@@ -160,7 +160,7 @@ async def test_evolution_sink_explains_build_transition(
         EvolutionEvent(
             event_key=f"transition:{event_type}",
             event_type=event_type,
-            candidate_id="candidate-1",
+            release_id="release-1",
             origin={
                 "tenant_id": "tenant-a",
                 "thread_id": "owner-thread",
@@ -190,7 +190,7 @@ async def test_system_owned_evolution_and_bootstrap_events_are_consumed_without_
         EvolutionEvent(
             event_key="startup:recovered",
             event_type="release.recovered",
-            candidate_id="initial",
+            release_id="initial",
             payload={"status": "active"},
         )
     )

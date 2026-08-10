@@ -57,4 +57,4 @@ runtime exposes it as `<capability>__<tool>` instead of shadowing the kernel too
 AgentSpec can then select that reviewed alternative. Moving the built-in default itself
 still requires normal upstream/base review. Changing trusted identity injection, tool
 approval policy, the Agent API, or bootstrap activation is always a fixed-kernel change
-and is rejected by candidate commit validation.
+and requires an outer host deployment before it can replace the running controller.

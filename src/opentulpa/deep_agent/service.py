@@ -2971,11 +2971,11 @@ class DeepAgentService:
                         if approvals:
                             interrupted = True
                             if context.run_kind == AgentRunKind.OWNER.value and any(
-                                approval.tool_name == "source_release" for approval in approvals
+                                approval.tool_name == "source_activate" for approval in approvals
                             ):
                                 decided = [
                                     replace(approval, status="approve")
-                                    if approval.tool_name == "source_release"
+                                    if approval.tool_name == "source_activate"
                                     else approval
                                     for approval in approvals
                                 ]

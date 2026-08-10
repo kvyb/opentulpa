@@ -19,8 +19,6 @@ intake_drafts_db_path: .opentulpa/deepagents/intake_drafts.db
 
 # Self-evolution is Git-native and only activates when the canonical source checkout is present.
 evolution_enabled: true
-evolution_sandbox_image: opentulpa-evolution:0.1.0
-evolution_evaluator_image: opentulpa-evolution:0.1.0
 
 # Deep Agent and sandbox limits
 agent_max_completion_tokens: 40000

@@ -38,7 +38,7 @@ _DOTENV_MAX_BYTES = 256 * 1024
 _DOTENV_MAX_VALUE_BYTES = 64 * 1024
 _DOTENV_MAX_KEYS = 512
 _TRUSTED_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-_INSTALL_PROFILE = "runtime-no-dev-no-install-project-v1"
+_INSTALL_PROFILE = "runtime-no-dev-no-build-no-install-project-v1"
 _METADATA_FILENAME = "runtime-env.json"
 _SECRET_ENV_RE = re.compile(r"(api[_-]?key|authorization|cookie|password|passwd|secret|token)", re.I)
 _PROTECTED_ENVIRONMENT_KEYS = frozenset(
@@ -133,7 +133,7 @@ class LiveSourceRuntimeEnvironment:
 
 
 class LiveSourceRuntimeEnvironmentStore:
-    """Prepare one immutable dependency venv per evaluated live-source commit."""
+    """Prepare one immutable dependency venv per dependency definition."""
 
     def __init__(
         self,
@@ -192,7 +192,6 @@ class LiveSourceRuntimeEnvironmentStore:
         pyproject_hash = self._regular_file_sha256(workspace / "pyproject.toml", label="pyproject")
         lock_hash = self._regular_file_sha256(workspace / "uv.lock", label="uv lock")
         env_id = self._environment_id(
-            source_commit=source_commit,
             pyproject_sha256=pyproject_hash,
             dependency_lock_hash=lock_hash,
         )
@@ -248,6 +247,7 @@ class LiveSourceRuntimeEnvironmentStore:
                 "sync",
                 "--frozen",
                 "--no-dev",
+                "--no-build",
                 "--no-install-project",
                 "--project",
                 str(workspace),
@@ -277,17 +277,15 @@ class LiveSourceRuntimeEnvironmentStore:
     def _environment_id(
         self,
         *,
-        source_commit: str,
         pyproject_sha256: str,
         dependency_lock_hash: str,
     ) -> str:
         payload = {
-            "format_version": 1,
+            "format_version": 2,
             "install_profile": self._install_profile,
             "python": self._python_runtime_identity(),
             "pyproject_sha256": pyproject_sha256,
-            "source_commit": source_commit,
-            "sync": ["--frozen", "--no-dev", "--no-install-project"],
+            "sync": ["--frozen", "--no-dev", "--no-build", "--no-install-project"],
             "uv_lock_sha256": dependency_lock_hash,
         }
         encoded = json.dumps(
@@ -379,7 +377,7 @@ class LiveSourceRuntimeEnvironmentStore:
             return None
         environment = LiveSourceRuntimeEnvironment(
             id=str(payload.get("id") or ""),
-            source_commit=str(payload.get("source_commit") or ""),
+            source_commit=source_commit,
             python_interpreter=interpreter,
             dependency_lock_hash=str(payload.get("dependency_lock_hash") or ""),
             pyproject_sha256=str(payload.get("pyproject_sha256") or ""),
@@ -387,7 +385,7 @@ class LiveSourceRuntimeEnvironmentStore:
         )
         if (
             environment.id != root.name
-            or environment.source_commit != source_commit
+            or payload.get("format_version") != 2
             or environment.dependency_lock_hash != dependency_lock_hash
             or environment.pyproject_sha256 != pyproject_sha256
             or environment.install_profile != self._install_profile
@@ -401,9 +399,8 @@ class LiveSourceRuntimeEnvironmentStore:
         environment: LiveSourceRuntimeEnvironment,
     ) -> None:
         payload = {
-            "format_version": 1,
+            "format_version": 2,
             "id": environment.id,
-            "source_commit": environment.source_commit,
             "python_interpreter": str(environment.python_interpreter),
             "dependency_lock_hash": environment.dependency_lock_hash,
             "pyproject_sha256": environment.pyproject_sha256,
@@ -592,8 +589,7 @@ class RuntimeEnvFileManager:
                 },
             }
         variables: list[JsonValue] = [
-            {"name": name, "value": value, "set": True}
-            for name, value in sorted(values.items())
+            {"name": name, "set": True} for name in sorted(values)
         ]
         return {"available": True, "variables": variables, "count": len(variables)}
 

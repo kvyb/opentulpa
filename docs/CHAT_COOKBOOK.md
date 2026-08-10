@@ -43,13 +43,13 @@ with `/start` followed by the final eight characters of the bot token.
 
 > Improve the Telegram interface so long answers are split cleanly at paragraph
 > boundaries and destructive-shell approvals remain usable after a worker restart. Use
-> your source shell, add regression tests, show me the test result, and release it when
+> your source tools, add regression tests, show me the test result, and activate it when
 > the checks pass.
 
-The main agent receives a detached source worktree, not the serving checkout. It can
-edit and test there over multiple turns. `source_release` uses a restart-safe internal
-handoff while managed mode stages and restarts the release; on failure it restores the
-prior image and reports the result in the same conversation.
+The main agent edits one persistent trusted Git repository, not the serving checkout. It
+can edit and test there over multiple turns. `source_activate` journals the exact commit,
+returns while host-owned checks run, and restores the prior commit if startup or probation
+fails. Reconnect and use `source_status` to read the durable result.
 
 ### Add another interface
 
@@ -67,15 +67,15 @@ planner, memory store, or untyped tool gateway.
 
 > Add a compact run-history view to the bundled terminal UI. Keep the Agent API unchanged,
 > add tests for refresh and pending destructive-shell approvals, use `trace_get` to inspect a failed test,
-> and show me the result before calling `source_release`.
+> and show me the result before calling `source_activate`.
 
 ### Respect the stable boundary
 
-> Change the bootstrap so future releases can bypass fixed evaluator tests.
+> Change the stable host so future activations skip its fixed checks.
 
-The agent may edit the repository copy of bootstrap code, but that code cannot replace
-the already-running stable bootstrap or its trusted evaluation and release recipe. The
-fixed host must reject a release that fails its external gates.
+The agent may commit that host change, but it cannot replace the already-running stable
+host. A local install or Docker/Railway deployment must replace the controller before its
+activation policy changes.
 
 ### Roll back
 

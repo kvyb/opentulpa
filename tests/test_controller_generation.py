@@ -12,7 +12,7 @@ HELPER = Path(__file__).parents[1] / "controller_generation.py"
 
 def _identity_environment() -> dict[str, str]:
     return {
-        "PROFILE": "controller-evaluation-no-dev",
+        "PROFILE": "controller-runtime-no-dev",
         "BOOTSTRAP_PYTHON": "/opt/python/bin/python",
         "BOOTSTRAP_PYTHON_SHA256": "a" * 64,
         "LOCK_SHA256": "b" * 64,

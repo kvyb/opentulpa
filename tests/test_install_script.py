@@ -279,7 +279,7 @@ def test_installer_builds_final_path_controller_and_exact_dispatcher(tmp_path: P
     manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["generation_id"] == generation.name
     assert manifest["identity"]["source_commit"] == "1" * 40
-    assert manifest["identity"]["install_profile"] == "controller-evaluation-no-dev"
+    assert manifest["identity"]["install_profile"] == "controller-runtime-no-dev"
     assert len(manifest["runtime_tree_sha256"]) == 64
     assert manifest["source"]["kind"] == "local"
     assert manifest["source"]["oid"] == "1" * 40
@@ -318,7 +318,7 @@ def test_installer_builds_final_path_controller_and_exact_dispatcher(tmp_path: P
     logged = calls.read_text(encoding="utf-8")
     assert "uv build --wheel" in logged
     assert "uv export --frozen --no-dev --no-emit-project" in logged
-    assert "--extra evaluation" in logged
+    assert "--extra evaluation" not in logged
     assert "pip download --disable-pip-version-check --require-hashes --only-binary=:all:" in logged
     assert "uv sync" not in logged
 

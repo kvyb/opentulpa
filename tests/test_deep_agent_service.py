@@ -67,15 +67,15 @@ class _ToolCapableMessageModel(FakeMessagesListChatModel):
         return self
 
 
-def _destructive_shell_tool(calls: list[str]) -> BaseTool:
-    @tool("source_shell")
-    def source_shell(command: str) -> dict[str, str]:
+def _destructive_source_bash_tool(calls: list[str]) -> BaseTool:
+    @tool("source_bash")
+    def source_bash(command: str) -> dict[str, str]:
         """Run a source command."""
 
         calls.append(command)
         return {"command": command}
 
-    return source_shell
+    return source_bash
 
 
 class _AttachmentResolver:
@@ -474,18 +474,18 @@ def test_deepagents_context_budget_preserves_stricter_model_profiles() -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_shell_runs_harmless_rm_reference_without_approval(
+async def test_source_bash_runs_harmless_rm_reference_without_approval(
     tmp_path: Path,
 ) -> None:
     calls: list[str] = []
-    source_shell = _destructive_shell_tool(calls)
+    source_bash = _destructive_source_bash_tool(calls)
     model = _ToolCapableMessageModel(
         responses=[
             AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": "source_shell",
+                        "name": "source_bash",
                         "args": {"command": "grep -R 'rm -rf' ."},
                         "id": "call-shell",
                         "type": "tool_call",
@@ -495,7 +495,7 @@ async def test_source_shell_runs_harmless_rm_reference_without_approval(
             AIMessage(content="Search completed."),
         ]
     )
-    service = _service(tmp_path, model, tools=[source_shell])
+    service = _service(tmp_path, model, tools=[source_bash])
     await service.start()
     try:
         events = [
@@ -512,18 +512,18 @@ async def test_source_shell_runs_harmless_rm_reference_without_approval(
 
 
 @pytest.mark.asyncio
-async def test_source_shell_runs_dynamic_command_without_policy_rejection(
+async def test_source_bash_runs_dynamic_command_without_policy_rejection(
     tmp_path: Path,
 ) -> None:
     calls: list[str] = []
-    source_shell = _destructive_shell_tool(calls)
+    source_bash = _destructive_source_bash_tool(calls)
     model = _ToolCapableMessageModel(
         responses=[
             AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": "source_shell",
+                        "name": "source_bash",
                         "args": {"command": "rm${IFS}-rf build"},
                         "id": "call-shell",
                         "type": "tool_call",
@@ -533,7 +533,7 @@ async def test_source_shell_runs_dynamic_command_without_policy_rejection(
             AIMessage(content="The dynamic command ran."),
         ]
     )
-    service = _service(tmp_path, model, tools=[source_shell])
+    service = _service(tmp_path, model, tools=[source_bash])
     await service.start()
     try:
         events = [
@@ -2160,39 +2160,36 @@ async def test_shutdown_leaves_active_runs_for_restart_reconciliation(
 
 
 @pytest.mark.asyncio
-async def test_source_release_runs_without_approval(
+async def test_source_activate_runs_without_approval(
     tmp_path: Path,
 ) -> None:
-    release_calls: list[str] = []
+    activation_calls: list[str] = []
 
-    @tool("source_release")
-    async def source_release(
+    @tool("source_activate")
+    async def source_activate(
         idempotency_key: str,
-        expected_candidate_id: str,
-        expected_diff_sha256: str,
         message: str,
+        reason: str,
     ) -> dict[str, str]:
-        """Activate an exact source candidate."""
+        """Activate the trusted source worktree."""
 
-        del expected_diff_sha256, message
-        release_calls.append(idempotency_key)
-        return {"candidate_id": expected_candidate_id, "status": "queued"}
+        del message, reason
+        activation_calls.append(idempotency_key)
+        return {"activation_id": "activation-1", "status": "preparing"}
 
-    digest = "a" * 64
     model = _ToolCapableMessageModel(
         responses=[
             AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": "source_release",
+                        "name": "source_activate",
                         "args": {
-                            "idempotency_key": "release-key-1",
-                            "expected_candidate_id": "candidate-1",
-                            "expected_diff_sha256": digest,
+                            "idempotency_key": "activate-key-1",
                             "message": "Deploy the tested source",
+                            "reason": "Owner requested deployment",
                         },
-                        "id": "call-release",
+                        "id": "call-activate",
                         "type": "tool_call",
                     }
                 ],
@@ -2200,7 +2197,7 @@ async def test_source_release_runs_without_approval(
             AIMessage(content="The new source release is active."),
         ]
     )
-    service = _service(tmp_path, model, tools=[source_release])
+    service = _service(tmp_path, model, tools=[source_activate])
     await service.start()
     try:
         events = [
@@ -2216,7 +2213,7 @@ async def test_source_release_runs_without_approval(
     assert completed is not None
     assert completed.status == "completed"
     assert completed.final_text == "The new source release is active."
-    assert release_calls == ["release-key-1"]
+    assert activation_calls == ["activate-key-1"]
     assert all(event.type != "approval.required" for event in events)
 
 

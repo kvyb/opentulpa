@@ -508,38 +508,36 @@ class SourceStatusArguments(ToolArguments):
     pass
 
 
-class SourceSyncUpstreamArguments(ToolArguments):
-    expected_active_release_id: str = Field(min_length=1, max_length=100)
+class SourceReadArguments(ToolArguments):
+    path: str = Field(min_length=1, max_length=4_096)
+    offset: int = Field(default=1, ge=1)
+    limit: int = Field(default=2_000, ge=1, le=2_000)
 
 
-class SourcePreparePullRequestArguments(RequiredIdempotencyArguments):
-    candidate_id: str = Field(min_length=1, max_length=100)
-    expected_revision: int = Field(ge=1)
-    base_ref: str = Field(default="main", min_length=1, max_length=300)
-    branch: str | None = Field(default=None, min_length=1, max_length=250)
-    provider: Literal["auto", "local", "daytona"] = "auto"
-    message: str = Field(default="Apply tested OpenTulpa evolution", min_length=1, max_length=500)
+class SourceWriteArguments(ToolArguments):
+    path: str = Field(min_length=1, max_length=4_096)
+    content: str = Field(max_length=2_000_000)
 
 
-class SourceResolveDependenciesArguments(ToolArguments):
-    expected_candidate_id: str = Field(min_length=1, max_length=100)
-    expected_diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+class SourceEditArguments(ToolArguments):
+    path: str = Field(min_length=1, max_length=4_096)
+    old_text: str = Field(min_length=1, max_length=1_000_000)
+    new_text: str = Field(max_length=1_000_000)
+    replace_all: bool = False
 
 
-class SourceShellArguments(ToolArguments):
+class SourceBashArguments(ToolArguments):
     command: str = Field(min_length=1, max_length=100_000)
     timeout_seconds: int = Field(default=300, ge=1, le=600)
 
 
-class SourceReleaseArguments(RequiredIdempotencyArguments):
-    expected_candidate_id: str = Field(min_length=1, max_length=100)
-    expected_diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+class SourceActivateArguments(RequiredIdempotencyArguments):
     message: str = Field(default="OpenTulpa self-update", min_length=1, max_length=500)
+    reason: str = Field(default="Trusted source activation", max_length=4_000)
 
 
 class SourceRollbackArguments(RequiredIdempotencyArguments):
-    expected_current_release_id: str = Field(min_length=1, max_length=100)
-    expected_target_release_id: str = Field(min_length=1, max_length=100)
+    expected_active_release_id: str = Field(min_length=1, max_length=100)
     reason: str = Field(default="Owner requested rollback", max_length=4_000)
 
 
@@ -657,13 +655,13 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "repository_close": RepositoryCloseArguments,
         "repository_publish_pr": RepositoryPublishPullRequestArguments,
         "source_status": SourceStatusArguments,
-        "source_runtime_env_get": ToolArguments,
-        "source_sync_upstream": SourceSyncUpstreamArguments,
-        "source_prepare_pr": SourcePreparePullRequestArguments,
-        "source_resolve_dependencies": SourceResolveDependenciesArguments,
-        "source_shell": SourceShellArguments,
-        "source_release": SourceReleaseArguments,
+        "source_read": SourceReadArguments,
+        "source_write": SourceWriteArguments,
+        "source_edit": SourceEditArguments,
+        "source_bash": SourceBashArguments,
+        "source_activate": SourceActivateArguments,
         "source_rollback": SourceRollbackArguments,
+        "source_runtime_env_get": ToolArguments,
         "source_set_runtime_env": SourceSetRuntimeEnvArguments,
         "trace_list": TraceListArguments,
         "trace_get": TraceGetArguments,

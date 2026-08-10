@@ -5,6 +5,6 @@ fixed loader never imports these files as Python. A manifest may only launch a w
 module below `opentulpa.capability_workers` and may use dependencies already present in
 the reviewed runtime base.
 
-Source evolution may add or revise manifests and worker modules. The fixed evaluator
-tests the exact candidate commit, and the stable bootstrap binds activation to that
-commit before the overlay becomes a trusted release.
+Source evolution may add or revise manifests and worker modules. The stable host binds
+activation to the exact Git commit, runs its fixed checks, and accepts it only after
+runtime readiness and probation.

@@ -364,7 +364,6 @@ def _require_private_child_path(root: Path, target: Path) -> None:
 
 def _build_evolution_client(
     *,
-    project_root: Path,
     settings: Settings,
 ) -> EvolutionClient | None:
     if not release_consumers_enabled():
@@ -378,10 +377,6 @@ def _build_evolution_client(
     return EvolutionClient(
         base_url=base_url,
         token=token,
-        review_cache_root=_resolve_path(
-            project_root,
-            ".opentulpa/deepagents/evolution_reviews",
-        ),
     )
 
 
@@ -1112,7 +1107,6 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             return model
 
         evolution = _build_evolution_client(
-            project_root=project_root,
             settings=settings,
         )
         owner_tenant_id = _resolve_owner_tenant_id(
