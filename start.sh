@@ -105,6 +105,8 @@ configure_python_extras() {
     SELECTED_EXTRAS+=("${item}")
     seen="${seen} ${item}"
   done
+  OPENTULPA_EXTRAS="$(IFS=,; printf '%s' "${SELECTED_EXTRAS[*]-}")"
+  export OPENTULPA_EXTRAS
 }
 
 is_truthy() {

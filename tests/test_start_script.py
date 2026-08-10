@@ -757,6 +757,27 @@ def test_start_script_browser_flag_installs_only_cloud_adapter_dependencies() ->
     assert "playwright install chromium" not in result.stdout
 
 
+def test_start_script_exports_normalized_runtime_extras() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source ./start.sh; "
+            "OPENTULPA_EXTRAS='documents,integrations'; "
+            "INSTALL_BROWSER_USE=1; "
+            "configure_python_extras; "
+            "printf '%s' \"$OPENTULPA_EXTRAS\"",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "documents,integrations,browser"
+
+
 def test_start_script_retains_selected_optional_adapters() -> None:
     result = _run_start(
         "install",

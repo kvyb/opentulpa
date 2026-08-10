@@ -104,7 +104,7 @@ def test_runtime_environment_records_final_interpreter_path(tmp_path: Path) -> N
         executable.chmod(0o700)
 
     def run_uv(*args: Any, **kwargs: Any) -> BoundedProcessResult:
-        del args
+        commands.append(tuple(args[0]))
         target = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
         interpreter = target / "bin" / "python"
         interpreter.parent.mkdir()
@@ -113,12 +113,14 @@ def test_runtime_environment_records_final_interpreter_path(tmp_path: Path) -> N
         return BoundedProcessResult(returncode=0, output=b"", truncated=False, timed_out=False)
 
     envs = tmp_path / "runtime-envs"
+    commands: list[tuple[str, ...]] = []
     store = LiveSourceRuntimeEnvironmentStore(
         source_repository=source,
         envs_root=envs,
         worktrees_root=tmp_path / "runtime-worktrees",
         uv_cli=str(uv),
         python_executable=str(python),
+        extras=("bundled",),
         runner=run_uv,
     )
 
@@ -129,6 +131,13 @@ def test_runtime_environment_records_final_interpreter_path(tmp_path: Path) -> N
     assert environment.python_interpreter == expected
     assert expected.is_file()
     assert metadata["python_interpreter"] == str(expected)
+    assert commands[0][2:7] == (
+        "--frozen",
+        "--no-dev",
+        "--no-install-project",
+        "--extra",
+        "bundled",
+    )
     assert store.prepare(commit).python_interpreter == expected
 
 
@@ -183,7 +192,7 @@ class _EnvironmentStore:
             python_interpreter=Path(sys.executable),
             dependency_lock_hash="f" * 64,
             pyproject_sha256="1" * 64,
-            install_profile="runtime-no-dev-no-build-no-install-project-v1",
+            install_profile="runtime-no-dev-extras-no-install-project-v1",
         )
 
 

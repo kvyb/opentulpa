@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -50,6 +51,7 @@ def build_host_evolution_runtime(
         envs_root=resolved_data / "runtime-source-envs",
         worktrees_root=evolution_root / "runtime-env-worktrees",
         uv_cli=_trusted_uv_cli(),
+        extras=_runtime_extras(),
         timeout_seconds=max(900, settings.sandbox_timeout_seconds),
         max_output_bytes=max_output_bytes,
     )
@@ -105,6 +107,10 @@ def _trusted_uv_cli() -> str:
     if candidate.name != "uv" or not os.access(candidate, os.X_OK):
         raise RuntimeError("host runtime environment builder requires the trusted uv executable")
     return str(candidate)
+
+
+def _runtime_extras() -> tuple[str, ...]:
+    return tuple(part for part in re.split(r"[\s,]+", os.environ.get("OPENTULPA_EXTRAS", "")) if part)
 
 
 __all__ = ["build_host_evolution_runtime"]

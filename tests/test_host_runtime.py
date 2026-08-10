@@ -111,7 +111,7 @@ def _live_source_spec_with_environment(
         runtime_python_interpreter=str(interpreter),
         runtime_dependency_lock_hash="f" * 64,
         runtime_pyproject_sha256="1" * 64,
-        runtime_install_profile="runtime-no-dev-no-build-no-install-project-v1",
+        runtime_install_profile="runtime-no-dev-extras-no-install-project-v1",
     )
 
 

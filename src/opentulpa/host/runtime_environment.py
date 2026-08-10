@@ -34,11 +34,12 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _WRITABLE_ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]{0,127}\Z")
 _RAW_ENV_VALUE_RE = re.compile(r"[A-Za-z0-9_./:@%+=,\-]*\Z")
+_EXTRA_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 _DOTENV_MAX_BYTES = 256 * 1024
 _DOTENV_MAX_VALUE_BYTES = 64 * 1024
 _DOTENV_MAX_KEYS = 512
 _TRUSTED_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-_INSTALL_PROFILE = "runtime-no-dev-no-build-no-install-project-v1"
+_INSTALL_PROFILE = "runtime-no-dev-extras-no-install-project-v1"
 _METADATA_FILENAME = "runtime-env.json"
 _SECRET_ENV_RE = re.compile(r"(api[_-]?key|authorization|cookie|password|passwd|secret|token)", re.I)
 _PROTECTED_ENVIRONMENT_KEYS = frozenset(
@@ -144,6 +145,7 @@ class LiveSourceRuntimeEnvironmentStore:
         uv_cli: str,
         python_executable: str = sys.executable,
         install_profile: str = _INSTALL_PROFILE,
+        extras: Sequence[str] = (),
         timeout_seconds: int = 1_800,
         max_output_bytes: int = 1_000_000,
         runner: BoundedCommandRunner | None = None,
@@ -159,6 +161,9 @@ class LiveSourceRuntimeEnvironmentStore:
         self._install_profile = str(install_profile or "").strip()
         if not self._install_profile or "\x00" in self._install_profile:
             raise ValueError("runtime install profile is invalid")
+        self._extras = tuple(sorted({str(extra).strip() for extra in extras if str(extra).strip()}))
+        if any(_EXTRA_RE.fullmatch(extra) is None for extra in self._extras):
+            raise ValueError("runtime optional dependency extra is invalid")
         if timeout_seconds < 60 or max_output_bytes < 1_024:
             raise ValueError("runtime environment builder limits are invalid")
         self._timeout_seconds = timeout_seconds
@@ -245,10 +250,7 @@ class LiveSourceRuntimeEnvironmentStore:
             (
                 str(self._uv_cli),
                 "sync",
-                "--frozen",
-                "--no-dev",
-                "--no-build",
-                "--no-install-project",
+                *self._sync_options(),
                 "--project",
                 str(workspace),
                 "--python",
@@ -285,7 +287,7 @@ class LiveSourceRuntimeEnvironmentStore:
             "install_profile": self._install_profile,
             "python": self._python_runtime_identity(),
             "pyproject_sha256": pyproject_sha256,
-            "sync": ["--frozen", "--no-dev", "--no-build", "--no-install-project"],
+            "sync": list(self._sync_options()),
             "uv_lock_sha256": dependency_lock_hash,
         }
         encoded = json.dumps(
@@ -296,6 +298,12 @@ class LiveSourceRuntimeEnvironmentStore:
             sort_keys=True,
         ).encode("ascii")
         return hashlib.sha256(encoded).hexdigest()
+
+    def _sync_options(self) -> tuple[str, ...]:
+        options = ["--frozen", "--no-dev", "--no-install-project"]
+        for extra in self._extras:
+            options.extend(("--extra", extra))
+        return tuple(options)
 
     def _python_runtime_identity(self) -> dict[str, str]:
         return {

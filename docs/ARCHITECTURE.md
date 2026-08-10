@@ -55,10 +55,11 @@ written yet.
 
 ## Dependency Environments
 
-The host prepares immutable runtime environments with `uv sync --frozen --no-dev --no-build
---no-install-project`. Their identity is derived from `pyproject.toml`, `uv.lock`, Python,
-and the install profile, so source-only commits reuse the existing environment. The mutable
-project itself is loaded from the exact live checkout through `PYTHONPATH`.
+The host prepares immutable runtime environments with `uv sync --frozen --no-dev
+--no-install-project` plus the deployment's configured optional bundles. Their identity is
+derived from `pyproject.toml`, `uv.lock`, Python, the install profile, and those bundles, so
+source-only commits reuse the existing environment. The mutable project itself is loaded from
+the exact live checkout through `PYTHONPATH`.
 
 Before replacing the child, the host runs bounded source compilation with its isolated trusted
 interpreter; it never imports editable source. Full Ruff, mypy, and pytest runs belong in the
