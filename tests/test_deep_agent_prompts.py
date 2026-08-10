@@ -60,7 +60,8 @@ def test_owner_prompt_uses_content_fetch_for_unconfigured_search() -> None:
 
 def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:
     prompt = " ".join(OWNER_PROMPT.casefold().split())
-    assert "use source_shell for opentulpa source" in prompt
+    assert "use source_read, source_write, source_edit, and source_bash" in prompt
+    assert "native git commands in source_bash" in prompt
     assert "for any external git repository, start with repository_open" in prompt
     assert "never use opentulpa source tools" in prompt
     assert "composio integration tools execute through the trusted host" in prompt
@@ -75,12 +76,12 @@ def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:
     assert "pairs once with `/start <code>`" in prompt
 
 
-def test_owner_prompt_distinguishes_source_availability_from_session_state() -> None:
+def test_owner_prompt_explains_durable_source_activation() -> None:
     prompt = " ".join(OWNER_PROMPT.casefold().split())
-    assert "available means usable" in prompt
-    assert "active means an open candidate, not unavailable self-update" in prompt
-    assert "activate self-updates through source_release" in prompt
-    assert "runtime healthcheck and rollback path run" in prompt
+    assert "activate through source_activate" in prompt
+    assert "returns after queuing the durable operation" in prompt
+    assert "reconnect and call source_status" in prompt
+    assert "exact active release id" in prompt
 
 
 def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:

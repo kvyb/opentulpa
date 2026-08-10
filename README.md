@@ -5,8 +5,8 @@
   </picture>
 </p>
 
-OpenTulpa is a self-hosted Deep Agents application that can evaluate and publish changes
-to its own source without replacing the stable host controller.
+OpenTulpa is a self-hosted Deep Agents application that can edit, activate, and roll back
+its own source without replacing the stable host controller.
 
 ## Get started
 
@@ -28,45 +28,35 @@ built at its final path for the target machine; see the
 
 ## Deployment
 
-OpenTulpa can serve immutable releases locally, in Docker Compose, or on Railway.
-The default production path is the installed host controller: the Docker image and
-`./install.sh` both package the controller generation, source seed, trusted evaluation
-wheelhouse, and `uv` toolchain that core self-evolution needs. Source evolution is
-enabled by default and uses a trusted-local candidate worktree on hosts such as Railway
-where rootful namespace isolation is unavailable.
+OpenTulpa runs locally, in Docker Compose, or on Railway. The Docker image and
+`./install.sh` package an immutable host controller, a Git source seed, and `uv`. The host
+keeps one independent source worktree and its activation journal on persistent storage.
 
-Trusted-local evolution is intended for single-tenant/personal deployments. It is not a
-security sandbox for adversarial tenants: candidate commands run as the controller user in
-a disposable worktree, while the stable controller keeps release and rollback authority.
+Source editing is intentionally trusted and intended for personal or single-tenant
+deployments. Direct source commands run as the controller user; they are not an adversarial
+code sandbox. Product and repository sandboxes remain separate boundaries.
 
-Rootful Linux `bwrap`/process isolation and OCI-backed dependency resolution remain
-optional hardened backends. They are not required for the default self-evolution loop.
 Optional capability bundles such as browser automation, integrations, document tooling,
 research tooling, and hosted sandboxes are separate deployment choices.
 See [Deployment](docs/DEPLOYMENT.md).
-The image starts the immutable host controller directly. Host releases execute only from
-sealed Python generations; managed OCI releases execute only from immutable image digests.
+The image starts the immutable host controller directly. Mutable application children run
+from exact Git commits selected by that controller.
 
 ## How self-evolution works
 
-1. The stable controller opens a detached Git candidate worktree.
-2. Native Git refs retain instance and upstream lineage; native merge state records and
-   exposes conflicts instead of inventing a parallel conflict format.
-3. By default, the candidate uses a trusted-local full Git worktree and normal local
-   shell while the stable controller owns evaluation, release building, activation, and
-   rollback. The candidate workspace is never the serving source tree.
-4. On supported rootful Linux, optional hardened candidate/evaluator isolation can run
-   with separate UIDs and namespace boundaries.
-5. Optional dependency proposals go through a credential-free, content-addressed OCI
-   resolver; fixed evaluation and generation building use its exact lock and wheelhouse.
-6. Promotion is a stop/start-fenced cutover with an availability gap, strict readiness,
-   and live probation. It is not standby or zero-downtime promotion.
-7. A failure restores the exact previous generation and its recorded HostConfig. Product
-   database mutations and external side effects are not rewound.
+1. `source_read`, `source_write`, `source_edit`, and `source_bash` operate on one persistent,
+   independent Git repository. Normal Git commands handle remotes, branches, and merges.
+2. `source_activate` commits the current worktree and records an idempotent activation in
+   SQLite before any runtime change.
+3. The host prepares a dependency environment keyed by `pyproject.toml`, `uv.lock`, Python,
+   and install profile without running dependency build scripts, then safely compiles the source.
+4. The runtime supervisor selects the exact commit; child startup exercises imports and the tool
+   contract before strict readiness and live probation record it as active.
+5. A failed activation restores the exact prior commit. `source_rollback` activates the
+   journal's previous healthy release through the same runtime path.
 
-The active child cannot survive normal promotion: it is drained and stopped before the
-new child starts. The stable host/controller and its `current` and `previous` generation
-references remain in place throughout.
+Cutover is stop/start fenced and has a short availability gap; it is not standby or
+zero-downtime. Product database mutations and external side effects are not rewound.
 
 ## Documentation
 

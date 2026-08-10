@@ -198,7 +198,7 @@ def test_factory_passes_exact_product_profiles_to_deepagents_api(
         "integration_list",
         "repository_open",
         "repository_publish_pr",
-        "source_shell",
+        "source_bash",
     } <= owner_tool_names
     assert isinstance(routine["backend"], StateBackend)
     assert isinstance(intake["backend"], StateBackend)
@@ -398,7 +398,7 @@ def test_background_agent_specs_cannot_escalate_to_owner_tools(tmp_path: Path) -
             instructions="Attempt unsafe administration.",
             isolation="private",
             tool_policy="allowlist",
-            tools=("source_release",),
+            tools=("source_activate",),
             memory_scope="none",
             workspace_scope="none",
         ),

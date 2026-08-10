@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -248,7 +247,7 @@ def test_private_evolution_event_route_requires_exact_child_identity(
     event = EvolutionEvent(
         event_key="candidate:candidate-1:failed",
         event_type="candidate.failed",
-        candidate_id="candidate-1",
+        release_id="release-1",
         origin={
             "tenant_id": "tenant-a",
             "channel": "web",
@@ -299,7 +298,7 @@ def test_probation_child_rejects_private_evolution_event_delivery(
     event = EvolutionEvent(
         event_key="candidate:candidate-1:failed",
         event_type="candidate.failed",
-        candidate_id="candidate-1",
+        release_id="release-1",
         payload={"status": "failed"},
     )
 
@@ -663,7 +662,6 @@ def test_partial_start_failure_cleans_attempted_boundaries_in_shutdown_phases(
 
 
 def test_probation_composition_does_not_construct_source_evolution_client(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENTULPA_DISABLE_CONSUMERS", "true")
@@ -671,7 +669,6 @@ def test_probation_composition_does_not_construct_source_evolution_client(
     monkeypatch.setenv("OPENTULPA_BOOTSTRAP_EVOLUTION_TOKEN", "e" * 48)
 
     client = main_module._build_evolution_client(
-        project_root=tmp_path,
         settings=cast(Any, SimpleNamespace(evolution_enabled=True)),
     )
 

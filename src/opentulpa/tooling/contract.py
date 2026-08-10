@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opentulpa.specs.protocol import AgentRunContext
 
-CONTRACT_VERSION: Literal["1.1"] = "1.1"
+CONTRACT_VERSION: Literal["1.2"] = "1.2"
 
 
 class AgentChannel(StrEnum):
@@ -113,7 +113,7 @@ class _ToolContractEnvelope[T](_ContractModel):
 
 
 class _ToolContractDocument(_ContractModel):
-    contract_version: Literal["1.1"] = CONTRACT_VERSION
+    contract_version: Literal["1.2"] = CONTRACT_VERSION
     operations: tuple[ToolSpec, ...]
 
 
@@ -405,38 +405,21 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         timeout_seconds=600,
     ),
     _tool("source_status", "evolution", ToolEffect.READ),
-    _tool("source_runtime_env_get", "evolution", ToolEffect.READ),
+    _tool("source_read", "evolution", ToolEffect.READ),
+    _tool("source_write", "evolution", ToolEffect.UPDATE),
+    _tool("source_edit", "evolution", ToolEffect.UPDATE),
     _tool(
-        "source_sync_upstream",
-        "evolution",
-        ToolEffect.UPDATE,
-        timeout_seconds=300,
-    ),
-    _tool(
-        "source_prepare_pr",
-        "evolution",
-        ToolEffect.CREATE,
-        idempotency=IdempotencyMode.REQUIRED,
-        timeout_seconds=900,
-    ),
-    _tool(
-        "source_resolve_dependencies",
-        "evolution",
-        ToolEffect.UPDATE,
-        timeout_seconds=1_800,
-    ),
-    _tool(
-        "source_shell",
+        "source_bash",
         "evolution",
         ToolEffect.EXECUTE,
         timeout_seconds=660,
     ),
     _tool(
-        "source_release",
+        "source_activate",
         "evolution",
         ToolEffect.AUTHORIZE,
         idempotency=IdempotencyMode.REQUIRED,
-        timeout_seconds=1_800,
+        timeout_seconds=60,
     ),
     _tool(
         "source_rollback",
@@ -445,6 +428,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         idempotency=IdempotencyMode.REQUIRED,
         timeout_seconds=60,
     ),
+    _tool("source_runtime_env_get", "evolution", ToolEffect.READ),
     _tool(
         "source_set_runtime_env",
         "evolution",
@@ -514,13 +498,13 @@ def render_tool_contract_markdown() -> str:
         "- `approval=auto` runs without an interrupt after normal authorization checks.",
         "- `approval=always` persists an interrupt for explicit owner approval.",
         "- `approval=policy` delegates decisions to a tool-specific runtime policy.",
-        "- Owner source shell and release tools run without per-call approval; source_release remains restart-safe through health checks and rollback.",
+        "- Owner source tools edit one persistent Git worktree directly. source_activate is restart-safe and runs host-owned checks, health probation, and rollback in the background.",
         "- `idempotency=required` rejects calls without a caller-supplied key.",
         "- `idempotency=derived` derives a stable key from canonical tenant-scoped input.",
         "- `execution=job` returns `status=accepted` and a durable `job_id`.",
         "- Every service validates tenant ownership; errors are sanitized before entering `ToolResult`.",
         "- `intake_draft_prepare` returns a hash-bound one-time `confirmation_handle`; only `intake_draft_activate` accepts it.",
-        "- Secret handle tools expose metadata and revocation only. Owner-only `source_set_runtime_env` redeems tenant secret handles inside the trusted application boundary before writing the host-owned `.env`; results redact values and `.env` is excluded from source releases. Trusted adapters and declared capability bindings redeem only the scope they require.",
+        "- Secret handle tools expose metadata and revocation only. Owner-only `source_set_runtime_env` redeems tenant secret handles inside the trusted application boundary before writing the host-owned `.env`; results redact values and credential files are excluded from source activation. Trusted adapters and declared capability bindings redeem only the scope they require.",
         "- Capability activation accepts config plus opaque secret-handle bindings only and requires an exact passing test attestation.",
         "- `trace_list` is newest-first; pass the last returned `run_id` as `before_run_id` to read the next page.",
         "",

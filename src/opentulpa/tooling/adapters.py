@@ -267,31 +267,22 @@ class ProductToolApplication(Protocol):
 
     async def source_status(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
+    async def source_read(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
+
+    async def source_write(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
+
+    async def source_edit(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
+
+    async def source_bash(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
+
+    async def source_activate(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
+
+    async def source_rollback(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
+
     async def source_runtime_env_get(
         self,
         invocation: ProductToolInvocation,
     ) -> ProductToolOutput: ...
-
-    async def source_sync_upstream(
-        self,
-        invocation: ProductToolInvocation,
-    ) -> ProductToolOutput: ...
-
-    async def source_prepare_pr(
-        self,
-        invocation: ProductToolInvocation,
-    ) -> ProductToolOutput: ...
-
-    async def source_resolve_dependencies(
-        self,
-        invocation: ProductToolInvocation,
-    ) -> ProductToolOutput: ...
-
-    async def source_shell(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
-
-    async def source_release(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
-
-    async def source_rollback(self, invocation: ProductToolInvocation) -> ProductToolOutput: ...
 
     async def source_set_runtime_env(
         self,
@@ -507,24 +498,25 @@ def _description(spec: ToolSpec) -> str:
             "result pages before answering."
         ),
         "source_status": (
-            "Inspect source self-update state. available reports whether self-update is usable; "
-            "active and session_active report only whether an editable candidate session exists."
+            "Inspect the persistent OpenTulpa source worktree, active release, previous release, "
+            "runtime status, and latest activation."
         ),
-        "source_sync_upstream": (
-            "Fetch configured remote main through the stable controller and open an isolated "
-            "reconciliation candidate bound to the current active release."
+        "source_read": (
+            "Read UTF-8 text from the persistent OpenTulpa source worktree."
         ),
-        "source_prepare_pr": (
-            "Export an evaluated self-evolution patch into one clean Git branch based on the "
-            "configured upstream repository. Test it in /workspace before repository_publish_pr."
+        "source_write": (
+            "Create or replace a UTF-8 file in the persistent OpenTulpa source worktree."
         ),
-        "source_resolve_dependencies": (
-            "Resolve an exact pyproject dependency proposal through the stable credential-free "
-            "OCI resolver, then install its verified lock into the active source candidate."
+        "source_edit": (
+            "Replace exact text in a file in the persistent OpenTulpa source worktree."
         ),
-        "source_shell": (
-            "Run a shell command in the OpenTulpa source control environment for inspection, "
-            "edits, tests, or release preparation."
+        "source_bash": (
+            "Run a bounded shell command directly in the persistent OpenTulpa source worktree "
+            "for Git operations, inspection, edits, or tests."
+        ),
+        "source_activate": (
+            "Commit current source edits and queue host-owned dependency and compile checks, "
+            "then child-owned import, contract, health, probation, and rollback checks."
         ),
         "source_set_runtime_env": (
             "Set one live runtime .env variable through the stable host, restart the child, "
@@ -532,8 +524,8 @@ def _description(spec: ToolSpec) -> str:
             "opaque secret handle as secret_id; never pass plaintext. Never returns the value."
         ),
         "source_runtime_env_get": (
-            "Read the live runtime .env through the stable host. Owner-only. Returns current "
-            "variable names and values to the model so it can diagnose and repair configuration."
+            "Inspect the live runtime .env through the stable host. Owner-only. Returns which "
+            "variable names are set, never their values."
         ),
         "sandbox_ssh_diagnostic": (
             "Run one SSH command from the sandbox using an opaque stored private-key or password "

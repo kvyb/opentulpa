@@ -94,29 +94,6 @@ class Settings(BaseSettings):
         default=True,
         description=("Enable source editing and self-release through the stable host controller."),
     )
-    evolution_source_repository: str | None = Field(
-        default=None,
-        description=(
-            "Canonical Git checkout used by the managed bootstrap to create disposable "
-            "source candidates. Defaults to the bootstrap project root."
-        ),
-    )
-    evolution_upstream_repository: str = Field(
-        default="https://github.com/kvyb/opentulpa.git",
-        description="Unauthenticated HTTPS Git repository used for trusted upstream sync.",
-    )
-    evolution_upstream_ref: str = Field(
-        default="refs/heads/main",
-        description="Full remote branch ref imported by trusted upstream sync.",
-    )
-    evolution_sandbox_image: str = Field(
-        default="opentulpa-evolution:0.1.0",
-        description="Locally built, reviewed OCI image used by the main agent's source shell.",
-    )
-    evolution_evaluator_image: str = Field(
-        default="opentulpa-evolution:0.1.0",
-        description="Locally built OCI image containing trusted candidate evaluation dependencies.",
-    )
     intake_drafts_db_path: str = Field(
         default=".opentulpa/deepagents/intake_drafts.db",
         description="Revisioned intake workflow drafts migrated from setup sessions.",

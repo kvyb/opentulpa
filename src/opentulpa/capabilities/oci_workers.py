@@ -8,18 +8,16 @@ import inspect
 import json
 import os
 import re
+import signal
+from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
 import httpx
 
-from opentulpa.bootstrap.oci_host import (
-    LocalOciCommandRunner,
-    OciCommandResult,
-    OciCommandRunner,
-)
 from opentulpa.capabilities.models import (
     WorkerRuntime,
     WorkerSpec,
@@ -49,6 +47,105 @@ _MANIFEST_LABEL = "org.opentulpa.capability.manifest-digest"
 _WORKER_LABEL = "org.opentulpa.capability.worker"
 _RELEASE_LABEL = "org.opentulpa.capability.release"
 _LEASE_LABEL = "org.opentulpa.capability.lease"
+
+
+@dataclass(frozen=True, slots=True)
+class OciCommandResult:
+    returncode: int
+    output: bytes = b""
+    truncated: bool = False
+    timed_out: bool = False
+
+
+class OciCommandRunner(Protocol):
+    async def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        max_output_bytes: int,
+    ) -> OciCommandResult: ...
+
+
+class LocalOciCommandRunner:
+    """Bounded OCI CLI runner with no inherited application secrets."""
+
+    def __init__(self, *, cwd: Path) -> None:
+        self._cwd = cwd.expanduser().resolve()
+
+    async def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        max_output_bytes: int,
+    ) -> OciCommandResult:
+        if not argv or timeout_seconds <= 0 or max_output_bytes < 1:
+            raise ValueError("OCI command runner configuration is invalid")
+        environment = {
+            key: value
+            for key in (
+                "PATH",
+                "HOME",
+                "DOCKER_HOST",
+                "DOCKER_CONTEXT",
+                "CONTAINER_HOST",
+                "XDG_RUNTIME_DIR",
+            )
+            if (value := os.environ.get(key))
+        }
+        environment.setdefault("PATH", os.defpath)
+        environment.setdefault("HOME", "/tmp")
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=self._cwd,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        stream = process.stdout
+        assert stream is not None
+        retained = bytearray()
+        output_size = 0
+
+        async def drain_output() -> None:
+            nonlocal output_size
+            while chunk := await stream.read(64 * 1_024):
+                output_size += len(chunk)
+                remaining = max_output_bytes - len(retained)
+                if remaining > 0:
+                    retained.extend(chunk[:remaining])
+
+        reader = asyncio.create_task(drain_output())
+        timed_out = False
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                await process.wait()
+        except TimeoutError:
+            timed_out = True
+            self._kill_process_group(process)
+            await process.wait()
+        except BaseException:
+            self._kill_process_group(process)
+            await process.wait()
+            await reader
+            raise
+        await reader
+        return OciCommandResult(
+            returncode=124 if timed_out else int(process.returncode or 0),
+            output=bytes(retained),
+            truncated=output_size > len(retained),
+            timed_out=timed_out,
+        )
+
+    @staticmethod
+    def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            with suppress(OSError):
+                process.kill()
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,7 +881,10 @@ class RoutingWorkerHost:
 
 
 __all__ = [
+    "LocalOciCommandRunner",
     "OciCapabilityPolicy",
     "OciCapabilityWorkerHost",
+    "OciCommandResult",
+    "OciCommandRunner",
     "RoutingWorkerHost",
 ]

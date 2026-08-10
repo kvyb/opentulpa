@@ -28,7 +28,7 @@ COPY pyproject.toml uv.lock ./
 # Pysher 1.0.8 is sdist-only but required by Composio; keep every other
 # dependency binary-only and seed setuptools for the later offline build.
 RUN extras="$(printf '%s' "${OPENTULPA_EXTRAS}" | tr ',' ' ')" \
-    && set -- --extra evaluation \
+    && set -- \
     && for extra in ${extras}; do \
          case "${extra}" in \
            browser|integrations|documents|research|hosted-sandbox|bundled) ;; \

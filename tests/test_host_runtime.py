@@ -111,7 +111,7 @@ def _live_source_spec_with_environment(
         runtime_python_interpreter=str(interpreter),
         runtime_dependency_lock_hash="f" * 64,
         runtime_pyproject_sha256="1" * 64,
-        runtime_install_profile="runtime-no-dev-no-install-project-v1",
+        runtime_install_profile="runtime-no-dev-no-build-no-install-project-v1",
     )
 
 
@@ -343,6 +343,23 @@ async def test_runtime_env_file_manager_restores_dotenv_when_restart_fails(
     assert result["runtime_restored"] is True
     assert result["value"] == "[redacted]"
     assert dotenv.read_text(encoding="utf-8") == "OPENAI_COMPATIBLE_API_KEY=previous\n"
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_file_manager_lists_names_without_values(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    dotenv = source / ".env"
+    dotenv.write_text("COMPOSIO_API_KEY=provider-secret\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+
+    result = await RuntimeEnvFileManager(source_root=source, runtime=object()).read()  # type: ignore[arg-type]
+
+    assert result == {
+        "available": True,
+        "variables": [{"name": "COMPOSIO_API_KEY", "set": True}],
+        "count": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -1249,7 +1266,7 @@ async def test_candidate_is_routed_during_probation_and_commits_after_probe(
     event = EvolutionEvent(
         event_key="candidate:probation:event",
         event_type="candidate.passed",
-        candidate_id="candidate",
+        release_id="release",
         payload={},
     )
     await runtime.deliver_evolution_event(event)

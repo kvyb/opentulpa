@@ -360,72 +360,65 @@ async def test_delivery_uses_trusted_actor_channel_and_thread_not_model_argument
 async def test_source_operations_are_owner_only_iterative_and_hide_worktree_paths() -> None:
     evolution = _Port(
         source_status={
-            "active": True,
-            "candidate_id": "candidate-1",
-            "diff_sha256": "d" * 64,
-            "current_release_id": "release-current",
-            "rollback_target_release_id": "release-prior",
+            "active_release_id": "release-current",
+            "workspace_head": "a" * 40,
+            "worktree_path": "/private/evolution/source",
         },
-        source_sync_upstream={
-            "synced": True,
-            "candidate_id": "candidate-1",
-            "upstream_commit": "a" * 40,
-        },
-        source_resolve_dependencies={
-            "candidate_id": "candidate-1",
-            "dependency_base_id": "b" * 64,
-        },
-        source_shell={
-            "candidate": {
-                "id": "candidate-1",
-                "status": "building",
-                "worktree_path": "/private/evolution/candidate-1",
-            },
+        source_read={"path": "README.md", "content": "before\n"},
+        source_write={"path": "README.md", "bytes_written": 6},
+        source_edit={"path": "README.md", "replacements": 1},
+        source_bash={
             "exit_code": 0,
             "output": "tests passed",
+            "workspace_root": "/private/evolution/source",
         },
-        source_release={
-            "candidate": {"id": "candidate-1", "status": "ready"},
-            "promotion": {"id": "promotion-1", "status": "queued"},
-        },
-        source_rollback={"id": "rollback-1", "status": "queued"},
+        source_activate={"activation_id": "activation-1", "status": "preparing"},
+        source_rollback={"activation_id": "activation-2", "status": "preparing"},
     )
     application, ports = _application(evolution=evolution)
 
     status = await application.source_status(_invocation("source_status", {}, idempotency_key=None))
-    synced = await application.source_sync_upstream(
+    read = await application.source_read(
         _invocation(
-            "source_sync_upstream",
-            {"expected_active_release_id": "release-current"},
+            "source_read",
+            {"path": "README.md", "offset": 1, "limit": 2_000},
             idempotency_key=None,
         )
     )
-    dependencies = await application.source_resolve_dependencies(
+    written = await application.source_write(
         _invocation(
-            "source_resolve_dependencies",
+            "source_write",
+            {"path": "README.md", "content": "after\n"},
+            idempotency_key=None,
+        )
+    )
+    edited = await application.source_edit(
+        _invocation(
+            "source_edit",
             {
-                "expected_candidate_id": "candidate-1",
-                "expected_diff_sha256": "d" * 64,
+                "path": "README.md",
+                "old_text": "after",
+                "new_text": "done",
+                "replace_all": False,
             },
             idempotency_key=None,
         )
     )
-    shell = await application.source_shell(
+    bash = await application.source_bash(
         _invocation(
-            "source_shell",
+            "source_bash",
             {"command": "pytest -q", "timeout_seconds": 300},
             idempotency_key=None,
         )
     )
-    released = await application.source_release(
+    activated = await application.source_activate(
         _invocation(
-            "source_release",
+            "source_activate",
             {
-                "expected_candidate_id": "candidate-1",
-                "expected_diff_sha256": "d" * 64,
                 "message": "Improve website interface",
+                "reason": "Owner requested improvement",
             },
-            idempotency_key="release-1",
+            idempotency_key="activate-1",
         )
     )
     assert ports["idempotency"].calls == []
@@ -433,21 +426,20 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
         _invocation(
             "source_rollback",
             {
-                "expected_current_release_id": "release-current",
-                "expected_target_release_id": "release-prior",
+                "expected_active_release_id": "release-current",
                 "reason": "Regression found",
             },
             idempotency_key="rollback-1",
         )
     )
 
-    assert status.data["candidate_id"] == "candidate-1"
-    assert synced.data["upstream_commit"] == "a" * 40
-    assert dependencies.data["dependency_base_id"] == "b" * 64
-    assert shell.data["candidate"] == {"id": "candidate-1", "status": "building"}
-    assert shell.data["output"] == "tests passed"
-    assert released.data["promotion"]["id"] == "promotion-1"
-    assert rolled_back.data == {"id": "rollback-1", "status": "queued"}
+    assert status.data == {"active_release_id": "release-current", "workspace_head": "a" * 40}
+    assert read.data["content"] == "before\n"
+    assert written.data["bytes_written"] == 6
+    assert edited.data["replacements"] == 1
+    assert bash.data == {"exit_code": 0, "output": "tests passed"}
+    assert activated.data == {"activation_id": "activation-1", "status": "preparing"}
+    assert rolled_back.data == {"activation_id": "activation-2", "status": "preparing"}
     audit_context = {
         "tenant_id": "tenant-a",
         "actor_id": "owner-1",
@@ -462,22 +454,34 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
     assert evolution.calls == [
         ("source_status", {"audit_context": audit_context}),
         (
-            "source_sync_upstream",
+            "source_read",
             {
-                "expected_active_release_id": "release-current",
+                "path": "README.md",
+                "offset": 1,
+                "limit": 2_000,
                 "audit_context": audit_context,
             },
         ),
         (
-            "source_resolve_dependencies",
+            "source_write",
             {
-                "expected_candidate_id": "candidate-1",
-                "expected_diff_sha256": "d" * 64,
+                "path": "README.md",
+                "content": "after\n",
                 "audit_context": audit_context,
             },
         ),
         (
-            "source_shell",
+            "source_edit",
+            {
+                "path": "README.md",
+                "old_text": "after",
+                "new_text": "done",
+                "replace_all": False,
+                "audit_context": audit_context,
+            },
+        ),
+        (
+            "source_bash",
             {
                 "command": "pytest -q",
                 "timeout_seconds": 300,
@@ -485,12 +489,11 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
             },
         ),
         (
-            "source_release",
+            "source_activate",
             {
-                "idempotency_key": "release-1",
-                "expected_candidate_id": "candidate-1",
-                "expected_diff_sha256": "d" * 64,
+                "idempotency_key": "activate-1",
                 "message": "Improve website interface",
+                "reason": "Owner requested improvement",
                 "audit_context": audit_context,
             },
         ),
@@ -498,8 +501,7 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
             "source_rollback",
             {
                 "idempotency_key": "rollback-1",
-                "expected_current_release_id": "release-current",
-                "expected_target_release_id": "release-prior",
+                "expected_active_release_id": "release-current",
                 "reason": "Regression found",
                 "audit_context": audit_context,
             },
@@ -520,83 +522,6 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
                 idempotency_key=None,
             )
         )
-
-
-@pytest.mark.asyncio
-async def test_source_prepare_pr_exports_digest_bound_patch_to_clean_repository(
-    tmp_path: Path,
-) -> None:
-    patch = b"diff --git a/README.md b/README.md\n"
-    digest = hashlib.sha256(patch).hexdigest()
-    patch_path = tmp_path / "candidate.patch"
-    patch_path.write_bytes(patch)
-    evolution = _Port(
-        prepare_contribution={
-            "id": "candidate-1",
-            "revision": 7,
-            "contribution": {
-                "upstream_repository": "https://github.com/kvyb/opentulpa",
-                "branch_name": "opentulpa/candidate-1",
-                "head_commit": "b" * 40,
-                "sanitized": True,
-                "metadata": {
-                    "patch_sha256": digest,
-                    "candidate_tree_oid": "c" * 40,
-                },
-            },
-        },
-        review_patch=patch_path,
-    )
-    repositories = _Port(
-        open={"id": "repo-1", "tenant_id": "tenant-a"},
-        import_verified_patch={
-            "workspace_id": "repo-1",
-            "head_sha": "a" * 40,
-            "patch_sha256": digest,
-        },
-    )
-    application, ports = _application(evolution=evolution, repositories=repositories)
-
-    prepared = await application.source_prepare_pr(
-        _invocation(
-            "source_prepare_pr",
-            {
-                "candidate_id": "candidate-1",
-                "expected_revision": 7,
-                "base_ref": "main",
-                "branch": None,
-                "provider": "auto",
-                "message": "Apply tested evolution",
-            },
-            idempotency_key="prepare-pr-1",
-        )
-    )
-
-    assert prepared.data["workspace_id"] == "repo-1"
-    assert prepared.data["candidate_id"] == "candidate-1"
-    assert prepared.data["requires_tests_before_publish"] is False
-    assert prepared.data["evaluation_reused_by_exact_tree"] is True
-    assert evolution.calls[0][0] == "prepare_contribution"
-    assert evolution.calls[1] == ("review_patch", {"candidate_id": "candidate-1"})
-    assert repositories.calls[0] == (
-        "open",
-        {
-            "tenant_id": "tenant-a",
-            "thread_id": "thread-1",
-            "repository_url": "https://github.com/kvyb/opentulpa",
-            "base_ref": "main",
-            "branch": "opentulpa/candidate-1",
-            "provider": "auto",
-        },
-    )
-    imported = repositories.calls[1]
-    assert imported[0] == "import_verified_patch"
-    assert imported[1]["patch"] == patch
-    assert imported[1]["expected_sha256"] == digest
-    assert imported[1]["source_candidate_id"] == "candidate-1"
-    assert imported[1]["source_commit"] == "b" * 40
-    assert imported[1]["expected_tree_oid"] == "c" * 40
-    assert ports["idempotency"].calls[0][1]["operation"] == "source_prepare_pr"
 
 
 @pytest.mark.asyncio

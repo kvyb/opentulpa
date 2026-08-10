@@ -11,8 +11,8 @@ capability generations, encrypted secret handles, idempotency records, and Teleg
 state remain explicit product stores. The simple schedule API is a projection over
 TriggerSpec revisions and has no second schedule database.
 
-Managed mode adds a separate bootstrap database for release leases, activation state,
-durable ingress, and outbox delivery, plus an evolution archive for candidate lineage.
-Those files live in the bootstrap state root, outside the mutable release workspace.
+The stable host adds `bootstrap/evolution/activations.db` for source releases, the
+active/previous/last-known-good decision, idempotent activation attempts, and terminal
+notification state. It lives outside the trusted source repository and mutable child.
 
 Raw `sqlite3` remains appropriate for these small stores. Moving to multiple active replicas requires replacing the Deep Agents saver/store and any concurrently written product stores with shared database implementations before adding workers.

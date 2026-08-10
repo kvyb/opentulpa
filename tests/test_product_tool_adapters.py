@@ -171,46 +171,45 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
     assert "result pages before answering" in content_fetch.description
     source_status = next(tool for tool in tools if tool.name == "source_status")
     assert source_status.tool_call_schema.model_json_schema()["properties"] == {}
-    assert "available reports whether self-update is usable" in source_status.description
-    assert "candidate session" in source_status.description
-    source_env_get = next(tool for tool in tools if tool.name == "source_runtime_env_get")
-    assert source_env_get.tool_call_schema.model_json_schema()["properties"] == {}
-    assert "Returns current variable names and values" in source_env_get.description
-    source_sync = next(tool for tool in tools if tool.name == "source_sync_upstream")
-    assert set(source_sync.tool_call_schema.model_json_schema()["properties"]) == {
-        "expected_active_release_id"
+    assert "persistent OpenTulpa source worktree" in source_status.description
+    source_read = next(tool for tool in tools if tool.name == "source_read")
+    assert set(source_read.tool_call_schema.model_json_schema()["properties"]) == {
+        "path",
+        "offset",
+        "limit",
     }
-    assert "configured remote main" in source_sync.description
-    source_prepare_pr = next(tool for tool in tools if tool.name == "source_prepare_pr")
-    assert set(source_prepare_pr.tool_call_schema.model_json_schema()["properties"]) == {
-        "candidate_id",
-        "expected_revision",
-        "base_ref",
-        "branch",
-        "provider",
-        "message",
-        "idempotency_key",
+    source_write = next(tool for tool in tools if tool.name == "source_write")
+    assert set(source_write.tool_call_schema.model_json_schema()["properties"]) == {
+        "path",
+        "content",
     }
-    assert "repository_publish_pr" in source_prepare_pr.description
-    source_shell = next(tool for tool in tools if tool.name == "source_shell")
-    assert set(source_shell.tool_call_schema.model_json_schema()["properties"]) == {
+    source_edit = next(tool for tool in tools if tool.name == "source_edit")
+    assert set(source_edit.tool_call_schema.model_json_schema()["properties"]) == {
+        "path",
+        "old_text",
+        "new_text",
+        "replace_all",
+    }
+    source_bash = next(tool for tool in tools if tool.name == "source_bash")
+    assert set(source_bash.tool_call_schema.model_json_schema()["properties"]) == {
         "command",
         "timeout_seconds",
     }
-    source_release = next(tool for tool in tools if tool.name == "source_release")
-    assert set(source_release.tool_call_schema.model_json_schema()["properties"]) == {
-        "expected_candidate_id",
-        "expected_diff_sha256",
+    source_activate = next(tool for tool in tools if tool.name == "source_activate")
+    assert set(source_activate.tool_call_schema.model_json_schema()["properties"]) == {
         "idempotency_key",
         "message",
+        "reason",
     }
     source_rollback = next(tool for tool in tools if tool.name == "source_rollback")
     assert set(source_rollback.tool_call_schema.model_json_schema()["properties"]) == {
-        "expected_current_release_id",
-        "expected_target_release_id",
+        "expected_active_release_id",
         "idempotency_key",
         "reason",
     }
+    source_env_get = next(tool for tool in tools if tool.name == "source_runtime_env_get")
+    assert source_env_get.tool_call_schema.model_json_schema()["properties"] == {}
+    assert "never their values" in source_env_get.description
     source_env = next(tool for tool in tools if tool.name == "source_set_runtime_env")
     assert set(source_env.tool_call_schema.model_json_schema()["properties"]) == {
         "name",

@@ -1,149 +1,99 @@
 # Architecture
 
-OpenTulpa has a stable host/controller, immutable Git-native wheel/venv generations, and
-external persistent state. The controller is not replaced by the runtime it serves.
+OpenTulpa separates an immutable host controller, a mutable application child, and
+persistent state. The child can replace its application source; it cannot replace the host
+process currently supervising it.
 
 ## Boundaries
 
 ```text
-owner/interfaces -> stable host/controller -> active runtime generation
-                         |                         |
-                         |                         +-- product state/workspaces
-                         +-- Git lineage, evaluation, activation, rollback
-                         +-- sandbox/evaluator authority
+owner/interfaces -> stable host -> active application child
+                         |                 |
+                         |                 +-- product state and capabilities
+                         +-- trusted source repository
+                         +-- activation journal
+                         +-- process identity, health, probation, rollback
 ```
 
-The stable controller owns authentication, configuration, process supervision, source
-mutation policy, fixed evaluation, generation publication, strict readiness, probation,
-cutover, rollback, and recovery. The active runtime owns the Deep Agents application and
-product behavior. Persistent product state is external to the generation so replacing a
-runtime does not replace conversations, memories, skills, databases, or tenant workspaces.
+The host owns authentication, encrypted configuration, the evolution control token, Git
+commit selection, dependency environments, child process identity, strict readiness,
+probation, and rollback. The child owns Deep Agents and product behavior. Product databases,
+memories, skills, and workspaces live outside both source checkouts.
 
-## Immutable Generations
+## Source Model
 
-Each generation is identified by content and environment inputs including the exact Git
-commit/tree, wheel, lockfile, evaluator fingerprint, Python runtime, state contract, and
-runtime tree hash. The generation contract owns canonical serialization, identity, and
-manifest digesting. `GenerationStore` alone seals the assembled tree, computes its runtime
-hash, writes and verifies the manifest, and transitions `BUILDING` to `COMPLETE`; builders
-cannot publish generations directly. Python venvs are not portable;
-their path and interpreter layout are part of the target installation. See the
-[Python venv documentation](https://docs.python.org/3/library/venv.html).
+The host maintains two repositories:
 
-The stable launcher/controller generation remains present while runtime generations
-change. `controller/current` names the active controller generation and
-`controller/previous` retains the exact prior generation for operator recovery. Release
-records similarly retain current and previous serving releases plus the HostConfig needed
-to recreate them. Evolution releases, bootstrap release aliases, and host activation share
-one typed immutable artifact-provenance contract rather than selecting trusted metadata
-through independent key lists.
+- The live repository is the exact checkout used to launch the child. Only the host imports
+  release commits and changes its detached `HEAD`.
+- `bootstrap/evolution/source` is one independent repository on persistent storage. Trusted
+  owner tools edit it directly across conversations and host restarts.
 
-## Dependency Bases
+`source_read`, `source_write`, and `source_edit` provide bounded text operations.
+`source_bash` runs a bounded shell in the trusted repository, so ordinary Git handles
+remotes, branches, fetches, merges, and conflict state. There is no candidate database,
+parallel lineage model, patch-export protocol, or custom dependency proposal workflow.
 
-Dependency changes use a separate stable-controller authority. The candidate may change
-only `[project].dependencies` and `[project.optional-dependencies]`; it cannot select an
-index, direct URL, local path, build hook, or workspace source. The controller binds the
-candidate and its current diff before starting dependency resolution.
+Source bash is trusted owner execution, not an adversarial sandbox. It receives a small
+environment without model/provider credentials. File operations reject path escapes and
+symbolic links. Activation refuses credential-file paths such as `.env`, private keys, and
+PEM files. Runtime `.env` changes remain a separate host-owned operation.
 
-The resolver starts from the immutable trusted baseline lock and runs fixed `uv` and `pip`
-argument vectors in an immutable OCI image with no production credentials. Network access
-is limited to lock metadata resolution and hash-checked binary wheel download from the
-configured HTTPS simple index. Source-only metadata for unselected optional groups remains
-inside this worker. The controller rejects direct references, custom source configuration,
-mutable output, untrusted artifact hosts, and any exported requirement that cannot be
-downloaded and installed as a hash-pinned binary wheel.
+## Activation Journal
 
-The result is a sealed, content-addressed dependency base containing `uv.lock`, exported
-hash-locked requirements, a wheelhouse, package inventory, and an offline-installed
-dependency site. Candidate evaluation mounts that exact site read-only and includes it in
-the evaluator fingerprint. Generation construction selects the same base by lock hash,
-rebuilds the final-path venv offline, and records dependency-base provenance in the
-release. System-package and arbitrary build-system evolution are not provided by this
-resolver.
+`bootstrap/evolution/activations.db` is the sole source-evolution journal. It stores:
 
-A native controller gives the worker a bind mount containing only one resolution staging
-directory. A containerized controller instead uses a dedicated named volume and mounts
-only that resolution's volume subpath into the sibling worker. Neither transport exposes
-the candidate workspace, product data, controller state, or other resolver staging work.
+- immutable release IDs bound to exact Git commits;
+- one active, previous, and last-known-good release decision;
+- one in-progress activation at a time; and
+- tenant-scoped idempotency keys, request hashes, terminal results, and notification state.
 
-## Git Lineage And Candidates
+An activation is recorded before dependency preparation or runtime replacement. A host
+restart launches the journal's active commit and resumes any `preparing` operation. A commit
+created before a crash remains in the persistent repository even if no activation row was
+written yet.
 
-Source mutation starts in a detached Git candidate worktree. The candidate workspace is
-not the serving source tree and is not reused as the source for a later serving process.
-The controller commits the exact candidate bytes, evaluates that commit, and builds a new
-wheel/venv generation from it. The runtime supervisor accepts only a verified generation
-identity; it has no source-directory launch target or source-overlay activation path.
+## Dependency Environments
 
-Instance, upstream, and accepted-upstream lineage are native Git refs. Upstream changes
-are merged with Git's native merge base, index stages, `MERGE_HEAD`, and conflict paths.
-Conflicts remain durable in Git state across restart until explicitly resolved; there is
-no parallel conflict database that can disagree with Git.
+The host prepares immutable runtime environments with `uv sync --frozen --no-dev --no-build
+--no-install-project`. Their identity is derived from `pyproject.toml`, `uv.lock`, Python,
+and the install profile, so source-only commits reuse the existing environment. The mutable
+project itself is loaded from the exact live checkout through `PYTHONPATH`.
 
-## Mutation And Trust Boundaries
-
-The default source-evolution boundary is trusted-local: the stable controller gives the
-candidate a disposable full Git worktree and a normal local shell, then independently
-runs fixed evaluation, builds a sealed generation, and owns activation/rollback. This is
-the default for installed-host Docker, local installs, Railway, and private single-tenant
-hosts. The candidate worktree is not the serving source tree and cannot publish releases.
-
-Optional strong source mutation/evaluation isolation is supported only on rootful Linux
-where trusted `bwrap`, `setpriv`, and `prlimit` are available and namespace probing
-succeeds. Docker Compose must provide the required `SYS_ADMIN` and `NET_ADMIN`
-capabilities and the configured relaxed seccomp/AppArmor settings.
-
-When the optional strong backend is enabled, the served runtime and candidate are
-distinct identities and trust domains. The served runtime defaults to UID/GID `65532`;
-hardened candidate processes default to UID/GID `65533`. Namespace, mount, network, PID,
-CPU, memory, file-size, and capability limits are applied before candidate commands run.
-Candidates cannot access controller credentials, product state, the resolver engine/socket,
-or the host environment. Hash verification detects tampering; UID and capability separation
-is the optional strong mutation boundary.
+Before replacing the child, the host runs bounded source compilation with its isolated trusted
+interpreter; it never imports editable source. Full Ruff, mypy, and pytest runs belong in the
+trusted worktree or CI, not in the production activation path. Child startup then exercises
+application and tool-contract imports, real database opening, identity checks, and health endpoints.
 
 ## Serving Lifecycle
 
-Promotion is deliberately a stop/start-fenced cutover:
-
 ```text
-prepare -> staging -> strict readiness -> drain -> stop old -> start new
-        -> strict readiness -> live probation -> active
+commit -> journal preparing -> dependency environment -> safe compile
+       -> stop old -> start exact commit -> strict readiness -> live probation -> active
 ```
 
-There is an availability gap between stopping the old child and starting the new child.
-This is not standby and not zero-downtime. The active child does not survive normal
-promotion. During probation the candidate serves live traffic with production credentials.
+Cutover is sequential and has an availability gap. The current implementation is not a
+standby or zero-downtime A/B system because both child versions share one live checkout,
+one product state root, and one ownership record. On startup or probation failure, the
+runtime supervisor restores the exact previous `RuntimeLiveSourceSpec`. The journal advances
+only after that call succeeds.
 
-If a pre-cutover check fails, the current release remains active. If activation or live
-probation fails, the controller stops the candidate and restores the exact previous
-generation and HostConfig. It also restores release-coupled capability state when a
-snapshot exists. Product-state mutations and external side effects are not rewound.
-If exact restoration is impossible, safe mode stops forwarding rather than serving an
-unverified child.
+Rollback activates the recorded previous healthy release through the same runtime path.
+Rollback does not rewind product database migrations, messages, purchases, authorization
+changes, or other external effects. Those paths retain their own idempotency and recovery
+contracts.
 
-The controller persists activation phases and lease fences. On controller death or
-restart, it reconciles those records, retains or restores the previous release as
-appropriate, and never assumes that a partially activated child is safe merely because a
-process still exists.
+## Host Evolution
+
+Edits to child-visible modules become active through `source_activate`. Edits to the host
+controller code are present in Git but cannot replace the already-running controller.
+Activating those changes fully requires the outer supervisor: a new Docker/Railway deploy or
+local controller installation. This boundary keeps rollback authority outside mutable code.
 
 ## Persistent State
 
-Product databases, checkpoints, memories, skills, files, capabilities, secrets, tenant
-workspaces, Git refs, generation metadata, activation records, and rollback state are
-external to immutable runtime bytes. Release rollback can restore release-coupled state
-that was explicitly snapshotted, but it cannot undo already committed product effects or
-external provider effects.
-
-The installer lock is a private authoritative `mkdir` directory. It has no PID metadata,
-is never automatically reclaimed, and may be removed by an operator only after verifying
-that no installer or descendant remains. This protects generation publication from
-concurrent installers without pretending that a stale PID can establish ownership.
-
-## Interfaces And Workers
-
-The stable host authenticates owner/interface requests and proxies the universal Agent API
-to the active runtime. Capability workers receive scoped, revision-bound credentials and
-are lease-fenced to the active release. They do not receive the owner bearer token,
-controller credentials, or generic OCI authority.
-
-Local automatic host restart is separately guarded by pidfd support. There is no numeric
-PID fallback, because a reused PID is not a safe process identity.
+Back up the whole configured data root. In particular, preserve product databases,
+`bootstrap/evolution/source`, `bootstrap/evolution/activations.db`, host configuration, the
+runtime `.env`, and runtime dependency environments. OpenTulpa is a single-controller,
+single-active-child SQLite deployment; multiple replicas require shared-store replacements
+and explicit leader fencing first.

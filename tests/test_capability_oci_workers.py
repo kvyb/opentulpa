@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from opentulpa.bootstrap.oci_host import OciCommandResult
 from opentulpa.capabilities import (
     CapabilityManifest,
     EvalCommand,
@@ -18,6 +17,7 @@ from opentulpa.capabilities import (
     WorkerRuntime,
     WorkerSpec,
 )
+from opentulpa.capabilities.oci_workers import OciCommandResult
 from opentulpa.capabilities.workers import WorkerLifecycleError
 
 DIGEST = f"sha256:{'1' * 64}"

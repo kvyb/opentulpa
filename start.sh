@@ -39,7 +39,7 @@ Commands:
   serve                 Start the headless host, Agent API, and configured interfaces
   local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
   server                Install, then run the headless Agent API directly
-  managed               Install trusted OCI images, then run the live-source host
+  managed               Install the tenant OCI worker, then run the live-source host
   install               Install/setup only
   run [local|server|managed] Run only, without installing
   doctor [local|server|managed] Check startup readiness
@@ -807,10 +807,6 @@ ensure_required_env() {
 
   if [[ "${runtime}" == "managed" ]]; then
     env_is_set "OPENTULPA_OWNER_TOKEN" || missing+=("OPENTULPA_OWNER_TOKEN")
-    env_is_set "OPENTULPA_RECOVERY_TOKEN" || missing+=("OPENTULPA_RECOVERY_TOKEN")
-    env_is_set "OPENTULPA_INGRESS_TOKEN" || missing+=("OPENTULPA_INGRESS_TOKEN")
-    env_is_set "OPENTULPA_RELEASE_EGRESS_NETWORK" || missing+=("OPENTULPA_RELEASE_EGRESS_NETWORK")
-    env_is_set "OPENTULPA_RELEASE_BASE_IMAGE" || missing+=("OPENTULPA_RELEASE_BASE_IMAGE")
     if server_telegram_enabled; then
       env_is_set "TELEGRAM_BOT_TOKEN" || missing+=("TELEGRAM_BOT_TOKEN")
       env_is_set "TELEGRAM_WEBHOOK_SECRET" || missing+=("TELEGRAM_WEBHOOK_SECRET")
@@ -861,10 +857,6 @@ ensure_required_env() {
   fi
   if [[ "${runtime}" == "managed" ]]; then
     env_is_set "OPENTULPA_OWNER_TOKEN" || prompt_env_value "OPENTULPA_OWNER_TOKEN" "OPENTULPA_OWNER_TOKEN" 1
-    env_is_set "OPENTULPA_RECOVERY_TOKEN" || prompt_env_value "OPENTULPA_RECOVERY_TOKEN" "OPENTULPA_RECOVERY_TOKEN (32+ random characters)" 1
-    env_is_set "OPENTULPA_INGRESS_TOKEN" || prompt_env_value "OPENTULPA_INGRESS_TOKEN" "OPENTULPA_INGRESS_TOKEN (32+ random characters)" 1
-    env_is_set "OPENTULPA_RELEASE_EGRESS_NETWORK" || prompt_env_value "OPENTULPA_RELEASE_EGRESS_NETWORK" "OPENTULPA_RELEASE_EGRESS_NETWORK"
-    env_is_set "OPENTULPA_RELEASE_BASE_IMAGE" || prompt_env_value "OPENTULPA_RELEASE_BASE_IMAGE" "OPENTULPA_RELEASE_BASE_IMAGE" 0 "opentulpa-runtime-base:0.1.0"
     if server_telegram_enabled; then
       env_is_set "TELEGRAM_BOT_TOKEN" || prompt_env_value "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN" 1
       env_is_set "TELEGRAM_WEBHOOK_SECRET" || prompt_env_value "TELEGRAM_WEBHOOK_SECRET" "TELEGRAM_WEBHOOK_SECRET" 1
@@ -929,33 +921,6 @@ install_tenant_sandbox_image() {
   if [[ "${DRY_RUN}" != "1" ]]; then
     command -v "${engine}" >/dev/null 2>&1 || die "${engine} is required for tenant sandbox execution"
   fi
-  run_cmd "${engine}" build \
-    --tag "${tenant_image}" \
-    --file docker/tenant-sandbox.Dockerfile .
-}
-
-install_managed_images() {
-  local engine runtime_image sandbox_image evaluator_image tenant_image extras_csv
-  engine="${OPENTULPA_CONTAINER_CLI:-docker}"
-  runtime_image="${OPENTULPA_RELEASE_BASE_IMAGE:-opentulpa-runtime-base:0.1.0}"
-  sandbox_image="${EVOLUTION_SANDBOX_IMAGE:-opentulpa-evolution:0.1.0}"
-  evaluator_image="${EVOLUTION_EVALUATOR_IMAGE:-${sandbox_image}}"
-  tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
-  tenant_image="${tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
-  if [[ "${DRY_RUN}" != "1" ]]; then
-    command -v "${engine}" >/dev/null 2>&1 || die "${engine} is required for managed mode"
-  fi
-  if ((${#SELECTED_EXTRAS[@]})); then
-    extras_csv="$(IFS=,; printf '%s' "${SELECTED_EXTRAS[*]}")"
-    run_cmd "${engine}" build --build-arg "OPENTULPA_EXTRAS=${extras_csv}" \
-      --tag "${runtime_image}" --file Dockerfile .
-  else
-    run_cmd "${engine}" build --tag "${runtime_image}" --file Dockerfile .
-  fi
-  run_cmd "${engine}" build \
-    --tag "${sandbox_image}" \
-    --tag "${evaluator_image}" \
-    --file docker/evolution.Dockerfile .
   run_cmd "${engine}" build \
     --tag "${tenant_image}" \
     --file docker/tenant-sandbox.Dockerfile .
@@ -1350,18 +1315,11 @@ run_doctor() {
     fi
   fi
   if [[ "${runtime}" == "managed" ]]; then
-    local engine runtime_image sandbox_image tenant_image network recovery_token ingress_token
+    local engine tenant_image
     engine="${OPENTULPA_CONTAINER_CLI:-docker}"
-    runtime_image="${OPENTULPA_RELEASE_BASE_IMAGE:-opentulpa-runtime-base:0.1.0}"
-    sandbox_image="${EVOLUTION_SANDBOX_IMAGE:-opentulpa-evolution:0.1.0}"
     tenant_image="$(config_value "SANDBOX_IMAGE" "sandbox_image")"
     tenant_image="${tenant_image:-opentulpa-tenant-sandbox:0.1.0}"
-    network="${OPENTULPA_RELEASE_EGRESS_NETWORK:-}"
-    recovery_token="${OPENTULPA_RECOVERY_TOKEN:-}"
-    ingress_token="${OPENTULPA_INGRESS_TOKEN:-}"
     doctor_check "OPENTULPA_OWNER_TOKEN is set" "$(env_is_set "OPENTULPA_OWNER_TOKEN" && echo 1 || echo 0)" "set OPENTULPA_OWNER_TOKEN" || failures=$((failures + 1))
-    doctor_check "OPENTULPA_RECOVERY_TOKEN is at least 32 characters" "$([[ ${#recovery_token} -ge 32 ]] && echo 1 || echo 0)" "set a random OPENTULPA_RECOVERY_TOKEN" || failures=$((failures + 1))
-    doctor_check "OPENTULPA_INGRESS_TOKEN is at least 32 characters" "$([[ ${#ingress_token} -ge 32 ]] && echo 1 || echo 0)" "set a random OPENTULPA_INGRESS_TOKEN" || failures=$((failures + 1))
     if server_telegram_enabled; then
       doctor_check "TELEGRAM_WEBHOOK_SECRET is set" "$(env_is_set "TELEGRAM_WEBHOOK_SECRET" && echo 1 || echo 0)" "set a stable TELEGRAM_WEBHOOK_SECRET" || failures=$((failures + 1))
       doctor_check "PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN is set" "$(public_base_url_is_set && echo 1 || echo 0)" "set the public HTTPS gateway URL" || failures=$((failures + 1))
@@ -1370,10 +1328,7 @@ run_doctor() {
     doctor_check "${engine} is available" "$(command -v "${engine}" >/dev/null 2>&1 && echo 1 || echo 0)" "install a rootless Docker or Podman engine" || failures=$((failures + 1))
     if command -v "${engine}" >/dev/null 2>&1; then
       doctor_check "${engine} is rootless" "$(container_engine_is_rootless "${engine}" && echo 1 || echo 0)" "configure a rootless Docker or Podman engine" || failures=$((failures + 1))
-      doctor_check "trusted runtime base image exists" "$("${engine}" image inspect "${runtime_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install managed" || failures=$((failures + 1))
-      doctor_check "evolution sandbox image exists" "$("${engine}" image inspect "${sandbox_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install managed" || failures=$((failures + 1))
       doctor_check "tenant sandbox image exists" "$("${engine}" image inspect "${tenant_image}" >/dev/null 2>&1 && echo 1 || echo 0)" "run ./start.sh install managed" || failures=$((failures + 1))
-      doctor_check "restricted release network exists" "$([[ -n "${network}" ]] && "${engine}" network inspect "${network}" >/dev/null 2>&1 && echo 1 || echo 0)" "create and restrict OPENTULPA_RELEASE_EGRESS_NETWORK" || failures=$((failures + 1))
     fi
   fi
   if [[ "${runtime}" != "managed" ]]; then
@@ -1463,11 +1418,7 @@ main() {
   if [[ "${MODE}" != "run" ]]; then
     install_python_deps
     install_railway_sandbox_bridge
-    if [[ "${runtime}" == "managed" ]]; then
-      install_managed_images
-    else
-      install_tenant_sandbox_image
-    fi
+    install_tenant_sandbox_image
     if [[ "${runtime}" == "local" ]]; then
       ensure_cloudflared
     fi

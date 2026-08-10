@@ -12,10 +12,6 @@ EMPTY_REQUIRED_ENV = {
     "PUBLIC_BASE_URL": "",
     "OPENTULPA_DATA_ROOT": "",
     "OPENTULPA_OWNER_TOKEN": "",
-    "OPENTULPA_RECOVERY_TOKEN": "",
-    "OPENTULPA_INGRESS_TOKEN": "",
-    "OPENTULPA_RELEASE_EGRESS_NETWORK": "",
-    "OPENTULPA_RELEASE_BASE_IMAGE": "",
     "SANDBOX_IMAGE": "",
     "COMPOSIO_API_KEY": "",
     "TELEGRAM_ALLOWED_USERNAMES": "",
@@ -715,7 +711,7 @@ def test_direct_start_recognizes_railway_hosted_sandbox(tmp_path: Path) -> None:
     assert "shell commands will be unavailable" not in result.stderr
 
 
-def test_start_script_install_managed_builds_trusted_runtime_and_evaluator_images() -> None:
+def test_start_script_install_managed_builds_only_tenant_sandbox_image() -> None:
     result = _run_start(
         "install",
         "managed",
@@ -724,13 +720,12 @@ def test_start_script_install_managed_builds_trusted_runtime_and_evaluator_image
     )
 
     assert result.returncode == 0
-    assert "docker build --tag opentulpa-runtime-base:0.1.0 --file Dockerfile ." in result.stdout
-    assert "--tag opentulpa-evolution:0.1.0" in result.stdout
-    assert "--file docker/evolution.Dockerfile ." in result.stdout
     assert (
         "--tag opentulpa-tenant-sandbox:0.1.0 "
         "--file docker/tenant-sandbox.Dockerfile ."
     ) in result.stdout
+    assert "--file Dockerfile" not in result.stdout
+    assert "evolution.Dockerfile" not in result.stdout
     assert "uv run --no-sync opentulpa-host" not in result.stdout
 
 
@@ -742,10 +737,6 @@ def test_start_script_run_managed_uses_live_source_host_without_rebuilding() -> 
         env={
             **EMPTY_REQUIRED_ENV,
             "OPENAI_COMPATIBLE_API_KEY": "test-key",
-            "OPENTULPA_RECOVERY_TOKEN": "r" * 32,
-            "OPENTULPA_INGRESS_TOKEN": "i" * 32,
-            "OPENTULPA_RELEASE_EGRESS_NETWORK": "restricted-egress",
-            "OPENTULPA_RELEASE_BASE_IMAGE": "opentulpa-runtime-base:0.1.0",
             "OPENTULPA_OWNER_TOKEN": "owner-token",
         },
     )
@@ -777,7 +768,7 @@ def test_start_script_retains_selected_optional_adapters() -> None:
     assert "uv sync --frozen --no-dev --extra integrations --extra documents" in result.stdout
 
 
-def test_start_script_bakes_selected_adapters_into_managed_runtime() -> None:
+def test_start_script_installs_selected_adapters_for_managed_runtime() -> None:
     result = _run_start(
         "install",
         "managed",
@@ -786,10 +777,8 @@ def test_start_script_bakes_selected_adapters_into_managed_runtime() -> None:
     )
 
     assert result.returncode == 0
-    assert (
-        "docker build --build-arg OPENTULPA_EXTRAS=bundled "
-        "--tag opentulpa-runtime-base:0.1.0 --file Dockerfile ."
-    ) in result.stdout
+    assert "uv sync --frozen --no-dev --extra bundled" in result.stdout
+    assert "--build-arg OPENTULPA_EXTRAS" not in result.stdout
 
 
 def test_start_script_rejects_unknown_optional_adapter_bundle() -> None:

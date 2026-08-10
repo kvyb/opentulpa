@@ -5,7 +5,7 @@ REPOSITORY="${OPENTULPA_INSTALL_REPOSITORY:-https://github.com/kvyb/opentulpa.gi
 REF="${OPENTULPA_INSTALL_REF:-main}"
 PYTHON_REQUEST="${OPENTULPA_INSTALL_PYTHON:-3.12}"
 PIP_VERSION="${OPENTULPA_INSTALL_PIP_VERSION:-25.1.1}"
-PROFILE="${OPENTULPA_INSTALL_PROFILE:-controller-evaluation-no-dev}"
+PROFILE="${OPENTULPA_INSTALL_PROFILE:-controller-runtime-no-dev}"
 DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 INSTALL_ROOT="${OPENTULPA_INSTALL_ROOT:-${DATA_HOME}/opentulpa/install}"
 CONTROLLER_ROOT="${INSTALL_ROOT}/controller"
@@ -448,7 +448,6 @@ PROJECT_WHEEL=$1
   --no-dev \
   --no-emit-project \
   --no-header \
-  --extra evaluation \
   --project "$EXACT_SOURCE" \
   --output-file "$REQUIREMENTS"
 [ -s "$REQUIREMENTS" ] || fail "uv export produced no locked runtime requirements"
