@@ -182,7 +182,7 @@ def create_host_app(
         sandbox = await _sandbox_status(sandbox_supervisor)
         ok = bool(sandbox.get("ok"))
         return JSONResponse(
-            status_code=200 if ok else 503,
+            status_code=200,
             content={
                 "ok": ok,
                 "host": "ready",

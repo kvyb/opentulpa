@@ -207,7 +207,7 @@ def test_log_cursor_resumes_same_host_and_resets_after_host_replacement() -> Non
     )
 
 
-def test_host_health_fails_closed_when_sandbox_worker_is_unavailable(tmp_path: Path) -> None:
+def test_host_health_reports_degraded_sandbox_without_failing_liveness(tmp_path: Path) -> None:
     store, service = _parts(tmp_path)
     app = create_host_app(
         store=store,
@@ -220,7 +220,7 @@ def test_host_health_fails_closed_when_sandbox_worker_is_unavailable(tmp_path: P
         status = client.get("/_host/api/status").json()
         assert service.started is False
 
-    assert health.status_code == 503
+    assert health.status_code == 200
     assert health.json()["ok"] is False
     assert health.json()["sandbox"]["checks"] == {"execute": False, "ssh": False}
     assert status["sandbox"]["ok"] is False
