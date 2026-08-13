@@ -15,6 +15,7 @@ from pydantic import SecretStr
 
 from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.host import runtime as runtime_module
+from opentulpa.host.evolution import _ActivationJournal
 from opentulpa.host.models import HostConfig
 from opentulpa.host.runtime import (
     RuntimeLiveSourceSpec,
@@ -1052,6 +1053,146 @@ async def test_unexpected_exit_restarts_exact_live_source_with_bounded_budget(
     assert runtime.live_source == spec
     assert runtime.endpoint is None
     assert "restart budget" in str(runtime.error)
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["startup", "crash", "crash_zero", "stale_pending", "live_pending"]
+)
+async def test_runtime_recovers_recorded_previous_source_and_reconciles_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    previous = RuntimeLiveSourceSpec(source_commit="a" * 40)
+    active = RuntimeLiveSourceSpec(source_commit="b" * 40)
+    journal = _ActivationJournal(tmp_path / "activations.db")
+    initial = journal.initialize(previous.source_commit)
+    active_release = journal.release_for_commit(active.source_commit)
+    operation, _ = journal.begin(
+        tenant_id="owner",
+        idempotency_key="activate-b",
+        request_hash="c" * 64,
+        kind="activate",
+        target_release_id=active_release["id"],
+        previous_release_id=initial["active_release_id"],
+        reason="test",
+        audit={"tenant_id": "owner"},
+    )
+    journal.complete_success(
+        operation["id"], result={"status": "active", "source_commit": active.source_commit}
+    )
+    pending = None
+    if failure in {"stale_pending", "live_pending"}:
+        pending_release = journal.release_for_commit("c" * 40)
+        pending, _ = journal.begin(
+            tenant_id="owner",
+            idempotency_key="activate-c",
+            request_hash="d" * 64,
+            kind="activate",
+            target_release_id=pending_release["id"],
+            previous_release_id=active_release["id"],
+            reason="test",
+            audit={"tenant_id": "owner"},
+        )
+    runtime = RuntimeSupervisor(
+        project_root=tmp_path,
+        data_root=tmp_path / "data",
+        live_source_spec=active,
+        max_unexpected_restarts=0 if failure in {"startup", "crash_zero"} else 1,
+        restart_backoff_seconds=0,
+        max_restart_backoff_seconds=0,
+    )
+    runtime._subreaper_enabled = True
+    runtime._descendant_inspector = lambda leader_pid, launch_nonce: ()
+
+    async def recovery_source(
+        failed: RuntimeLiveSourceSpec, allow_pending: bool
+    ) -> RuntimeLiveSourceSpec | None:
+        candidate = journal.recovery_candidate(
+            failed.source_commit, allow_pending=allow_pending
+        )
+        return (
+            RuntimeLiveSourceSpec(source_commit=candidate["source_commit"])
+            if candidate is not None
+            else None
+        )
+
+    async def reconcile(
+        failed: RuntimeLiveSourceSpec,
+        selected: RuntimeLiveSourceSpec,
+        invalidate_pending: bool,
+    ) -> None:
+        journal.complete_recovery(
+            failed_release_id=journal.release_for_commit(failed.source_commit)["id"],
+            selected_release_id=journal.release_for_commit(selected.source_commit)["id"],
+            invalidate_pending=invalidate_pending,
+        )
+
+    async def preflight(target: Any) -> None:
+        if failure in {"startup", "stale_pending"} and target.live_source == active:
+            raise RuntimeUnavailableError("active source cannot start")
+
+    async def spawn(config: HostConfig, target: Any) -> Any:
+        child = _fake_live_child(target.live_source)
+        child.config = config
+        runtime._status = "ready"
+        return child
+
+    monkeypatch.setattr(runtime, "_ensure_controller_ownership", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(runtime, "_preflight_target", preflight)
+    monkeypatch.setattr(runtime, "_spawn_target", spawn)
+    monkeypatch.setattr(runtime, "_terminate_child_process_group", _terminate_fake_child)
+    runtime.configure_source_recovery(recovery_source, reconcile)
+
+    if failure == "live_pending":
+        child = _fake_live_child(active)
+        runtime._begin_selection(child.config, child.target)
+        runtime._status = "ready"
+        runtime._adopt_child(child)
+        child.process.exit(17)
+        await _wait_until(lambda: runtime._child is not None and runtime._child is not child)
+        restarted = runtime._child
+        assert restarted is not None
+        cast(_FakeProcess, restarted.process).exit(18)
+        await _wait_until(lambda: runtime.status == "failed" and runtime._child is None)
+        state = journal.state()
+        assert runtime.status == "failed"
+        assert runtime.live_source == active
+        assert state["active_release_id"] == active_release["id"]
+        assert pending is not None
+        assert journal.operation(pending["id"])["status"] == "preparing"  # type: ignore[index]
+        await runtime.shutdown()
+        return
+    if failure in {"startup", "stale_pending"}:
+        await runtime.start(_config())
+    else:
+        child = _fake_live_child(active)
+        runtime._begin_selection(child.config, child.target)
+        runtime._status = "ready"
+        runtime._adopt_child(child)
+        child.process.exit(17)
+        if failure == "crash":
+            await _wait_until(
+                lambda: runtime._child is not None
+                and runtime._child is not child
+                and runtime.live_source == active
+            )
+            restarted = runtime._child
+            assert restarted is not None
+            cast(_FakeProcess, restarted.process).exit(18)
+        await _wait_until(lambda: runtime._child is not None and runtime.live_source == previous)
+
+    state = journal.state()
+    assert runtime.status == "ready"
+    assert runtime.live_source == previous
+    assert state["active_release_id"] == initial["active_release_id"]
+    assert state["previous_release_id"] is None
+    assert state["last_good_release_id"] == initial["active_release_id"]
+    assert journal.operation(operation["id"])["status"] == "rolled_back"  # type: ignore[index]
+    if pending is not None:
+        assert journal.operation(pending["id"])["status"] == "failed"  # type: ignore[index]
     await runtime.shutdown()
 
 
