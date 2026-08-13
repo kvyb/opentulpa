@@ -192,6 +192,10 @@ ProcessFencer = Callable[
 ]
 DescendantInspector = Callable[[int, str], tuple[RuntimeProcessIdentity, ...]]
 ProcessSignaler = Callable[[int, int], None]
+RecoverySource = Callable[[RuntimeLiveSourceSpec, bool], Awaitable[RuntimeLiveSourceSpec | None]]
+RecoveryReconciler = Callable[
+    [RuntimeLiveSourceSpec, RuntimeLiveSourceSpec, bool], Awaitable[None]
+]
 
 
 class _OwnershipRecord(BaseModel):
@@ -400,6 +404,8 @@ class RuntimeSupervisor:
         self._desired_config: HostConfig | None = None
         self._desired_target: _LaunchTarget | None = None
         self._unexpected_restarts = 0
+        self._recovery_source: RecoverySource | None = None
+        self._recovery_reconciler: RecoveryReconciler | None = None
         self._operation_task: asyncio.Task[Any] | None = None
         self._watcher_task: asyncio.Task[None] | None = None
         self._probation_rollback_task: asyncio.Task[None] | None = None
@@ -478,6 +484,16 @@ class RuntimeSupervisor:
         self._desired_target = None
         self._unexpected_restarts = 0
 
+    def configure_source_recovery(
+        self, source: RecoverySource, reconciler: RecoveryReconciler
+    ) -> None:
+        if not self._is_fully_stopped():
+            raise RuntimeUnavailableError(
+                "cannot change source recovery during a runtime transition"
+            )
+        self._recovery_source = source
+        self._recovery_reconciler = reconciler
+
     def configure_evolution_control(self, *, base_url: str, token: str) -> None:
         if not self._is_fully_stopped():
             raise RuntimeUnavailableError(
@@ -520,13 +536,17 @@ class RuntimeSupervisor:
                 self._require_launch_safe()
                 target = self._selected_target()
                 previous = self._child
+                recovered_from: _LaunchTarget | None = None
                 try:
                     await self._preflight_target(target)
                 except Exception as exc:
-                    self._error = self._safe_error(exc)
-                    if previous is None:
-                        self._status = "failed"
-                    raise
+                    fallback = await self._recovery_target(target, allow_pending=True)
+                    if fallback is None:
+                        self._error = self._safe_error(exc)
+                        if previous is None:
+                            self._status = "failed"
+                        raise
+                    recovered_from, target = target, fallback
                 previous_config = previous.config if previous is not None else None
                 previous_target = previous.target if previous is not None else None
                 if previous is not None:
@@ -539,9 +559,26 @@ class RuntimeSupervisor:
                     await self._restore_after_cancellation(previous_config, previous_target)
                     raise
                 except Exception:
-                    self._desired_running = False
-                    raise
-                self._adopt_child(child)
+                    if recovered_from is not None:
+                        self._desired_running = False
+                        raise
+                    fallback = await self._recovery_target(target, allow_pending=True)
+                    if fallback is None:
+                        self._desired_running = False
+                        raise
+                    recovered_from, target = target, fallback
+                    self._begin_selection(config, target)
+                    try:
+                        child = await self._spawn_target(config, target)
+                    except Exception:
+                        self._desired_running = False
+                        raise
+                if recovered_from is not None:
+                    await self._finish_recovery(
+                        recovered_from, target, child, invalidate_pending=True
+                    )
+                else:
+                    self._adopt_child(child)
             finally:
                 self._release_operation()
 
@@ -1243,20 +1280,12 @@ class RuntimeSupervisor:
                 config = child.config
                 target = child.target
                 self._child = None
-                if not self._desired_running or self._max_unexpected_restarts == 0:
+                if not self._desired_running:
                     self._status = "failed"
                     return
                 self._status = "restarting"
 
-            while True:
-                if self._unexpected_restarts >= self._max_unexpected_restarts:
-                    async with self._lock:
-                        if self._selection_version == version and self._child is None:
-                            self._desired_running = False
-                            self._status = "failed"
-                            self._error = "runtime exhausted its unexpected-exit restart budget"
-                            self._append_log("host", self._error)
-                    return
+            while self._unexpected_restarts < self._max_unexpected_restarts:
                 attempt = self._unexpected_restarts + 1
                 delay = min(
                     self._restart_backoff * (2 ** (attempt - 1)),
@@ -1285,15 +1314,39 @@ class RuntimeSupervisor:
                             self._desired_running = False
                             return
                         if attempt >= self._max_unexpected_restarts:
-                            self._desired_running = False
-                            self._status = "failed"
-                            self._error = "runtime exhausted its unexpected-exit restart budget"
-                            self._append_log("host", self._error)
-                            return
+                            break
                         self._status = "restarting"
                         continue
                     self._adopt_child(replacement)
                     return
+            async with self._lock:
+                if (
+                    self._selection_version != version
+                    or not self._desired_running
+                    or self._child is not None
+                ):
+                    return
+                fallback = await self._recovery_target(target, allow_pending=False)
+                if fallback is None:
+                    self._desired_running = False
+                    self._status = "failed"
+                    self._error = "runtime exhausted its unexpected-exit restart budget"
+                    self._append_log("host", self._error)
+                    return
+                self._begin_selection(config, fallback)
+                try:
+                    replacement = await self._spawn_target(config, fallback)
+                    await self._finish_recovery(
+                        target, fallback, replacement, invalidate_pending=False
+                    )
+                except Exception:
+                    self._desired_running = False
+                    if self._status != "recovery_required":
+                        self._status = "failed"
+                        self._error = "runtime fallback source failed operational checks"
+                        self._append_log("host", self._error)
+                    return
+                return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2011,6 +2064,72 @@ class RuntimeSupervisor:
         self._desired_config = config
         self._desired_target = target
         self._unexpected_restarts = 0
+
+    async def _recovery_target(
+        self, failed: _LaunchTarget, *, allow_pending: bool
+    ) -> _LaunchTarget | None:
+        if (
+            self._recovery_source is None
+            or self._recovery_reconciler is None
+            or self._status == "recovery_required"
+        ):
+            return None
+        try:
+            candidate = await self._recovery_source(
+                failed.require_live_source(), allow_pending
+            )
+            if candidate is None or candidate.source_commit == failed.live_source.source_commit:
+                return None
+            target = _LaunchTarget.for_live_source(candidate)
+            await self._preflight_target(target)
+        except Exception:
+            return None
+        self._append_log("host", "runtime source failed; starting recorded previous source")
+        return target
+
+    async def _finish_recovery(
+        self,
+        failed: _LaunchTarget,
+        selected: _LaunchTarget,
+        child: _Child,
+        *,
+        invalidate_pending: bool,
+    ) -> None:
+        assert self._recovery_reconciler is not None
+        reconciliation: asyncio.Future[None] = asyncio.ensure_future(
+            self._recovery_reconciler(
+                failed.require_live_source(),
+                selected.require_live_source(),
+                invalidate_pending,
+            )
+        )
+        cancelled = False
+        try:
+            while not reconciliation.done():
+                try:
+                    await asyncio.shield(reconciliation)
+                except asyncio.CancelledError:
+                    cancelled = True
+            reconciliation.result()
+        except BaseException as exc:
+            self._desired_running = False
+            try:
+                await self._await_shielded(asyncio.create_task(self._stop_child(child)))
+            except Exception as cleanup_error:
+                self._status = "recovery_required"
+                self._error = "runtime recovery journal and child containment disagree"
+                raise RuntimeUnavailableError(self._error) from cleanup_error
+            self._select_target(failed)
+            self._desired_target = failed
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            self._status = "failed"
+            self._error = "runtime recovery journal reconciliation failed"
+            raise RuntimeUnavailableError(self._error) from exc
+        self._select_target(selected)
+        self._adopt_child(child)
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _is_fully_stopped(self) -> bool:
         return (

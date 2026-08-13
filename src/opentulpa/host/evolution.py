@@ -395,6 +395,109 @@ class _ActivationJournal:
             raise SourceEvolutionError("source activation disappeared")
         return operation
 
+    def recovery_candidate(
+        self, failed_source_commit: str, *, allow_pending: bool
+    ) -> dict[str, str] | None:
+        failed_commit = _commit(failed_source_commit)
+        with self._lock, closing(self._connect()) as connection:
+            state = connection.execute(
+                """
+                SELECT state.active_release_id, state.previous_release_id,
+                    active.source_commit AS active_source_commit
+                FROM source_state AS state
+                JOIN source_releases AS active ON active.id = state.active_release_id
+                WHERE state.singleton = 1
+                """
+            ).fetchone()
+            if (
+                state is None
+                or str(state["active_source_commit"]) != failed_commit
+                or state["previous_release_id"] is None
+            ):
+                return None
+            if not allow_pending and connection.execute(
+                "SELECT 1 FROM source_activations WHERE status='preparing' LIMIT 1"
+            ).fetchone() is not None:
+                return None
+            latest = connection.execute(
+                """
+                SELECT kind FROM source_activations
+                WHERE target_release_id = ? AND status = 'active'
+                ORDER BY updated_at DESC, id DESC LIMIT 1
+                """,
+                (state["active_release_id"],),
+            ).fetchone()
+            if latest is not None and str(latest["kind"]) == "rollback":
+                return None
+            candidate = connection.execute(
+                "SELECT id, source_commit, created_at FROM source_releases WHERE id = ?",
+                (state["previous_release_id"],),
+            ).fetchone()
+        if candidate is None or str(candidate["source_commit"]) == failed_commit:
+            return None
+        return {key: str(candidate[key]) for key in ("id", "source_commit", "created_at")}
+
+    def complete_recovery(
+        self,
+        *,
+        failed_release_id: str,
+        selected_release_id: str,
+        invalidate_pending: bool,
+    ) -> None:
+        now = self._now()
+        result = {
+            "status": "rolled_back",
+            "reason": "runtime source failed operational checks",
+            "active_release_id": selected_release_id,
+            "failed_release_id": failed_release_id,
+        }
+        encoded = json.dumps(result, sort_keys=True, separators=(",", ":"))
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                state = connection.execute(
+                    "SELECT * FROM source_state WHERE singleton = 1"
+                ).fetchone()
+                if state is None or str(state["active_release_id"]) != failed_release_id:
+                    raise SourceEvolutionError("active source changed during runtime recovery")
+                if str(state["previous_release_id"] or "") != selected_release_id:
+                    raise SourceEvolutionError("runtime recovery source changed before activation")
+                pending = connection.execute(
+                    "SELECT id FROM source_activations WHERE status='preparing' LIMIT 1"
+                ).fetchone()
+                if pending is not None and not invalidate_pending:
+                    raise SourceEvolutionError("source activation changed during runtime recovery")
+                connection.execute(
+                    """
+                    UPDATE source_state SET active_release_id=?, previous_release_id=NULL,
+                        last_good_release_id=?, updated_at=? WHERE singleton=1
+                    """,
+                    (selected_release_id, selected_release_id, now),
+                )
+                connection.execute(
+                    """
+                    UPDATE source_activations SET status='rolled_back', result_json=?, updated_at=?
+                    WHERE id = (
+                        SELECT id FROM source_activations
+                        WHERE target_release_id=? AND status='active'
+                        ORDER BY updated_at DESC, id DESC LIMIT 1
+                    )
+                    """,
+                    (encoded, now, failed_release_id),
+                )
+                if invalidate_pending:
+                    connection.execute(
+                        """
+                        UPDATE source_activations SET status='failed', result_json=?, updated_at=?
+                        WHERE status='preparing' AND previous_release_id=?
+                        """,
+                        (encoded, now, failed_release_id),
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
     def pending_notifications(self) -> list[dict[str, Any]]:
         with self._lock, closing(self._connect()) as connection:
             rows = connection.execute(
@@ -764,9 +867,47 @@ class HostEvolutionControlService:
         release = await asyncio.to_thread(self._journal.release, state["active_release_id"])
         if release is None:
             raise SourceEvolutionError("active source release is unavailable")
-        spec = await self._prepare_spec(str(release["source_commit"]))
+        self._runtime.configure_source_recovery(self._recovery_source, self._complete_recovery)
+        try:
+            spec = await self._prepare_spec(str(release["source_commit"]))
+        except Exception:
+            spec = RuntimeLiveSourceSpec(source_commit=str(release["source_commit"]))
         self._runtime.set_live_source(spec)
         self._prepared = True
+
+    async def _recovery_source(
+        self, failed: RuntimeLiveSourceSpec, allow_pending: bool
+    ) -> RuntimeLiveSourceSpec | None:
+        candidate = await asyncio.to_thread(
+            self._journal.recovery_candidate,
+            failed.source_commit,
+            allow_pending=allow_pending,
+        )
+        if candidate is None:
+            return None
+        try:
+            return await self._prepare_spec(candidate["source_commit"])
+        except Exception:
+            return None
+
+    async def _complete_recovery(
+        self,
+        failed: RuntimeLiveSourceSpec,
+        selected: RuntimeLiveSourceSpec,
+        invalidate_pending: bool,
+    ) -> None:
+        failed_release = await asyncio.to_thread(
+            self._journal.release_for_commit, failed.source_commit
+        )
+        selected_release = await asyncio.to_thread(
+            self._journal.release_for_commit, selected.source_commit
+        )
+        await asyncio.to_thread(
+            self._journal.complete_recovery,
+            failed_release_id=failed_release["id"],
+            selected_release_id=selected_release["id"],
+            invalidate_pending=invalidate_pending,
+        )
 
     async def start(self) -> None:
         if self._started:

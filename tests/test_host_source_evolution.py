@@ -204,6 +204,9 @@ class _Runtime:
         self.events: list[Any] = []
         self.fail_next = False
 
+    def configure_source_recovery(self, source: Any, reconciler: Any) -> None:
+        del source, reconciler
+
     def set_live_source(self, spec: RuntimeLiveSourceSpec) -> None:
         self.live_source = spec
         self.status = "ready"
