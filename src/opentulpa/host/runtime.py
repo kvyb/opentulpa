@@ -2916,6 +2916,8 @@ class RuntimeSupervisor:
             raise RuntimeUnavailableError("recorded runtime process could not be inspected") from exc
         argv = tuple(value.decode("utf-8", errors="surrogateescape") for value in raw_argv.split(b"\0") if value)
         if not argv:
+            if RuntimeSupervisor._linux_process_state(proc_root) == "Z":
+                return None
             raise RuntimeUnavailableError("recorded runtime process command is unavailable")
         try:
             executable = RuntimeSupervisor._linux_process_executable(proc_root, argv)
@@ -2981,6 +2983,15 @@ class RuntimeSupervisor:
     @staticmethod
     def _linux_process_birth(proc_root: Path) -> str:
         return RuntimeSupervisor._linux_process_metadata(proc_root)[2]
+
+    @staticmethod
+    def _linux_process_state(proc_root: Path) -> str:
+        raw_stat = (proc_root / "stat").read_text(encoding="ascii")
+        close_paren = raw_stat.rfind(")")
+        fields = raw_stat[close_paren + 2 :].split() if close_paren >= 0 else []
+        if not fields or len(fields[0]) != 1:
+            raise RuntimeUnavailableError("runtime process state is invalid")
+        return fields[0]
 
     @staticmethod
     def _linux_process_metadata(proc_root: Path) -> tuple[int, int, str]:

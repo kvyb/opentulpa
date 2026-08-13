@@ -822,6 +822,41 @@ def test_process_table_error_preserves_safe_pid_and_errno(
         RuntimeSupervisor._linux_process_table(proc_root)
 
 
+def test_process_inspection_treats_only_empty_zombie_command_as_exited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_root = tmp_path / "proc" / "42"
+    proc_root.mkdir(parents=True)
+    (proc_root / "cmdline").write_bytes(b"")
+    monkeypatch.setattr(
+        runtime_module,
+        "Path",
+        lambda value: proc_root.parent if value == "/proc" else Path(value),
+    )
+
+    monkeypatch.setattr(RuntimeSupervisor, "_pid_alive", staticmethod(lambda pid: True))
+    monkeypatch.setattr(
+        RuntimeSupervisor,
+        "_linux_process_metadata",
+        staticmethod(lambda path: (1, 42, "linux:1")),
+    )
+    monkeypatch.setattr(
+        RuntimeSupervisor,
+        "_linux_process_state",
+        staticmethod(lambda path: "Z"),
+    )
+    assert RuntimeSupervisor._inspect_process(42) is None
+
+    monkeypatch.setattr(
+        RuntimeSupervisor,
+        "_linux_process_state",
+        staticmethod(lambda path: "R"),
+    )
+    with pytest.raises(RuntimeUnavailableError, match="process command is unavailable"):
+        RuntimeSupervisor._inspect_process(42)
+
+
 @pytest.mark.asyncio
 async def test_explicit_stop_fails_closed_when_containment_preflight_fails(
     tmp_path: Path,
