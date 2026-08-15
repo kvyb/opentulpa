@@ -95,6 +95,30 @@ def test_trusted_workspace_refuses_to_activate_credential_files(
     assert credential_path in "\n".join(workspace.changes())
 
 
+def test_trusted_workspace_validates_committed_files_and_allows_env_example(
+    tmp_path: Path,
+) -> None:
+    source, _ = _seed(tmp_path)
+    workspace = _TrustedSourceWorkspace(
+        source_repository=source,
+        path=tmp_path / "control" / "source",
+        max_output_bytes=100_000,
+    )
+    workspace.prepare()
+    workspace.write(".env.example", "TOKEN=placeholder\n")
+    _, changed = workspace.commit("Document environment")
+    assert changed is True
+
+    workspace.write("credentials.json", '{"token":"secret"}\n')
+    assert workspace.bash(
+        "git add credentials.json && git commit -m credential",
+        timeout_seconds=10,
+    )["exit_code"] == 0
+
+    with pytest.raises(SourceEvolutionError, match="credential"):
+        workspace.commit("Activate committed source")
+
+
 def test_runtime_environment_records_final_interpreter_path(tmp_path: Path) -> None:
     source, commit = _seed(tmp_path)
     uv = tmp_path / "uv"
@@ -203,6 +227,8 @@ class _Runtime:
         self.replacements: list[tuple[RuntimeLiveSourceSpec, RuntimeLiveSourceSpec | None]] = []
         self.events: list[Any] = []
         self.fail_next = False
+        self.fail_replace_at: int | None = None
+        self.stop_calls = 0
 
     def configure_source_recovery(self, source: Any, reconciler: Any) -> None:
         del source, reconciler
@@ -218,13 +244,17 @@ class _Runtime:
         rollback: RuntimeLiveSourceSpec | None = None,
     ) -> None:
         self.replacements.append((spec, rollback))
-        if self.fail_next:
+        if self.fail_next or len(self.replacements) == self.fail_replace_at:
             self.fail_next = False
             self.live_source = rollback
             self.status = "ready"
             raise RuntimeError("activation failed")
         self.live_source = spec
         self.status = "ready"
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self.status = "stopped"
 
     async def deliver_evolution_event(self, event: Any) -> None:
         self.events.append(event)
@@ -302,6 +332,130 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
     failure = await service.source_status()
     assert failure["active_source_commit"] == bundled
     assert failure["activation"]["status"] == "rolled_back"  # type: ignore[index]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_after_commit", [False, True])
+async def test_source_activation_restores_runtime_when_journal_finalization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_after_commit: bool,
+) -> None:
+    source, bundled = _seed(tmp_path)
+    runtime = _Runtime()
+    journal = _ActivationJournal(tmp_path / "control" / "activations.db")
+    service = HostEvolutionControlService(
+        runtime=runtime,  # type: ignore[arg-type]
+        workspace=_TrustedSourceWorkspace(
+            source_repository=source,
+            path=tmp_path / "control" / "source",
+            max_output_bytes=100_000,
+        ),
+        journal=journal,
+        runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+    )
+
+    async def checks() -> list[Any]:
+        return [{"name": "focused", "passed": True}]
+
+    service._run_checks = checks  # type: ignore[method-assign]
+    await service.prepare()
+    await service.start()
+    previous_spec = runtime.live_source
+    original_complete_success = journal.complete_success
+
+    def fail_finalization(*args: Any, **kwargs: Any) -> Any:
+        if failure_after_commit:
+            original_complete_success(*args, **kwargs)
+        raise OSError("journal unavailable")
+
+    await service.source_edit(
+        path="README.md",
+        old_text="before",
+        new_text="after",
+        audit_context={"tenant_id": "owner"},
+    )
+    monkeypatch.setattr(
+        journal,
+        "complete_success",
+        fail_finalization,
+    )
+
+    queued = await service.source_activate(
+        idempotency_key="activate-finalization-failure",
+        audit_context={"tenant_id": "owner"},
+    )
+    await service._tasks[str(queued["activation_id"])]
+
+    status = await service.source_status()
+    assert runtime.live_source is not None
+    if failure_after_commit:
+        assert status["active_source_commit"] != bundled
+        assert status["activation"]["status"] == "active"  # type: ignore[index]
+        assert runtime.live_source.source_commit == status["active_source_commit"]
+        assert len(runtime.replacements) == 1
+    else:
+        assert status["active_source_commit"] == bundled
+        assert status["activation"]["status"] == "rolled_back"  # type: ignore[index]
+        assert runtime.live_source.source_commit == bundled
+        assert len(runtime.replacements) == 2
+        assert runtime.replacements[1] == (previous_spec, runtime.replacements[0][0])
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_source_activation_leaves_pending_when_rollback_cannot_be_proven(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, bundled = _seed(tmp_path)
+    runtime = _Runtime()
+    journal = _ActivationJournal(tmp_path / "control" / "activations.db")
+    service = HostEvolutionControlService(
+        runtime=runtime,  # type: ignore[arg-type]
+        workspace=_TrustedSourceWorkspace(
+            source_repository=source,
+            path=tmp_path / "control" / "source",
+            max_output_bytes=100_000,
+        ),
+        journal=journal,
+        runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+    )
+
+    async def checks() -> list[Any]:
+        return [{"name": "focused", "passed": True}]
+
+    service._run_checks = checks  # type: ignore[method-assign]
+    await service.prepare()
+    await service.start()
+
+    def fail_finalization(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise OSError("journal unavailable")
+
+    await service.source_edit(
+        path="README.md",
+        old_text="before",
+        new_text="after",
+        audit_context={"tenant_id": "owner"},
+    )
+    runtime.fail_replace_at = 2
+    monkeypatch.setattr(journal, "complete_success", fail_finalization)
+
+    queued = await service.source_activate(
+        idempotency_key="activate-unproven-rollback",
+        audit_context={"tenant_id": "owner"},
+    )
+    with pytest.raises(SourceEvolutionError, match="remains pending"):
+        await service._tasks[str(queued["activation_id"])]
+
+    status = await service.source_status()
+    assert status["active_source_commit"] == bundled
+    assert status["runtime_status"] == "stopped"
+    assert status["activation"]["status"] == "preparing"  # type: ignore[index]
+    assert len(runtime.replacements) == 2
+    assert runtime.stop_calls == 1
     await service.shutdown()
 
 
