@@ -634,7 +634,10 @@ class _TrustedSourceWorkspace:
             for path in _git(self.path, "diff", "--cached", "--name-only", "-z").stdout.split("\0")
             if path
         )
-        forbidden = tuple(path for path in changed if self._forbidden_source_path(path))
+        tracked = tuple(
+            path for path in _git(self.path, "ls-files", "-z").stdout.split("\0") if path
+        )
+        forbidden = tuple(path for path in tracked if self._forbidden_source_path(path))
         if forbidden:
             _git(self.path, "reset", "--", ".")
             raise SourceEvolutionError("trusted source contains a credential file")
@@ -818,7 +821,7 @@ class _TrustedSourceWorkspace:
         name = candidate.name.casefold()
         return (
             name == ".env"
-            or name.startswith(".env.")
+            or (name.startswith(".env.") and name != ".env.example")
             or name in _SECRET_SOURCE_NAMES
             or candidate.suffix.lower() in _SECRET_SOURCE_SUFFIXES
             or normalized in _SECRET_SOURCE_PATHS
@@ -1210,6 +1213,8 @@ class HostEvolutionControlService:
                 if target is None or previous is None:
                     raise SourceEvolutionError("source activation release history is incomplete")
                 checks: list[JsonValue] = []
+                target_spec: RuntimeLiveSourceSpec | None = None
+                previous_spec: RuntimeLiveSourceSpec | None = None
                 try:
                     if operation["kind"] == "activate":
                         await asyncio.to_thread(
@@ -1244,29 +1249,72 @@ class HostEvolutionControlService:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    active_spec = self._runtime.live_source
-                    restored = bool(
-                        active_spec is not None
-                        and active_spec.source_commit == previous["source_commit"]
-                        and self._runtime.status in {"ready", "probation"}
-                    )
-                    result = {
-                        "status": "rolled_back" if restored else "failed",
-                        "activation_id": activation_id,
-                        "kind": str(operation["kind"]),
-                        "active_release_id": str(previous["id"]) if restored else None,
-                        "source_commit": str(previous["source_commit"]) if restored else None,
-                        "target_release_id": str(target["id"]),
-                        "target_source_commit": str(target["source_commit"]),
-                        "checks": checks,
-                        "error": self._safe_error(exc),
-                    }
-                    operation = await asyncio.to_thread(
-                        self._journal.complete_failure,
-                        activation_id,
-                        rolled_back=restored,
-                        result=result,
-                    )
+                    try:
+                        persisted = await asyncio.to_thread(
+                            self._journal.operation, activation_id
+                        )
+                    except Exception:
+                        await self._runtime.stop()
+                        raise
+                    if persisted is not None and persisted["status"] == "active":
+                        operation = persisted
+                    else:
+                        active_spec = self._runtime.live_source
+                        rollback_error: Exception | None = None
+                        if (
+                            target_spec is not None
+                            and previous_spec is not None
+                            and active_spec is not None
+                            and active_spec.source_commit == target_spec.source_commit
+                        ):
+                            try:
+                                await self._runtime.replace_live_source(
+                                    previous_spec, rollback=target_spec
+                                )
+                            except Exception as rollback_exc:
+                                rollback_error = rollback_exc
+                        active_spec = self._runtime.live_source
+                        restored = bool(
+                            active_spec is not None
+                            and active_spec.source_commit == previous["source_commit"]
+                            and self._runtime.status in {"ready", "probation"}
+                        )
+                        if not restored:
+                            try:
+                                await self._runtime.stop()
+                            except Exception as stop_exc:
+                                raise SourceEvolutionError(
+                                    "source activation rollback could not prove runtime containment"
+                                ) from stop_exc
+                            if self._runtime.status != "stopped":
+                                raise SourceEvolutionError(
+                                    "source activation rollback could not prove runtime containment"
+                                ) from (rollback_error or exc)
+                            raise SourceEvolutionError(
+                                "source activation rollback could not restore the previous runtime; "
+                                "activation remains pending"
+                            ) from (rollback_error or exc)
+                        result = {
+                            "status": "rolled_back" if restored else "failed",
+                            "activation_id": activation_id,
+                            "kind": str(operation["kind"]),
+                            "active_release_id": str(previous["id"])
+                            if restored
+                            else None,
+                            "source_commit": str(previous["source_commit"])
+                            if restored
+                            else None,
+                            "target_release_id": str(target["id"]),
+                            "target_source_commit": str(target["source_commit"]),
+                            "checks": checks,
+                            "error": self._safe_error(exc),
+                        }
+                        operation = await asyncio.to_thread(
+                            self._journal.complete_failure,
+                            activation_id,
+                            rolled_back=restored,
+                            result=result,
+                        )
                 await self._notify(operation)
         finally:
             self._tasks.pop(activation_id, None)
