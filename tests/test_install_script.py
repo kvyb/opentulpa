@@ -219,7 +219,8 @@ elif args[:2] == ["pip", "install"]:
             "import json, os, pathlib, sys\\n"
             "if len(sys.argv) == 3 and sys.argv[1] == '--probe':\\n"
             "    pathlib.Path(sys.argv[2]).write_text(json.dumps({{k: os.environ.get(k) for k in "
-            "['OPENTULPA_INSTALL_ROOT', 'OPENTULPA_SOURCE_SEED_ROOT', "
+            "['OPENTULPA_INSTALL_ROOT', 'OPENTULPA_SOURCE_ROOT', "
+            "'OPENTULPA_SOURCE_SEED_ROOT', "
             "'OPENTULPA_TRUSTED_WHEELHOUSE', 'OPENTULPA_INSTALL_ASSETS_ROOT', "
             "'OPENTULPA_UV_BIN', 'OPENTULPA_SOURCE_SEED_OID', "
             "'OPENTULPA_SOURCE_SEED_SHA256', 'OPENTULPA_SOURCE_SEED_TREE_OID']}}), "
@@ -357,6 +358,7 @@ def test_installer_builds_final_path_controller_and_exact_dispatcher(tmp_path: P
     environment = json.loads(probe.read_text(encoding="utf-8"))
     assert environment == {
         "OPENTULPA_INSTALL_ROOT": str(tmp_path / "install root"),
+        "OPENTULPA_SOURCE_ROOT": str(source),
         "OPENTULPA_SOURCE_SEED_ROOT": str(generation / "source-seed"),
         "OPENTULPA_TRUSTED_WHEELHOUSE": str(generation / "wheelhouse"),
         "OPENTULPA_INSTALL_ASSETS_ROOT": str(generation / "assets"),
