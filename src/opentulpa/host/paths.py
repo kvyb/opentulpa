@@ -31,6 +31,7 @@ _PRODUCT_ENTRIES = {
 _CONTROLLER_ENTRIES = frozenset(
     {
         "bootstrap",
+        "install",
         "product",
         "source",
         "bun",
