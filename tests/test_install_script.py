@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -228,6 +229,45 @@ elif args[:2] == ["pip", "install"]:
         script.chmod(0o755)
 """,
     )
+    tui_script = '#!/bin/sh\n[ "$1" = --protocol-version ] && printf \'2\\n\'\n'
+    bun_template = tools / "bun-template"
+    _write_executable(
+        bun_template,
+        f"""#!{sys.executable}
+import pathlib
+import platform
+import subprocess
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("1.3.14")
+elif args == ["run", "build"]:
+    subprocess.run(["bun", "run", "build.ts"], check=True)
+elif args == ["run", "build.ts"]:
+    target = {{
+        ("Darwin", "arm64"): "darwin-arm64",
+        ("Darwin", "x86_64"): "darwin-x64",
+        ("Linux", "aarch64"): "linux-arm64",
+        ("Linux", "arm64"): "linux-arm64",
+        ("Linux", "x86_64"): "linux-x64",
+    }}[(platform.system(), platform.machine())]
+    output = pathlib.Path("dist") / f"opentulpa-tui-{{target}}"
+    output.parent.mkdir()
+    output.write_text({tui_script!r}, encoding="utf-8")
+    output.chmod(0o755)
+""",
+    )
+    install_bun = f'cp {shlex.quote(str(bun_template))} "$BUN_INSTALL/bin/bun"'
+    _write_executable(
+        tools / "curl",
+        f"""#!{sys.executable}
+print('#!/bin/sh')
+print('mkdir -p "$BUN_INSTALL/bin"')
+print({install_bun!r})
+print('chmod 755 "$BUN_INSTALL/bin/bun"')
+""",
+    )
     return tools, calls
 
 
@@ -366,6 +406,19 @@ def test_installer_accepts_uv_long_shebang_wrapper(tmp_path: Path) -> None:
     )
     assert reused.returncode == 0, reused.stderr
     assert _current_generation(tmp_path) == generation
+
+
+def test_installer_builds_tui_with_downloaded_bun(tmp_path: Path) -> None:
+    source = _source(tmp_path / "source")
+    tui = source / "clients" / "tui"
+    tui.mkdir(parents=True)
+    (tui / "package.json").write_text("{}\n", encoding="utf-8")
+    tools, _ = _fake_tools(tmp_path)
+
+    result = _run_install(tmp_path, source, tools)
+
+    assert result.returncode == 0, result.stderr
+    assert list((_current_generation(tmp_path) / "assets" / "tui").iterdir())
 
 
 def test_installer_reuses_identity_and_atomically_tracks_previous(tmp_path: Path) -> None:
