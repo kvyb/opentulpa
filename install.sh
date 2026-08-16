@@ -667,10 +667,25 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
 if runtime_digest.hexdigest() != manifest.get("runtime_tree_sha256"):
     raise SystemExit(1)
 def uses_final_interpreter(entrypoint: pathlib.Path) -> bool:
-    first = entrypoint.read_text(errors="replace").splitlines()[0]
-    interpreter = pathlib.Path(first.removeprefix("#!"))
+    lines = entrypoint.read_text(errors="replace").splitlines()
+    if len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[2] == "' '''":
+        prefix = "'''exec' '"
+        suffix = "' \"$0\" \"$@\""
+        if not lines[1].startswith(prefix) or not lines[1].endswith(suffix):
+            return False
+        raw_interpreter = lines[1][len(prefix):-len(suffix)]
+        if not raw_interpreter or "'" in raw_interpreter:
+            return False
+        interpreter = pathlib.Path(raw_interpreter)
+    elif lines and lines[0].startswith("#!"):
+        interpreter = pathlib.Path(lines[0].removeprefix("#!"))
+    else:
+        return False
+    aliases = {"python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"}
     return (
-        first.startswith("#!")
+        interpreter.is_absolute()
+        and ".." not in interpreter.parts
+        and interpreter.name in aliases
         and interpreter.parent.resolve() == (root / "bin").resolve()
         and interpreter.resolve() == (root / "bin" / "python").resolve()
     )
@@ -789,10 +804,25 @@ root = pathlib.Path(sys.argv[1])
 source = pathlib.Path(sys.argv[2]).resolve()
 commands = sys.argv[3:]
 def uses_final_interpreter(script: pathlib.Path) -> bool:
-    first = script.read_text(errors="replace").splitlines()[0]
-    interpreter = pathlib.Path(first.removeprefix("#!"))
+    lines = script.read_text(errors="replace").splitlines()
+    if len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[2] == "' '''":
+        prefix = "'''exec' '"
+        suffix = "' \"$0\" \"$@\""
+        if not lines[1].startswith(prefix) or not lines[1].endswith(suffix):
+            return False
+        raw_interpreter = lines[1][len(prefix):-len(suffix)]
+        if not raw_interpreter or "'" in raw_interpreter:
+            return False
+        interpreter = pathlib.Path(raw_interpreter)
+    elif lines and lines[0].startswith("#!"):
+        interpreter = pathlib.Path(lines[0].removeprefix("#!"))
+    else:
+        return False
+    aliases = {"python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"}
     return (
-        first.startswith("#!")
+        interpreter.is_absolute()
+        and ".." not in interpreter.parts
+        and interpreter.name in aliases
         and interpreter.parent.resolve() == (root / "bin").resolve()
         and interpreter.resolve() == (root / "bin" / "python").resolve()
     )
@@ -1037,12 +1067,27 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(payload + b"\0")
 if runtime_digest.hexdigest() != digest:
     raise SystemExit(1)
-first = entrypoint.read_text(errors="replace").splitlines()[0]
-interpreter = pathlib.Path(first.removeprefix("#!"))
-if (
-    not first.startswith("#!")
-    or interpreter.parent.resolve() != (root / "bin").resolve()
-    or interpreter.resolve() != (root / "bin" / "python").resolve()
+lines = entrypoint.read_text(errors="replace").splitlines()
+if len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[2] == "' '''":
+    prefix = "'''exec' '"
+    suffix = "' \"$0\" \"$@\""
+    if not lines[1].startswith(prefix) or not lines[1].endswith(suffix):
+        raise SystemExit(1)
+    raw_interpreter = lines[1][len(prefix):-len(suffix)]
+    if not raw_interpreter or "'" in raw_interpreter:
+        raise SystemExit(1)
+    interpreter = pathlib.Path(raw_interpreter)
+elif lines and lines[0].startswith("#!"):
+    interpreter = pathlib.Path(lines[0].removeprefix("#!"))
+else:
+    raise SystemExit(1)
+aliases = {"python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"}
+if not (
+    interpreter.is_absolute()
+    and ".." not in interpreter.parts
+    and interpreter.name in aliases
+    and interpreter.parent.resolve() == (root / "bin").resolve()
+    and interpreter.resolve() == (root / "bin" / "python").resolve()
 ):
     raise SystemExit(1)
 source = manifest.get("source")
