@@ -547,6 +547,8 @@ if [ -z "$TUI_BINARY" ] && [ -n "$TUI_TARGET" ] \
   say "building the native terminal client"
   (
     cd "$TUI_BUILD_ROOT"
+    PATH="$(dirname "$BUN_BIN"):$PATH"
+    export PATH
     "$BUN_BIN" install --frozen-lockfile
     "$BUN_BIN" run build
   )
