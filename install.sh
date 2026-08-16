@@ -666,10 +666,10 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(b"\0")
 if runtime_digest.hexdigest() != manifest.get("runtime_tree_sha256"):
     raise SystemExit(1)
-expected = f"#!{root / 'bin' / 'python'}"
+expected = {f"#!{root / 'bin' / name}" for name in ("python", "python3")}
 for command in commands:
     entrypoint = root / "bin" / command
-    if not entrypoint.is_file() or entrypoint.read_text(errors="replace").splitlines()[0] != expected:
+    if not entrypoint.is_file() or entrypoint.read_text(errors="replace").splitlines()[0] not in expected:
         raise SystemExit(1)
 PY
 }
@@ -781,14 +781,14 @@ import sys
 root = pathlib.Path(sys.argv[1])
 source = pathlib.Path(sys.argv[2]).resolve()
 commands = sys.argv[3:]
-expected = f"#!{root / 'bin' / 'python'}"
+expected = {f"#!{root / 'bin' / name}" for name in ("python", "python3")}
 distribution = importlib.metadata.distribution("opentulpa")
 entrypoints = {item.name: item for item in distribution.entry_points if item.group == "console_scripts"}
 for command in commands:
     script = root / "bin" / command
     if command not in entrypoints or not script.is_file():
         raise SystemExit(f"missing console entrypoint: {command}")
-    if script.read_text(errors="replace").splitlines()[0] != expected:
+    if script.read_text(errors="replace").splitlines()[0] not in expected:
         raise SystemExit(f"entrypoint does not use its final interpreter: {command}")
     if not callable(entrypoints[command].load()):
         raise SystemExit(f"console entrypoint is not callable: {command}")
@@ -1023,8 +1023,8 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(payload + b"\0")
 if runtime_digest.hexdigest() != digest:
     raise SystemExit(1)
-expected = f"#!{root / 'bin' / 'python'}"
-if entrypoint.read_text(errors="replace").splitlines()[0] != expected:
+expected = {f"#!{root / 'bin' / name}" for name in ("python", "python3")}
+if entrypoint.read_text(errors="replace").splitlines()[0] not in expected:
     raise SystemExit(1)
 source = manifest.get("source")
 oid = str(source.get("oid") if isinstance(source, dict) else "")
