@@ -903,10 +903,19 @@ import sys
 print(shlex.quote(sys.argv[1]))
 PY
   )
+  source_root_shell=$(
+    "$PYTHON_BIN" - "$SOURCE_ROOT" <<'PY'
+import shlex
+import sys
+
+print(shlex.quote(sys.argv[1]))
+PY
+  )
   {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' "bootstrap_python=${bootstrap_python_shell}"
     printf '%s\n' "bootstrap_python_sha256=${BOOTSTRAP_PYTHON_SHA256}"
+    printf '%s\n' "source_root=${source_root_shell}"
     cat <<'DISPATCHER'
 set -eu
 
@@ -1158,6 +1167,7 @@ source_seed=$(CDPATH= cd "${generation}/source-seed" && pwd -P) || {
   exit 1
 }
 export OPENTULPA_INSTALL_ROOT="$install_root"
+export OPENTULPA_SOURCE_ROOT="$source_root"
 export OPENTULPA_SOURCE_SEED_ROOT="$source_seed"
 export OPENTULPA_SOURCE_SEED_OID="$source_oid"
 export OPENTULPA_SOURCE_SEED_SHA256="$source_seed_sha256"
