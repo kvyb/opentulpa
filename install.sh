@@ -666,10 +666,17 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(b"\0")
 if runtime_digest.hexdigest() != manifest.get("runtime_tree_sha256"):
     raise SystemExit(1)
-expected = {f"#!{root / 'bin' / name}" for name in ("python", "python3")}
+def uses_final_interpreter(entrypoint: pathlib.Path) -> bool:
+    first = entrypoint.read_text(errors="replace").splitlines()[0]
+    interpreter = pathlib.Path(first.removeprefix("#!"))
+    return (
+        first.startswith("#!")
+        and interpreter.parent.resolve() == (root / "bin").resolve()
+        and interpreter.resolve() == (root / "bin" / "python").resolve()
+    )
 for command in commands:
     entrypoint = root / "bin" / command
-    if not entrypoint.is_file() or entrypoint.read_text(errors="replace").splitlines()[0] not in expected:
+    if not entrypoint.is_file() or not uses_final_interpreter(entrypoint):
         raise SystemExit(1)
 PY
 }
@@ -781,14 +788,21 @@ import sys
 root = pathlib.Path(sys.argv[1])
 source = pathlib.Path(sys.argv[2]).resolve()
 commands = sys.argv[3:]
-expected = {f"#!{root / 'bin' / name}" for name in ("python", "python3")}
+def uses_final_interpreter(script: pathlib.Path) -> bool:
+    first = script.read_text(errors="replace").splitlines()[0]
+    interpreter = pathlib.Path(first.removeprefix("#!"))
+    return (
+        first.startswith("#!")
+        and interpreter.parent.resolve() == (root / "bin").resolve()
+        and interpreter.resolve() == (root / "bin" / "python").resolve()
+    )
 distribution = importlib.metadata.distribution("opentulpa")
 entrypoints = {item.name: item for item in distribution.entry_points if item.group == "console_scripts"}
 for command in commands:
     script = root / "bin" / command
     if command not in entrypoints or not script.is_file():
         raise SystemExit(f"missing console entrypoint: {command}")
-    if script.read_text(errors="replace").splitlines()[0] not in expected:
+    if not uses_final_interpreter(script):
         raise SystemExit(f"entrypoint does not use its final interpreter: {command}")
     if not callable(entrypoints[command].load()):
         raise SystemExit(f"console entrypoint is not callable: {command}")
@@ -1023,8 +1037,13 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(payload + b"\0")
 if runtime_digest.hexdigest() != digest:
     raise SystemExit(1)
-expected = {f"#!{root / 'bin' / name}" for name in ("python", "python3")}
-if entrypoint.read_text(errors="replace").splitlines()[0] not in expected:
+first = entrypoint.read_text(errors="replace").splitlines()[0]
+interpreter = pathlib.Path(first.removeprefix("#!"))
+if (
+    not first.startswith("#!")
+    or interpreter.parent.resolve() != (root / "bin").resolve()
+    or interpreter.resolve() != (root / "bin" / "python").resolve()
+):
     raise SystemExit(1)
 source = manifest.get("source")
 oid = str(source.get("oid") if isinstance(source, dict) else "")
