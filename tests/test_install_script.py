@@ -139,6 +139,7 @@ destination.mkdir(parents=True, exist_ok=True)
 import os
 import pathlib
 import platform
+import shlex
 import sys
 import time
 
@@ -203,8 +204,17 @@ elif args[:2] == ["pip", "install"]:
     (dist / "entry_points.txt").write_text(entries, encoding="utf-8")
     for name in COMMANDS:
         script = generation / "bin" / name
+        interpreter = generation / "bin" / "python"
+        launcher = f"#!{{interpreter}}\\n"
+        if os.environ.get("FAKE_UV_LONG_SHEBANG") == "1":
+            launcher = (
+                "#!/bin/sh\\n'''exec' "
+                + shlex.quote(str(interpreter))
+                + ' "$0" "$@"\\n'
+                + "' '''\\n"
+            )
         script.write_text(
-            f"#!{{generation / 'bin' / 'python'}}\\n"
+            launcher +
             "import json, os, pathlib, sys\\n"
             "if len(sys.argv) == 3 and sys.argv[1] == '--probe':\\n"
             "    pathlib.Path(sys.argv[2]).write_text(json.dumps({{k: os.environ.get(k) for k in "
@@ -321,6 +331,41 @@ def test_installer_builds_final_path_controller_and_exact_dispatcher(tmp_path: P
     assert "--extra evaluation" not in logged
     assert "pip download --disable-pip-version-check --require-hashes --only-binary=:all:" in logged
     assert "uv sync" not in logged
+
+
+def test_installer_accepts_uv_long_shebang_wrapper(tmp_path: Path) -> None:
+    source = _source(tmp_path / "source")
+    tools, _ = _fake_tools(tmp_path)
+
+    result = _run_install(
+        tmp_path,
+        source,
+        tools,
+        extra_env={"FAKE_UV_LONG_SHEBANG": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    generation = _current_generation(tmp_path)
+    assert (generation / "bin" / "opentulpa").read_text().startswith(
+        "#!/bin/sh\n'''exec' "
+    )
+    probe = tmp_path / "long shebang environment.json"
+    dispatched = subprocess.run(
+        [str(tmp_path / "command bin" / "opentulpa"), "--probe", str(probe)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dispatched.returncode == 0, dispatched.stderr
+
+    reused = _run_install(
+        tmp_path,
+        source,
+        tools,
+        extra_env={"FAKE_UV_LONG_SHEBANG": "1"},
+    )
+    assert reused.returncode == 0, reused.stderr
+    assert _current_generation(tmp_path) == generation
 
 
 def test_installer_reuses_identity_and_atomically_tracks_previous(tmp_path: Path) -> None:

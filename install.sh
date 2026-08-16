@@ -666,10 +666,32 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(b"\0")
 if runtime_digest.hexdigest() != manifest.get("runtime_tree_sha256"):
     raise SystemExit(1)
-expected = f"#!{root / 'bin' / 'python'}"
+def uses_final_interpreter(entrypoint: pathlib.Path) -> bool:
+    lines = entrypoint.read_text(errors="replace").splitlines()
+    if len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[2] == "' '''":
+        prefix = "'''exec' '"
+        suffix = "' \"$0\" \"$@\""
+        if not lines[1].startswith(prefix) or not lines[1].endswith(suffix):
+            return False
+        raw_interpreter = lines[1][len(prefix):-len(suffix)]
+        if not raw_interpreter or "'" in raw_interpreter:
+            return False
+        interpreter = pathlib.Path(raw_interpreter)
+    elif lines and lines[0].startswith("#!"):
+        interpreter = pathlib.Path(lines[0].removeprefix("#!"))
+    else:
+        return False
+    aliases = {"python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"}
+    return (
+        interpreter.is_absolute()
+        and ".." not in interpreter.parts
+        and interpreter.name in aliases
+        and interpreter.parent.resolve() == (root / "bin").resolve()
+        and interpreter.resolve() == (root / "bin" / "python").resolve()
+    )
 for command in commands:
     entrypoint = root / "bin" / command
-    if not entrypoint.is_file() or entrypoint.read_text(errors="replace").splitlines()[0] != expected:
+    if not entrypoint.is_file() or not uses_final_interpreter(entrypoint):
         raise SystemExit(1)
 PY
 }
@@ -781,14 +803,36 @@ import sys
 root = pathlib.Path(sys.argv[1])
 source = pathlib.Path(sys.argv[2]).resolve()
 commands = sys.argv[3:]
-expected = f"#!{root / 'bin' / 'python'}"
+def uses_final_interpreter(script: pathlib.Path) -> bool:
+    lines = script.read_text(errors="replace").splitlines()
+    if len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[2] == "' '''":
+        prefix = "'''exec' '"
+        suffix = "' \"$0\" \"$@\""
+        if not lines[1].startswith(prefix) or not lines[1].endswith(suffix):
+            return False
+        raw_interpreter = lines[1][len(prefix):-len(suffix)]
+        if not raw_interpreter or "'" in raw_interpreter:
+            return False
+        interpreter = pathlib.Path(raw_interpreter)
+    elif lines and lines[0].startswith("#!"):
+        interpreter = pathlib.Path(lines[0].removeprefix("#!"))
+    else:
+        return False
+    aliases = {"python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"}
+    return (
+        interpreter.is_absolute()
+        and ".." not in interpreter.parts
+        and interpreter.name in aliases
+        and interpreter.parent.resolve() == (root / "bin").resolve()
+        and interpreter.resolve() == (root / "bin" / "python").resolve()
+    )
 distribution = importlib.metadata.distribution("opentulpa")
 entrypoints = {item.name: item for item in distribution.entry_points if item.group == "console_scripts"}
 for command in commands:
     script = root / "bin" / command
     if command not in entrypoints or not script.is_file():
         raise SystemExit(f"missing console entrypoint: {command}")
-    if script.read_text(errors="replace").splitlines()[0] != expected:
+    if not uses_final_interpreter(script):
         raise SystemExit(f"entrypoint does not use its final interpreter: {command}")
     if not callable(entrypoints[command].load()):
         raise SystemExit(f"console entrypoint is not callable: {command}")
@@ -1023,8 +1067,28 @@ for path in sorted(runtime_paths, key=lambda item: item.relative_to(root).as_pos
     runtime_digest.update(payload + b"\0")
 if runtime_digest.hexdigest() != digest:
     raise SystemExit(1)
-expected = f"#!{root / 'bin' / 'python'}"
-if entrypoint.read_text(errors="replace").splitlines()[0] != expected:
+lines = entrypoint.read_text(errors="replace").splitlines()
+if len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[2] == "' '''":
+    prefix = "'''exec' '"
+    suffix = "' \"$0\" \"$@\""
+    if not lines[1].startswith(prefix) or not lines[1].endswith(suffix):
+        raise SystemExit(1)
+    raw_interpreter = lines[1][len(prefix):-len(suffix)]
+    if not raw_interpreter or "'" in raw_interpreter:
+        raise SystemExit(1)
+    interpreter = pathlib.Path(raw_interpreter)
+elif lines and lines[0].startswith("#!"):
+    interpreter = pathlib.Path(lines[0].removeprefix("#!"))
+else:
+    raise SystemExit(1)
+aliases = {"python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"}
+if not (
+    interpreter.is_absolute()
+    and ".." not in interpreter.parts
+    and interpreter.name in aliases
+    and interpreter.parent.resolve() == (root / "bin").resolve()
+    and interpreter.resolve() == (root / "bin" / "python").resolve()
+):
     raise SystemExit(1)
 source = manifest.get("source")
 oid = str(source.get("oid") if isinstance(source, dict) else "")
