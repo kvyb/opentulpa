@@ -1,0 +1,9 @@
+[Unit]
+Description=Recover the OpenTulpa container
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock -w 9 /run/opentulpa-container.lock /usr/local/sbin/opentulpa-container-watchdog
+TimeoutStartSec=15s

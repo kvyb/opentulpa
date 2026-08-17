@@ -107,6 +107,21 @@ Persist the `opentulpa_data` volume. The included Compose path may enable strong
 isolation for product/repository sandboxes on rootful Linux, but source evolution itself is
 trusted and does not require Docker-in-Docker or a Docker socket.
 
+The Compose service uses `restart: unless-stopped`. For a host that must also recover a
+replacement left in Docker's `Created` state, install the optional host watchdog:
+
+```bash
+sudo install -m 0755 deploy/systemd/opentulpa-container-watchdog /usr/local/sbin/
+sudo install -m 0644 deploy/systemd/opentulpa-container-watchdog.{service,timer} /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/opentulpa-container-restart.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opentulpa-container-watchdog.timer
+```
+
+Run a full Docker recreation from outside the container with
+`sudo systemctl start opentulpa-container-restart.service`. Never run that Compose command from
+inside OpenTulpa; normal code and configuration changes use the managed source/runtime tools.
+
 ## Railway
 
 Railway uses the repository Dockerfile and should attach one persistent volume at:

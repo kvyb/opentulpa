@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the OpenTulpa container every 10 seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=opentulpa-container-watchdog.service
+
+[Install]
+WantedBy=timers.target

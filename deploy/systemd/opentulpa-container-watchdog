@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+container=opentulpa-opentulpa-1
+state=$(/usr/bin/docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)
+
+case "$state" in
+    running|restarting|exited|dead|paused|"")
+        exit 0
+        ;;
+    created)
+        /usr/bin/logger -t opentulpa-watchdog "starting container left in Created state"
+        /usr/bin/docker start "$container" >/dev/null
+        ;;
+    *)
+        exit 0
+        ;;
+esac

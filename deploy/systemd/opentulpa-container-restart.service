@@ -1,0 +1,10 @@
+[Unit]
+Description=Safely recreate the OpenTulpa container from the host
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/opentulpa
+ExecStart=/usr/bin/flock -w 30 /run/opentulpa-container.lock /usr/bin/docker compose up -d --force-recreate opentulpa
+TimeoutStartSec=180s
