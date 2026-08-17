@@ -11,6 +11,8 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from opentulpa.inference.models import ResolvedInferencePlan
+
 
 class EvolutionControlError(RuntimeError):
     """Sanitized failure returned across the stable control boundary."""
@@ -51,6 +53,8 @@ class SourceActivateRequest(SourceContextRequest):
     idempotency_key: str = Field(min_length=1, max_length=200)
     message: str = Field(default="OpenTulpa self-update", min_length=1, max_length=500)
     reason: str = Field(default="Trusted source activation", max_length=4_000)
+    review_instructions: str = Field(min_length=1, max_length=10_000)
+    inference_plan: ResolvedInferencePlan | None = None
 
 
 class SourceRollbackRequest(SourceContextRequest):
@@ -146,6 +150,8 @@ def register_evolution_control_api(
                 idempotency_key=body.idempotency_key,
                 message=body.message,
                 reason=body.reason,
+                review_instructions=body.review_instructions,
+                inference_plan=body.inference_plan,
                 audit_context=body.audit_context,
             )
         )
@@ -294,6 +300,8 @@ class EvolutionClient:
         idempotency_key: str,
         message: str = "OpenTulpa self-update",
         reason: str = "Trusted source activation",
+        review_instructions: str,
+        inference_plan: ResolvedInferencePlan | None = None,
         audit_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         return await self._post(
@@ -302,6 +310,12 @@ class EvolutionClient:
             idempotency_key=idempotency_key,
             message=message,
             reason=reason,
+            review_instructions=review_instructions,
+            inference_plan=(
+                inference_plan.model_dump(mode="json")
+                if inference_plan is not None
+                else None
+            ),
         )
 
     async def source_rollback(

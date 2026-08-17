@@ -3157,7 +3157,14 @@ class DeepAgentService:
                 tags=["deepagents", str(context.run_kind)],
             )
         return {
-            "configurable": {"thread_id": checkpoint_thread_id},
+            "configurable": {
+                "thread_id": checkpoint_thread_id,
+                "inference_plan": (
+                    inference_plan.model_dump(mode="json")
+                    if inference_plan is not None
+                    else None
+                ),
+            },
             "callbacks": callbacks,
             "metadata": {
                 "tenant_id": context.tenant_id,

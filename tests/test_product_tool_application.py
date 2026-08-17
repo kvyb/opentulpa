@@ -417,6 +417,7 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
             {
                 "message": "Improve website interface",
                 "reason": "Owner requested improvement",
+                "review_instructions": "Verify the interface in the running deployment.",
             },
             idempotency_key="activate-1",
         )
@@ -494,6 +495,8 @@ async def test_source_operations_are_owner_only_iterative_and_hide_worktree_path
                 "idempotency_key": "activate-1",
                 "message": "Improve website interface",
                 "reason": "Owner requested improvement",
+                "review_instructions": "Verify the interface in the running deployment.",
+                "inference_plan": None,
                 "audit_context": audit_context,
             },
         ),

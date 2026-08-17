@@ -15,11 +15,13 @@ from opentulpa.host.evolution import (
     _ActivationJournal,
     _TrustedSourceWorkspace,
 )
+from opentulpa.host.reviewer import ReleaseReviewDecision
 from opentulpa.host.runtime import RuntimeLiveSourceSpec
 from opentulpa.host.runtime_environment import (
     LiveSourceRuntimeEnvironment,
     LiveSourceRuntimeEnvironmentStore,
 )
+from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
 
 
 def _seed(tmp_path: Path) -> tuple[Path, str]:
@@ -282,6 +284,69 @@ class _Runtime:
 
     async def deliver_evolution_event(self, event: Any) -> None:
         self.events.append(event)
+
+
+class _RejectingReviewer:
+    async def review(self, **kwargs: Any) -> ReleaseReviewDecision:
+        assert Path(kwargs["candidate_root"]).is_dir()
+        assert Path(kwargs["reviewer_root"]).is_dir()
+        assert kwargs["review_instructions"] == "Verify VALUE in deployment."
+        assert kwargs["inference_plan"].primary.model == "owner-model"
+        return ReleaseReviewDecision(
+            approved=False,
+            summary="The deployed value is wrong.",
+            findings=["Expected VALUE=2 but observed VALUE=1."],
+            repair_handoff="Fix VALUE in src/opentulpa/__init__.py and rerun its test.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_reviewer_rejection_rolls_back_and_notifies_owner_handoff(tmp_path: Path) -> None:
+    source, bundled = _seed(tmp_path)
+    runtime = _Runtime()
+    service = HostEvolutionControlService(
+        runtime=runtime,  # type: ignore[arg-type]
+        workspace=_TrustedSourceWorkspace(
+            source_repository=source,
+            path=tmp_path / "control" / "source",
+            max_output_bytes=100_000,
+        ),
+        journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
+        runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+        reviewer=_RejectingReviewer(),  # type: ignore[arg-type]
+    )
+
+    async def checks() -> list[Any]:
+        return [{"name": "focused", "passed": True}]
+
+    service._run_checks = checks  # type: ignore[method-assign]
+    await service.prepare()
+    await service.start()
+    await service.source_edit(
+        path="src/opentulpa/__init__.py",
+        old_text="VALUE = 1",
+        new_text="VALUE = 2",
+    )
+    inference_plan = ResolvedInferencePlan.resolve(
+        InferenceSelection(provider="api", model="owner-model", reasoning_effort="xhigh"),
+        preference_revision=4,
+    )
+    queued = await service.source_activate(
+        idempotency_key="review-reject",
+        review_instructions="Verify VALUE in deployment.",
+        inference_plan=inference_plan,
+        audit_context={"tenant_id": "owner", "thread_id": "thread-1"},
+    )
+    await service._tasks[str(queued["activation_id"])]
+
+    status = await service.source_status()
+    assert status["active_source_commit"] == bundled
+    assert status["activation"]["status"] == "rolled_back"  # type: ignore[index]
+    assert "Repair handoff:" in status["activation"]["error"]  # type: ignore[index]
+    assert runtime.events[-1].event_type == "promotion.failed"
+    assert "src/opentulpa/__init__.py" in runtime.events[-1].payload["error"]
+    assert status["workspace_head"] != bundled
+    await service.shutdown()
 
 
 @pytest.mark.asyncio

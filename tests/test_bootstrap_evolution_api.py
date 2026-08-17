@@ -83,6 +83,7 @@ async def test_evolution_control_client_is_authenticated_and_source_only() -> No
         await client.source_activate(
             idempotency_key="activate-1",
             message="Improve source",
+            review_instructions="Verify the changed source and running deployment.",
             audit_context=audit,
         )
         await client.source_rollback(

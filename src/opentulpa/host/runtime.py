@@ -452,6 +452,11 @@ class RuntimeSupervisor:
         return self._project_root
 
     @property
+    def current_config(self) -> HostConfig | None:
+        child = self._child
+        return child.config if child is not None else self._desired_config
+
+    @property
     def source_commit(self) -> str | None:
         child = self._child
         if child is not None and child.source_commit is not None:
@@ -802,6 +807,47 @@ class RuntimeSupervisor:
 
     def logs(self, *, after: int = 0) -> list[RuntimeLogEntry]:
         return [entry for entry in self._logs if entry.sequence > after]
+
+    def redact(self, text: str) -> str:
+        safe_text = str(text)
+        for value in sorted(self._redaction_values, key=len, reverse=True):
+            safe_text = safe_text.replace(value, "[redacted]")
+        return _SECRET_LINE.sub(r"\1\2[redacted]", safe_text)
+
+    async def review_request(
+        self,
+        *,
+        method: str,
+        path: str,
+        json_body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Make one bounded authenticated request to the running review candidate."""
+
+        safe_method = str(method or "GET").strip().upper()
+        safe_path = str(path or "").strip()
+        if safe_method not in {"GET", "POST"} or not safe_path.startswith("/") or "://" in safe_path:
+            return {"ok": False, "error": "runtime review request is invalid"}
+        child = self._require_event_delivery_child()
+        try:
+            response = await self._client.request(
+                safe_method,
+                f"{child.endpoint}{safe_path}",
+                headers={
+                    "Authorization": (
+                        "Bearer " + child.config.internal_runtime_token.get_secret_value()
+                    ),
+                    "X-OpenTulpa-Launch-Nonce": child.launch_nonce,
+                },
+                json=json_body,
+                timeout=60,
+            )
+        except httpx.HTTPError as exc:
+            return {"ok": False, "error": self._safe_error(exc)}
+        return {
+            "ok": response.is_success,
+            "status_code": response.status_code,
+            "body": self.redact(response.text)[:20_000],
+        }
 
     async def wait_for_logs(self, *, after: int, timeout: float = 15) -> list[RuntimeLogEntry]:
         current = self.logs(after=after)

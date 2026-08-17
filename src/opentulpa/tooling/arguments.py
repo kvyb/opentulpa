@@ -541,6 +541,14 @@ class SourceBashArguments(ToolArguments):
 class SourceActivateArguments(RequiredIdempotencyArguments):
     message: str = Field(default="OpenTulpa self-update", min_length=1, max_length=500)
     reason: str = Field(default="Trusted source activation", max_length=4_000)
+    review_instructions: str = Field(
+        min_length=1,
+        max_length=10_000,
+        description=(
+            "Explain changed code and callers, expected deployment behavior, risks, and useful "
+            "runtime diagnostics or tests for the independent reviewer."
+        ),
+    )
 
 
 class SourceRollbackArguments(RequiredIdempotencyArguments):

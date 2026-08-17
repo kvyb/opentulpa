@@ -278,6 +278,7 @@ def main() -> None:
                 "idempotency_key": "rootful-e2e-activate",
                 "message": "Rootful trusted source activation",
                 "reason": "Rootful E2E",
+                "review_instructions": "Verify the marker and running deployment health.",
             },
         )
         active = _wait_activation(

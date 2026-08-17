@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
 from opentulpa.specs import AgentSpecRef, OriginRef
 from opentulpa.tooling.adapters import (
     ProductToolApplication,
@@ -86,6 +87,7 @@ async def _invoke_through_tool_node(
     context: AgentRunContext,
     arguments: dict[str, Any],
     call_id: str = "call-1",
+    inference_plan: ResolvedInferencePlan | None = None,
 ) -> dict[str, Any]:
     builder = StateGraph(MessagesState, context_schema=AgentRunContext)
     builder.add_node("tools", ToolNode([tool]))
@@ -107,6 +109,15 @@ async def _invoke_through_tool_node(
                     ],
                 )
             ]
+        },
+        config={
+            "configurable": {
+                "inference_plan": (
+                    inference_plan.model_dump(mode="json")
+                    if inference_plan is not None
+                    else None
+                )
+            }
         },
         context=context,
     )
@@ -200,7 +211,9 @@ def test_factory_covers_exact_registry_and_hides_all_host_context_fields() -> No
         "idempotency_key",
         "message",
         "reason",
+        "review_instructions",
     }
+    assert "review_instructions" in source_activate.tool_call_schema.model_json_schema()["required"]
     source_rollback = next(tool for tool in tools if tool.name == "source_rollback")
     assert set(source_rollback.tool_call_schema.model_json_schema()["properties"]) == {
         "expected_active_release_id",
@@ -270,6 +283,35 @@ async def test_tool_node_injects_trusted_context_and_adapter_calls_direct_port()
     assert invocation.context.actor_id == "actor-1"
     assert invocation.arguments == {"file_id": "file-1"}
     assert invocation.idempotency_key is None
+
+
+@pytest.mark.asyncio
+async def test_source_activation_inherits_owner_inference_plan() -> None:
+    application, recording = _application()
+    tool = build_product_tools(application, names=["source_activate"])[0]
+    plan = ResolvedInferencePlan.resolve(
+        InferenceSelection(
+            provider="codex",
+            model="gpt-5.3-codex",
+            reasoning_effort="xhigh",
+            fallback_to_api=True,
+        ),
+        preference_revision=7,
+    )
+
+    await _invoke_through_tool_node(
+        tool,
+        context=_context(),
+        inference_plan=plan,
+        arguments={
+            "idempotency_key": "activate-plan",
+            "message": "Plan-aware release",
+            "reason": "test",
+            "review_instructions": "Verify the running candidate.",
+        },
+    )
+
+    assert recording.invocations[0].inference_plan == plan
 
 
 @pytest.mark.asyncio
