@@ -51,8 +51,11 @@ from exact Git commits selected by that controller.
 3. The host prepares a dependency environment keyed by `pyproject.toml`, `uv.lock`, Python,
    install profile, and configured optional bundles, then safely compiles the source.
 4. The runtime supervisor selects the exact commit; child startup exercises imports and the tool
-   contract before strict readiness and live probation record it as active.
-5. A failed activation restores the exact prior commit. `source_rollback` activates the
+   contract before strict readiness and live probation.
+5. A stable Deep Agent reviewer inherits the owner's exact model/provider plan, inspects disposable
+   source copies, and checks the running deployment with logs, requests, tests, and diagnostics.
+6. Approval records the candidate active. Rejection restores the prior commit and sends a root-cause
+   Repair handoff to the owner agent. `source_rollback` activates the
    journal's previous healthy release through the same runtime path.
 
 Cutover is stop/start fenced and has a short availability gap; it is not standby or

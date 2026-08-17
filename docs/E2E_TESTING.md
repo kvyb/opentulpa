@@ -47,8 +47,10 @@ The script starts a real stable host against a fake model endpoint, then verifie
 3. The serving process ownership record names the exact activated commit.
 4. The runtime uses UID/GID `65532`, no effective capabilities, `no_new_privs`, and its
    recorded process group.
-5. Explicit rollback restores the initial release and process commit.
-6. A full host restart preserves the rollback decision and trusted worktree history.
+5. The stable reviewer receives the owner's pinned inference plan and validates the running child.
+6. Reviewer rejection restores the initial release and delivers a root-cause Repair handoff.
+7. Explicit rollback restores the initial release and process commit.
+8. A full host restart preserves the rollback decision and trusted worktree history.
 
 ## Manual Failure Injection
 
@@ -58,6 +60,7 @@ For a release intended for deployment, rehearse these boundaries on a copied dat
 - dependency-lock mismatch or failed `uv sync --frozen`;
 - child exit before strict readiness;
 - health failure during live probation;
+- reviewer rejection, timeout, or invalid structured response;
 - host termination while an activation row is `preparing`;
 - repeated activation and rollback requests with the same idempotency key;
 - changed request data with a reused idempotency key;
@@ -72,6 +75,7 @@ For a release intended for deployment, rehearse these boundaries on a copied dat
 | Before journal insert | Worktree commit remains available; active release is unchanged. |
 | Dependency or fixed check | Activation becomes failed; current child keeps serving. |
 | Startup or probation | Runtime restores the exact previous spec; activation records `rolled_back`. |
+| Reviewer rejection or failure | Runtime restores the previous spec and notifies the owner runtime. |
 | Host death during activation | Restart serves journal active, then resumes the `preparing` operation. |
 | Explicit rollback | Previous healthy release becomes active; prior active becomes the new previous. |
 | Idempotent replay | Exact terminal result is returned without another runtime replacement. |

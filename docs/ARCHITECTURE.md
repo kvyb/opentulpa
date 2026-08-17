@@ -70,7 +70,8 @@ application and tool-contract imports, real database opening, identity checks, a
 
 ```text
 commit -> journal preparing -> dependency environment -> safe compile
-       -> stop old -> start exact commit -> strict readiness -> live probation -> active
+       -> stop old -> start exact commit -> strict readiness -> live probation
+       -> stable Deep Agent review -> active or exact rollback + owner repair handoff
 ```
 
 Cutover is sequential and has an availability gap. The current implementation is not a
@@ -78,6 +79,12 @@ standby or zero-downtime A/B system because both child versions share one live c
 one product state root, and one ownership record. On startup or probation failure, the
 runtime supervisor restores the exact previous `RuntimeLiveSourceSpec`. The journal advances
 only after that call succeeds.
+
+The reviewer runs in the stable host with the initiating owner's pinned inference plan. Its prompt
+comes from the previous release, so a candidate cannot weaken its own review. It inspects disposable
+copies of both generations and may probe the running candidate, redacted logs, tests, processes,
+ports, networking, Docker, and services. A rejection is delivered as a trusted evolution event to
+the restored owner runtime; that agent repairs the persistent source worktree and retries activation.
 
 Rollback activates the recorded previous healthy release through the same runtime path.
 Rollback does not rewind product database migrations, messages, purchases, authorization

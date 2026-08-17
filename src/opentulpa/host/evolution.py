@@ -12,6 +12,8 @@ import shutil
 import sqlite3
 import stat
 import sys
+import tarfile
+import tempfile
 import threading
 from collections.abc import Mapping
 from contextlib import closing, suppress
@@ -29,12 +31,14 @@ from opentulpa.evolution.git_security import (
 )
 from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.evolution.process import run_bounded_process
+from opentulpa.host.reviewer import DeepAgentReleaseReviewer, ReleaseReviewDecision
 from opentulpa.host.runtime import RuntimeLiveSourceSpec, RuntimeSupervisor
 from opentulpa.host.runtime_environment import (
     LiveSourceRuntimeEnvironmentStore,
     RuntimeEnvFileManager,
     RuntimeEnvironmentError,
 )
+from opentulpa.inference.models import ResolvedInferencePlan
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 _SECRET_SOURCE_NAMES = frozenset(
@@ -127,6 +131,8 @@ class _ActivationJournal:
                             status IN ('preparing', 'active', 'failed', 'rolled_back')
                         ),
                         reason TEXT NOT NULL,
+                        review_instructions TEXT NOT NULL DEFAULT '',
+                        inference_plan_json TEXT,
                         audit_json TEXT NOT NULL,
                         result_json TEXT,
                         notified INTEGER NOT NULL DEFAULT 0 CHECK (notified IN (0, 1)),
@@ -143,13 +149,28 @@ class _ActivationJournal:
                 row = connection.execute(
                     "SELECT version FROM source_journal_schema WHERE singleton = 1"
                 ).fetchone()
-                if row is not None and int(row["version"]) > 1:
+                if row is not None and int(row["version"]) > 2:
                     raise SourceEvolutionError("source journal uses a newer schema")
+                columns = {
+                    str(column["name"])
+                    for column in connection.execute(
+                        "PRAGMA table_info(source_activations)"
+                    ).fetchall()
+                }
+                if "review_instructions" not in columns:
+                    connection.execute(
+                        "ALTER TABLE source_activations "
+                        "ADD COLUMN review_instructions TEXT NOT NULL DEFAULT ''"
+                    )
+                if "inference_plan_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE source_activations ADD COLUMN inference_plan_json TEXT"
+                    )
                 connection.execute(
                     """
                     INSERT INTO source_journal_schema(singleton, version, updated_at)
-                    VALUES(1, 1, ?)
-                    ON CONFLICT(singleton) DO UPDATE SET version=1, updated_at=excluded.updated_at
+                    VALUES(1, 2, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET version=2, updated_at=excluded.updated_at
                     """,
                     (now,),
                 )
@@ -220,6 +241,8 @@ class _ActivationJournal:
         previous_release_id: str,
         reason: str,
         audit: Mapping[str, JsonValue],
+        review_instructions: str = "",
+        inference_plan: Mapping[str, JsonValue] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         activation_id = "activation_" + hashlib.sha256(
             f"{tenant_id}\0{idempotency_key}".encode()
@@ -253,8 +276,8 @@ class _ActivationJournal:
                     INSERT INTO source_activations(
                         id, tenant_id, idempotency_key, request_hash, kind,
                         target_release_id, previous_release_id, status, reason,
-                        audit_json, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, 'preparing', ?, ?, ?, ?)
+                        review_instructions, inference_plan_json, audit_json, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, 'preparing', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         activation_id,
@@ -265,6 +288,12 @@ class _ActivationJournal:
                         target_release_id,
                         previous_release_id,
                         reason,
+                        review_instructions,
+                        (
+                            json.dumps(dict(inference_plan), sort_keys=True, separators=(",", ":"))
+                            if inference_plan is not None
+                            else None
+                        ),
                         json.dumps(dict(audit), sort_keys=True, separators=(",", ":")),
                         now,
                         now,
@@ -521,6 +550,10 @@ class _ActivationJournal:
     def _operation(row: sqlite3.Row) -> dict[str, Any]:
         operation = dict(row)
         operation["audit"] = json.loads(str(operation.pop("audit_json")))
+        raw_plan = operation.pop("inference_plan_json")
+        operation["inference_plan"] = (
+            json.loads(str(raw_plan)) if raw_plan is not None else None
+        )
         raw_result = operation.pop("result_json")
         operation["result"] = json.loads(str(raw_result)) if raw_result is not None else None
         operation["notified"] = bool(operation["notified"])
@@ -694,6 +727,48 @@ class _TrustedSourceWorkspace:
                 raise SourceEvolutionError("trusted source import changed the commit tree")
             _git(self._source, "update-ref", f"refs/opentulpa/releases/{commit}", commit)
 
+    def changed_paths(self, previous_commit: str, target_commit: str) -> tuple[str, ...]:
+        return tuple(
+            path
+            for path in _git(
+                self.path,
+                "diff",
+                "--name-only",
+                "-z",
+                _commit(previous_commit),
+                _commit(target_commit),
+            ).stdout.split("\0")
+            if path
+        )
+
+    def text_at(self, source_commit: str, path: str, *, limit: int = 20_000) -> str:
+        result = _git(
+            self.path,
+            "show",
+            f"{_commit(source_commit)}:{path}",
+            check=False,
+            max_output_bytes=limit + 1,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout[:limit]
+
+    def export(self, source_commit: str, destination: Path) -> None:
+        destination.mkdir(parents=True, mode=0o700)
+        archive = destination.parent / f".{destination.name}.tar"
+        try:
+            _git(
+                self.path,
+                "archive",
+                "--format=tar",
+                f"--output={archive}",
+                _commit(source_commit),
+            )
+            with tarfile.open(archive, "r:") as source:
+                source.extractall(destination, filter="data")
+        finally:
+            archive.unlink(missing_ok=True)
+
     def read(self, path: str, *, offset: int, limit: int) -> dict[str, JsonValue]:
         target, relative = self._source_path(path, must_exist=True)
         try:
@@ -839,6 +914,7 @@ class HostEvolutionControlService:
         journal: _ActivationJournal,
         runtime_environment_store: LiveSourceRuntimeEnvironmentStore,
         runtime_env_file_manager: RuntimeEnvFileManager | None = None,
+        reviewer: DeepAgentReleaseReviewer | None = None,
         check_timeout_seconds: int = 120,
         max_output_bytes: int = 1_000_000,
     ) -> None:
@@ -847,6 +923,7 @@ class HostEvolutionControlService:
         self._journal = journal
         self._runtime_environment_store = runtime_environment_store
         self._runtime_env_file_manager = runtime_env_file_manager
+        self._reviewer = reviewer
         self._check_timeout_seconds = check_timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._operation_lock = asyncio.Lock()
@@ -1036,6 +1113,10 @@ class HostEvolutionControlService:
         idempotency_key: str,
         message: str = "OpenTulpa self-update",
         reason: str = "Trusted source activation",
+        review_instructions: str = (
+            "Review the changed code and running deployment; approve only if both work as intended."
+        ),
+        inference_plan: ResolvedInferencePlan | None = None,
         audit_context: Mapping[str, str] | None = None,
     ) -> dict[str, JsonValue]:
         self._require_started()
@@ -1044,6 +1125,9 @@ class HostEvolutionControlService:
         tenant_id = audit.tenant_id or "owner"
         safe_reason = " ".join(str(reason or "").split())[:4_000]
         safe_message = " ".join(str(message or "").split())[:500]
+        safe_review = str(review_instructions or "").strip()[:10_000]
+        if not safe_review:
+            raise ValueError("source activation review instructions are required")
         async with self._operation_lock:
             existing = await asyncio.to_thread(
                 self._journal.find,
@@ -1056,6 +1140,8 @@ class HostEvolutionControlService:
                     target_release_id=str(existing["target_release_id"]),
                     reason=safe_reason,
                     message=safe_message,
+                    review_instructions=safe_review,
+                    inference_plan=inference_plan,
                 )
                 if existing["request_hash"] != expected_hash:
                     raise SourceEvolutionError(
@@ -1080,6 +1166,8 @@ class HostEvolutionControlService:
                 target_release_id=target["id"],
                 reason=safe_reason,
                 message=safe_message,
+                review_instructions=safe_review,
+                inference_plan=inference_plan,
             )
             operation, replayed = await asyncio.to_thread(
                 self._journal.begin,
@@ -1091,6 +1179,12 @@ class HostEvolutionControlService:
                 previous_release_id=str(state["active_release_id"]),
                 reason=safe_reason,
                 audit=audit.as_metadata(),
+                review_instructions=safe_review,
+                inference_plan=(
+                    inference_plan.model_dump(mode="json")
+                    if inference_plan is not None
+                    else None
+                ),
             )
             if operation["status"] == "preparing":
                 self._schedule(str(operation["id"]))
@@ -1124,6 +1218,8 @@ class HostEvolutionControlService:
                     target_release_id=str(existing["target_release_id"]),
                     reason=safe_reason,
                     message="",
+                    review_instructions="",
+                    inference_plan=None,
                 )
                 if existing["request_hash"] != expected_hash:
                     raise SourceEvolutionError(
@@ -1143,6 +1239,8 @@ class HostEvolutionControlService:
                 target_release_id=str(target_id),
                 reason=safe_reason,
                 message="",
+                review_instructions="",
+                inference_plan=None,
             )
             operation, replayed = await asyncio.to_thread(
                 self._journal.begin,
@@ -1213,6 +1311,7 @@ class HostEvolutionControlService:
                 if target is None or previous is None:
                     raise SourceEvolutionError("source activation release history is incomplete")
                 checks: list[JsonValue] = []
+                review: dict[str, JsonValue] | None = None
                 target_spec: RuntimeLiveSourceSpec | None = None
                 previous_spec: RuntimeLiveSourceSpec | None = None
                 try:
@@ -1230,6 +1329,15 @@ class HostEvolutionControlService:
                     ):
                         previous_spec = await self._prepare_spec(previous["source_commit"])
                     await self._runtime.replace_live_source(target_spec, rollback=previous_spec)
+                    if operation["kind"] == "activate" and self._reviewer is not None:
+                        decision = await self._review_release(
+                            operation=operation,
+                            target=target,
+                            previous=previous,
+                        )
+                        review = decision.model_dump(mode="json")
+                        if not decision.approved:
+                            raise SourceEvolutionError(decision.diagnostic())
                     result: dict[str, JsonValue] = {
                         "status": "rolled_back"
                         if operation["kind"] == "rollback"
@@ -1240,6 +1348,7 @@ class HostEvolutionControlService:
                         "source_commit": str(target["source_commit"]),
                         "previous_release_id": str(previous["id"]),
                         "checks": checks,
+                        **({"review": review} if review is not None else {}),
                     }
                     operation = await asyncio.to_thread(
                         self._journal.complete_success,
@@ -1307,6 +1416,7 @@ class HostEvolutionControlService:
                             "target_release_id": str(target["id"]),
                             "target_source_commit": str(target["source_commit"]),
                             "checks": checks,
+                            **({"review": review} if review is not None else {}),
                             "error": self._safe_error(exc),
                         }
                         operation = await asyncio.to_thread(
@@ -1318,6 +1428,56 @@ class HostEvolutionControlService:
                 await self._notify(operation)
         finally:
             self._tasks.pop(activation_id, None)
+
+    async def _review_release(
+        self,
+        *,
+        operation: Mapping[str, Any],
+        target: Mapping[str, Any],
+        previous: Mapping[str, Any],
+    ) -> ReleaseReviewDecision:
+        reviewer = self._reviewer
+        if reviewer is None:
+            raise SourceEvolutionError("source release reviewer is unavailable")
+        target_commit = str(target["source_commit"])
+        previous_commit = str(previous["source_commit"])
+        changed_paths, previous_prompt = await asyncio.gather(
+            asyncio.to_thread(self._workspace.changed_paths, previous_commit, target_commit),
+            asyncio.to_thread(
+                self._workspace.text_at,
+                previous_commit,
+                "src/opentulpa/host/reviewer_prompt.md",
+            ),
+        )
+        if not previous_prompt.strip():
+            previous_prompt = Path(__file__).with_name("reviewer_prompt.md").read_text(
+                encoding="utf-8"
+            )
+        raw_plan = operation.get("inference_plan")
+        plan = (
+            ResolvedInferencePlan.model_validate(raw_plan)
+            if isinstance(raw_plan, Mapping)
+            else None
+        )
+        with tempfile.TemporaryDirectory(prefix="opentulpa-release-review-") as raw_root:
+            root = Path(raw_root)
+            candidate_root = root / "candidate"
+            reviewer_root = root / "previous"
+            await asyncio.gather(
+                asyncio.to_thread(self._workspace.export, target_commit, candidate_root),
+                asyncio.to_thread(self._workspace.export, previous_commit, reviewer_root),
+            )
+            return await reviewer.review(
+                release_id=str(target["id"]),
+                source_commit=target_commit,
+                changed_paths=changed_paths,
+                review_instructions=str(operation.get("review_instructions") or ""),
+                inference_plan=plan,
+                tenant_id=str(operation["tenant_id"]),
+                candidate_root=candidate_root,
+                reviewer_root=reviewer_root,
+                system_prompt=previous_prompt,
+            )
 
     async def _prepare_spec(self, source_commit: str) -> RuntimeLiveSourceSpec:
         await asyncio.to_thread(self._workspace.import_into_live_repository, source_commit)
@@ -1425,13 +1585,27 @@ class HostEvolutionControlService:
         return key
 
     @staticmethod
-    def _request_hash(*, kind: str, target_release_id: str, reason: str, message: str) -> str:
+    def _request_hash(
+        *,
+        kind: str,
+        target_release_id: str,
+        reason: str,
+        message: str,
+        review_instructions: str,
+        inference_plan: ResolvedInferencePlan | None,
+    ) -> str:
         payload = json.dumps(
             {
                 "kind": kind,
                 "target_release_id": target_release_id,
                 "reason": reason,
                 "message": message,
+                "review_instructions": review_instructions,
+                "inference_plan": (
+                    inference_plan.model_dump(mode="json")
+                    if inference_plan is not None
+                    else None
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),

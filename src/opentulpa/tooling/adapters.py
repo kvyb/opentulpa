@@ -17,6 +17,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, create_model
 
+from opentulpa.inference.models import ResolvedInferencePlan
 from opentulpa.tooling.arguments import OPERATION_ARGUMENT_SCHEMAS
 from opentulpa.tooling.contract import (
     TOOL_SPEC_BY_NAME,
@@ -48,6 +49,7 @@ class ProductToolInvocation:
     arguments: Mapping[str, Any]
     idempotency_key: str | None
     audit_id: str
+    inference_plan: ResolvedInferencePlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +361,7 @@ async def _execute_product_tool(
     context: AgentRunContext,
     raw_arguments: Mapping[str, Any],
     tool_call_id: str | None = None,
+    inference_plan: ResolvedInferencePlan | None = None,
 ) -> dict[str, Any]:
     """Validate policy, invoke one direct port method, and sanitize its result."""
 
@@ -395,6 +398,7 @@ async def _execute_product_tool(
         arguments=validated,
         idempotency_key=idempotency_key,
         audit_id=audit_id,
+        inference_plan=inference_plan,
     )
     try:
         async with asyncio.timeout(spec.timeout_seconds):
@@ -566,6 +570,7 @@ def _build_tool(application: ProductToolApplication, spec: ToolSpec) -> BaseTool
             context=context,
             raw_arguments=arguments,
             tool_call_id=runtime.tool_call_id,
+            inference_plan=_runtime_inference_plan(runtime),
         )
 
     execute.__name__ = f"execute_{spec.name}"
@@ -577,6 +582,14 @@ def _build_tool(application: ProductToolApplication, spec: ToolSpec) -> BaseTool
         description=_description(spec),
         args_schema=_runtime_schema(spec),
     )
+
+
+def _runtime_inference_plan(
+    runtime: ToolRuntime[AgentRunContext],
+) -> ResolvedInferencePlan | None:
+    configurable = runtime.config.get("configurable", {})
+    raw = configurable.get("inference_plan") if isinstance(configurable, dict) else None
+    return ResolvedInferencePlan.model_validate(raw) if isinstance(raw, dict) else None
 
 
 def build_product_tools(

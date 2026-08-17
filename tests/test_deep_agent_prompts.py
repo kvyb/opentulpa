@@ -84,6 +84,15 @@ def test_owner_prompt_explains_durable_source_activation() -> None:
     assert "exact active release id" in prompt
 
 
+def test_owner_prompt_briefs_owner_before_source_changes() -> None:
+    prompt = " ".join(OWNER_PROMPT.casefold().split())
+    assert "before source changes/releases" in prompt
+    assert "brief the owner on intent and runtime impact" in prompt
+    assert "low-cognitive-load plan" in prompt
+    assert "before starting background work" in prompt
+    assert "report meaningful progress" in prompt
+
+
 def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
     assert "Secret ingress replaces owner credentials" in OWNER_PROMPT
     assert "secret://<id>" in OWNER_PROMPT

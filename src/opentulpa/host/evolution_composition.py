@@ -15,6 +15,7 @@ from opentulpa.host.evolution import (
     _TrustedSourceWorkspace,
     prepare_live_source_repository,
 )
+from opentulpa.host.reviewer import DeepAgentReleaseReviewer
 from opentulpa.host.runtime import RuntimeSupervisor
 from opentulpa.host.runtime_environment import (
     LiveSourceRuntimeEnvironmentStore,
@@ -67,6 +68,14 @@ def build_host_evolution_runtime(
         runtime_env_file_manager=RuntimeEnvFileManager(
             source_root=live_repository,
             runtime=runtime,
+        ),
+        reviewer=DeepAgentReleaseReviewer(
+            runtime,
+            runtime_data_root=resolved_data / ".opentulpa",
+            api_reasoning_effort=settings.llm_reasoning_effort,
+            api_fallback_models=settings.llm_fallback_models,
+            provider_order=settings.llm_provider_order,
+            max_completion_tokens=settings.agent_max_completion_tokens,
         ),
         max_output_bytes=max_output_bytes,
     )

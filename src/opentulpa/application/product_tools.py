@@ -20,6 +20,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, SecretStr
 
+from opentulpa.inference.models import ResolvedInferencePlan
 from opentulpa.integrations.tenant_composio import ComposioProviderError
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.repositories.providers import RepositorySandboxError
@@ -559,6 +560,8 @@ class EvolutionPort(Protocol):
         idempotency_key: str,
         message: str = "OpenTulpa self-update",
         reason: str = "Trusted source activation",
+        review_instructions: str,
+        inference_plan: ResolvedInferencePlan | None = None,
         audit_context: Mapping[str, str] | None = None,
     ) -> Any: ...
 
@@ -2312,6 +2315,8 @@ class ProductToolApplication:
                 idempotency_key=self._required_key(invocation),
                 message=str(invocation.arguments["message"]),
                 reason=str(invocation.arguments["reason"]),
+                review_instructions=str(invocation.arguments["review_instructions"]),
+                inference_plan=invocation.inference_plan,
                 audit_context=self._evolution_audit_context(invocation),
             ),
         )

@@ -22,6 +22,7 @@ PROBE_TIMEOUT_SECONDS = 30
 MAX_SUBPROCESS_OUTPUT_BYTES = 32 * 1024
 PACKAGED_CONFIG = "opentulpa/resources/opentulpa.config.yaml"
 RELEASE_CONTRACT = "opentulpa/resources/release_contract.json"
+REVIEWER_PROMPT = "opentulpa/host/reviewer_prompt.md"
 CONSOLE_SCRIPTS = {
     "opentulpa": "opentulpa.host.cli:main",
     "opentulpa-host": "opentulpa.host.cli:serve",
@@ -218,6 +219,7 @@ def test_wheel_contains_runtime_resources(built_wheel: Path) -> None:
         names = set(archive.namelist())
         assert PACKAGED_CONFIG in names
         assert RELEASE_CONTRACT in names
+        assert REVIEWER_PROMPT in names
         assert (
             archive.read(PACKAGED_CONFIG) == (PROJECT_ROOT / "opentulpa.config.yaml").read_bytes()
         )
