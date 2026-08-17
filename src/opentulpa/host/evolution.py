@@ -32,6 +32,7 @@ from opentulpa.evolution.git_security import (
 )
 from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.evolution.process import run_bounded_process
+from opentulpa.host.controller_update import ControllerUpdateError, SystemdControllerUpdater
 from opentulpa.host.reviewer import DeepAgentReleaseReviewer, ReleaseReviewDecision
 from opentulpa.host.runtime import RuntimeLiveSourceSpec, RuntimeSupervisor
 from opentulpa.host.runtime_environment import (
@@ -920,6 +921,7 @@ class HostEvolutionControlService:
         runtime_environment_store: LiveSourceRuntimeEnvironmentStore,
         runtime_env_file_manager: RuntimeEnvFileManager | None = None,
         reviewer: DeepAgentReleaseReviewer | None = None,
+        controller_updater: SystemdControllerUpdater | None = None,
         check_timeout_seconds: int = 120,
         max_output_bytes: int = 1_000_000,
     ) -> None:
@@ -929,10 +931,12 @@ class HostEvolutionControlService:
         self._runtime_environment_store = runtime_environment_store
         self._runtime_env_file_manager = runtime_env_file_manager
         self._reviewer = reviewer
+        self._controller_updater = controller_updater
         self._check_timeout_seconds = check_timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._operation_lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._controller_update_task: asyncio.Task[None] | None = None
         self._prepared = False
         self._started = False
 
@@ -1002,16 +1006,21 @@ class HostEvolutionControlService:
         self._started = True
         for operation in await asyncio.to_thread(self._journal.pending):
             self._schedule(str(operation["id"]))
+        await self._reconcile_controller_update()
         await self._flush_notifications()
 
     async def shutdown(self) -> None:
         self._started = False
         tasks = tuple(self._tasks.values())
+        if self._controller_update_task is not None:
+            self._controller_update_task.cancel()
+            tasks = (*tasks, self._controller_update_task)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._controller_update_task = None
 
     async def source_status(
         self,
@@ -1155,6 +1164,13 @@ class HostEvolutionControlService:
                 public = self._public_operation(existing)
                 public["replayed"] = True
                 return public
+            if (
+                self._controller_updater is not None
+                and self._controller_updater.in_progress()
+            ):
+                raise SourceEvolutionError(
+                    "the previous controller update must finish before another activation"
+                )
             commit, changed = await asyncio.to_thread(self._workspace.commit, message)
             state = await asyncio.to_thread(self._journal.state)
             active = await asyncio.to_thread(self._journal.release, state["active_release_id"])
@@ -1233,6 +1249,13 @@ class HostEvolutionControlService:
                 public = self._public_operation(existing)
                 public["replayed"] = True
                 return public
+            if (
+                self._controller_updater is not None
+                and self._controller_updater.in_progress()
+            ):
+                raise SourceEvolutionError(
+                    "the controller update must finish before source rollback"
+                )
             state = await asyncio.to_thread(self._journal.state)
             if str(state["active_release_id"]) != str(expected_active_release_id or "").strip():
                 raise SourceEvolutionError("active source changed before rollback")
@@ -1430,6 +1453,7 @@ class HostEvolutionControlService:
                             rolled_back=restored,
                             result=result,
                         )
+                await self._reconcile_controller_update(operation)
                 await self._notify(operation)
         finally:
             self._tasks.pop(activation_id, None)
@@ -1536,6 +1560,50 @@ class HostEvolutionControlService:
     async def _flush_notifications(self) -> None:
         for operation in await asyncio.to_thread(self._journal.pending_notifications):
             await self._notify(operation)
+
+    async def _reconcile_controller_update(
+        self,
+        operation: Mapping[str, Any] | None = None,
+    ) -> None:
+        updater = self._controller_updater
+        if updater is None:
+            return
+        selected = operation or await asyncio.to_thread(self._journal.latest)
+        if selected is not None and selected.get("status") == "active" and selected.get("kind") == "activate":
+            target = await asyncio.to_thread(self._journal.release, selected["target_release_id"])
+            if target is not None:
+                with suppress(ControllerUpdateError):
+                    await asyncio.to_thread(
+                        updater.schedule,
+                        activation_id=str(selected["id"]),
+                        release_id=str(target["id"]),
+                        source_commit=str(target["source_commit"]),
+                        audit=dict(selected.get("audit") or {}),
+                    )
+        if updater.has_pending_notification() and (
+            self._controller_update_task is None or self._controller_update_task.done()
+        ):
+            self._controller_update_task = asyncio.create_task(
+                self._watch_controller_update(),
+                name="controller-update-notification",
+            )
+
+    async def _watch_controller_update(self) -> None:
+        updater = self._controller_updater
+        if updater is None:
+            return
+        while self._started and updater.has_pending_notification():
+            event = updater.pending_event()
+            if event is not None:
+                try:
+                    await self._runtime.deliver_evolution_event(event)
+                except Exception:
+                    await asyncio.sleep(1)
+                    continue
+                await asyncio.to_thread(updater.mark_notified, event)
+                await self._reconcile_controller_update()
+                continue
+            await asyncio.sleep(1)
 
     async def _notify(self, operation: Mapping[str, Any]) -> None:
         result = operation.get("result")

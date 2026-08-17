@@ -286,6 +286,21 @@ class _Runtime:
         self.events.append(event)
 
 
+class _ControllerUpdater:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+
+    def schedule(self, **request: Any) -> str:
+        self.requests.append(request)
+        return "scheduled"
+
+    def has_pending_notification(self) -> bool:
+        return False
+
+    def in_progress(self) -> bool:
+        return False
+
+
 class _RejectingReviewer:
     async def review(self, **kwargs: Any) -> ReleaseReviewDecision:
         assert Path(kwargs["candidate_root"]).is_dir()
@@ -353,6 +368,7 @@ async def test_reviewer_rejection_rolls_back_and_notifies_owner_handoff(tmp_path
 async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -> None:
     source, bundled = _seed(tmp_path)
     runtime = _Runtime()
+    updater = _ControllerUpdater()
     service = HostEvolutionControlService(
         runtime=runtime,  # type: ignore[arg-type]
         workspace=_TrustedSourceWorkspace(
@@ -362,6 +378,7 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
         ),
         journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
         runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+        controller_updater=updater,  # type: ignore[arg-type]
     )
 
     async def checks() -> list[Any]:
@@ -387,6 +404,7 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
     assert active["active_source_commit"] != bundled
     assert runtime.live_source is not None
     assert runtime.live_source.source_commit == active["active_source_commit"]
+    assert updater.requests[-1]["source_commit"] == active["active_source_commit"]
     replayed = await service.source_activate(
         idempotency_key="activate-1",
         message="Improve source",

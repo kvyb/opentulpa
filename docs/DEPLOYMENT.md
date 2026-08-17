@@ -65,6 +65,37 @@ Local automatic controller restart requires `pidfd_open` and `pidfd_send_signal`
 no numeric-PID fallback. If unavailable, stop the remembered host before starting a newly
 installed controller generation.
 
+## VPS With systemd
+
+Run the installed dispatcher as a root-owned service and set `OPENTULPA_SYSTEMD_UNIT` to
+that service's exact name. The dispatcher must remain stable; do not pin `ExecStart` to one
+generation.
+
+```ini
+[Unit]
+Description=OpenTulpa host
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=OPENTULPA_SYSTEMD_UNIT=opentulpa.service
+Environment=OPENTULPA_DATA_ROOT=/var/lib/opentulpa
+Environment=PORT=8000
+ExecStart=/root/.local/share/opentulpa/install/bin/opentulpa-host
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+After a reviewer-approved source activation, the stable host starts a transient root-owned
+systemd unit. It runs the existing verified installer against the exact clean commit,
+restarts `opentulpa.service`, and requires both the new generation's process and
+`/agent/healthz` to become healthy. Failure atomically restores `controller/previous`,
+restarts the old generation, and reports the result to the owner thread. No Docker socket,
+SSH fallback, or unrestricted sudo command is exposed to the mutable child.
+
 ## Docker Compose
 
 ```bash
@@ -109,11 +140,13 @@ be proven, the host remains unavailable rather than claiming an unsafe release i
 
 `source_rollback` selects the journal's previous healthy release. It does not reverse
 database migrations or external side effects. Database changes must remain backward
-compatible with the previous application commit.
+compatible with the previous application commit. It intentionally keeps the newest healthy
+stable controller; only the mutable child source rolls back. A controller that fails its own
+systemd health validation is restored separately by the privileged updater.
 
-Host-controller changes need an outer deployment. `source_activate` can commit them and the
-child may import shared modules from that commit, but only `./install.sh` or a new
-Docker/Railway deployment replaces the stable host process itself.
+On a configured systemd VPS, reviewer approval also updates the stable controller through
+the root-owned handoff above. Docker and Railway still require a new outer deployment to
+replace the stable host process.
 
 ## Backups
 

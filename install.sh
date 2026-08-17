@@ -90,7 +90,15 @@ chmod 700 "$INSTALL_ROOT" "$CONTROLLER_ROOT" "$GENERATIONS_ROOT" "$BIN_ROOT"
 
 command -v git >/dev/null 2>&1 || fail "git is required"
 
-if command -v uv >/dev/null 2>&1; then
+if [ -n "${OPENTULPA_UV_BIN:-}" ]; then
+  case "$OPENTULPA_UV_BIN" in
+    /*) ;;
+    *) fail "OPENTULPA_UV_BIN must be an absolute path" ;;
+  esac
+  [ -f "$OPENTULPA_UV_BIN" ] && [ ! -L "$OPENTULPA_UV_BIN" ] && [ -x "$OPENTULPA_UV_BIN" ] \
+    || fail "OPENTULPA_UV_BIN is not a trusted executable"
+  UV_BIN=$OPENTULPA_UV_BIN
+elif command -v uv >/dev/null 2>&1; then
   UV_BIN=$(command -v uv)
 else
   command -v curl >/dev/null 2>&1 \
@@ -304,6 +312,11 @@ import os
 import sys
 
 os.replace(sys.argv[1], sys.argv[2])
+directory = os.open(os.path.dirname(sys.argv[2]), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
 PY
 }
 
