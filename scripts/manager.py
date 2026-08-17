@@ -1,14 +1,11 @@
 import asyncio
-import json
 import os
 import re
-import secrets
 import signal
 import subprocess
 import sys
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
 
 import httpx
 
@@ -19,21 +16,9 @@ TUNNEL_LOG = LOG_DIR / "cloudflared.log"
 
 # Hardcoded runtime policy.
 STARTUP_WAIT_SECONDS = 180
-WEBHOOK_SYNC_ATTEMPTS = 12
 TUNNEL_URL_POLL_ATTEMPTS = 60
 TUNNEL_RECOVER_ATTEMPTS = 3
 TUNNEL_DNS_WARMUP_SECONDS = 20
-WEBHOOK_VERIFY_INTERVAL_SECONDS = 60
-TELEGRAM_WEBHOOK_ALLOWED_UPDATES = [
-    "message",
-    "edited_message",
-    "callback_query",
-    "my_chat_member",
-    "business_connection",
-    "business_message",
-    "edited_business_message",
-    "deleted_business_messages",
-]
 
 
 def load_dotenv(repo_root: Path) -> None:
@@ -94,11 +79,6 @@ class TulpaManager:
 
     def build_app_env(self) -> dict[str, str]:
         app_env = os.environ.copy()
-        if str(app_env.get("TELEGRAM_BOT_TOKEN", "")).strip() and not str(
-            app_env.get("TELEGRAM_WEBHOOK_SECRET", "")
-        ).strip():
-            app_env["TELEGRAM_WEBHOOK_SECRET"] = secrets.token_urlsafe(24)
-            self.log("generated ephemeral TELEGRAM_WEBHOOK_SECRET for this run.")
         if not str(app_env.get("HOST", "")).strip():
             app_env["HOST"] = self.app_host
             self.log(f"defaulted HOST={self.app_host} for local-only app binding.")
@@ -165,102 +145,7 @@ class TulpaManager:
             await asyncio.sleep(0.5)
         return None
 
-    @staticmethod
-    def _safe_json(response: Any) -> dict[str, Any]:
-        try:
-            return response.json() if getattr(response, "content", b"") else {}
-        except Exception:
-            return {}
-
-    async def sync_webhook(self, *, bot_token: str, secret: str | None, tunnel_url: str) -> bool:
-        webhook_url = f"{tunnel_url}/webhook/telegram"
-        self.log(f"syncing telegram webhook to {webhook_url}...")
-        base = f"https://api.telegram.org/bot{bot_token}"
-
-        async with httpx.AsyncClient() as client:
-            for attempt in range(1, WEBHOOK_SYNC_ATTEMPTS + 1):
-                data: dict[str, str] = {
-                    "url": webhook_url,
-                    "allowed_updates": json.dumps(TELEGRAM_WEBHOOK_ALLOWED_UPDATES),
-                }
-                if secret:
-                    data["secret_token"] = secret
-
-                try:
-                    set_resp = await client.post(f"{base}/setWebhook", data=data, timeout=15.0)
-                    set_payload = self._safe_json(set_resp)
-                except Exception as exc:
-                    self.error(f"setWebhook attempt {attempt}/{WEBHOOK_SYNC_ATTEMPTS} failed: {exc}")
-                    await asyncio.sleep(min(2.0 * attempt, 10.0))
-                    continue
-
-                if not bool(set_payload.get("ok")):
-                    description = str(set_payload.get("description", "")).strip()
-                    self.error(
-                        f"setWebhook attempt {attempt}/{WEBHOOK_SYNC_ATTEMPTS} returned error: "
-                        f"{str(set_payload)[:200]}"
-                    )
-                    if "Failed to resolve host" in description:
-                        await asyncio.sleep(min(4.0 * attempt, 20.0))
-                    else:
-                        await asyncio.sleep(min(2.0 * attempt, 10.0))
-                    continue
-
-                try:
-                    info_resp = await client.get(f"{base}/getWebhookInfo", timeout=15.0)
-                    info_payload = self._safe_json(info_resp)
-                except Exception as exc:
-                    self.error(
-                        f"getWebhookInfo attempt {attempt}/{WEBHOOK_SYNC_ATTEMPTS} failed: {exc}"
-                    )
-                    await asyncio.sleep(min(2.0 * attempt, 10.0))
-                    continue
-
-                result = info_payload.get("result", {}) if isinstance(info_payload, dict) else {}
-                live_url = str(result.get("url", "")).strip()
-                last_error = str(result.get("last_error_message", "")).strip()
-                pending = result.get("pending_update_count")
-
-                if live_url == webhook_url and not last_error:
-                    self.log(f"webhook synced (pending updates: {pending}).")
-                    return True
-
-                self.error(
-                    "webhook verification failed "
-                    f"attempt {attempt}/{WEBHOOK_SYNC_ATTEMPTS}: "
-                    f"url={live_url or '<empty>'}, "
-                    f"last_error={last_error or '<none>'}, pending={pending}"
-                )
-                await asyncio.sleep(min(2.0 * attempt, 10.0))
-
-        return False
-
-    async def verify_webhook(self, *, bot_token: str, tunnel_url: str) -> bool:
-        webhook_url = f"{tunnel_url}/webhook/telegram"
-        base = f"https://api.telegram.org/bot{bot_token}"
-        try:
-            async with httpx.AsyncClient() as client:
-                info_resp = await client.get(f"{base}/getWebhookInfo", timeout=15.0)
-        except Exception as exc:
-            self.error(f"webhook drift check failed: {exc}")
-            return False
-
-        info_payload = self._safe_json(info_resp)
-        result = info_payload.get("result", {}) if isinstance(info_payload, dict) else {}
-        live_url = str(result.get("url", "")).strip()
-        last_error = str(result.get("last_error_message", "")).strip()
-        if live_url == webhook_url and not last_error:
-            return True
-        self.error(
-            "webhook drift detected: "
-            f"url={live_url or '<empty>'}, expected={webhook_url}, "
-            f"last_error={last_error or '<none>'}"
-        )
-        return False
-
-    async def recover_tunnel_and_webhook(self, app_env: dict[str, str]) -> str | None:
-        bot_token = str(app_env.get("TELEGRAM_BOT_TOKEN", "")).strip()
-        secret = str(app_env.get("TELEGRAM_WEBHOOK_SECRET", "")).strip() or None
+    async def recover_tunnel(self) -> str | None:
         tunnel_url: str | None = None
 
         for attempt in range(1, TUNNEL_RECOVER_ATTEMPTS + 1):
@@ -282,14 +167,7 @@ class TulpaManager:
                 self.log(f"waiting {TUNNEL_DNS_WARMUP_SECONDS}s for tunnel DNS propagation...")
                 await asyncio.sleep(TUNNEL_DNS_WARMUP_SECONDS)
 
-            if not bot_token:
-                return tunnel_url
-
-            if await self.sync_webhook(bot_token=bot_token, secret=secret, tunnel_url=tunnel_url):
-                return tunnel_url
-
-            self.error("recovery: webhook sync failed.")
-            await asyncio.sleep(min(3.0 * attempt, 10.0))
+            return tunnel_url
 
         return None
 
@@ -304,40 +182,27 @@ class TulpaManager:
             self.stop()
             return
 
-        tunnel_url = await self.recover_tunnel_and_webhook(app_env)
+        tunnel_url = await self.recover_tunnel()
         if not tunnel_url:
-            self.error("failed to establish healthy tunnel+webhook state.")
+            self.error("failed to establish a healthy tunnel.")
             self.stop()
             return
 
         self.log("--- OpenTulpa is live ---")
         self.log(f"Tunnel URL: {tunnel_url}")
         self.log("Press Ctrl+C to shutdown.")
-        last_webhook_verify = 0.0
-        bot_token = str(app_env.get("TELEGRAM_BOT_TOKEN", "")).strip()
-        secret = str(app_env.get("TELEGRAM_WEBHOOK_SECRET", "")).strip() or None
-
         while not self.stopping:
             if self.app_proc is not None and self.app_proc.poll() is not None:
                 self.error("app process died.")
                 break
             if self.tunnel_proc is not None and self.tunnel_proc.poll() is not None:
                 self.error("tunnel process died; attempting recovery.")
-                recovered_url = await self.recover_tunnel_and_webhook(app_env)
+                recovered_url = await self.recover_tunnel()
                 if not recovered_url:
                     self.error("tunnel recovery failed.")
                     break
                 tunnel_url = recovered_url
                 self.log(f"tunnel recovered: {tunnel_url}")
-            now = asyncio.get_running_loop().time()
-            if bot_token and now - last_webhook_verify >= WEBHOOK_VERIFY_INTERVAL_SECONDS:
-                last_webhook_verify = now
-                if not await self.verify_webhook(bot_token=bot_token, tunnel_url=tunnel_url):
-                    await self.sync_webhook(
-                        bot_token=bot_token,
-                        secret=secret,
-                        tunnel_url=tunnel_url,
-                    )
             await asyncio.sleep(5)
 
         self.stop()

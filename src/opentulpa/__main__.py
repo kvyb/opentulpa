@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -67,7 +66,6 @@ from opentulpa.core.config import (
     get_settings,
 )
 from opentulpa.core.paths import RuntimePaths
-from opentulpa.core.public_urls import resolve_public_base_url
 from opentulpa.core.release_runtime import ReleaseRuntimeIdentity, release_consumers_enabled
 from opentulpa.deep_agent.contracts import AgentRunRequest, AgentRunSnapshot
 from opentulpa.deep_agent.dynamic_tools import TenantDynamicToolRegistry
@@ -107,9 +105,6 @@ from opentulpa.integrations.web_search import get_web_search_provider
 from opentulpa.interfaces.telegram.business import TelegramBusinessService
 from opentulpa.interfaces.telegram.business_relay import TelegramBusinessRelay
 from opentulpa.interfaces.telegram.client import TelegramClient
-from opentulpa.interfaces.telegram.constants import (
-    TELEGRAM_BUSINESS_WEBHOOK_ALLOWED_UPDATES,
-)
 from opentulpa.interfaces.telegram.security import parse_csv_set
 from opentulpa.jobs.registry import JobHandlerRegistry
 from opentulpa.jobs.service import JobService
@@ -727,10 +722,6 @@ def _bootstrap_persistent_storage(
     _alias_directory_into_data_root(project_root, resolved_root, "tulpa_stuff")
 
 
-def _resolve_public_base_url() -> str:
-    return resolve_public_base_url()
-
-
 def _clean_composio_scope_part(value: object) -> str:
     return str(value or "").strip().strip("/").replace(":", "_")
 
@@ -926,60 +917,6 @@ def _build_release_control_service(
         ingress_handler=handle_ingress if control_handlers_enabled else None,
         event_handler=handle_event if control_handlers_enabled else None,
     )
-
-
-def _auto_configure_telegram_webhook(
-    settings: Settings,
-    *,
-    webhook_secret: str | None = None,
-) -> None:
-    if not release_consumers_enabled():
-        return
-    bot_token = str(settings.telegram_bot_token or "").strip()
-    if not bot_token:
-        return
-    public_base_url = _resolve_public_base_url()
-    if not public_base_url:
-        print(
-            "PUBLIC_BASE_URL/RAILWAY_PUBLIC_DOMAIN not set; skipping Telegram webhook auto-config."
-        )
-        return
-    resolved_secret = str(webhook_secret or "").strip() or _ensure_telegram_webhook_secret(settings)
-    webhook_url = f"{public_base_url}/webhook/telegram"
-    payload = {
-        "url": webhook_url,
-        "secret_token": resolved_secret,
-        "allowed_updates": json.dumps(TELEGRAM_BUSINESS_WEBHOOK_ALLOWED_UPDATES),
-    }
-    try:
-        import httpx
-
-        with httpx.Client(timeout=15.0) as client:
-            response = client.post(
-                f"https://api.telegram.org/bot{bot_token}/setWebhook",
-                data=payload,
-            )
-        if response.status_code != 200:
-            print(
-                "Telegram webhook auto-config failed: "
-                f"HTTP {response.status_code} {response.text[:160]}",
-                file=sys.stderr,
-            )
-            return
-        data = response.json() if response.content else {}
-        if bool(data.get("ok")):
-            print(
-                "Telegram webhook configured: "
-                f"{webhook_url} "
-                f"allowed_updates={','.join(TELEGRAM_BUSINESS_WEBHOOK_ALLOWED_UPDATES)}"
-            )
-        else:
-            print(
-                f"Telegram webhook auto-config failed: {data.get('description', 'unknown error')}",
-                file=sys.stderr,
-            )
-    except Exception as exc:
-        print(f"Telegram webhook auto-config failed: {exc}", file=sys.stderr)
 
 
 def build_application(*, project_root: Path, settings: Settings) -> ApplicationComposition:
@@ -1618,15 +1555,6 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             notification_service=notifications,
             inference_service=inference,
             repository_service=repositories,
-            startup_callback=(
-                lambda: asyncio.to_thread(
-                    _auto_configure_telegram_webhook,
-                    settings,
-                    webhook_secret=telegram_webhook_secret,
-                )
-            )
-            if consumers_enabled
-            else None,
         )
         app.state.owner_tenant_id = owner_tenant_id
         app.state.product_application = product_application

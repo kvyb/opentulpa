@@ -170,9 +170,6 @@ def test_main_passes_explicit_application_root_without_package_aliases(
         return composition
 
     monkeypatch.setattr(main_module, "build_application", build_application)
-    monkeypatch.setattr(
-        main_module, "_auto_configure_telegram_webhook", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(main_module.uvicorn, "run", lambda *args, **kwargs: None)
 
     main_module.main()

@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import httpx
 import pytest
 
 from opentulpa import __main__ as main_module
@@ -441,51 +440,6 @@ async def test_deferred_agent_fails_closed_then_delegates() -> None:
     proxy.bind(cast(DeepAgentService, agent))
     sentinel = cast(Any, object())
     assert await proxy.run(sentinel) is sentinel
-
-
-def test_auto_configure_webhook_reuses_composed_secret(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class FakeResponse:
-        status_code = 200
-        text = ""
-        content = b"{}"
-
-        @staticmethod
-        def json() -> dict[str, bool]:
-            return {"ok": True}
-
-    class FakeClient:
-        def __init__(self, **kwargs: Any) -> None:
-            del kwargs
-
-        def __enter__(self) -> FakeClient:
-            return self
-
-        def __exit__(self, *args: Any) -> None:
-            del args
-
-        def post(self, url: str, *, data: dict[str, Any]) -> FakeResponse:
-            calls.append({"url": url, "data": data})
-            return FakeResponse()
-
-    monkeypatch.setattr(main_module, "_resolve_public_base_url", lambda: "https://example.test")
-    monkeypatch.setattr(httpx, "Client", FakeClient)
-    settings = _settings(tmp_path, telegram_bot_token="bot-token")
-
-    main_module._auto_configure_telegram_webhook(
-        settings,
-        webhook_secret="composed-secret",
-    )
-
-    assert len(calls) == 1
-    assert calls[0]["url"] == "https://api.telegram.org/botbot-token/setWebhook"
-    assert calls[0]["data"]["url"] == "https://example.test/webhook/telegram"
-    assert calls[0]["data"]["secret_token"] == "composed-secret"
-    assert calls[0]["data"]["allowed_updates"]
 
 
 def test_runtime_and_migration_paths_share_defaults() -> None:

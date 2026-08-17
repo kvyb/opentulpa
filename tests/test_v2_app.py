@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
@@ -97,7 +100,7 @@ class _SyncDispatcher:
         _ = identifiers
 
     async def dispatch_event(self, **event: Any) -> None:
-        _ = event
+        self.events.append(f"dispatch:{event['source_event_id']}")
 
 
 class _CloseOnly:
@@ -155,6 +158,10 @@ def _app(
         resolve_principal=principal,
         trigger_dispatcher=cast(Any, trigger_dispatcher),
         intake_poll_dispatcher=cast(Any, intake_dispatcher),
+        meta_messenger_tenant_id="tenant-a",
+        meta_messenger_trigger_id="meta-trigger",
+        meta_messenger_verify_token="meta-verify-token",
+        meta_app_secret="meta-app-secret",
         browser_service=cast(Any, _CloseOnly("browser", events)),
         telegram_client=cast(Any, _TelegramClient(events)),
         capability_service=(
@@ -171,6 +178,37 @@ def _app(
         startup_callback=startup_callback,
         startup_callback_timeout_seconds=startup_callback_timeout_seconds,
     )
+
+
+def test_meta_messenger_uses_trigger_dispatcher_bound_method() -> None:
+    events: list[str] = []
+    payload = {
+        "object": "page",
+        "entry": [
+            {
+                "id": "page-1",
+                "messaging": [
+                    {
+                        "sender": {"id": "user-1"},
+                        "recipient": {"id": "page-1"},
+                        "message": {"mid": "message-1", "text": "hello"},
+                    }
+                ],
+            }
+        ],
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(b"meta-app-secret", body, hashlib.sha256).hexdigest()
+
+    with TestClient(_app(events)) as client:
+        response = client.post(
+            "/webhook/meta/messenger",
+            content=body,
+            headers={"x-hub-signature-256": f"sha256={signature}"},
+        )
+
+    assert response.status_code == 200
+    assert "dispatch:message-1" in events
 
 
 def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:

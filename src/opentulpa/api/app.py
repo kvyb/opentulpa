@@ -534,7 +534,9 @@ def create_app(
     register_meta_messenger_routes(
         app,
         get_dispatcher=lambda: (
-            trigger_dispatcher if consumers_enabled else None
+            trigger_dispatcher.dispatch_event
+            if consumers_enabled and trigger_dispatcher is not None
+            else None
         ),
         tenant_id=meta_messenger_tenant_id,
         trigger_id=meta_messenger_trigger_id,

@@ -37,7 +37,7 @@ Usage:
 
 Commands:
   serve                 Start the headless host, Agent API, and configured interfaces
-  local                 Install, then run local Telegram mode: app + Cloudflare tunnel + webhook sync
+  local                 Install, then run local Telegram mode: app + Cloudflare tunnel
   server                Install, then run the headless Agent API directly
   managed               Install the tenant OCI worker, then run the live-source host
   install               Install/setup only
