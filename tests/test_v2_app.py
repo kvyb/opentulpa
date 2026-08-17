@@ -229,6 +229,19 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
         assert landing.headers["cache-control"] == "no-store"
 
 
+def test_health_is_unavailable_when_capability_worker_is_unhealthy() -> None:
+    events: list[str] = []
+    app = _app(events, with_capability_service=True)
+
+    with TestClient(app) as client:
+        app.state.capability_service.started = False
+
+        health = client.get("/healthz")
+
+        assert health.status_code == 503
+        assert health.json()["status"] == "unavailable"
+
+
 def test_private_evolution_event_route_requires_exact_child_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

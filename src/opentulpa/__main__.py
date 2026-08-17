@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import shutil
+import signal
 import sqlite3
 import stat
 import sys
@@ -55,6 +56,7 @@ from opentulpa.capabilities import (
     CapabilityRevisionStore,
     CapabilityWorkerManager,
     SubprocessWorkerHost,
+    WorkerHandle,
 )
 from opentulpa.capability_workers.state import TelegramWorkerState
 from opentulpa.context.customer_profiles import CustomerProfileService
@@ -501,6 +503,23 @@ def _sandbox_execution_configuration(
 def _capability_worker_host(project_root: Path) -> CapabilityWorkerClient | SubprocessWorkerHost:
     """Use stable OCI authority in production and reviewed subprocesses in direct dev."""
 
+    def restart_managed_runtime(handle: WorkerHandle, returncode: int) -> None:
+        logger.error(
+            "Required capability worker exited: capability=%s worker=%s code=%s",
+            handle.capability_name,
+            handle.worker_name,
+            returncode,
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def subprocess_host() -> SubprocessWorkerHost:
+        return SubprocessWorkerHost(
+            cwd=project_root,
+            on_required_worker_exit=(
+                restart_managed_runtime if os.environ.get("OPENTULPA_DYNAMIC_HOST") else None
+            ),
+        )
+
     release_mode = str(os.environ.get("OPENTULPA_RELEASE_MODE") or "").strip().casefold()
     managed = str(os.environ.get("OPENTULPA_MANAGED_RELEASE") or "").strip().casefold() in {
         "1",
@@ -528,10 +547,10 @@ def _capability_worker_host(project_root: Path) -> CapabilityWorkerClient | Subp
         if worker_url or worker_token:
             raise RuntimeError("staging releases cannot receive capability worker authority")
         # Staging disables consumers, so this reviewed host is constructed but never starts.
-        return SubprocessWorkerHost(cwd=project_root)
+        return subprocess_host()
     if worker_url or worker_token:
         raise RuntimeError("stable worker credentials are valid only in a managed release")
-    return SubprocessWorkerHost(cwd=project_root)
+    return subprocess_host()
 
 
 def _resolve_owner_tenant_id(

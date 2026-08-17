@@ -106,6 +106,8 @@ def _register_health_routes(
     app: FastAPI,
     agent_service: AgentRunService,
     identity: ReleaseRuntimeIdentity,
+    capability_service: CapabilityControlService | None,
+    consumers_enabled: bool,
 ) -> None:
     def content(*, status: str) -> dict[str, object]:
         return {
@@ -134,7 +136,17 @@ def _register_health_routes(
 
     @app.get("/healthz", response_model=None)
     async def health() -> JSONResponse:
-        ready = app.state.lifecycle_status == "ready"
+        capabilities_healthy = True
+        if consumers_enabled and capability_service is not None:
+            try:
+                result = capability_service.healthy()
+                capabilities_healthy = bool(
+                    await result if inspect.isawaitable(result) else result
+                )
+            except Exception:
+                logger.exception("Capability health probe failed")
+                capabilities_healthy = False
+        ready = app.state.lifecycle_status == "ready" and capabilities_healthy
         return JSONResponse(
             status_code=200 if ready else 503,
             content=content(status="ok" if ready else "unavailable"),
@@ -401,7 +413,13 @@ def create_app(
     if release_control_service is not None:
         register_release_control_plane(app, release_control_service)
 
-    _register_health_routes(app, agent_service, runtime_identity)
+    _register_health_routes(
+        app,
+        agent_service,
+        runtime_identity,
+        capability_service,
+        consumers_enabled,
+    )
     _register_private_runtime_routes(
         app,
         identity=runtime_identity,

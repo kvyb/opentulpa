@@ -7,7 +7,7 @@ import inspect
 import json
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -101,6 +101,7 @@ class SubprocessWorkerHost:
         *,
         cwd: Path | None = None,
         base_environment: Mapping[str, str] | None = None,
+        on_required_worker_exit: Callable[[WorkerHandle, int], None] | None = None,
     ) -> None:
         self._cwd = cwd.resolve() if cwd is not None else None
         if base_environment is None:
@@ -110,8 +111,10 @@ class SubprocessWorkerHost:
                 if (value := os.environ.get(key)) is not None
             }
         self._base_environment = dict(base_environment)
+        self._on_required_worker_exit = on_required_worker_exit
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._specs: dict[str, WorkerSpec] = {}
+        self._watchers: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
 
     async def start(self, launch: WorkerLaunch) -> WorkerHandle:
@@ -150,7 +153,7 @@ class SubprocessWorkerHost:
                     env=environment,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=None,
                 ),
                 timeout=launch.worker.resources.startup_timeout_seconds,
             )
@@ -190,6 +193,10 @@ class SubprocessWorkerHost:
                     raise WorkerLifecycleError(
                         f"worker {launch.worker.name!r} exited during startup"
                     )
+            if launch.worker.required and self._on_required_worker_exit is not None:
+                watcher = asyncio.create_task(self._watch_required_worker(handle, process))
+                self._watchers.add(watcher)
+                watcher.add_done_callback(self._watchers.discard)
             return handle
         except asyncio.CancelledError:
             await self.stop(handle)
@@ -222,6 +229,17 @@ class SubprocessWorkerHost:
         except TimeoutError:
             process.kill()
             await process.wait()
+
+    async def _watch_required_worker(
+        self,
+        handle: WorkerHandle,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        returncode = await process.wait()
+        async with self._lock:
+            unexpected = self._processes.get(handle.id) is process
+        if unexpected and self._on_required_worker_exit is not None:
+            self._on_required_worker_exit(handle, returncode)
 
     @staticmethod
     async def _wait_ready(

@@ -453,6 +453,7 @@ async def test_subprocess_host_inherits_live_source_pythonpath(
 
 @pytest.mark.asyncio
 async def test_ready_file_worker_must_signal_readiness_and_liveness_tracks_exit() -> None:
+    exited = asyncio.Event()
     worker = WorkerSpec(
         name="ready_interface",
         kind=WorkerKind.INTERFACE,
@@ -475,11 +476,16 @@ async def test_ready_file_worker_must_signal_readiness_and_liveness_tracks_exit(
         workers=(worker,),
         eval_commands=(EvalCommand(argv=("pytest", "-q")),),
     )
-    manager = CapabilityWorkerManager(SubprocessWorkerHost(base_environment={}))
+    manager = CapabilityWorkerManager(
+        SubprocessWorkerHost(
+            base_environment={},
+            on_required_worker_exit=lambda _handle, _returncode: exited.set(),
+        )
+    )
 
     await manager.start(instance_id="ready-main", manifest=manifest)
     assert await manager.healthy("ready-main") is True
-    await asyncio.sleep(0.3)
+    await asyncio.wait_for(exited.wait(), timeout=1)
     assert await manager.healthy("ready-main") is False
     await manager.stop("ready-main")
 
