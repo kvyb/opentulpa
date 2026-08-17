@@ -364,6 +364,28 @@ async def test_runtime_env_file_manager_lists_names_without_values(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_runtime_env_file_manager_rejects_redacted_placeholder(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+
+    class Runtime:
+        status = "ready"
+
+        async def replace_current_environment(self, *, apply: Any, restore: Any) -> None:
+            raise AssertionError("redacted placeholders must not restart the runtime")
+
+    result = await RuntimeEnvFileManager(source_root=source, runtime=Runtime()).set(
+        name="COMPOSIO_API_KEY",
+        value="[redacted].",
+        idempotency_key="env-update-redacted",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "runtime_env_value_redacted"
+    assert not (source / ".env").exists()
+
+
+@pytest.mark.asyncio
 async def test_runtime_env_file_manager_rejects_world_readable_existing_dotenv(
     tmp_path: Path,
 ) -> None:

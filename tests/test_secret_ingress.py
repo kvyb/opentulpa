@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from opentulpa.secrets import (
     AesGcmHostKeyCipher,
     SecretIngressHook,
@@ -330,9 +332,78 @@ def test_ingress_ignores_unnamed_unrecognized_secret_blocks(tmp_path: Path) -> N
         text=text,
     )
 
-    assert result.text == text
+    assert "this-is-not-a-recognized-secret-block" not in result.text
+    assert result.text.startswith("[credential not stored]")
+    assert "the credential was redacted before it could be stored" in result.text
+    assert '<secret name="ENVIRONMENT_NAME">VALUE</secret>' in result.text
     assert result.handles == ()
     assert vault.list_handles(tenant_id="tenant-a") == []
+
+
+@pytest.mark.parametrize("placeholder", ["[redacted]", "[redacted].", "<redacted>", "***"])
+def test_ingress_does_not_store_guard_redaction_as_a_secret(
+    tmp_path: Path,
+    placeholder: str,
+) -> None:
+    ingress, vault = _ingress(tmp_path)
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f"COMPOSIO_API_KEY={placeholder}",
+    )
+
+    assert result.handles == ()
+    assert "the credential was redacted before it could be stored" in result.text
+    assert '<secret name="ENVIRONMENT_NAME">VALUE</secret>' in result.text
+    assert vault.get_handle(tenant_id="tenant-a", secret_id="composio_api_key") is None
+
+
+def test_ingress_accepts_short_values_in_explicit_secret_tags(tmp_path: Path) -> None:
+    ingress, _ = _ingress(tmp_path)
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text='<secret name="DEVICE_PIN">1234</secret>',
+    )
+
+    assert result.text == "secret://device_pin"
+    assert result.handles[0].id == "device_pin"
+
+
+def test_ingress_fails_closed_on_unclosed_secret_tag(tmp_path: Path) -> None:
+    ingress, vault = _ingress(tmp_path)
+    plaintext = "private-value-that-must-not-reach-the-model"
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=f'Before\n<secret name="DEPLOY_TOKEN">{plaintext}',
+    )
+
+    assert plaintext not in result.text
+    assert "[credential not stored]" in result.text
+    assert "the credential was redacted before it could be stored" in result.text
+    assert result.handles == ()
+    assert vault.list_handles(tenant_id="tenant-a") == []
+
+
+def test_ingress_reports_redacted_secret_alongside_stored_secret(tmp_path: Path) -> None:
+    ingress, _ = _ingress(tmp_path)
+
+    result = ingress.ingest(
+        tenant_id="tenant-a",
+        actor_id="owner-a",
+        text=(
+            '<secret name="FIRST_TOKEN">stored-value</secret> '
+            "SECOND_TOKEN=[redacted]."
+        ),
+    )
+
+    assert result.text.startswith("secret://first_token SECOND_TOKEN=[redacted].")
+    assert "the credential was redacted before it could be stored" in result.text
+    assert [handle.id for handle in result.handles] == ["first_token"]
 
 
 def test_ingress_ignores_named_placeholders(tmp_path: Path) -> None:

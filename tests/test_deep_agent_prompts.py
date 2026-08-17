@@ -72,7 +72,7 @@ def test_owner_prompt_preserves_trusted_routing_boundaries() -> None:
     assert "never install a composio cli" in prompt
     assert "missing sandbox credentials" in prompt
     assert "do not place whole source files" in prompt
-    assert "`github_token=<value>` only when" in prompt
+    assert "ask for github_token only in the secret tag format" in prompt
     assert "pairs once with `/start <code>`" in prompt
 
 
@@ -94,7 +94,9 @@ def test_owner_prompt_briefs_owner_before_source_changes() -> None:
 
 
 def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
-    assert "Secret ingress replaces owner credentials" in OWNER_PROMPT
+    assert '<secret name="ENVIRONMENT_NAME">VALUE</secret>' in OWNER_PROMPT
+    assert "multiline values use" in OWNER_PROMPT
+    assert "Secret ingress replaces them" in OWNER_PROMPT
     assert "secret://<id>" in OWNER_PROMPT
     assert "source_runtime_env_get" in OWNER_PROMPT
     assert "source_set_runtime_env" in OWNER_PROMPT
@@ -104,6 +106,9 @@ def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
     assert "fresh idempotency key" in OWNER_PROMPT
     assert "Never use SSH" in OWNER_PROMPT
     assert "service/container lifecycle commands" in OWNER_PROMPT
+    assert "arrives as `[redacted]` without a" in OWNER_PROMPT
+    assert "say it was not stored" in OWNER_PROMPT
+    assert "GITHUB_TOKEN=<value>" not in OWNER_PROMPT
 
 
 def test_owner_prompt_keeps_persona_owner_controlled() -> None:

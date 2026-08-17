@@ -578,6 +578,16 @@ class SourceSetRuntimeEnvArguments(RequiredIdempotencyArguments):
     def require_one_value_source(self) -> SourceSetRuntimeEnvArguments:
         if (self.value is None) == (self.secret_id is None):
             raise ValueError("exactly one of value or secret_id is required")
+        if self.value is not None and (
+            "[redacted]" in self.value.casefold()
+            or "<redacted>" in self.value.casefold()
+            or self.value.strip() == "***"
+        ):
+            raise ValueError("redacted values are not credentials; resend using the secret tag format")
+        if self.value is not None and self.name.endswith(
+            ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE_KEY")
+        ):
+            raise ValueError("credential environment variables require secret_id")
         return self
 
 

@@ -65,6 +65,7 @@ _SECRET_NAME_ATTR_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SECRET_BARE_NAME_RE = re.compile(r"^\s*(?P<name>[A-Za-z][A-Za-z0-9_-]{0,63})\s*$")
+_SECRET_OPEN_RE = re.compile(r"<secret\b", flags=re.IGNORECASE)
 _OPENSSH_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN OPENSSH "
     r"PRIVATE KEY-----.*-----END OPENSSH "
@@ -97,11 +98,20 @@ _PLACEHOLDER_VALUES = frozenset(
         "null",
         "replace-me",
         "replace_me",
+        "redacted",
         "secret",
         "token",
         "your-key",
         "your_key",
+        "[redacted]",
+        "<redacted>",
+        "***",
     }
+)
+_SECRET_FORMAT_NOTICE = (
+    "[Trusted secret ingress notice: the credential was redacted before it could be stored. "
+    "Tell the owner to resend it exactly as "
+    "<secret name=\"ENVIRONMENT_NAME\">VALUE</secret>, without a code fence.]"
 )
 
 
@@ -161,8 +171,15 @@ class SecretIngressService:
         """Store all recognized values before returning sanitized message text."""
 
         matches = self._matches(text)
+        invalid_spans = self._invalid_secret_spans(text, matches)
+        needs_notice = bool(invalid_spans) or self._contains_redacted_assignment(text)
         if not matches:
-            return SecretIngressResult(text=text, handles=())
+            sanitized = text
+            for start, end in reversed(invalid_spans):
+                sanitized = f"{sanitized[:start]}[credential not stored]{sanitized[end:]}"
+            if needs_notice:
+                sanitized = f"{sanitized.rstrip()}\n\n{_SECRET_FORMAT_NOTICE}"
+            return SecretIngressResult(text=sanitized, handles=())
 
         replacements: list[tuple[int, int, str]] = []
         handles: list[SecretHandle] = []
@@ -183,10 +200,15 @@ class SecretIngressService:
                 )
                 handles.append(handle)
                 replacements.append((match.start, match.end, f"secret://{handle.id}"))
+        replacements.extend(
+            (start, end, "[credential not stored]") for start, end in invalid_spans
+        )
 
         sanitized = text
         for start, end, reference in reversed(replacements):
             sanitized = f"{sanitized[:start]}{reference}{sanitized[end:]}"
+        if needs_notice:
+            sanitized = f"{sanitized.rstrip()}\n\n{_SECRET_FORMAT_NOTICE}"
         return SecretIngressResult(text=sanitized, handles=tuple(handles))
 
     def _store_value(
@@ -223,6 +245,7 @@ class SecretIngressService:
         )
 
     def _matches(self, text: str) -> list[_Match]:
+        secret_blocks = self._secret_block_spans(text)
         named_matches = self._named_matches(text)
         pattern_matches = [
             _Match(
@@ -233,6 +256,10 @@ class SecretIngressService:
             )
             for pattern in self._patterns
             for match in pattern.expression.finditer(text)
+            if not any(
+                match.start("value") >= block_start and match.end("value") <= block_end
+                for block_start, block_end in secret_blocks
+            )
         ]
         # Explicitly named credentials win over generic token-shape detection.
         matches = named_matches + pattern_matches
@@ -256,6 +283,7 @@ class SecretIngressService:
     def _named_matches(text: str) -> list[_Match]:
         matches: list[_Match] = []
         occupied: list[tuple[int, int]] = []
+        secret_blocks = SecretIngressService._secret_block_spans(text)
         for expression in (_SECRET_TAG_BLOCK_RE, _SECRET_LINE_BLOCK_RE):
             for match in expression.finditer(text):
                 start, end = match.span()
@@ -270,7 +298,7 @@ class SecretIngressService:
                     continue
                 if not SecretIngressService._is_secret_value(
                     plaintext,
-                    min_bytes=1 if normalized_name == "ssh_password" else 8,
+                    min_bytes=1,
                 ):
                     continue
                 occupied.append((start, end))
@@ -285,7 +313,10 @@ class SecretIngressService:
                 )
         for match in _NAMED_SECRET_ASSIGNMENT_RE.finditer(text):
             start, end = match.span("value")
-            if any(start < used_end and end > used_start for used_start, used_end in occupied):
+            if any(
+                start < used_end and end > used_start
+                for used_start, used_end in (*occupied, *secret_blocks)
+            ):
                 continue
             plaintext = match.group("value")
             normalized_name = SecretIngressService._normalize_name(match.group("name"))
@@ -362,9 +393,49 @@ class SecretIngressService:
         clean = str(value or "").strip()
         return (
             min_bytes <= len(clean.encode("utf-8")) <= 1_048_576
+            and not SecretIngressService._is_redaction_placeholder(clean)
             and clean.casefold() not in _PLACEHOLDER_VALUES
             and not clean.startswith("secret://")
         )
+
+    @staticmethod
+    def _is_redaction_placeholder(value: str) -> bool:
+        clean = str(value or "").strip().casefold()
+        return bool(
+            re.fullmatch(
+                r"(?:redacted|[\[<(]\s*redacted\s*[\])>]|\*{3,})[.,;:!?]*",
+                clean,
+            )
+        )
+
+    @staticmethod
+    def _contains_redacted_assignment(text: str) -> bool:
+        return any(
+            SecretIngressService._is_redaction_placeholder(match.group("value"))
+            for match in _NAMED_SECRET_ASSIGNMENT_RE.finditer(str(text or ""))
+        )
+
+    @staticmethod
+    def _secret_block_spans(text: str) -> list[tuple[int, int]]:
+        complete = sorted(
+            {
+                match.span()
+                for expression in (_SECRET_TAG_BLOCK_RE, _SECRET_LINE_BLOCK_RE)
+                for match in expression.finditer(text)
+            }
+        )
+        spans = list(complete)
+        for opened in _SECRET_OPEN_RE.finditer(text):
+            if not any(start <= opened.start() < end for start, end in complete):
+                spans.append((opened.start(), len(text)))
+        return sorted(set(spans))
+
+    @staticmethod
+    def _invalid_secret_spans(text: str, matches: Sequence[_Match]) -> list[tuple[int, int]]:
+        accepted = {(match.start, match.end) for match in matches}
+        return [
+            span for span in SecretIngressService._secret_block_spans(text) if span not in accepted
+        ]
 
 
 __all__ = [

@@ -253,6 +253,22 @@ def test_runtime_env_arguments_require_exactly_one_value_source() -> None:
                 "idempotency_key": "runtime-env-missing-1",
             }
         )
+    with pytest.raises(ValueError, match="require secret_id"):
+        schema.model_validate(
+            {
+                "name": "COMPOSIO_API_KEY",
+                "value": "plaintext-secret",
+                "idempotency_key": "runtime-env-plaintext-1",
+            }
+        )
+    with pytest.raises(ValueError, match="redacted values"):
+        schema.model_validate(
+            {
+                "name": "PUBLIC_LABEL",
+                "value": "[redacted]",
+                "idempotency_key": "runtime-env-redacted-1",
+            }
+        )
     with pytest.raises(ValueError, match="exactly one"):
         schema.model_validate(
             {

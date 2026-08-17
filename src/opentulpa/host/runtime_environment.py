@@ -866,6 +866,16 @@ class RuntimeEnvFileManager:
                 "Runtime .env variable value is invalid.",
                 stage="env_write",
             )
+        if re.fullmatch(
+            r"(?:redacted|[\[<(]\s*redacted\s*[\])>]|\*{3,})[.,;:!?]*",
+            text.strip(),
+            flags=re.IGNORECASE,
+        ):
+            raise RuntimeEnvironmentError(
+                "runtime_env_value_redacted",
+                "A redacted placeholder cannot be stored as a runtime value.",
+                stage="env_write",
+            )
         return text
 
     @staticmethod
