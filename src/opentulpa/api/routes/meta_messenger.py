@@ -124,25 +124,31 @@ def register_meta_messenger_routes(
     configured_tenant_id = str(tenant_id or "").strip()
     configured_trigger_id = str(trigger_id or "").strip()
 
-    def require_configuration() -> tuple[str, str, str, str]:
+    def require_verify_token() -> str:
         configured_verify_token = str(verify_token or "").strip()
+        if not configured_verify_token:
+            raise HTTPException(
+                status_code=503,
+                detail="Meta Messenger webhook verification is not configured",
+            )
+        return configured_verify_token
+
+    def require_event_configuration() -> tuple[str, str, str]:
         configured_app_secret = str(app_secret or "").strip()
         if not all(
             (
                 configured_tenant_id,
                 configured_trigger_id,
-                configured_verify_token,
                 configured_app_secret,
             )
         ):
             raise HTTPException(
                 status_code=503,
-                detail="Meta Messenger webhook is not configured",
+                detail="Meta Messenger event delivery is not configured",
             )
         return (
             configured_tenant_id,
             configured_trigger_id,
-            configured_verify_token,
             configured_app_secret,
         )
 
@@ -174,7 +180,7 @@ def register_meta_messenger_routes(
         hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
         hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
     ) -> Response:
-        _, _, configured_verify_token, _ = require_configuration()
+        configured_verify_token = require_verify_token()
         if (
             hub_mode != "subscribe"
             or hub_verify_token is None
@@ -190,9 +196,8 @@ def register_meta_messenger_routes(
         (
             resolved_tenant_id,
             resolved_trigger_id,
-            _,
             configured_app_secret,
-        ) = require_configuration()
+        ) = require_event_configuration()
         body_bytes = await request.body()
         if len(body_bytes) > _MAX_BODY_BYTES:
             raise HTTPException(status_code=413, detail="Meta webhook body is too large")

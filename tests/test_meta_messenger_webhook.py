@@ -180,7 +180,31 @@ def test_meta_webhook_ignores_non_message_events() -> None:
     assert dispatcher.events == []
 
 
-def test_meta_webhook_returns_unavailable_when_not_configured() -> None:
+def test_meta_webhook_verification_does_not_require_app_secret() -> None:
+    app = FastAPI()
+    register_meta_messenger_routes(
+        app,
+        get_dispatcher=lambda: None,
+        tenant_id="tenant-1",
+        trigger_id="meta-messenger-message",
+        verify_token=VERIFY_TOKEN,
+        app_secret=None,
+    )
+
+    response = TestClient(app).get(
+        "/webhook/meta/messenger",
+        params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": VERIFY_TOKEN,
+            "hub.challenge": "123456789",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.text == "123456789"
+
+
+def test_meta_webhook_returns_unavailable_without_verify_token() -> None:
     app = FastAPI()
     register_meta_messenger_routes(
         app,
