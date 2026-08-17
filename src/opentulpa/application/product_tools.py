@@ -20,6 +20,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, SecretStr
 
+from opentulpa.core.command_safety import contains_host_lifecycle_command
 from opentulpa.integrations.tenant_composio import ComposioProviderError
 from opentulpa.integrations.web_search import WebSearchProviderError
 from opentulpa.repositories.providers import RepositorySandboxError
@@ -854,6 +855,42 @@ def _sandbox_ssh_command(
     raise ProductToolApplicationError(
         "invalid_request",
         "The SSH secret type is invalid.",
+    )
+
+
+def _validate_ssh_diagnostic_command(command: str) -> str:
+    remote_command = str(command or "").strip()
+    if contains_host_lifecycle_command(remote_command):
+        raise ProductToolApplicationError(
+            "invalid_request",
+            "SSH diagnostics cannot change service or container lifecycle state. "
+            "Use the deployment control plane; for OpenTulpa configuration use "
+            "source_set_runtime_env.",
+        )
+    return remote_command
+
+
+def _runtime_env_update_error(
+    result: Mapping[str, Any],
+    *,
+    replayed: bool,
+) -> ProductToolApplicationError:
+    if result.get("runtime_restored") is False:
+        return ProductToolApplicationError(
+            "runtime_recovery_required",
+            "The runtime environment update failed and runtime recovery is required. "
+            "Stop and report this state; do not use SSH as a fallback.",
+        )
+    message = (
+        "The previous runtime environment update failed and was not applied. "
+        "Retry with a fresh idempotency key."
+        if replayed
+        else "The runtime environment update failed and was not applied."
+    )
+    return ProductToolApplicationError(
+        "runtime_env_update_failed",
+        message,
+        retryable=result.get("rollback_restored") is True,
     )
 
 
@@ -1884,6 +1921,7 @@ class ProductToolApplication:
         self,
         invocation: ProductToolInvocation,
     ) -> ProductToolOutput:
+        remote_command = _validate_ssh_diagnostic_command(invocation.arguments["command"])
         sandbox = self._require_sandbox_execution(invocation)
         secret_service = self._require_secret_handles(invocation)
         secret_type = str(invocation.arguments.get("secret_type") or "private_key").strip()
@@ -1944,7 +1982,7 @@ class ProductToolApplication:
         command = _sandbox_ssh_command(
             target=target,
             port=int(invocation.arguments["port"]),
-            remote_command=str(invocation.arguments["command"]),
+            remote_command=remote_command,
             secret_type=secret_type,
         )
         if secret_type == "private_key":
@@ -2364,21 +2402,12 @@ class ProductToolApplication:
                 )
             )
             if isinstance(result, Mapping) and result.get("status") == "failed":
-                raise ProductToolApplicationError(
-                    "runtime_env_update_failed",
-                    "The runtime environment update failed and was not applied.",
-                    retryable=result.get("rollback_restored") is True,
-                )
+                raise _runtime_env_update_error(result, replayed=False)
             return result
 
         output = await self._idempotent_output(invocation, update)
         if isinstance(output.data, Mapping) and output.data.get("status") == "failed":
-            raise ProductToolApplicationError(
-                "runtime_env_update_failed",
-                "The previous runtime environment update failed and was not applied. "
-                "Retry with a fresh idempotency key.",
-                retryable=output.data.get("rollback_restored") is True,
-            )
+            raise _runtime_env_update_error(output.data, replayed=True)
         return output
 
     async def trace_list(self, invocation: ProductToolInvocation) -> ProductToolOutput:

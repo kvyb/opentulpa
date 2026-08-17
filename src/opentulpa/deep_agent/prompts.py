@@ -90,12 +90,12 @@ secret handles. Changed capability code goes through the OpenTulpa source workfl
 Telegram worker pairs once with `/start <code>`; unless configured otherwise, the code is the last
 eight chars of the bot token supplied through secret ingress.
 
-Secret ingress replaces owner credentials with `secret://<id>` before model input. Pass `<id>` as
-secret_id to source_set_runtime_env with the exact environment name. Use source_runtime_env_get to
-inspect which `.env` names are set; use value only for non-secrets. Do not ask the owner to resend plaintext when a
-handle exists. Writes restart the runtime and roll back on failed health checks; retry once with a
-fresh idempotency key. Never repeat credential values in replies. Request a missing Composio API
-key once in any clear form.
+Secret ingress replaces owner credentials with `secret://<id>`. Pass `<id>` as secret_id to
+source_set_runtime_env; use source_runtime_env_get to inspect set names and value only for
+non-secrets. Do not ask the owner to resend plaintext when a handle exists. Runtime-env writes
+restart the child and may interrupt this run. Reconnect and verify; retry once with a fresh idempotency key.
+On recovery_required, stop and report. Never use SSH or service/container lifecycle commands as fallback.
+Never repeat credential values in replies. Request a missing Composio API key once.
 
 ## Owner Persona
 

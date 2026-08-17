@@ -21,6 +21,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
+from opentulpa.core.command_safety import contains_host_lifecycle_command
 from opentulpa.evolution.context import EvolutionAuditContext
 from opentulpa.evolution.git_security import (
     discover_git_directories,
@@ -754,6 +755,10 @@ class _TrustedSourceWorkspace:
         safe_command = str(command or "").strip()
         if not safe_command or "\x00" in safe_command or len(safe_command) > 100_000:
             raise ValueError("source bash command is invalid")
+        if contains_host_lifecycle_command(safe_command):
+            raise SourceEvolutionError(
+                "source bash cannot change host service, container, or process lifecycle state"
+            )
         timeout = int(timeout_seconds)
         if timeout < 1 or timeout > 600:
             raise ValueError("source bash timeout must be between 1 and 600 seconds")

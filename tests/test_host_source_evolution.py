@@ -75,6 +75,30 @@ def test_trusted_workspace_persists_direct_edits_and_imports_exact_commit(
     assert reopened.head() == commit
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        "kill -TERM 1",
+        "docker container restart opentulpa-opentulpa-1",
+        "docker --host unix:///var/run/docker.sock compose --project-name opentulpa up -d",
+    ),
+)
+def test_trusted_workspace_rejects_host_lifecycle_commands(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    source, _ = _seed(tmp_path)
+    workspace = _TrustedSourceWorkspace(
+        source_repository=source,
+        path=tmp_path / "control" / "source",
+        max_output_bytes=100_000,
+    )
+    workspace.prepare()
+
+    with pytest.raises(SourceEvolutionError, match="lifecycle"):
+        workspace.bash(command, timeout_seconds=10)
+
+
 @pytest.mark.parametrize("credential_path", [".env", "config/credentials.json", "secrets.yaml"])
 def test_trusted_workspace_refuses_to_activate_credential_files(
     tmp_path: Path,

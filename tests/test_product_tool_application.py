@@ -775,6 +775,33 @@ async def test_source_set_runtime_env_marks_rolled_back_update_as_failed_effect(
 
 
 @pytest.mark.asyncio
+async def test_source_set_runtime_env_exposes_recovery_required() -> None:
+    evolution = _Port(
+        source_set_runtime_env={
+            "status": "failed",
+            "name": "META_MESSENGER_VERIFY_TOKEN",
+            "changed": False,
+            "runtime_restored": False,
+            "rollback_restored": False,
+        }
+    )
+    application, _ = _application(evolution=evolution)
+
+    with pytest.raises(ProductToolApplicationError) as error:
+        await application.source_set_runtime_env(
+            _invocation(
+                "source_set_runtime_env",
+                {"name": "META_MESSENGER_VERIFY_TOKEN", "value": "verify-token"},
+                idempotency_key="runtime-env-recovery-required",
+            )
+        )
+
+    assert error.value.code == "runtime_recovery_required"
+    assert error.value.retryable is False
+    assert "do not use SSH as a fallback" in error.value.public_message
+
+
+@pytest.mark.asyncio
 async def test_intake_confirmation_token_is_exposed_only_as_model_handle(
     tmp_path: Path,
 ) -> None:
@@ -1010,6 +1037,31 @@ async def test_sandbox_ssh_diagnostic_mounts_password_for_askpass_only() -> None
     assert "ssh -i" not in sandbox_call["command"]
     assert sandbox_call["secret_files"][0].content == password
     assert sandbox_call["secret_files"][0].env == "OPENTULPA_SSH_PASSWORD_FILE"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_ssh_diagnostic_rejects_container_self_recreate() -> None:
+    application, _ = _application()
+
+    with pytest.raises(ProductToolApplicationError, match="container lifecycle"):
+        await application.sandbox_ssh_diagnostic(
+            _invocation(
+                "sandbox_ssh_diagnostic",
+                {
+                    "secret_id": "ssh_password",
+                    "host": "84.21.189.71",
+                    "user": "root",
+                    "port": 22,
+                    "command": (
+                        "cd /opt/opentulpa; "
+                        "docker compose up -d --force-recreate opentulpa"
+                    ),
+                    "timeout_seconds": 180,
+                    "secret_type": "password",
+                },
+                idempotency_key=None,
+            )
+        )
 
 
 def test_password_ssh_command_reads_only_the_mounted_askpass_file(tmp_path: Path) -> None:

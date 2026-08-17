@@ -93,6 +93,8 @@ def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
     assert "Never repeat credential values" in OWNER_PROMPT
     assert "Do not ask the owner to resend" in OWNER_PROMPT
     assert "fresh idempotency key" in OWNER_PROMPT
+    assert "Never use SSH" in OWNER_PROMPT
+    assert "service/container lifecycle commands" in OWNER_PROMPT
 
 
 def test_owner_prompt_keeps_persona_owner_controlled() -> None:

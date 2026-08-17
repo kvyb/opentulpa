@@ -377,7 +377,14 @@ class SandboxSshDiagnosticArguments(ToolArguments):
         pattern=r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
     )
     port: int = Field(default=22, ge=1, le=65_535)
-    command: str = Field(min_length=1, max_length=20_000)
+    command: str = Field(
+        min_length=1,
+        max_length=20_000,
+        description=(
+            "Read-only remote diagnostic command. Service and container lifecycle commands "
+            "are rejected; use the deployment control plane for those operations."
+        ),
+    )
     timeout_seconds: int = Field(default=60, ge=1, le=600)
     secret_type: Literal["private_key", "password"] = "private_key"
 
