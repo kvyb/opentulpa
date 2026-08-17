@@ -189,6 +189,7 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
     assert "/v2/intake/workflows" in paths
     assert "/v2/schedules" in paths
     assert "/webhook/telegram" in paths
+    assert "/webhook/meta/messenger" in paths
     assert "/webhook/composio/callback" in paths
     assert all(
         path
@@ -200,7 +201,11 @@ def test_v2_app_exposes_only_cutover_routes_and_deepagents_health() -> None:
             "/_runtime/evolution-events",
         }
         or path.startswith("/v2/")
-        or path in {"/webhook/telegram", "/webhook/composio/callback"}
+        or path in {
+            "/webhook/telegram",
+            "/webhook/meta/messenger",
+            "/webhook/composio/callback",
+        }
         for path in paths
     )
 

@@ -338,6 +338,28 @@ def test_build_application_injects_browser_use_cloud_session_provider(tmp_path: 
     )
 
 
+def test_build_application_wires_meta_messenger_webhook_configuration(
+    tmp_path: Path,
+) -> None:
+    composition = main_module.build_application(
+        project_root=tmp_path,
+        settings=_settings(
+            tmp_path,
+            meta_messenger_verify_token="verify-token",
+            meta_app_secret="app-secret",
+            meta_messenger_trigger_id="messenger-intake",
+        ),
+    )
+
+    routes = {
+        (route.path, method)
+        for route in composition.app.routes
+        for method in getattr(route, "methods", set())
+    }
+    assert ("/webhook/meta/messenger", "GET") in routes
+    assert ("/webhook/meta/messenger", "POST") in routes
+
+
 def test_build_application_separates_business_webhook_from_owner_notifications(
     tmp_path: Path,
 ) -> None:

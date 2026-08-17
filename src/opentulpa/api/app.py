@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from opentulpa.api.routes.meta_messenger import register_meta_messenger_routes
 from opentulpa.api.routes.telegram_business import (
     TelegramBusinessUpdateHandler,
     register_telegram_business_routes,
@@ -290,6 +291,10 @@ def create_app(
     intake_poll_dispatcher: IntakePollDispatcher | None = None,
     telegram_business_relay: TelegramBusinessUpdateHandler | None = None,
     telegram_webhook_secret: str | None = None,
+    meta_messenger_tenant_id: str = "",
+    meta_messenger_trigger_id: str = "meta-messenger-message",
+    meta_messenger_verify_token: str | None = None,
+    meta_app_secret: str | None = None,
     browser_service: TenantBrowserService | None = None,
     telegram_client: TelegramClient | None = None,
     evolution_service: Any | None = None,
@@ -525,6 +530,16 @@ def create_app(
         app,
         get_relay=lambda: telegram_business_relay,
         webhook_secret=telegram_webhook_secret,
+    )
+    register_meta_messenger_routes(
+        app,
+        get_dispatcher=lambda: (
+            trigger_dispatcher if consumers_enabled else None
+        ),
+        tenant_id=meta_messenger_tenant_id,
+        trigger_id=meta_messenger_trigger_id,
+        verify_token=meta_messenger_verify_token,
+        app_secret=meta_app_secret,
     )
     _register_composio_callback(app)
     return app

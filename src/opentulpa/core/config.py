@@ -190,6 +190,24 @@ class Settings(BaseSettings):
         default=None,
         description="Optional secret for webhook path",
     )
+
+    # Meta Messenger (Facebook Page messages)
+    meta_messenger_verify_token: str | None = Field(
+        default=None,
+        description="Verify token configured for the Meta Messenger webhook subscription.",
+    )
+    meta_app_secret: str | None = Field(
+        default=None,
+        description="Meta app secret used to validate X-Hub-Signature-256.",
+    )
+    meta_messenger_trigger_id: str = Field(
+        default="meta-messenger-message",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_-]{0,63}$",
+        description="Active TriggerSpec that receives authenticated Messenger events.",
+    )
+
     opentulpa_owner_customer_id: str | None = Field(
         default=None,
         description=(
