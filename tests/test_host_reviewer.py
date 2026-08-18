@@ -38,9 +38,21 @@ class _Runtime:
         return text.replace("secret-value", "[redacted]")
 
 
-def test_rejected_review_requires_repair_handoff() -> None:
+def test_p0_or_p1_review_requires_repair_handoff() -> None:
     with pytest.raises(ValueError, match="repair handoff"):
-        ReleaseReviewDecision(approved=False, summary="Code bug")
+        ReleaseReviewDecision(approved=True, summary="Code bug", findings=["[P1] Data loss"])
+
+
+def test_p2_or_p3_review_is_approved() -> None:
+    decision = ReleaseReviewDecision(
+        approved=False,
+        summary="Minor issue",
+        findings=["[P2] A non-blocking edge case"],
+        repair_handoff="This must not block the release.",
+    )
+
+    assert decision.approved is True
+    assert decision.repair_handoff is None
 
 
 @pytest.mark.asyncio
@@ -103,7 +115,9 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     )
 
     assert decision.approved is True
-    assert captured["system_prompt"] == "Previous generation prompt"
+    assert "# Ponytail" in captured["system_prompt"]
+    assert "Only P0 and P1 findings block a release" in captured["system_prompt"]
+    assert captured["system_prompt"].endswith("Previous generation prompt")
     assert captured["model_config"]["model_name"] == "owner-model"
     assert captured["model_config"]["reasoning_effort"] == "xhigh"
     message = json.loads(captured["payload"]["messages"][0]["content"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -28,6 +29,8 @@ from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
 from opentulpa.inference.service import InferenceService
 from opentulpa.secrets.host_key import load_or_create_host_cipher
 
+_FINDING_SEVERITY = re.compile(r"^\[(P[0-3])\]\s+\S")
+
 
 class ReleaseReviewDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -39,9 +42,18 @@ class ReleaseReviewDecision(BaseModel):
     repair_handoff: str | None = Field(default=None, min_length=1, max_length=1_500)
 
     @model_validator(mode="after")
-    def _rejected_release_has_repair_handoff(self) -> ReleaseReviewDecision:
+    def _apply_release_threshold(self) -> ReleaseReviewDecision:
+        severities = []
+        for finding in self.findings:
+            match = _FINDING_SEVERITY.match(finding)
+            if match is None:
+                raise ValueError("release findings must start with [P0], [P1], [P2], or [P3]")
+            severities.append(match.group(1))
+        self.approved = not any(severity in {"P0", "P1"} for severity in severities)
         if not self.approved and self.repair_handoff is None:
             raise ValueError("rejected releases require a repair handoff")
+        if self.approved:
+            self.repair_handoff = None
         return self
 
     def diagnostic(self) -> str:
@@ -152,7 +164,14 @@ class DeepAgentReleaseReviewer:
             model=model,
             name="opentulpa_release_reviewer",
             tools=[inspect_runtime, request_runtime, run_shell],
-            system_prompt=system_prompt.strip() or _FALLBACK_PROMPT,
+            system_prompt="\n\n".join(
+                (
+                    Path(__file__).with_name("reviewer_policy.md").read_text(encoding="utf-8"),
+                    Path(__file__).with_name("ponytail_skill.md").read_text(encoding="utf-8"),
+                    "# Previous-release review handoff\n"
+                    + (system_prompt.strip() or _FALLBACK_PROMPT),
+                )
+            ),
             response_format=ReleaseReviewDecision,
             middleware=middleware,
         )
