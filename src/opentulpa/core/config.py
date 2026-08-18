@@ -208,6 +208,19 @@ class Settings(BaseSettings):
         description="Active TriggerSpec that receives authenticated Messenger events.",
     )
 
+    # Curated villa inventory. When set, this tenant-owned workbook is imported into
+    # the separate persistent villas.db during startup. Re-imports are content-idempotent.
+    villa_inventory_file_id: str | None = Field(
+        default=None,
+        description="Optional tenant FileVault XLSX file imported into villas.db at startup.",
+    )
+    villa_inventory_sheet_name: str = Field(
+        default="MASTER VILLAS",
+        min_length=1,
+        max_length=100,
+        description="Workbook sheet containing the normalized villa inventory table.",
+    )
+
     opentulpa_owner_customer_id: str | None = Field(
         default=None,
         description=(
