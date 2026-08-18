@@ -6,12 +6,17 @@ import asyncio
 import json
 import os
 import re
+import stat
+import threading
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 from deepagents import create_deep_agent
 from langchain.tools import tool
+from langchain_core.callbacks import BaseCallbackHandler
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opentulpa.deep_agent.service import (
@@ -27,9 +32,11 @@ from opentulpa.host.runtime import RuntimeSupervisor
 from opentulpa.inference.codex import is_transient as is_codex_transient
 from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
 from opentulpa.inference.service import InferenceService
+from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.secrets.host_key import load_or_create_host_cipher
 
 _FINDING_SEVERITY = re.compile(r"^\[(P[0-3])\]\s+\S")
+_REVIEW_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
 
 class ReleaseReviewDecision(BaseModel):
@@ -65,6 +72,182 @@ class ReleaseReviewDecision(BaseModel):
         return " ".join([self.summary, *self.findings])[:2_000]
 
 
+class _ReviewAuditLog(BaseCallbackHandler):
+    """Persist redacted LangChain events for one release review."""
+
+    run_inline = True
+
+    def __init__(self, path: Path, *, redact: Any) -> None:
+        self._path = path
+        self._redact = redact
+        self._lock = threading.Lock()
+
+    def record(self, event: str, data: Any = None, **metadata: Any) -> None:
+        payload = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event": event,
+            **metadata,
+            **({"data": data} if data is not None else {}),
+        }
+        serialized = json.dumps(redact_for_langfuse(payload), ensure_ascii=False, default=str)
+        line = self._redact(serialized) + "\n"
+        with self._lock:
+            descriptor = os.open(
+                self._path,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+                stream.write(line)
+
+    def on_chain_start(
+        self,
+        serialized: dict[str, Any],
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "chain.start",
+            {"component": serialized, "inputs": inputs},
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_chain_end(
+        self,
+        outputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "chain.end",
+            outputs,
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_chain_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "chain.error",
+            {"type": type(error).__name__, "message": str(error)},
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[Any]],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "model.start",
+            {"component": serialized, "messages": messages},
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_llm_end(
+        self,
+        response: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "model.end",
+            response,
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "model.error",
+            {"type": type(error).__name__, "message": str(error)},
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_tool_start(
+        self,
+        serialized: dict[str, Any],
+        input_str: str,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "tool.start",
+            {"component": serialized, "input": input_str, "inputs": kwargs.get("inputs")},
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_tool_end(
+        self,
+        output: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "tool.end",
+            output,
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+    def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.record(
+            "tool.error",
+            {"type": type(error).__name__, "message": str(error)},
+            run_id=str(run_id),
+            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            name=kwargs.get("name"),
+        )
+
+
 class DeepAgentReleaseReviewer:
     """Review a running candidate using the owner run's inference plan."""
 
@@ -88,6 +271,7 @@ class DeepAgentReleaseReviewer:
     async def review(
         self,
         *,
+        review_id: str,
         release_id: str,
         source_commit: str,
         changed_paths: Sequence[str],
@@ -101,6 +285,17 @@ class DeepAgentReleaseReviewer:
         config = self._runtime.current_config
         if config is None:
             raise RuntimeError("release reviewer has no active model configuration")
+        audit = self._audit_log(review_id)
+        audit.record(
+            "review.started",
+            {
+                "review_id": review_id,
+                "release_id": release_id,
+                "source_commit": source_commit,
+                "changed_paths": list(changed_paths),
+                "review_instructions": review_instructions,
+            },
+        )
 
         @tool
         def inspect_runtime() -> dict[str, Any]:
@@ -182,22 +377,51 @@ class DeepAgentReleaseReviewer:
             "review_instructions": review_instructions,
             "inference_plan": plan.model_dump(mode="json"),
         }
-        state = await graph.ainvoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": json.dumps(prompt, ensure_ascii=False, sort_keys=True),
-                    }
-                ]
-            }
-        )
-        response = state.get("structured_response") if isinstance(state, dict) else None
-        if isinstance(response, ReleaseReviewDecision):
-            return response
-        if isinstance(response, dict):
-            return ReleaseReviewDecision.model_validate(response)
-        raise RuntimeError("release reviewer returned no decision")
+        try:
+            state = await graph.ainvoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": json.dumps(prompt, ensure_ascii=False, sort_keys=True),
+                        }
+                    ]
+                },
+                config={"callbacks": [audit]},
+            )
+            response = state.get("structured_response") if isinstance(state, dict) else None
+            if isinstance(response, ReleaseReviewDecision):
+                decision = response
+            elif isinstance(response, dict):
+                decision = ReleaseReviewDecision.model_validate(response)
+            else:
+                raise RuntimeError("release reviewer returned no decision")
+            audit.record("review.completed", decision.model_dump(mode="json"))
+            return decision
+        except BaseException as exc:
+            audit.record(
+                "review.failed",
+                {"type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
+
+    def _audit_log(self, review_id: str) -> _ReviewAuditLog:
+        safe_id = str(review_id or "").strip()
+        if _REVIEW_ID.fullmatch(safe_id) is None:
+            raise ValueError("release review id is invalid")
+        root = self._runtime_data_root / "release_reviews"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = root.lstat()
+        if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("release review log directory is unsafe")
+        root.chmod(0o700)
+        path = root / f"{safe_id}.jsonl"
+        if os.path.lexists(path):
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError("release review log path is unsafe")
+            path.chmod(0o600)
+        return _ReviewAuditLog(path, redact=self._runtime.redact)
 
     def _inference_runtime(
         self,

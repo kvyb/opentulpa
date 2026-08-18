@@ -1551,6 +1551,7 @@ class HostEvolutionControlService:
                 asyncio.to_thread(self._workspace.export, previous_commit, reviewer_root),
             )
             return await reviewer.review(
+                review_id=str(operation["id"]),
                 release_id=str(target["id"]),
                 source_commit=target_commit,
                 changed_paths=changed_paths,

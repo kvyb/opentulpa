@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr
@@ -67,8 +68,28 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     captured: dict[str, Any] = {}
 
     class _Graph:
-        async def ainvoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async def ainvoke(
+            self,
+            payload: dict[str, Any],
+            config: dict[str, Any],
+        ) -> dict[str, Any]:
             captured["payload"] = payload
+            callback = config["callbacks"][0]
+            callback.on_chat_model_start(
+                {"name": "review-model"},
+                [[{"role": "user", "content": "token=secret-value"}]],
+                run_id=uuid4(),
+            )
+            tool_run_id = uuid4()
+            callback.on_tool_start(
+                {"name": "run_shell"},
+                "password=secret-value",
+                run_id=tool_run_id,
+            )
+            callback.on_tool_end(
+                {"output": "secret-value"},
+                run_id=tool_run_id,
+            )
             return {
                 "structured_response": {
                     "approved": True,
@@ -103,6 +124,7 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     )
 
     decision = await reviewer.review(
+        review_id="activation-1",
         release_id="release-1",
         source_commit="a" * 40,
         changed_paths=("src/opentulpa/example.py",),
@@ -132,3 +154,16 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     )
     assert shell_result["cwd"] == str(candidate)
     assert shell_result["output"] == "safe"
+    audit_path = tmp_path / "release_reviews" / "activation-1.jsonl"
+    audit = audit_path.read_text(encoding="utf-8")
+    events = [json.loads(line)["event"] for line in audit.splitlines()]
+    assert audit_path.parent.stat().st_mode & 0o777 == 0o700
+    assert audit_path.stat().st_mode & 0o777 == 0o600
+    assert "secret-value" not in audit
+    assert events == [
+        "review.started",
+        "model.start",
+        "tool.start",
+        "tool.end",
+        "review.completed",
+    ]
