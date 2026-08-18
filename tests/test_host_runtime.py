@@ -844,7 +844,7 @@ def test_process_table_error_preserves_safe_pid_and_errno(
         RuntimeSupervisor._linux_process_table(proc_root)
 
 
-def test_process_inspection_treats_only_empty_zombie_command_as_exited(
+def test_process_inspection_treats_only_empty_terminal_command_as_exited(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -867,6 +867,13 @@ def test_process_inspection_treats_only_empty_zombie_command_as_exited(
         RuntimeSupervisor,
         "_linux_process_state",
         staticmethod(lambda path: "Z"),
+    )
+    assert RuntimeSupervisor._inspect_process(42) is None
+
+    monkeypatch.setattr(
+        RuntimeSupervisor,
+        "_linux_process_state",
+        staticmethod(lambda path: "X"),
     )
     assert RuntimeSupervisor._inspect_process(42) is None
 

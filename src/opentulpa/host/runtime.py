@@ -2962,7 +2962,7 @@ class RuntimeSupervisor:
             raise RuntimeUnavailableError("recorded runtime process could not be inspected") from exc
         argv = tuple(value.decode("utf-8", errors="surrogateescape") for value in raw_argv.split(b"\0") if value)
         if not argv:
-            if RuntimeSupervisor._linux_process_state(proc_root) == "Z":
+            if RuntimeSupervisor._linux_process_state(proc_root) in {"X", "Z"}:
                 return None
             raise RuntimeUnavailableError("recorded runtime process command is unavailable")
         try:
