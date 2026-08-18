@@ -65,7 +65,6 @@ class DeepAgentReleaseReviewer:
         api_fallback_models: Sequence[str] = (),
         provider_order: Mapping[str, Sequence[str]] | None = None,
         max_completion_tokens: int | None = None,
-        timeout_seconds: float = 900,
     ) -> None:
         self._runtime = runtime
         self._runtime_data_root = runtime_data_root
@@ -73,7 +72,6 @@ class DeepAgentReleaseReviewer:
         self._api_fallback_models = tuple(api_fallback_models)
         self._provider_order = dict(provider_order or {})
         self._max_completion_tokens = max_completion_tokens
-        self._timeout_seconds = timeout_seconds
 
     async def review(
         self,
@@ -165,17 +163,16 @@ class DeepAgentReleaseReviewer:
             "review_instructions": review_instructions,
             "inference_plan": plan.model_dump(mode="json"),
         }
-        async with asyncio.timeout(self._timeout_seconds):
-            state = await graph.ainvoke(
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": json.dumps(prompt, ensure_ascii=False, sort_keys=True),
-                        }
-                    ]
-                }
-            )
+        state = await graph.ainvoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": json.dumps(prompt, ensure_ascii=False, sort_keys=True),
+                    }
+                ]
+            }
+        )
         response = state.get("structured_response") if isinstance(state, dict) else None
         if isinstance(response, ReleaseReviewDecision):
             return response

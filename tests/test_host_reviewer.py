@@ -76,6 +76,11 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
 
     monkeypatch.setattr(reviewer_module, "create_deep_agent", create_agent)
     monkeypatch.setattr(reviewer_module, "build_openrouter_chat_model", build_model)
+    monkeypatch.setattr(
+        reviewer_module.asyncio,
+        "timeout",
+        lambda _: pytest.fail("release reviews must not have a whole-review timeout"),
+    )
     plan = ResolvedInferencePlan.resolve(
         InferenceSelection(provider="api", model="owner-model", reasoning_effort="xhigh"),
         preference_revision=3,
