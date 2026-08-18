@@ -482,6 +482,12 @@ class DeepAgentReleaseReviewer:
                     allow_request=_before_current_run_activity,
                 )
             )
+        middleware.append(
+            _ProviderFallbackMiddleware(
+                (resolved.model, resolved.model),
+                eligible=is_codex_transient,
+            )
+        )
         middleware.append(_CodexAuthRetryMiddleware(resolved))
         return _with_deepagents_context_budget(resolved.model, provider="codex"), middleware
 

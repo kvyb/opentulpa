@@ -56,6 +56,43 @@ def test_p2_or_p3_review_is_approved() -> None:
     assert decision.repair_handoff is None
 
 
+def test_reviewer_retries_transient_codex_model_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_model = object()
+
+    class _Inference:
+        def resolve_model(self, *_: Any) -> Any:
+            return type("Resolved", (), {"model": codex_model, "token_provider": None})()
+
+    monkeypatch.setattr(reviewer_module, "InferenceService", lambda **_: _Inference())
+    monkeypatch.setattr(reviewer_module, "load_or_create_host_cipher", lambda _: object())
+    reviewer = DeepAgentReleaseReviewer(
+        _Runtime(),  # type: ignore[arg-type]
+        runtime_data_root=tmp_path,
+    )
+    plan = ResolvedInferencePlan.resolve(
+        InferenceSelection(provider="codex", model="gpt-test"),
+        preference_revision=1,
+    )
+
+    _, middleware = reviewer._inference_runtime(  # noqa: SLF001
+        plan,
+        tenant_id="tenant-a",
+        api_key="api-key",
+        base_url="https://example.com/v1",
+        api_default_model="api-model",
+    )
+    retry = next(
+        item
+        for item in middleware
+        if isinstance(item, reviewer_module._ProviderFallbackMiddleware)
+    )
+
+    assert retry._fallback_models == (codex_model, codex_model)  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     tmp_path: Path,
