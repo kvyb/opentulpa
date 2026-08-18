@@ -10,6 +10,7 @@ import unicodedata
 from io import BytesIO
 from typing import Any
 from xml.etree import ElementTree
+from xml.parsers import expat
 from zipfile import BadZipFile, ZipFile
 
 from opentulpa.villas.models import VillaRecord
@@ -71,9 +72,20 @@ def _read_part(zf: ZipFile, part: str, *, label: str) -> bytes:
 
 
 def _safe_xml(raw: bytes, *, label: str) -> ElementTree.Element:
-    lowered = raw.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
+    parser = expat.ParserCreate()
+
+    def reject_declaration(*_args: Any) -> None:
         raise VillaWorkbookError(f"unsafe declarations in {label} XML")
+
+    parser.StartDoctypeDeclHandler = reject_declaration
+    parser.EntityDeclHandler = reject_declaration
+    parser.ExternalEntityRefHandler = lambda *_args: 0
+    try:
+        parser.Parse(raw, True)
+    except VillaWorkbookError:
+        raise
+    except expat.ExpatError as exc:
+        raise VillaWorkbookError(f"invalid {label} XML") from exc
     try:
         return ElementTree.fromstring(raw)
     except ElementTree.ParseError as exc:
@@ -96,10 +108,7 @@ def _canonical_part(base_part: str, target: str) -> str:
 
 
 def _relationship_map(zf: ZipFile, rels_part: str, *, source_part: str) -> dict[str, str]:
-    try:
-        root = _xml_part(zf, rels_part, label="relationship")
-    except VillaWorkbookError as exc:
-        raise VillaWorkbookError("workbook relationships are missing or invalid") from exc
+    root = _xml_part(zf, rels_part, label="relationship")
     result: dict[str, str] = {}
     for node in root.findall(f"{{{_PACKAGE_REL_NS}}}Relationship"):
         relationship_id = str(node.attrib.get("Id") or "")
@@ -217,9 +226,9 @@ def _table_bounds(zf: ZipFile, worksheet_part: str, worksheet_rows: dict[int, di
         posixpath.basename(worksheet_part) + ".rels",
     )
     table_ranges: list[str] = []
-    try:
+    if rels_part in zf.namelist():
         relationships = _relationship_map(zf, rels_part, source_part=worksheet_part)
-    except VillaWorkbookError:
+    else:
         relationships = {}
     for part in relationships.values():
         if "/tables/" not in f"/{part}":

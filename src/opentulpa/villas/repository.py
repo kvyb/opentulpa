@@ -254,7 +254,9 @@ class VillaRepository:
                 connection.commit()
                 return self._result_from_row(previous, replayed=True)
 
-            run_id = new_short_id("vimport")
+            result_run_id = (
+                str(previous["id"]) if previous is not None else new_short_id("vimport")
+            )
             inserted = 0
             updated = 0
             unchanged = 0
@@ -298,7 +300,7 @@ class VillaRepository:
                             record.source_hash,
                             now,
                             now,
-                            run_id,
+                            result_run_id,
                             now,
                             now,
                         ),
@@ -316,7 +318,7 @@ class VillaRepository:
                             *self._source_values(record),
                             record.source_hash,
                             now,
-                            run_id,
+                            result_run_id,
                             now,
                             tenant,
                             villa_id,
@@ -357,8 +359,8 @@ class VillaRepository:
                         record.source_row,
                         record.source_hash,
                         source_json,
-                        run_id,
-                        run_id,
+                        result_run_id,
+                        result_run_id,
                         now,
                         now,
                     ),
@@ -399,7 +401,7 @@ class VillaRepository:
                     """,
                     (
                         tenant,
-                        run_id,
+                        result_run_id,
                         source_file,
                         filename,
                         sheet_name,
@@ -413,11 +415,8 @@ class VillaRepository:
                         now,
                     ),
                 )
-                result_run_id = run_id
-            else:
-                # Historical content can be replayed after later imports changed state.
-                # Reconcile it without inserting a duplicate content-unique audit row.
-                result_run_id = str(previous["id"])
+            # Historical content is reconciled using its existing persisted run ID,
+            # without inserting a duplicate content-unique audit row.
             connection.commit()
             row = connection.execute(
                 "SELECT * FROM import_runs WHERE tenant_id=? AND id=?",

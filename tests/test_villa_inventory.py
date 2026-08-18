@@ -155,19 +155,60 @@ def test_parser_rejects_wrong_sheet() -> None:
         parse_master_villas_xlsx(_workbook([_row("Villa One")]), sheet_name="Other")
 
 
-def test_parser_rejects_dtd_and_entity_declarations() -> None:
-    raw = _workbook([_row("Villa One")])
+def _replace_archive_part(raw: bytes, part: str, payload: bytes) -> bytes:
     source = BytesIO(raw)
     target = BytesIO()
     with ZipFile(source) as incoming, ZipFile(target, "w", compression=ZIP_DEFLATED) as outgoing:
         for info in incoming.infolist():
-            payload = incoming.read(info.filename)
-            if info.filename == "xl/workbook.xml":
-                payload = b'<!DOCTYPE workbook [<!ENTITY bomb "expanded">]>' + payload
-            outgoing.writestr(info, payload)
+            outgoing.writestr(
+                info,
+                payload if info.filename == part else incoming.read(info.filename),
+            )
+    return target.getvalue()
+
+
+def test_parser_rejects_dtd_and_entity_declarations() -> None:
+    unsafe = _replace_archive_part(
+        _workbook([_row("Villa One")]),
+        "xl/workbook.xml",
+        b'<!DOCTYPE workbook [<!ENTITY bomb "expanded">]><workbook/>',
+    )
 
     with pytest.raises(VillaWorkbookError, match="unsafe declarations"):
-        parse_master_villas_xlsx(target.getvalue())
+        parse_master_villas_xlsx(unsafe)
+
+
+@pytest.mark.parametrize(
+    ("part", "root_name"),
+    [
+        ("xl/workbook.xml", "workbook"),
+        ("xl/worksheets/_rels/sheet.xml.rels", "Relationships"),
+    ],
+)
+def test_parser_rejects_utf16_declarations_in_required_and_optional_parts(
+    part: str,
+    root_name: str,
+) -> None:
+    payload = (
+        f'<?xml version="1.0" encoding="UTF-16"?>'
+        f'<!DOCTYPE {root_name} [<!ENTITY bomb "expanded">]>'
+        f'<{root_name}>&bomb;</{root_name}>'
+    ).encode("utf-16")
+    unsafe = _replace_archive_part(_workbook([_row("Villa One")]), part, payload)
+
+    with pytest.raises(VillaWorkbookError, match="unsafe declarations"):
+        parse_master_villas_xlsx(unsafe)
+
+
+def test_parser_propagates_malformed_optional_relationships() -> None:
+    malformed = _replace_archive_part(
+        _workbook([_row("Villa One")]),
+        "xl/worksheets/_rels/sheet.xml.rels",
+        b"<Relationships>",
+    )
+
+    with pytest.raises(VillaWorkbookError, match="invalid relationship XML"):
+        parse_master_villas_xlsx(malformed)
 
 
 def test_repository_is_idempotent_and_preserves_manual_state(tmp_path: Path) -> None:
@@ -298,6 +339,31 @@ def test_repository_historical_replay_restores_state_and_preserves_manual_fields
         "active": 1,
         "source_records": 3,
     }
+    with repository._conn() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_runs WHERE tenant_id='owner'"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM villas AS villa
+            LEFT JOIN import_runs AS run
+                ON run.tenant_id=villa.tenant_id AND run.id=villa.last_import_run_id
+            WHERE villa.tenant_id='owner' AND run.id IS NULL
+            """
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM villa_source_records AS source
+            LEFT JOIN import_runs AS first_run
+                ON first_run.tenant_id=source.tenant_id
+                    AND first_run.id=source.first_import_run_id
+            LEFT JOIN import_runs AS last_run
+                ON last_run.tenant_id=source.tenant_id
+                    AND last_run.id=source.last_import_run_id
+            WHERE source.tenant_id='owner'
+                AND (first_run.id IS NULL OR last_run.id IS NULL)
+            """
+        ).fetchone()[0] == 0
     assert repository.list_villas(tenant_id="another") == []
 
 
