@@ -154,6 +154,7 @@ from opentulpa.specs import (
 from opentulpa.specs.dispatcher import TriggerDispatcher, TriggerExecutionStore
 from opentulpa.tooling import TOOL_SPEC_BY_NAME
 from opentulpa.tooling.adapters import build_product_tools
+from opentulpa.villas import VillaInventoryService, VillaRepository
 
 logger = logging.getLogger(__name__)
 
@@ -988,6 +989,11 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             db_path=data_root / "file_vault.db",
         )
         file_analysis = FileAnalysisService(file_vault)
+        villa_repository = VillaRepository(data_root / "villas" / "villas.db")
+        villa_inventory = VillaInventoryService(
+            repository=villa_repository,
+            file_vault=file_vault,
+        )
 
         oracle = OpenAICompatibleKnowledgeOracleClient(
             api_key=api_key,
@@ -1524,6 +1530,24 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             ),
             capability=CapabilityPrincipalResolver(capability_credentials),
         )
+        async def import_configured_villa_inventory() -> None:
+            file_id = str(settings.villa_inventory_file_id or "").strip()
+            if not file_id:
+                return
+            result = villa_inventory.import_file(
+                tenant_id=owner_tenant_id,
+                file_id=file_id,
+                sheet_name=settings.villa_inventory_sheet_name,
+            )
+            logger.info(
+                "Villa inventory ready: parsed=%s inserted=%s updated=%s unchanged=%s replayed=%s",
+                result.parsed_count,
+                result.inserted_count,
+                result.updated_count,
+                result.unchanged_count,
+                result.replayed,
+            )
+
         app = create_app(
             agent_service=agent_service,
             job_service=jobs,
@@ -1555,6 +1579,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             notification_service=notifications,
             inference_service=inference,
             repository_service=repositories,
+            startup_callback=import_configured_villa_inventory,
         )
         app.state.owner_tenant_id = owner_tenant_id
         app.state.product_application = product_application
@@ -1563,6 +1588,8 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
         app.state.evolution_service = evolution
         app.state.customer_profiles = profiles
         app.state.business_knowledge = business_knowledge
+        app.state.villa_repository = villa_repository
+        app.state.villa_inventory = villa_inventory
         app.state.tenant_composio = tenant_composio
         app.state.agent_spec_store = agent_spec_store
         app.state.trigger_spec_store = trigger_spec_store
