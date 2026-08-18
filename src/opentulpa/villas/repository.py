@@ -229,7 +229,28 @@ class VillaRepository:
                 """,
                 (tenant, sheet_name, source_sha256),
             ).fetchone()
-            if previous is not None:
+            existing_scope_rows = connection.execute(
+                """
+                SELECT v.identity_fingerprint, v.source_hash, v.source_status
+                FROM villas AS v
+                WHERE v.tenant_id=? AND EXISTS (
+                    SELECT 1 FROM villa_source_records AS source
+                    WHERE source.tenant_id=v.tenant_id
+                        AND source.villa_id=v.id
+                        AND source.sheet_name=?
+                )
+                """,
+                (tenant, sheet_name),
+            ).fetchall()
+            expected_state = {
+                record.identity_fingerprint: record.source_hash for record in records
+            }
+            actual_active_state = {
+                str(row["identity_fingerprint"]): str(row["source_hash"])
+                for row in existing_scope_rows
+                if str(row["source_status"]) == "active"
+            }
+            if previous is not None and actual_active_state == expected_state:
                 connection.commit()
                 return self._result_from_row(previous, replayed=True)
 
@@ -347,8 +368,12 @@ class VillaRepository:
                 str(row["id"])
                 for row in connection.execute(
                     """
-                    SELECT id FROM villas
-                    WHERE tenant_id=? AND source_sheet=? AND source_status='active'
+                    SELECT DISTINCT v.id
+                    FROM villas AS v
+                    JOIN villa_source_records AS source
+                        ON source.tenant_id=v.tenant_id AND source.villa_id=v.id
+                    WHERE v.tenant_id=? AND source.sheet_name=?
+                        AND v.source_status='active'
                     """,
                     (tenant, sheet_name),
                 ).fetchall()
@@ -363,38 +388,44 @@ class VillaRepository:
                     """,
                     (now, tenant, *sorted(missing_ids)),
                 )
-            connection.execute(
-                """
-                INSERT INTO import_runs (
-                    tenant_id, id, file_id, filename, sheet_name, source_sha256,
-                    status, parsed_count, inserted_count, updated_count,
-                    unchanged_count, missing_count, started_at, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    tenant,
-                    run_id,
-                    source_file,
-                    filename,
-                    sheet_name,
-                    source_sha256,
-                    len(records),
-                    inserted,
-                    updated,
-                    unchanged,
-                    len(missing_ids),
-                    now,
-                    now,
-                ),
-            )
+            if previous is None:
+                connection.execute(
+                    """
+                    INSERT INTO import_runs (
+                        tenant_id, id, file_id, filename, sheet_name, source_sha256,
+                        status, parsed_count, inserted_count, updated_count,
+                        unchanged_count, missing_count, started_at, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        tenant,
+                        run_id,
+                        source_file,
+                        filename,
+                        sheet_name,
+                        source_sha256,
+                        len(records),
+                        inserted,
+                        updated,
+                        unchanged,
+                        len(missing_ids),
+                        now,
+                        now,
+                    ),
+                )
+                result_run_id = run_id
+            else:
+                # Historical content can be replayed after later imports changed state.
+                # Reconcile it without inserting a duplicate content-unique audit row.
+                result_run_id = str(previous["id"])
             connection.commit()
             row = connection.execute(
                 "SELECT * FROM import_runs WHERE tenant_id=? AND id=?",
-                (tenant, run_id),
+                (tenant, result_run_id),
             ).fetchone()
             if row is None:
                 raise RuntimeError("villa import summary was not persisted")
-            return self._result_from_row(row, replayed=False)
+            return self._result_from_row(row, replayed=previous is not None)
 
     def counts(self, *, tenant_id: str) -> dict[str, int]:
         tenant = str(tenant_id or "").strip()

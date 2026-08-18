@@ -46,6 +46,7 @@ _EXPECTED_HEADERS = (
 _MAX_XLSX_BYTES = 20 * 1024 * 1024
 _MAX_ARCHIVE_ENTRIES = 512
 _MAX_UNCOMPRESSED_BYTES = 96 * 1024 * 1024
+_MAX_XML_PART_BYTES = 32 * 1024 * 1024
 _MAX_CELL_CHARS = 100_000
 _CELL_REF_RE = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
 _RANGE_RE = re.compile(r"^([A-Z]+)([1-9][0-9]*):([A-Z]+)([1-9][0-9]*)$")
@@ -55,11 +56,32 @@ class VillaWorkbookError(ValueError):
     """Workbook is unsafe or does not match the villa inventory contract."""
 
 
+def _read_part(zf: ZipFile, part: str, *, label: str) -> bytes:
+    try:
+        info = zf.getinfo(part)
+    except KeyError as exc:
+        raise VillaWorkbookError(f"{label} part is missing") from exc
+    if info.file_size > _MAX_XML_PART_BYTES:
+        raise VillaWorkbookError(f"{label} part exceeds the supported limit")
+    with zf.open(info) as stream:
+        raw = stream.read(_MAX_XML_PART_BYTES + 1)
+    if len(raw) > _MAX_XML_PART_BYTES:
+        raise VillaWorkbookError(f"{label} part exceeds the supported limit")
+    return raw
+
+
 def _safe_xml(raw: bytes, *, label: str) -> ElementTree.Element:
+    lowered = raw.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        raise VillaWorkbookError(f"unsafe declarations in {label} XML")
     try:
         return ElementTree.fromstring(raw)
     except ElementTree.ParseError as exc:
         raise VillaWorkbookError(f"invalid {label} XML") from exc
+
+
+def _xml_part(zf: ZipFile, part: str, *, label: str) -> ElementTree.Element:
+    return _safe_xml(_read_part(zf, part, label=label), label=label)
 
 
 def _canonical_part(base_part: str, target: str) -> str:
@@ -75,9 +97,9 @@ def _canonical_part(base_part: str, target: str) -> str:
 
 def _relationship_map(zf: ZipFile, rels_part: str, *, source_part: str) -> dict[str, str]:
     try:
-        root = _safe_xml(zf.read(rels_part), label="relationship")
-    except KeyError as exc:
-        raise VillaWorkbookError("workbook relationships are missing") from exc
+        root = _xml_part(zf, rels_part, label="relationship")
+    except VillaWorkbookError as exc:
+        raise VillaWorkbookError("workbook relationships are missing or invalid") from exc
     result: dict[str, str] = {}
     for node in root.findall(f"{{{_PACKAGE_REL_NS}}}Relationship"):
         relationship_id = str(node.attrib.get("Id") or "")
@@ -89,17 +111,16 @@ def _relationship_map(zf: ZipFile, rels_part: str, *, source_part: str) -> dict[
 
 def _shared_strings(zf: ZipFile) -> list[str]:
     try:
-        root = _safe_xml(zf.read("xl/sharedStrings.xml"), label="shared strings")
-    except KeyError:
-        return []
+        root = _xml_part(zf, "xl/sharedStrings.xml", label="shared strings")
+    except VillaWorkbookError as exc:
+        if "part is missing" in str(exc):
+            return []
+        raise
     return ["".join(node.text or "" for node in item.iter(f"{{{_MAIN_NS}}}t")) for item in root]
 
 
 def _worksheet_part(zf: ZipFile, sheet_name: str) -> str:
-    try:
-        workbook = _safe_xml(zf.read("xl/workbook.xml"), label="workbook")
-    except KeyError as exc:
-        raise VillaWorkbookError("workbook.xml is missing") from exc
+    workbook = _xml_part(zf, "xl/workbook.xml", label="workbook")
     relationships = _relationship_map(
         zf,
         "xl/_rels/workbook.xml.rels",
@@ -169,10 +190,7 @@ def _worksheet_rows(
     worksheet_part: str,
     shared: list[str],
 ) -> dict[int, dict[int, str | int | float | bool | None]]:
-    try:
-        root = _safe_xml(zf.read(worksheet_part), label="worksheet")
-    except KeyError as exc:
-        raise VillaWorkbookError("worksheet part is missing") from exc
+    root = _xml_part(zf, worksheet_part, label="worksheet")
     rows: dict[int, dict[int, str | int | float | bool | None]] = {}
     for row in root.findall(".//m:sheetData/m:row", _NS):
         try:
@@ -207,9 +225,11 @@ def _table_bounds(zf: ZipFile, worksheet_part: str, worksheet_rows: dict[int, di
         if "/tables/" not in f"/{part}":
             continue
         try:
-            table = _safe_xml(zf.read(part), label="table")
-        except KeyError:
-            continue
+            table = _xml_part(zf, part, label="table")
+        except VillaWorkbookError as exc:
+            if "part is missing" in str(exc):
+                continue
+            raise
         reference = str(table.attrib.get("ref") or "")
         if reference:
             table_ranges.append(reference)

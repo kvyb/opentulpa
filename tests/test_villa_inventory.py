@@ -155,6 +155,21 @@ def test_parser_rejects_wrong_sheet() -> None:
         parse_master_villas_xlsx(_workbook([_row("Villa One")]), sheet_name="Other")
 
 
+def test_parser_rejects_dtd_and_entity_declarations() -> None:
+    raw = _workbook([_row("Villa One")])
+    source = BytesIO(raw)
+    target = BytesIO()
+    with ZipFile(source) as incoming, ZipFile(target, "w", compression=ZIP_DEFLATED) as outgoing:
+        for info in incoming.infolist():
+            payload = incoming.read(info.filename)
+            if info.filename == "xl/workbook.xml":
+                payload = b'<!DOCTYPE workbook [<!ENTITY bomb "expanded">]>' + payload
+            outgoing.writestr(info, payload)
+
+    with pytest.raises(VillaWorkbookError, match="unsafe declarations"):
+        parse_master_villas_xlsx(target.getvalue())
+
+
 def test_repository_is_idempotent_and_preserves_manual_state(tmp_path: Path) -> None:
     raw = _workbook([_row("Villa One")])
     records = parse_master_villas_xlsx(raw)
@@ -195,6 +210,95 @@ def test_repository_is_idempotent_and_preserves_manual_state(tmp_path: Path) -> 
     assert villa["manual_status"] == "reserved"
     assert villa["manual_overrides_json"] == '{"monthly_idr":31000000}'
     assert repository.list_villas(tenant_id="tenant-b") == []
+
+
+def test_repository_marks_removed_inventory_missing_when_source_column_differs(
+    tmp_path: Path,
+) -> None:
+    repository = VillaRepository(tmp_path / "villas.db")
+    first_records = parse_master_villas_xlsx(
+        _workbook([_row("Villa A"), _row("Villa B")])
+    )
+    second_records = parse_master_villas_xlsx(_workbook([_row("Villa B")]))
+    repository.import_records(
+        tenant_id="owner",
+        file_id="file-ab",
+        filename="ab.xlsx",
+        sheet_name="MASTER VILLAS",
+        source_sha256="sha-ab",
+        records=first_records,
+    )
+
+    result = repository.import_records(
+        tenant_id="owner",
+        file_id="file-b",
+        filename="b.xlsx",
+        sheet_name="MASTER VILLAS",
+        source_sha256="sha-b",
+        records=second_records,
+    )
+
+    assert result.missing_count == 1
+    villas = {row["property_name"]: row for row in repository.list_villas(tenant_id="owner")}
+    assert villas["Villa A"]["source_status"] == "missing"
+    assert villas["Villa B"]["source_status"] == "active"
+
+
+def test_repository_historical_replay_restores_state_and_preserves_manual_fields(
+    tmp_path: Path,
+) -> None:
+    repository = VillaRepository(tmp_path / "villas.db")
+    record_a = parse_master_villas_xlsx(_workbook([_row("Villa A", price=30_000_000)]))
+    record_b = parse_master_villas_xlsx(_workbook([_row("Villa B", price=40_000_000)]))
+    first = repository.import_records(
+        tenant_id="owner",
+        file_id="file-a",
+        filename="a.xlsx",
+        sheet_name="MASTER VILLAS",
+        source_sha256="sha-a",
+        records=record_a,
+    )
+    with repository._conn() as connection:
+        connection.execute(
+            """
+            UPDATE villas SET manual_status='reserved', manual_overrides_json=?
+            WHERE tenant_id='owner' AND property_name='Villa A'
+            """,
+            ('{"monthly_idr":31000000}',),
+        )
+        connection.commit()
+    repository.import_records(
+        tenant_id="owner",
+        file_id="file-b",
+        filename="b.xlsx",
+        sheet_name="MASTER VILLAS",
+        source_sha256="sha-b",
+        records=record_b,
+    )
+
+    replay = repository.import_records(
+        tenant_id="owner",
+        file_id="file-a-again",
+        filename="a-again.xlsx",
+        sheet_name="MASTER VILLAS",
+        source_sha256="sha-a",
+        records=record_a,
+    )
+
+    assert replay.replayed is True
+    assert replay.import_run_id == first.import_run_id
+    villas = {row["property_name"]: row for row in repository.list_villas(tenant_id="owner")}
+    assert villas["Villa A"]["source_status"] == "active"
+    assert villas["Villa A"]["monthly_idr"] == 30_000_000
+    assert villas["Villa A"]["manual_status"] == "reserved"
+    assert villas["Villa A"]["manual_overrides_json"] == '{"monthly_idr":31000000}'
+    assert villas["Villa B"]["source_status"] == "missing"
+    assert repository.counts(tenant_id="owner") == {
+        "total": 2,
+        "active": 1,
+        "source_records": 3,
+    }
+    assert repository.list_villas(tenant_id="another") == []
 
 
 class _Files:
