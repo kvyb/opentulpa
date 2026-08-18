@@ -175,6 +175,7 @@ def build_host_application() -> tuple[Any, str, str, Path]:
         build_host_evolution_runtime(
             runtime=runtime,
             data_root=paths.data_root,
+            product_root=paths.product_root,
             control_root=paths.control_root,
             settings=settings,
         )

@@ -28,6 +28,7 @@ def build_host_evolution_runtime(
     *,
     runtime: RuntimeSupervisor,
     data_root: Path,
+    product_root: Path,
     settings: Settings,
     control_root: Path | None = None,
 ) -> HostEvolutionControlService | None:
@@ -40,6 +41,7 @@ def build_host_evolution_runtime(
         return None
 
     resolved_data = data_root.expanduser().absolute()
+    resolved_product = product_root.expanduser().absolute()
     resolved_control = (
         control_root.expanduser().absolute()
         if control_root is not None
@@ -73,7 +75,7 @@ def build_host_evolution_runtime(
         ),
         reviewer=DeepAgentReleaseReviewer(
             runtime,
-            runtime_data_root=resolved_data / ".opentulpa",
+            runtime_data_root=resolved_product / ".opentulpa",
             api_reasoning_effort=settings.llm_reasoning_effort,
             api_fallback_models=settings.llm_fallback_models,
             provider_order=settings.llm_provider_order,
