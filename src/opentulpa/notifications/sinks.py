@@ -21,12 +21,15 @@ if TYPE_CHECKING:
 
 
 _EVOLUTION_EVENT_TEXT = {
-    "build.preparing": "Preparing a new OpenTulpa build.",
-    "build.switching": "Switching to the new OpenTulpa build now.",
-    "build.active": "The new OpenTulpa build is active.",
-    "promotion.failed": "The new build failed; OpenTulpa kept or restored the previous build.",
-    "build.rolled_back": "The previous OpenTulpa build has been restored.",
+    "build.preparing": "Preparing a new OpenTulpa build. I will report again before it restarts.",
+    "build.switching": "OpenTulpa is restarting now. I will report again when it is back online.",
+    "build.active": "OpenTulpa is back online. The new build is active.",
+    "promotion.failed": "The new build failed, so OpenTulpa kept or restored the previous build.",
+    "build.rolled_back": "OpenTulpa is back online. The previous build has been restored.",
     "rollback.failed": "OpenTulpa could not restore the requested previous build.",
+    "runtime_env.restarting": "OpenTulpa is restarting to apply the runtime environment update. I will report again when it is back online.",
+    "runtime_env.updated": "OpenTulpa is back online. The runtime environment update is active.",
+    "runtime_env.failed": "The runtime environment update failed; OpenTulpa kept or restored the previous environment.",
 }
 
 

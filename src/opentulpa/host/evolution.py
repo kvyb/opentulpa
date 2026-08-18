@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -63,6 +64,7 @@ _SECRET_SOURCE_NAMES = frozenset(
 _SECRET_SOURCE_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
 _SECRET_SOURCE_PATHS = frozenset({".aws/credentials", ".docker/config.json"})
 _TRUSTED_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+logger = logging.getLogger(__name__)
 
 
 class SourceEvolutionError(RuntimeError):
@@ -1208,6 +1210,8 @@ class HostEvolutionControlService:
                 ),
             )
             if operation["status"] == "preparing":
+                if not replayed:
+                    await self._notify_progress(operation, "build.preparing")
                 self._schedule(str(operation["id"]))
             public = self._public_operation(operation)
             public["replayed"] = replayed
@@ -1309,12 +1313,60 @@ class HostEvolutionControlService:
         manager = self._runtime_env_file_manager
         if manager is None:
             raise SourceEvolutionError("runtime environment updates are unavailable")
-        return await manager.set(
-            name=name,
-            value=value,
-            idempotency_key=idempotency_key,
-            audit_context=audit_context,
-        )
+        audit = EvolutionAuditContext.from_mapping(audit_context)
+        event_key = hashlib.sha256(
+            f"{audit.tenant_id or 'owner'}:{idempotency_key}".encode()
+        ).hexdigest()
+        async with self._operation_lock:
+            state = await asyncio.to_thread(self._journal.state)
+
+            async def notify_before_restart() -> None:
+                delivered = await self._deliver_event(
+                    event_key=f"runtime-env:{event_key}:restarting",
+                    event_type="runtime_env.restarting",
+                    release_id=str(state["active_release_id"]),
+                    origin=audit.as_metadata(),
+                    payload={"status": "restarting", "name": str(name or "")[:128]},
+                )
+                if not delivered:
+                    raise SourceEvolutionError("runtime restart notice could not be delivered")
+
+            try:
+                result = await manager.set(
+                    name=name,
+                    value=value,
+                    idempotency_key=idempotency_key,
+                    audit_context=audit_context,
+                    before_restart=notify_before_restart,
+                )
+            except Exception:
+                await self._deliver_until_available(
+                    event_key=f"runtime-env:{event_key}:failed",
+                    event_type="runtime_env.failed",
+                    release_id=str(state["active_release_id"]),
+                    origin=audit.as_metadata(),
+                    payload={"status": "failed", "name": str(name or "")[:128]},
+                )
+                raise
+            failed = result.get("status") == "failed"
+            payload: dict[str, JsonValue] = {
+                "status": str(result.get("status") or "failed"),
+                "name": str(result.get("name") or name)[:128],
+                "changed": bool(result.get("changed")),
+                "restarted": bool(result.get("restarted")),
+                "rollback_restored": bool(result.get("rollback_restored")),
+            }
+            error = result.get("error")
+            if failed and isinstance(error, Mapping):
+                payload["failure_message"] = str(error.get("message") or "")[:4_000]
+            await self._deliver_until_available(
+                event_key=f"runtime-env:{event_key}:{'failed' if failed else 'updated'}",
+                event_type="runtime_env.failed" if failed else "runtime_env.updated",
+                release_id=str(state["active_release_id"]),
+                origin=audit.as_metadata(),
+                payload=payload,
+            )
+        return result
 
     def _schedule(self, activation_id: str) -> None:
         if not self._started or activation_id in self._tasks:
@@ -1356,6 +1408,8 @@ class HostEvolutionControlService:
                         or previous_spec.source_commit != previous["source_commit"]
                     ):
                         previous_spec = await self._prepare_spec(previous["source_commit"])
+                    if not await self._notify_progress(operation, "build.switching"):
+                        raise SourceEvolutionError("runtime restart notice could not be delivered")
                     await self._runtime.replace_live_source(target_spec, rollback=previous_spec)
                     if operation["kind"] == "activate" and self._reviewer is not None:
                         decision = await self._review_release(
@@ -1606,27 +1660,100 @@ class HostEvolutionControlService:
             await asyncio.sleep(1)
 
     async def _notify(self, operation: Mapping[str, Any]) -> None:
-        result = operation.get("result")
-        if not isinstance(result, Mapping):
-            return
-        kind = str(operation["kind"])
-        status = str(operation["status"])
-        if status == "active":
-            event_type = "build.rolled_back" if kind == "rollback" else "build.active"
-        else:
-            event_type = "rollback.failed" if kind == "rollback" else "promotion.failed"
-        event = EvolutionEvent(
-            event_key=f"source:{operation['id']}:{status}",
+        operation_id = str(operation["id"])
+        while self._started:
+            current = await asyncio.to_thread(self._journal.operation, operation_id)
+            if current is None:
+                return
+            result = current.get("result")
+            if not isinstance(result, Mapping):
+                return
+            kind = str(current["kind"])
+            status = str(current["status"])
+            event_type = (
+                "build.rolled_back"
+                if status == "active" and kind == "rollback"
+                else "build.active"
+                if status == "active"
+                else "rollback.failed"
+                if kind == "rollback"
+                else "promotion.failed"
+            )
+            if await self._deliver_event(
+                event_key=f"source:{operation_id}:{status}",
+                event_type=event_type,
+                release_id=str(current["target_release_id"]),
+                origin=dict(current.get("audit") or {}),
+                payload=dict(result),
+            ):
+                await asyncio.to_thread(self._journal.mark_notified, operation_id)
+                return
+            await asyncio.sleep(1)
+
+    async def _deliver_until_available(
+        self,
+        *,
+        event_key: str,
+        event_type: str,
+        release_id: str,
+        origin: dict[str, JsonValue],
+        payload: dict[str, JsonValue],
+    ) -> bool:
+        while self._started:
+            if await self._deliver_event(
+                event_key=event_key,
+                event_type=event_type,
+                release_id=release_id,
+                origin=origin,
+                payload=payload,
+            ):
+                return True
+            await asyncio.sleep(1)
+        return False
+
+    async def _notify_progress(
+        self,
+        operation: Mapping[str, Any],
+        event_type: str,
+    ) -> bool:
+        return await self._deliver_event(
+            event_key=f"source:{operation['id']}:{event_type}",
             event_type=event_type,
             release_id=str(operation["target_release_id"]),
             origin=dict(operation.get("audit") or {}),
-            payload=dict(result),
+            payload={"status": event_type.rsplit(".", 1)[-1]},
         )
-        try:
-            await self._runtime.deliver_evolution_event(event)
-        except Exception:
-            return
-        await asyncio.to_thread(self._journal.mark_notified, operation["id"])
+
+    async def _deliver_event(
+        self,
+        *,
+        event_key: str,
+        event_type: str,
+        release_id: str,
+        origin: dict[str, JsonValue],
+        payload: dict[str, JsonValue],
+    ) -> bool:
+        event = EvolutionEvent(
+            event_key=event_key,
+            event_type=event_type,
+            release_id=release_id,
+            origin=origin,
+            payload=payload,
+        )
+        for attempt in range(3):
+            try:
+                await self._runtime.deliver_evolution_event(event)
+                return True
+            except Exception as exc:
+                if attempt == 2:
+                    logger.error(
+                        "Failed to deliver %s owner notification: %s",
+                        event_type,
+                        type(exc).__name__,
+                    )
+                    break
+                await asyncio.sleep(0.25)
+        return False
 
     def _require_prepared(self) -> None:
         if not self._prepared:

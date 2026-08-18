@@ -374,10 +374,14 @@ async def test_runtime_env_file_manager_rejects_redacted_placeholder(tmp_path: P
         async def replace_current_environment(self, *, apply: Any, restore: Any) -> None:
             raise AssertionError("redacted placeholders must not restart the runtime")
 
+    async def before_restart() -> None:
+        raise AssertionError("invalid values must not emit a restart notice")
+
     result = await RuntimeEnvFileManager(source_root=source, runtime=Runtime()).set(
         name="COMPOSIO_API_KEY",
         value="[redacted].",
         idempotency_key="env-update-redacted",
+        before_restart=before_restart,
     )
 
     assert result["status"] == "failed"

@@ -246,6 +246,19 @@ class _EnvironmentStore:
         )
 
 
+class _RuntimeEnvManager:
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    async def set(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        before_restart = kwargs.get("before_restart")
+        if callable(before_restart):
+            await before_restart()
+        return dict(self.result)
+
+
 class _Runtime:
     def __init__(self) -> None:
         self.status = "stopped"
@@ -254,6 +267,7 @@ class _Runtime:
         self.events: list[Any] = []
         self.fail_next = False
         self.fail_replace_at: int | None = None
+        self.fail_event_types: set[str] = set()
         self.stop_calls = 0
 
     def configure_source_recovery(self, source: Any, reconciler: Any) -> None:
@@ -283,6 +297,8 @@ class _Runtime:
         self.status = "stopped"
 
     async def deliver_evolution_event(self, event: Any) -> None:
+        if event.event_type in self.fail_event_types:
+            raise RuntimeError("notification unavailable")
         self.events.append(event)
 
 
@@ -358,9 +374,65 @@ async def test_reviewer_rejection_rolls_back_and_notifies_owner_handoff(tmp_path
     assert status["active_source_commit"] == bundled
     assert status["activation"]["status"] == "rolled_back"  # type: ignore[index]
     assert "Repair handoff:" in status["activation"]["error"]  # type: ignore[index]
+    assert [event.event_type for event in runtime.events] == [
+        "build.preparing",
+        "build.switching",
+        "promotion.failed",
+    ]
     assert runtime.events[-1].event_type == "promotion.failed"
     assert "src/opentulpa/__init__.py" in runtime.events[-1].payload["error"]
     assert status["workspace_head"] != bundled
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_restart_notifies_requesting_owner_before_and_after(
+    tmp_path: Path,
+) -> None:
+    source, _ = _seed(tmp_path)
+    runtime = _Runtime()
+    manager = _RuntimeEnvManager(
+        {
+            "status": "updated",
+            "name": "EXAMPLE_TOKEN",
+            "changed": True,
+            "restarted": True,
+            "value": "[set]",
+        }
+    )
+    service = HostEvolutionControlService(
+        runtime=runtime,  # type: ignore[arg-type]
+        workspace=_TrustedSourceWorkspace(
+            source_repository=source,
+            path=tmp_path / "control" / "source",
+            max_output_bytes=100_000,
+        ),
+        journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
+        runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+        runtime_env_file_manager=manager,  # type: ignore[arg-type]
+    )
+    await service.prepare()
+    await service.start()
+
+    result = await service.source_set_runtime_env(
+        name="EXAMPLE_TOKEN",
+        value="secret-value",
+        idempotency_key="env-update-1",
+        audit_context={
+            "tenant_id": "owner",
+            "thread_id": "thread-1",
+            "channel": "telegram",
+            "origin": '{"interface":"telegram","source_id":"worker-1"}',
+        },
+    )
+
+    assert result["status"] == "updated"
+    assert [event.event_type for event in runtime.events] == [
+        "runtime_env.restarting",
+        "runtime_env.updated",
+    ]
+    assert all(event.origin["thread_id"] == "thread-1" for event in runtime.events)
+    assert "secret-value" not in json.dumps([event.payload for event in runtime.events])
     await service.shutdown()
 
 
@@ -439,6 +511,42 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
     failure = await service.source_status()
     assert failure["active_source_commit"] == bundled
     assert failure["activation"]["status"] == "rolled_back"  # type: ignore[index]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_source_activation_does_not_restart_without_owner_notice(tmp_path: Path) -> None:
+    source, bundled = _seed(tmp_path)
+    runtime = _Runtime()
+    runtime.fail_event_types.add("build.switching")
+    service = HostEvolutionControlService(
+        runtime=runtime,  # type: ignore[arg-type]
+        workspace=_TrustedSourceWorkspace(
+            source_repository=source,
+            path=tmp_path / "control" / "source",
+            max_output_bytes=100_000,
+        ),
+        journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
+        runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+    )
+
+    async def checks() -> list[Any]:
+        return [{"name": "focused", "passed": True}]
+
+    service._run_checks = checks  # type: ignore[method-assign]
+    await service.prepare()
+    await service.start()
+    await service.source_edit(path="README.md", old_text="before", new_text="after")
+    queued = await service.source_activate(idempotency_key="notice-required")
+    await service._tasks[str(queued["activation_id"])]
+
+    status = await service.source_status()
+    assert status["active_source_commit"] == bundled
+    assert runtime.replacements == []
+    assert [event.event_type for event in runtime.events] == [
+        "build.preparing",
+        "promotion.failed",
+    ]
     await service.shutdown()
 
 

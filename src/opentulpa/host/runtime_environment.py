@@ -13,7 +13,7 @@ import shutil
 import stat
 import sys
 import sysconfig
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -608,6 +608,7 @@ class RuntimeEnvFileManager:
         value: str,
         idempotency_key: str,
         audit_context: Mapping[str, str] | None = None,
+        before_restart: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, JsonValue]:
         del audit_context
         try:
@@ -652,6 +653,22 @@ class RuntimeEnvFileManager:
                 )
 
             state = {"applied": False}
+
+            if before_restart is not None:
+                try:
+                    await before_restart()
+                except Exception as exc:
+                    return self._failure_result(
+                        safe_name,
+                        RuntimeEnvironmentError(
+                            "runtime_env_restart_notice_failed",
+                            "Runtime environment update was not started because the restart notice could not be delivered.",
+                            stage="notification",
+                        ),
+                        file_rollback_restored=True,
+                        runtime_restored=self._runtime_is_healthy(),
+                        cause=exc,
+                    )
 
             def apply_update() -> None:
                 self._write_payload(new_payload)

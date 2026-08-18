@@ -100,6 +100,7 @@ def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
     assert "secret://<id>" in OWNER_PROMPT
     assert "source_runtime_env_get" in OWNER_PROMPT
     assert "source_set_runtime_env" in OWNER_PROMPT
+    assert "second status update will arrive when it is back" in OWNER_PROMPT
     assert "secret_id" in OWNER_PROMPT
     assert "Never repeat credential values" in OWNER_PROMPT
     assert "Do not ask the owner to resend" in OWNER_PROMPT

@@ -137,13 +137,31 @@ async def test_evolution_sink_delivers_failure_to_original_owner_thread(tmp_path
 @pytest.mark.parametrize(
     ("event_type", "status", "expected_text"),
     [
-        ("build.preparing", "preparing", "Preparing a new OpenTulpa build."),
-        ("build.switching", "switching", "Switching to the new OpenTulpa build now."),
-        ("build.active", "active", "The new OpenTulpa build is active."),
+        (
+            "build.preparing",
+            "preparing",
+            "Preparing a new OpenTulpa build. I will report again before it restarts.",
+        ),
+        (
+            "build.switching",
+            "switching",
+            "OpenTulpa is restarting now. I will report again when it is back online.",
+        ),
+        ("build.active", "active", "OpenTulpa is back online. The new build is active."),
         (
             "promotion.failed",
             "failed",
-            "The new build failed; OpenTulpa kept or restored the previous build.",
+            "The new build failed, so OpenTulpa kept or restored the previous build.",
+        ),
+        (
+            "runtime_env.restarting",
+            "restarting",
+            "OpenTulpa is restarting to apply the runtime environment update. I will report again when it is back online.",
+        ),
+        (
+            "runtime_env.updated",
+            "updated",
+            "OpenTulpa is back online. The runtime environment update is active.",
         ),
     ],
 )
