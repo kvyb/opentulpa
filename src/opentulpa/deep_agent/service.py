@@ -87,6 +87,7 @@ from opentulpa.persistence.tenant_namespace import (
     tenant_store_namespace,
 )
 from opentulpa.specs import AgentSpec, AgentSpecRef, AgentSpecStore, OriginRef
+from opentulpa.specs.defaults import DEFAULT_RELEASE_REPAIR_SPEC_ID, RELEASE_REPAIR_TOOLS
 from opentulpa.tooling import TOOL_SPEC_BY_NAME, AgentRunKind
 
 logger = logging.getLogger(__name__)
@@ -2570,6 +2571,8 @@ class DeepAgentService:
             if spec.isolation == "external"
             else None
             if spec.id == "owner"
+            else frozenset(RELEASE_REPAIR_TOOLS)
+            if spec.id == DEFAULT_RELEASE_REPAIR_SPEC_ID
             else _ROUTINE_PRODUCT_TOOL_NAMES | dynamic_names
         )
         unsafe = sorted(set(names) - boundary) if boundary is not None else []

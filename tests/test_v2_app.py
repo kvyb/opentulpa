@@ -18,6 +18,8 @@ from opentulpa.api.app import create_app
 from opentulpa.bootstrap.models import IngressEnvelope, OutboxEvent
 from opentulpa.core.release_runtime import release_consumers_enabled
 from opentulpa.evolution.models import EvolutionEvent
+from opentulpa.specs import AgentSpecRef
+from opentulpa.specs.defaults import default_agent_spec_writes
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class _AsyncLifecycle:
         self.shutdown_started = shutdown_started
         self.finish_shutdown = finish_shutdown
         self.started = False
+        self.requests: list[Any] = []
 
     def healthy(self) -> bool:
         return self.started
@@ -68,6 +71,15 @@ class _AsyncLifecycle:
         self.events.append(f"recover:{self.name}")
         if self.fail_at == "recovery":
             raise RuntimeError("failed:recovery")
+
+    async def open_stream(self, request: Any) -> Any:
+        self.requests.append(request)
+
+        async def empty() -> Any:
+            if False:
+                yield None
+
+        return empty()
 
     async def shutdown(self) -> None:
         self.events.append(f"stop:{self.name}")
@@ -156,6 +168,11 @@ def _app(
         intake_draft_service=cast(Any, object()),
         schedule_service=cast(Any, object()),
         resolve_principal=principal,
+        resolve_agent_spec=lambda tenant_id, spec_id: AgentSpecRef(
+            tenant_id=tenant_id,
+            spec_id=spec_id,
+            revision=1,
+        ),
         trigger_dispatcher=cast(Any, trigger_dispatcher),
         intake_poll_dispatcher=cast(Any, intake_dispatcher),
         meta_messenger_tenant_id="tenant-a",
@@ -341,6 +358,78 @@ def test_private_evolution_event_route_requires_exact_child_identity(
     assert delivered.status_code == 204
     assert len(notifications.published) == 1
     assert notifications.published[0]["tenant_id"] == "tenant-a"
+
+
+def test_rejected_release_schedules_restricted_repair_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Notifications:
+        def publish(self, **_: Any) -> None:
+            pass
+
+    nonce = "repair-event-launch-nonce-0000"
+    token = "repair-event-owner-token-000000"
+    monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", nonce)
+    monkeypatch.setenv("OPENTULPA_OWNER_TOKEN", token)
+    app = _app([], notification_service=Notifications())
+    event = EvolutionEvent(
+        event_key="source:activation-1:rolled_back",
+        event_type="promotion.failed",
+        release_id="release-1",
+        origin={"tenant_id": "tenant-a", "correlation_id": "owner-request"},
+        payload={
+            "status": "rolled_back",
+            "review": {
+                "approved": False,
+                "summary": "One blocker remains.",
+                "findings": ["[P1] Fix the source boundary."],
+                "repair_handoff": "Repair the boundary and rerun its test.",
+            },
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/_runtime/evolution-events",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-OpenTulpa-Launch-Nonce": nonce,
+            },
+            content=event.model_dump_json(),
+        )
+        limited = client.post(
+            "/_runtime/evolution-events",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-OpenTulpa-Launch-Nonce": nonce,
+            },
+            content=event.model_copy(
+                update={
+                    "event_key": "source:activation-3:rolled_back",
+                    "origin": {
+                        "tenant_id": "tenant-a",
+                        "correlation_id": "evolution-repair:3:activation-2",
+                    },
+                }
+            ).model_dump_json(),
+        )
+
+    assert response.status_code == 204
+    assert limited.status_code == 204
+    assert len(app.state.agent_service.requests) == 1
+    request = app.state.agent_service.requests[0]
+    assert request.context.agent_spec.spec_id == "release-repair"
+    assert set(default_agent_spec_writes()["release-repair"].tools) == {
+        "source_status",
+        "source_read",
+        "source_write",
+        "source_edit",
+        "source_bash",
+        "source_activate",
+    }
+    assert request.context.correlation_id.startswith("evolution-repair:1:")
+    assert "source_activate" in request.text
+    assert "[P1] Fix the source boundary." in request.text
 
 
 def test_probation_child_rejects_private_evolution_event_delivery(

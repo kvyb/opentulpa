@@ -3,10 +3,19 @@
 from opentulpa.specs.models import AgentSpecWrite
 
 DEFAULT_OWNER_SPEC_ID = "owner"
+DEFAULT_RELEASE_REPAIR_SPEC_ID = "release-repair"
 DEFAULT_ROUTINE_SPEC_ID = "routine"
 DEFAULT_INTAKE_SPEC_ID = "intake"
 DEFAULT_OWNER_MAX_RUNTIME_SECONDS = 7_200
 DEFAULT_OWNER_MAX_MODEL_CALLS = 500
+RELEASE_REPAIR_TOOLS = (
+    "source_status",
+    "source_read",
+    "source_write",
+    "source_edit",
+    "source_bash",
+    "source_activate",
+)
 
 
 def default_agent_spec_writes() -> dict[str, AgentSpecWrite]:
@@ -24,6 +33,20 @@ def default_agent_spec_writes() -> dict[str, AgentSpecWrite]:
             memory_scope="owner",
             workspace_scope="read_write",
             allow_delegation=True,
+            max_runtime_seconds=DEFAULT_OWNER_MAX_RUNTIME_SECONDS,
+            max_model_calls=DEFAULT_OWNER_MAX_MODEL_CALLS,
+        ),
+        DEFAULT_RELEASE_REPAIR_SPEC_ID: AgentSpecWrite(
+            name="Release Repair",
+            description="Restricted automatic repair for rejected OpenTulpa releases.",
+            runtime_profile="owner",
+            model_alias="default",
+            instructions="Verify release-review blockers, repair source, test, and reactivate once.",
+            isolation="private",
+            tool_policy="allowlist",
+            tools=RELEASE_REPAIR_TOOLS,
+            memory_scope="none",
+            workspace_scope="none",
             max_runtime_seconds=DEFAULT_OWNER_MAX_RUNTIME_SECONDS,
             max_model_calls=DEFAULT_OWNER_MAX_MODEL_CALLS,
         ),
@@ -58,6 +81,8 @@ __all__ = [
     "DEFAULT_OWNER_MAX_MODEL_CALLS",
     "DEFAULT_OWNER_MAX_RUNTIME_SECONDS",
     "DEFAULT_OWNER_SPEC_ID",
+    "DEFAULT_RELEASE_REPAIR_SPEC_ID",
     "DEFAULT_ROUTINE_SPEC_ID",
+    "RELEASE_REPAIR_TOOLS",
     "default_agent_spec_writes",
 ]

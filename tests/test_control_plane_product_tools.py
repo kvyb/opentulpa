@@ -176,6 +176,7 @@ async def test_agent_spec_tools_save_activate_rollback_and_hide_host_identity(
     assert listed["status"] == "ok"
     assert {view["spec"]["id"] for view in listed["data"]} == {
         "owner",
+        "release-repair",
         "routine",
         "intake",
     }

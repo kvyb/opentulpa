@@ -104,6 +104,7 @@ def test_agent_spec_crud_activation_rollback_and_tenant_isolation(tmp_path: Path
     assert seeded.status_code == 201
     assert {spec["id"] for spec in seeded.json()["specs"]} == {
         "owner",
+        "release-repair",
         "routine",
         "intake",
     }
@@ -115,6 +116,7 @@ def test_agent_spec_crud_activation_rollback_and_tenant_isolation(tmp_path: Path
     )
     assert {profile: ref.spec_id for profile, ref in refs.items()} == {
         "owner": "owner",
+        "release-repair": "release-repair",
         "routine": "routine",
         "intake": "intake",
     }

@@ -345,13 +345,13 @@ def seed_default_agent_spec_refs(
     tenant_id: str,
     actor_id: str,
 ) -> dict[str, AgentSpecRef]:
-    """Idempotently seed one tenant and return refs keyed by runtime profile."""
+    """Idempotently seed one tenant and return refs keyed by spec ID."""
 
     specs = AgentSpecService(store).seed_defaults(
         tenant_id=tenant_id,
         actor_id=actor_id,
     )
-    return {spec.runtime_profile: spec.ref for spec in specs}
+    return {spec.id: spec.ref for spec in specs}
 
 
 __all__ = [
