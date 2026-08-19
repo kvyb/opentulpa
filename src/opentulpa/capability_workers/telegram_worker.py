@@ -500,8 +500,14 @@ class TelegramInterfaceWorker:
         """Durably accept a Telegram batch before advancing its remote cursor."""
 
         await self._ensure_bot_identity()
-        await self._deliver_undelivered_approvals()
-        await self._deliver_notifications()
+        try:
+            await self._deliver_undelivered_approvals()
+        except (AgentAPIError, TelegramAPIError) as exc:
+            logger.warning("Telegram approval delivery failed: %s", exc)
+        try:
+            await self._deliver_notifications()
+        except (AgentAPIError, TelegramAPIError) as exc:
+            logger.warning("Telegram notification delivery failed: %s", exc)
         updates = await self._telegram.get_updates(
             offset=self._state.next_update_id,
             timeout_seconds=self._poll_timeout_seconds,

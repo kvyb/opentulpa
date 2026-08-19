@@ -1145,8 +1145,7 @@ async def test_notification_ack_retries_without_redelivering_telegram_message(
     )
     agent.fail_notification_ack = True
 
-    with pytest.raises(AgentAPIError, match="ack unavailable"):
-        await worker.poll_once()
+    await worker.poll_once()
 
     assert state.notification_cursor == 3
     assert state.pending_notification_acks() == [3]
@@ -1159,6 +1158,56 @@ async def test_notification_ack_retries_without_redelivering_telegram_message(
     assert agent.notification_acks == [3]
     assert state.pending_notification_acks() == []
     assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_delivery_failure_does_not_block_inbound_updates(
+    tmp_path: Path,
+) -> None:
+    class _FailingNotificationTelegram(_Telegram):
+        async def send_message(
+            self,
+            *,
+            chat_id: int,
+            text: str,
+            reply_markup: dict[str, Any] | None = None,
+        ) -> list[int]:
+            if text == "Undeliverable notification":
+                raise TelegramAPIError("delivery rejected")
+            return await super().send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+
+    telegram = _FailingNotificationTelegram([_message(1, text="still process this")])
+    agent = _Agent()
+    agent.notifications = [
+        AgentNotification(
+            id=1,
+            kind="run.failed",
+            text="Undeliverable notification",
+            status="failed",
+            thread_id="thread-1",
+            run_id="run-1",
+            approvals=(),
+            created_at="2026-07-20T00:00:00+00:00",
+        )
+    ]
+    state = TelegramWorkerState(tmp_path / "worker.json")
+    state.pair(user_id=7, chat_id=9)
+    worker = TelegramInterfaceWorker(
+        telegram=telegram,
+        agent=agent,
+        state=state,
+        pairing_code=None,
+        poll_timeout_seconds=1,
+    )
+
+    assert await worker.poll_once() == 1
+    assert agent.starts[0]["text"] == "still process this"
+    assert state.pending_updates() == []
+    assert state.notification_cursor == 0
 
 
 @pytest.mark.asyncio

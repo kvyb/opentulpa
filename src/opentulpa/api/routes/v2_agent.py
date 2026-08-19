@@ -248,12 +248,19 @@ async def _owned_snapshot(
     if snapshot is None or snapshot.context.tenant_id != principal.tenant_id:
         raise HTTPException(status_code=404, detail="agent run not found")
     binding = principal.agent_binding
-    if binding is not None and (
-        snapshot.context.agent_spec != binding.agent_spec
-        or snapshot.context.run_kind != binding.run_kind
-        or snapshot.context.trust_class != binding.trust_class
-    ):
-        raise HTTPException(status_code=404, detail="agent run not found")
+    if binding is not None:
+        matches_binding = (
+            snapshot.context.agent_spec == binding.agent_spec
+            and snapshot.context.run_kind == binding.run_kind
+            and snapshot.context.trust_class == binding.trust_class
+        )
+        controls_background = (
+            principal.trust_class == "owner"
+            and binding.trust_class == "owner"
+            and snapshot.context.trust_class == "background"
+        )
+        if not matches_binding and not controls_background:
+            raise HTTPException(status_code=404, detail="agent run not found")
     return snapshot
 
 

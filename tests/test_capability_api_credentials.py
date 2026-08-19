@@ -306,6 +306,22 @@ def test_capability_principal_preserves_origin_and_cannot_cross_tenants(tmp_path
                 created_at="2026-07-20T00:00:00+00:00",
                 updated_at="2026-07-20T00:00:00+00:00",
             ),
+            "run_background": AgentRunSnapshot(
+                run_id="run_background",
+                context=_background_context("tenant-a"),
+                status="interrupted",
+                approvals=(
+                    AgentApproval(
+                        id="approval-background",
+                        tool_name="integration_invoke",
+                        description="Send",
+                        arguments={},
+                        allowed_decisions=("approve", "reject"),
+                    ),
+                ),
+                created_at="2026-07-20T00:00:00+00:00",
+                updated_at="2026-07-20T00:00:00+00:00",
+            ),
             "run_other": AgentRunSnapshot(
                 run_id="run_other",
                 context=other_context,
@@ -357,6 +373,13 @@ def test_capability_principal_preserves_origin_and_cannot_cross_tenants(tmp_path
     )
     assert resumed.status_code == 200
     assert service.decisions[0][0] == "run_waiting"
+    background_resumed = client.post(
+        "/v2/agent/runs/run_background/resume",
+        headers=headers,
+        json={"approval_id": "approval-background", "decision": "approve"},
+    )
+    assert background_resumed.status_code == 200
+    assert service.decisions[1][0] == "run_background"
 
     hidden = client.get("/v2/agent/runs/run_other", headers=headers)
     assert hidden.status_code == 404
@@ -386,7 +409,16 @@ def test_external_interface_uses_credential_bound_spec_kind_and_trust(tmp_path: 
     ingress_calls: list[dict[str, str]] = []
     client, service = _client(
         store,
-        _Agent(snapshots={"run_owner": owner_run}),
+        _Agent(
+            snapshots={
+                "run_owner": owner_run,
+                "run_background": AgentRunSnapshot(
+                    run_id="run_background",
+                    context=_background_context("tenant-a"),
+                    status="completed",
+                ),
+            }
+        ),
         secret_ingress=lambda **kwargs: ingress_calls.append(kwargs) or kwargs["text"],
     )
     headers = {"Authorization": f"Bearer {token}"}
@@ -423,6 +455,7 @@ def test_external_interface_uses_credential_bound_spec_kind_and_trust(tmp_path: 
         assert denied.status_code == 422
     assert len(service.requests) == 1
     assert client.get("/v2/agent/runs/run_owner", headers=headers).status_code == 404
+    assert client.get("/v2/agent/runs/run_background", headers=headers).status_code == 404
 
 
 def test_capability_route_scopes_and_revocation_fail_closed(tmp_path: Path) -> None:
@@ -558,6 +591,20 @@ def _owner_context(tenant_id: str) -> AgentRunContext:
         origin=OriginRef(interface="web", source_id="owner-web"),
         agent_spec=AgentSpecRef(tenant_id=tenant_id, spec_id="owner", revision=1),
         trust_class="owner",
+    )
+
+
+def _background_context(tenant_id: str) -> AgentRunContext:
+    return AgentRunContext(
+        tenant_id=tenant_id,
+        actor_id="scheduler",
+        thread_id="trigger:daily",
+        channel="routine",
+        run_kind="routine",
+        correlation_id="trigger:daily:1",
+        origin=OriginRef(interface="trigger", source_id="daily"),
+        agent_spec=AgentSpecRef(tenant_id=tenant_id, spec_id="routine", revision=1),
+        trust_class="background",
     )
 
 
