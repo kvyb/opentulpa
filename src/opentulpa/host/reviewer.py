@@ -17,7 +17,7 @@ from uuid import UUID
 from deepagents import create_deep_agent
 from langchain.tools import tool
 from langchain_core.callbacks import BaseCallbackHandler
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from opentulpa.deep_agent.service import (
     _before_current_run_activity,
@@ -35,33 +35,17 @@ from opentulpa.inference.service import InferenceService
 from opentulpa.logging.langfuse import redact_for_langfuse
 from opentulpa.secrets.host_key import load_or_create_host_cipher
 
-_FINDING_SEVERITY = re.compile(r"^\[(P[0-3])\]\s+\S")
 _REVIEW_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
 
 class ReleaseReviewDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    approved: bool
+    approved: StrictBool
     summary: str = Field(min_length=1, max_length=2_000)
     checks_performed: list[str] = Field(default_factory=list, max_length=30)
     findings: list[str] = Field(default_factory=list, max_length=30)
     repair_handoff: str | None = Field(default=None, min_length=1, max_length=1_500)
-
-    @model_validator(mode="after")
-    def _apply_release_threshold(self) -> ReleaseReviewDecision:
-        severities = []
-        for finding in self.findings:
-            match = _FINDING_SEVERITY.match(finding)
-            if match is None:
-                raise ValueError("release findings must start with [P0], [P1], [P2], or [P3]")
-            severities.append(match.group(1))
-        self.approved = not any(severity in {"P0", "P1"} for severity in severities)
-        if not self.approved and self.repair_handoff is None:
-            raise ValueError("rejected releases require a repair handoff")
-        if self.approved:
-            self.repair_handoff = None
-        return self
 
     def diagnostic(self) -> str:
         if self.repair_handoff is not None:

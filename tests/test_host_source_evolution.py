@@ -326,7 +326,7 @@ class _RejectingReviewer:
         return ReleaseReviewDecision(
             approved=False,
             summary="The deployed value is wrong.",
-            findings=["[P1] Expected VALUE=2 but observed VALUE=1."],
+            findings=["Expected VALUE=2 but observed VALUE=1."],
             repair_handoff="Fix VALUE in src/opentulpa/__init__.py and rerun its test.",
         )
 

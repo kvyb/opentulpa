@@ -7,7 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 import opentulpa.host.reviewer as reviewer_module
 from opentulpa.host.models import HostConfig
@@ -39,21 +39,16 @@ class _Runtime:
         return text.replace("secret-value", "[redacted]")
 
 
-def test_p0_or_p1_review_requires_repair_handoff() -> None:
-    with pytest.raises(ValueError, match="repair handoff"):
-        ReleaseReviewDecision(approved=True, summary="Code bug", findings=["[P1] Data loss"])
-
-
-def test_p2_or_p3_review_is_approved() -> None:
+def test_review_decision_accepts_reviewer_judgment_without_prefixes() -> None:
     decision = ReleaseReviewDecision(
-        approved=False,
+        approved=True,
         summary="Minor issue",
-        findings=["[P2] A non-blocking edge case"],
-        repair_handoff="This must not block the release.",
+        findings=["A non-blocking edge case", "[P1] Labels do not override approval"],
     )
 
     assert decision.approved is True
-    assert decision.repair_handoff is None
+    with pytest.raises(ValidationError):
+        ReleaseReviewDecision.model_validate({"approved": "true", "summary": "Malformed"})
 
 
 def test_reviewer_retries_transient_codex_model_calls(
