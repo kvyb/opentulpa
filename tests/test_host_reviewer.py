@@ -89,6 +89,77 @@ def test_reviewer_retries_transient_codex_model_calls(
 
 
 @pytest.mark.asyncio
+async def test_reviewer_prefers_connected_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Model:
+        id = "gpt-review"
+        reasoning_efforts = ("low", "high")
+        default_reasoning_effort = "low"
+
+    class _Inference:
+        validated: InferenceSelection | None = None
+
+        def codex_connected(self, _: str) -> bool:
+            return True
+
+        async def models(self, *_: Any) -> tuple[_Model, ...]:
+            return (_Model(),)
+
+        async def validate_selection(
+            self,
+            _: str,
+            selection: InferenceSelection,
+        ) -> InferenceSelection:
+            self.validated = selection
+            return selection
+
+    inference = _Inference()
+    monkeypatch.setattr(reviewer_module, "InferenceService", lambda **_: inference)
+    monkeypatch.setattr(reviewer_module, "load_or_create_host_cipher", lambda _: object())
+    reviewer = DeepAgentReleaseReviewer(
+        _Runtime(),  # type: ignore[arg-type]
+        runtime_data_root=tmp_path,
+    )
+    api_plan = ResolvedInferencePlan.resolve(
+        InferenceSelection(provider="api", model="api-model"),
+        preference_revision=4,
+    )
+
+    plan = await reviewer._prefer_codex_plan(  # noqa: SLF001
+        api_plan,
+        tenant_id="tenant-a",
+        api_key="api-key",
+        base_url="https://example.com/v1",
+        api_default_model="api-model",
+    )
+
+    assert plan.primary == InferenceSelection(
+        provider="codex",
+        model="gpt-review",
+        reasoning_effort="high",
+    )
+    assert plan.preference_revision == 4
+
+    codex_plan = ResolvedInferencePlan.resolve(
+        InferenceSelection(provider="codex", model="gpt-pinned", fallback_to_api=True),
+        preference_revision=5,
+    )
+    plan = await reviewer._prefer_codex_plan(  # noqa: SLF001
+        codex_plan,
+        tenant_id="tenant-a",
+        api_key="api-key",
+        base_url="https://example.com/v1",
+        api_default_model="api-model",
+    )
+
+    assert inference.validated == codex_plan.primary
+    assert plan.primary.provider == "codex"
+    assert plan.primary.fallback_to_api is False
+
+
+@pytest.mark.asyncio
 async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

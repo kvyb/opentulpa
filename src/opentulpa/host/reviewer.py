@@ -332,28 +332,42 @@ class DeepAgentReleaseReviewer:
             ),
             preference_revision=0,
         )
-        model, middleware = self._inference_runtime(
-            plan,
-            tenant_id=tenant_id,
-            api_key=config.api_key.get_secret_value(),
-            base_url=config.base_url,
-            api_default_model=config.model,
-        )
-        graph = create_deep_agent(
-            model=model,
-            name="opentulpa_release_reviewer",
-            tools=[inspect_runtime, request_runtime, run_shell],
-            system_prompt="\n\n".join(
-                (
-                    Path(__file__).with_name("reviewer_policy.md").read_text(encoding="utf-8"),
-                    Path(__file__).with_name("ponytail_skill.md").read_text(encoding="utf-8"),
-                    "# Previous-release review handoff\n"
-                    + (system_prompt.strip() or _FALLBACK_PROMPT),
-                )
-            ),
-            response_format=ReleaseReviewDecision,
-            middleware=middleware,
-        )
+        try:
+            plan = await self._prefer_codex_plan(
+                plan,
+                tenant_id=tenant_id,
+                api_key=config.api_key.get_secret_value(),
+                base_url=config.base_url,
+                api_default_model=config.model,
+            )
+            model, middleware = self._inference_runtime(
+                plan,
+                tenant_id=tenant_id,
+                api_key=config.api_key.get_secret_value(),
+                base_url=config.base_url,
+                api_default_model=config.model,
+            )
+            graph = create_deep_agent(
+                model=model,
+                name="opentulpa_release_reviewer",
+                tools=[inspect_runtime, request_runtime, run_shell],
+                system_prompt="\n\n".join(
+                    (
+                        Path(__file__).with_name("reviewer_policy.md").read_text(encoding="utf-8"),
+                        Path(__file__).with_name("ponytail_skill.md").read_text(encoding="utf-8"),
+                        "# Previous-release review handoff\n"
+                        + (system_prompt.strip() or _FALLBACK_PROMPT),
+                    )
+                ),
+                response_format=ReleaseReviewDecision,
+                middleware=middleware,
+            )
+        except BaseException as exc:
+            audit.record(
+                "review.failed",
+                {"type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
         prompt = {
             "release_id": release_id,
             "source_commit": source_commit,
@@ -388,6 +402,46 @@ class DeepAgentReleaseReviewer:
                 {"type": type(exc).__name__, "message": str(exc)},
             )
             raise
+
+    async def _prefer_codex_plan(
+        self,
+        plan: ResolvedInferencePlan,
+        *,
+        tenant_id: str,
+        api_key: str,
+        base_url: str,
+        api_default_model: str,
+    ) -> ResolvedInferencePlan:
+        inference = InferenceService(
+            db_path=self._runtime_data_root / "deepagents" / "inference.db",
+            cipher=load_or_create_host_cipher(self._runtime_data_root),
+            api_key=api_key,
+            api_base_url=base_url,
+            api_default_model=api_default_model,
+            api_reasoning_effort=self._api_reasoning_effort,
+            api_fallback_models=self._api_fallback_models,
+        )
+        if not inference.codex_connected(tenant_id):
+            return plan
+        if plan.primary.provider == "codex":
+            selection = await inference.validate_selection(tenant_id, plan.primary)
+            selection = selection.model_copy(update={"fallback_to_api": False})
+        else:
+            models = await inference.models(tenant_id, "codex")
+            if not models:
+                raise RuntimeError("release review requires an available Codex model")
+            model = models[0]
+            selection = InferenceSelection(
+                provider="codex",
+                model=model.id,
+                reasoning_effort=(
+                    "high" if "high" in model.reasoning_efforts else model.default_reasoning_effort
+                ),
+            )
+        return ResolvedInferencePlan.resolve(
+            selection,
+            preference_revision=plan.preference_revision,
+        )
 
     def _audit_log(self, review_id: str) -> _ReviewAuditLog:
         safe_id = str(review_id or "").strip()
