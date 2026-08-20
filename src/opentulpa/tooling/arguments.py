@@ -42,10 +42,6 @@ class RequiredIdempotencyArguments(ToolArguments):
     )
 
 
-class ProfileGetArguments(ToolArguments):
-    pass
-
-
 class ProfileUpdateArguments(ToolArguments):
     updates: dict[str, Any] = Field(
         min_length=1,
@@ -292,10 +288,6 @@ class ScheduleDeleteArguments(RequiredIdempotencyArguments):
     expected_revision: int = Field(ge=1)
 
 
-class AgentSpecListArguments(ToolArguments):
-    pass
-
-
 class AgentSpecSaveArguments(ToolArguments):
     spec_id: ProtocolSlug | None = None
     expected_revision: int | None = Field(default=None, ge=1)
@@ -331,10 +323,6 @@ class TriggerSpecPayload(ToolArguments):
     labels: dict[ProtocolSlug, str] = Field(default_factory=dict, max_length=100)
 
 
-class TriggerSpecListArguments(ToolArguments):
-    pass
-
-
 class TriggerSpecSaveArguments(ToolArguments):
     trigger_id: ProtocolSlug | None = None
     expected_revision: int | None = Field(default=None, ge=1)
@@ -350,10 +338,6 @@ class TriggerSpecActivateArguments(RequiredIdempotencyArguments):
 class TriggerSpecRollbackArguments(RequiredIdempotencyArguments):
     trigger_id: ProtocolSlug
     expected_active_revision: int = Field(ge=1)
-
-
-class SecretHandleListArguments(ToolArguments):
-    pass
 
 
 class SecretHandleRevokeArguments(RequiredIdempotencyArguments):
@@ -410,14 +394,6 @@ CapabilitySecretHandle = Annotated[
         pattern=r"^[a-z][a-z0-9_-]{0,127}$",
     ),
 ]
-
-
-class CapabilityListArguments(ToolArguments):
-    pass
-
-
-class CapabilitySeedBundledArguments(ToolArguments):
-    pass
 
 
 class CapabilityTestArguments(ToolArguments):
@@ -509,10 +485,6 @@ class RepositoryPublishPullRequestArguments(RequiredIdempotencyArguments):
     title: str = Field(min_length=1, max_length=256)
     body: str = Field(default="", max_length=20_000)
     draft: bool = True
-
-
-class SourceStatusArguments(ToolArguments):
-    pass
 
 
 class SourceReadArguments(ToolArguments):
@@ -618,7 +590,7 @@ class TraceGetArguments(ToolArguments):
 
 OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType(
     {
-        "profile_get": ProfileGetArguments,
+        "profile_get": ToolArguments,
         "profile_update": ProfileUpdateArguments,
         "file_search": FileSearchArguments,
         "file_get": FileGetArguments,
@@ -653,19 +625,19 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "schedule_list": ScheduleListArguments,
         "schedule_save": ScheduleSaveArguments,
         "schedule_delete": ScheduleDeleteArguments,
-        "agent_spec_list": AgentSpecListArguments,
+        "agent_spec_list": ToolArguments,
         "agent_spec_save": AgentSpecSaveArguments,
         "agent_spec_activate": AgentSpecActivateArguments,
         "agent_spec_rollback": AgentSpecRollbackArguments,
-        "trigger_spec_list": TriggerSpecListArguments,
+        "trigger_spec_list": ToolArguments,
         "trigger_spec_save": TriggerSpecSaveArguments,
         "trigger_spec_activate": TriggerSpecActivateArguments,
         "trigger_spec_rollback": TriggerSpecRollbackArguments,
-        "secret_handle_list": SecretHandleListArguments,
+        "secret_handle_list": ToolArguments,
         "secret_handle_revoke": SecretHandleRevokeArguments,
         "sandbox_ssh_diagnostic": SandboxSshDiagnosticArguments,
-        "capability_list": CapabilityListArguments,
-        "capability_seed_bundled": CapabilitySeedBundledArguments,
+        "capability_list": ToolArguments,
+        "capability_seed_bundled": ToolArguments,
         "capability_test": CapabilityTestArguments,
         "capability_activate": CapabilityActivateArguments,
         "capability_rollback": CapabilityRollbackArguments,
@@ -679,7 +651,7 @@ OPERATION_ARGUMENT_SCHEMAS: Mapping[str, type[ToolArguments]] = MappingProxyType
         "repository_status": RepositoryStatusArguments,
         "repository_close": RepositoryCloseArguments,
         "repository_publish_pr": RepositoryPublishPullRequestArguments,
-        "source_status": SourceStatusArguments,
+        "source_status": ToolArguments,
         "source_read": SourceReadArguments,
         "source_write": SourceWriteArguments,
         "source_edit": SourceEditArguments,

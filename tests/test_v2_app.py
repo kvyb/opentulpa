@@ -382,7 +382,7 @@ def test_rejected_release_schedules_restricted_repair_run(
             "review": {
                 "approved": False,
                 "summary": "One blocker remains.",
-                "findings": ["[P1] Fix the source boundary."],
+                "findings": ["Fix the source boundary.", "[P2] Add a regression test.", 3],
                 "repair_handoff": "Repair the boundary and rerun its test.",
             },
         },
@@ -429,7 +429,9 @@ def test_rejected_release_schedules_restricted_repair_run(
     }
     assert request.context.correlation_id.startswith("evolution-repair:1:")
     assert "source_activate" in request.text
-    assert "[P1] Fix the source boundary." in request.text
+    assert "Fix the source boundary." in request.text
+    assert "[P2] Add a regression test." in request.text
+    assert "\n3" not in request.text
 
 
 def test_probation_child_rejects_private_evolution_event_delivery(

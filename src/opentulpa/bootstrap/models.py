@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import StrEnum
-from typing import Literal, Self
+from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 _CONTROL_PATH_PATTERN = r"^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,200}$"
 _IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
@@ -25,36 +24,6 @@ def _utc(value: datetime, *, label: str) -> datetime:
 
 class BootstrapModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-
-class ActivationKind(StrEnum):
-    DEPLOY = "deploy"
-    ROLLBACK = "rollback"
-
-
-class ActivationStatus(StrEnum):
-    QUEUED = "queued"
-    PREPARING = "preparing"
-    STAGED = "staged"
-    DRAINING = "draining"
-    STARTING = "starting"
-    VERIFYING = "verifying"
-    PROBATION = "probation"
-    ACTIVE = "active"
-    FAILED = "failed"
-    ROLLING_BACK = "rolling_back"
-    ROLLED_BACK = "rolled_back"
-    CANCELLED = "cancelled"
-
-
-TERMINAL_ACTIVATION_STATUSES = frozenset(
-    {
-        ActivationStatus.ACTIVE,
-        ActivationStatus.FAILED,
-        ActivationStatus.ROLLED_BACK,
-        ActivationStatus.CANCELLED,
-    }
-)
 
 
 class ReleaseOrigin(BootstrapModel):
@@ -106,72 +75,6 @@ class ReleaseRecord(BootstrapModel):
         return value
 
 
-class ActivationRecord(BootstrapModel):
-    """One crash-recoverable attempt to make a release serve traffic."""
-
-    id: str = Field(
-        default_factory=lambda: f"activation_{uuid4().hex}", min_length=1, max_length=100
-    )
-    kind: ActivationKind = ActivationKind.DEPLOY
-    target_release_id: str = Field(min_length=1, max_length=100)
-    previous_release_id: str | None = Field(default=None, min_length=1, max_length=100)
-    status: ActivationStatus = ActivationStatus.QUEUED
-    revision: int = Field(default=1, ge=1)
-    lease_epoch: int | None = Field(default=None, ge=1)
-    origin: ReleaseOrigin | None = None
-    reason: str = Field(default="", max_length=4_000)
-    failure_code: str | None = Field(default=None, min_length=1, max_length=100)
-    failure_message: str | None = Field(default=None, min_length=1, max_length=2_000)
-    probation_ends_at: datetime | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-    @field_validator("created_at", "updated_at", "probation_ends_at")
-    @classmethod
-    def _timestamps_utc(cls, value: datetime | None) -> datetime | None:
-        return _utc(value, label="activation timestamp") if value is not None else None
-
-    @model_validator(mode="after")
-    def _consistent(self) -> Self:
-        if self.updated_at < self.created_at:
-            raise ValueError("activation updated_at cannot precede created_at")
-        if (self.failure_code is None) != (self.failure_message is None):
-            raise ValueError("activation failure code and message must be recorded together")
-        return self
-
-
-class BootstrapState(BootstrapModel):
-    """The one durable serving decision for this installation."""
-
-    serving_release_id: str | None = Field(default=None, min_length=1, max_length=100)
-    last_known_good_release_id: str | None = Field(default=None, min_length=1, max_length=100)
-    previous_release_id: str | None = Field(default=None, min_length=1, max_length=100)
-    active_activation_id: str | None = Field(default=None, min_length=1, max_length=100)
-    active_lease_epoch: int | None = Field(default=None, ge=1)
-    ingress_paused: bool = True
-    safe_mode: bool = False
-    updated_at: datetime = Field(default_factory=utc_now)
-
-    @field_validator("updated_at")
-    @classmethod
-    def _updated_at_utc(cls, value: datetime) -> datetime:
-        return _utc(value, label="bootstrap state updated_at")
-
-
-class ReleaseLease(BootstrapModel):
-    epoch: int = Field(ge=1)
-    release_id: str = Field(min_length=1, max_length=100)
-    activation_id: str | None = Field(default=None, min_length=1, max_length=100)
-    status: Literal["active", "revoked"] = "active"
-    issued_at: datetime = Field(default_factory=utc_now)
-    revoked_at: datetime | None = None
-
-    @field_validator("issued_at", "revoked_at")
-    @classmethod
-    def _lease_timestamps_utc(cls, value: datetime | None) -> datetime | None:
-        return _utc(value, label="lease timestamp") if value is not None else None
-
-
 class IngressEnvelope(BootstrapModel):
     id: str = Field(
         default_factory=lambda: f"ingress_{uuid4().hex}", min_length=1, max_length=100
@@ -212,52 +115,6 @@ class OutboxEvent(BootstrapModel):
         return _utc(value, label="outbox timestamp") if value is not None else None
 
 
-class ReleaseLaunchContext(BootstrapModel):
-    mode: Literal["staging", "production"]
-    lease_epoch: int | None = Field(default=None, ge=1)
-    secrets_enabled: bool = False
-    ingress_enabled: bool = False
-
-    @model_validator(mode="after")
-    def _production_requires_a_lease(self) -> Self:
-        if self.mode == "production" and self.lease_epoch is None:
-            raise ValueError("production launch requires a lease epoch")
-        if self.mode == "staging" and (
-            self.lease_epoch is not None or self.secrets_enabled or self.ingress_enabled
-        ):
-            raise ValueError("staging cannot receive a production lease, secrets, or ingress")
-        return self
-
-
-class PreparedRelease(BootstrapModel):
-    release_id: str = Field(min_length=1, max_length=100)
-    artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    token: str = Field(min_length=1, max_length=500)
-
-
-class RunningRelease(BootstrapModel):
-    release_id: str = Field(min_length=1, max_length=100)
-    instance_id: str = Field(min_length=1, max_length=200)
-    mode: Literal["staging", "production"]
-    lease_epoch: int | None = Field(default=None, ge=1)
-    endpoint: str | None = Field(default=None, pattern=r"^http://127\.0\.0\.1:[0-9]{1,5}$")
-    control_token: str | None = Field(
-        default=None,
-        min_length=32,
-        max_length=200,
-        pattern=r"^[A-Za-z0-9_-]+$",
-        exclude=True,
-        repr=False,
-    )
-
-    @field_validator("endpoint")
-    @classmethod
-    def _endpoint_is_loopback_port(cls, value: str | None) -> str | None:
-        if value is not None and not 1 <= int(value.rsplit(":", 1)[1]) <= 65_535:
-            raise ValueError("release endpoint port is invalid")
-        return value
-
-
 class ReleaseHealth(BootstrapModel):
     healthy: bool
     release_id: str = Field(min_length=1, max_length=100)
@@ -272,20 +129,11 @@ class DrainResult(BootstrapModel):
 
 
 __all__ = [
-    "ActivationKind",
-    "ActivationRecord",
-    "ActivationStatus",
-    "BootstrapState",
     "DrainResult",
     "IngressEnvelope",
     "OutboxEvent",
-    "PreparedRelease",
     "ReleaseHealth",
-    "ReleaseLaunchContext",
-    "ReleaseLease",
     "ReleaseOrigin",
     "ReleaseRecord",
-    "RunningRelease",
-    "TERMINAL_ACTIVATION_STATUSES",
     "utc_now",
 ]
