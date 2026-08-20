@@ -140,6 +140,7 @@ async def test_reviewer_prefers_connected_codex(
         model="gpt-review",
         reasoning_effort="high",
     )
+    assert inference.validated == plan.primary
     assert plan.preference_revision == 4
 
     codex_plan = ResolvedInferencePlan.resolve(
@@ -157,6 +158,41 @@ async def test_reviewer_prefers_connected_codex(
     assert inference.validated == codex_plan.primary
     assert plan.primary.provider == "codex"
     assert plan.primary.fallback_to_api is False
+
+    class _DisconnectedInference:
+        def codex_connected(self, _: str) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        reviewer_module,
+        "InferenceService",
+        lambda **_: _DisconnectedInference(),
+    )
+    disconnected = DeepAgentReleaseReviewer(
+        _Runtime(),  # type: ignore[arg-type]
+        runtime_data_root=tmp_path,
+    )
+
+    assert (
+        await disconnected._prefer_codex_plan(  # noqa: SLF001
+            api_plan,
+            tenant_id="tenant-b",
+            api_key="api-key",
+            base_url="https://example.com/v1",
+            api_default_model="api-model",
+        )
+        == api_plan
+    )
+    plan = await disconnected._prefer_codex_plan(  # noqa: SLF001
+        codex_plan,
+        tenant_id="tenant-b",
+        api_key="api-key",
+        base_url="https://example.com/v1",
+        api_default_model="api-model",
+    )
+
+    assert plan.primary.provider == "api"
+    assert plan.primary.model == "api-model"
 
 
 @pytest.mark.asyncio

@@ -422,10 +422,18 @@ class DeepAgentReleaseReviewer:
             api_fallback_models=self._api_fallback_models,
         )
         if not inference.codex_connected(tenant_id):
-            return plan
+            if plan.primary.provider == "api":
+                return plan
+            return ResolvedInferencePlan.resolve(
+                InferenceSelection(
+                    provider="api",
+                    model=api_default_model,
+                    reasoning_effort=self._api_reasoning_effort,
+                ),
+                preference_revision=plan.preference_revision,
+            )
         if plan.primary.provider == "codex":
-            selection = await inference.validate_selection(tenant_id, plan.primary)
-            selection = selection.model_copy(update={"fallback_to_api": False})
+            selection = plan.primary
         else:
             models = await inference.models(tenant_id, "codex")
             if not models:
@@ -438,6 +446,8 @@ class DeepAgentReleaseReviewer:
                     "high" if "high" in model.reasoning_efforts else model.default_reasoning_effort
                 ),
             )
+        selection = await inference.validate_selection(tenant_id, selection)
+        selection = selection.model_copy(update={"fallback_to_api": False})
         return ResolvedInferencePlan.resolve(
             selection,
             preference_revision=plan.preference_revision,
