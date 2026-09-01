@@ -11,6 +11,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
@@ -115,18 +116,30 @@ def _mount_parent_arguments(destinations: Iterable[str]) -> list[str]:
     return arguments
 
 
-def _strong_sandbox_tools() -> tuple[Path, Path, Path] | str:
+def _strong_sandbox_tools() -> tuple[Path, Path, Path, Path] | str:
     if platform.system() != "Linux":
         return "strong sandbox requires Linux namespaces"
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return "strong sandbox requires a root host supervisor"
-    resolved: list[Path] = []
+    reaper = Path(sys.executable).resolve()
+    try:
+        metadata = reaper.lstat()
+    except OSError:
+        return "strong sandbox could not inspect its Python executable"
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or not os.access(reaper, os.X_OK)
+    ):
+        return "strong sandbox requires a root-owned immutable Python executable"
+    resolved = [reaper]
     for name in ("setpriv", "bwrap", "prlimit"):
         path, reason = _trusted_root_executable(name)
         if reason is not None or path is None:
             return reason or f"strong sandbox requires {name}"
         resolved.append(path)
-    return resolved[0], resolved[1], resolved[2]
+    return resolved[0], resolved[1], resolved[2], resolved[3]
 
 
 def strong_sandbox_unavailable_reason(*, probe: bool = True) -> str | None:
@@ -135,10 +148,11 @@ def strong_sandbox_unavailable_reason(*, probe: bool = True) -> str | None:
     tools = _strong_sandbox_tools()
     if isinstance(tools, str):
         return tools
-    setpriv, bwrap, prlimit = tools
+    reaper, setpriv, bwrap, prlimit = tools
     if not probe:
         return None
     probe_argv = _build_bubblewrap_argv(
+        reaper=reaper,
         setpriv=setpriv,
         bwrap=bwrap,
         prlimit=prlimit,
@@ -174,6 +188,7 @@ def strong_sandbox_unavailable_reason(*, probe: bool = True) -> str | None:
 
 def _build_bubblewrap_argv(
     *,
+    reaper: Path,
     setpriv: Path,
     bwrap: Path,
     prlimit: Path,
@@ -192,6 +207,11 @@ def _build_bubblewrap_argv(
     if not command or any(not value or "\x00" in value for value in command):
         raise ValueError("sandbox command is invalid")
     argv = [
+        str(reaper),
+        "-P",
+        "-m",
+        "opentulpa.evolution.process",
+        "--",
         str(bwrap),
         "--die-with-parent",
         "--new-session",
@@ -964,7 +984,7 @@ class CandidateProcessBackend(CandidateContainerBackend):
         tools = _strong_sandbox_tools()
         if isinstance(tools, str):
             raise RuntimeError(tools)
-        self._setpriv, self._bwrap, self._prlimit = tools
+        self._reaper, self._setpriv, self._bwrap, self._prlimit = tools
         self._process_uid = uid
         self._process_gid = gid
         self._read_only_mounts = tuple(
@@ -1032,6 +1052,7 @@ class CandidateProcessBackend(CandidateContainerBackend):
         memory_bytes = _resource_bytes(self._policy.memory_limit)
         file_bytes = self._policy.max_file_bytes
         argv = _build_bubblewrap_argv(
+            reaper=self._reaper,
             setpriv=self._setpriv,
             bwrap=self._bwrap,
             prlimit=self._prlimit,

@@ -252,7 +252,6 @@ class SandboxWorkerSupervisor:
             "PORT": self._config.base_url.split(":", 2)[2].split("/", 1)[0],
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "PYTHONPATH": str(self._project_root / "src"),
             "OPENTULPA_SANDBOX_RPC_TOKEN": self._config.token,
             "OPENTULPA_SANDBOX_WORKER_ROOT": str(root),
             "OPENTULPA_SANDBOX_MAX_OUTPUT_BYTES": str(self._settings.sandbox_max_output_bytes),

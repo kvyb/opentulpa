@@ -56,6 +56,7 @@ def test_sandbox_supervisor_worker_environment_excludes_app_secrets(
     }
     for name, value in secret_env.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PYTHONPATH", "/untrusted/live/source")
     monkeypatch.delenv("OPENTULPA_SANDBOX_RPC_URL", raising=False)
     monkeypatch.delenv("OPENTULPA_SANDBOX_RPC_TOKEN", raising=False)
 
@@ -67,6 +68,7 @@ def test_sandbox_supervisor_worker_environment_excludes_app_secrets(
     environment = supervisor._worker_environment()  # noqa: SLF001
 
     assert "OPENTULPA_SANDBOX_RPC_TOKEN" in environment
+    assert "PYTHONPATH" not in environment
     assert environment["OPENTULPA_SANDBOX_WORKER_ROOT"] == str(tmp_path / "data" / "sandbox_worker")
     for name, value in secret_env.items():
         assert name not in environment

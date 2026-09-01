@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -102,6 +104,38 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
             process.kill()
         except OSError:
             return
+
+
+def _run_as_subreaper(argv: Sequence[str]) -> int:
+    if not argv or not sys.platform.startswith("linux"):
+        return 127
+    try:
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+            return 127
+    except (AttributeError, OSError):
+        return 127
+    process = subprocess.Popen(list(argv))
+    returncode: int | None = None
+    while True:
+        try:
+            pid, status = os.wait()
+        except ChildProcessError:
+            break
+        if pid == process.pid:
+            returncode = os.waitstatus_to_exitcode(status)
+            process.returncode = returncode
+    return returncode if returncode is not None else 127
+
+
+def _main() -> None:
+    argv = sys.argv[1:]
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    raise SystemExit(_run_as_subreaper(argv))
+
+
+if __name__ == "__main__":
+    _main()
 
 
 __all__ = ["BoundedProcessResult", "run_bounded_process"]

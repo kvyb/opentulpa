@@ -127,6 +127,7 @@ def test_strong_process_command_has_only_explicit_mounts_and_private_namespaces(
     )
 
     argv = sandbox_module._build_bubblewrap_argv(  # noqa: SLF001
+        reaper=Path("/opt/opentulpa/bin/python"),
         setpriv=Path("/usr/bin/setpriv"),
         bwrap=Path("/usr/bin/bwrap"),
         prlimit=Path("/usr/bin/prlimit"),
@@ -143,7 +144,14 @@ def test_strong_process_command_has_only_explicit_mounts_and_private_namespaces(
         cpu_seconds=30,
     )
 
-    assert argv[0] == "/usr/bin/bwrap"
+    assert argv[:6] == [
+        "/opt/opentulpa/bin/python",
+        "-P",
+        "-m",
+        "opentulpa.evolution.process",
+        "--",
+        "/usr/bin/bwrap",
+    ]
     assert {
         "--unshare-pid",
         "--unshare-net",
@@ -159,7 +167,7 @@ def test_strong_process_command_has_only_explicit_mounts_and_private_namespaces(
         "/dev/shm",
         "--tmpfs",
     ]
-    command_separator = argv.index("--")
+    command_separator = argv.index("--", 6)
     assert argv[command_separator + 1 : command_separator + 10] == [
         "/usr/bin/setpriv",
         "--reuid=65533",
@@ -203,6 +211,7 @@ def test_bubblewrap_rejects_noncanonical_mount_destinations(
 ) -> None:
     with pytest.raises(ValueError, match="destination"):
         sandbox_module._build_bubblewrap_argv(  # noqa: SLF001
+            reaper=Path("/opt/opentulpa/bin/python"),
             setpriv=Path("/usr/bin/setpriv"),
             bwrap=Path("/usr/bin/bwrap"),
             prlimit=Path("/usr/bin/prlimit"),
@@ -222,6 +231,7 @@ def test_bubblewrap_rejects_noncanonical_mount_destinations(
 
 def test_bubblewrap_does_not_recreate_system_mount_parents(tmp_path: Path) -> None:
     argv = sandbox_module._build_bubblewrap_argv(  # noqa: SLF001
+        reaper=Path("/opt/opentulpa/bin/python"),
         setpriv=Path("/usr/bin/setpriv"),
         bwrap=Path("/usr/bin/bwrap"),
         prlimit=Path("/usr/bin/prlimit"),
@@ -238,7 +248,7 @@ def test_bubblewrap_does_not_recreate_system_mount_parents(tmp_path: Path) -> No
         cpu_seconds=30,
     )
 
-    setup = argv[: argv.index("--")]
+    setup = argv[5 : argv.index("--", 6)]
     assert ("--dir", "/usr/local") not in zip(setup, setup[1:], strict=False)
 
 
