@@ -110,6 +110,41 @@ async def test_trusted_local_candidate_shell_cancellation_stops_command(
     assert not (candidate / "cancelled.txt").exists()
 
 
+def test_strong_sandbox_keeps_trusted_venv_python_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "python-real"
+    target.write_text("", encoding="utf-8")
+    target.chmod(0o500)
+    reaper = tmp_path / "venv" / "bin" / "python"
+    reaper.parent.mkdir(parents=True)
+    reaper.symlink_to(target)
+    real_lstat = Path.lstat
+
+    def root_owned_lstat(path: Path) -> Any:
+        metadata = real_lstat(path)
+        if path == target:
+            return type("Metadata", (), {"st_mode": metadata.st_mode, "st_uid": 0})()
+        return metadata
+
+    monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(sandbox_module.os, "access", lambda *_: True)
+    monkeypatch.setattr(sandbox_module.sys, "executable", str(reaper))
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+    monkeypatch.setattr(
+        sandbox_module,
+        "_trusted_root_executable",
+        lambda name: (Path(f"/usr/bin/{name}"), None),
+    )
+
+    tools = sandbox_module._strong_sandbox_tools()  # noqa: SLF001
+
+    assert not isinstance(tools, str)
+    assert tools[0] == reaper
+
+
 def test_strong_process_command_has_only_explicit_mounts_and_private_namespaces(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

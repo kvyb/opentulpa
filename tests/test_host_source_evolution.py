@@ -98,10 +98,13 @@ async def test_source_activation_rejects_history_that_drops_active_release(
     tree = _git(workspace.path, "rev-parse", "HEAD^{tree}")
     divergent = _git(workspace.path, "commit-tree", tree, "-m", "divergent history")
     _git(workspace.path, "reset", "--hard", divergent)
+    workspace.write("README.md", "uncommitted divergent work\n")
 
     with pytest.raises(SourceEvolutionError, match="preserve the active release history"):
         await service.source_activate(idempotency_key="drop-active-history")
 
+    assert workspace.head() == divergent
+    assert workspace.changes()
     assert (await service.source_status())["active_source_commit"] == bundled
     await service.shutdown()
 

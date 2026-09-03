@@ -121,13 +121,15 @@ def _strong_sandbox_tools() -> tuple[Path, Path, Path, Path] | str:
         return "strong sandbox requires Linux namespaces"
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return "strong sandbox requires a root host supervisor"
-    reaper = Path(sys.executable).resolve()
+    reaper = Path(sys.executable)
     try:
-        metadata = reaper.lstat()
+        resolved_reaper = reaper.resolve(strict=True)
+        metadata = resolved_reaper.lstat()
     except OSError:
         return "strong sandbox could not inspect its Python executable"
     if (
-        not stat.S_ISREG(metadata.st_mode)
+        not reaper.is_absolute()
+        or not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid != 0
         or stat.S_IMODE(metadata.st_mode) & 0o022
         or not os.access(reaper, os.X_OK)

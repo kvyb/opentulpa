@@ -1200,9 +1200,16 @@ class HostEvolutionControlService:
                 raise SourceEvolutionError(
                     "the previous controller update must finish before another activation"
                 )
-            commit, changed = await asyncio.to_thread(self._workspace.commit, message)
             state = await asyncio.to_thread(self._journal.state)
             active = await asyncio.to_thread(self._journal.release, state["active_release_id"])
+            if active is not None:
+                current_head = await asyncio.to_thread(self._workspace.head)
+                await asyncio.to_thread(
+                    self._workspace.require_descendant,
+                    active["source_commit"],
+                    current_head,
+                )
+            commit, changed = await asyncio.to_thread(self._workspace.commit, message)
             if active is not None and active["source_commit"] == commit:
                 return {
                     "status": "already_active",
