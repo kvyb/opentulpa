@@ -274,15 +274,17 @@ class DeepAgentDeploymentSupervisor:
             """Inspect deployment state and recent redacted application logs."""
 
             error = str(self._runtime.error or "").strip()
+            live_source = getattr(self._runtime, "live_source", None)
             return {
                 "status": self._runtime.status,
                 "error": self._runtime.redact(error) if error else None,
+                "source_commit": getattr(live_source, "source_commit", None),
                 "logs": [entry.model_dump(mode="json") for entry in self._runtime.logs()[-200:]],
             }
 
         @tool
         async def probe_runtime(
-            path: Literal["/healthz", "/agent/healthz", "/_runtime/identity"],
+            path: Literal["/healthz", "/agent/healthz"],
         ) -> dict[str, Any]:
             """Run one allowlisted authenticated read-only deployment probe."""
 

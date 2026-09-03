@@ -283,8 +283,9 @@ async def test_supervisor_is_bounded_redacted_and_read_only(
         "probe_runtime",
     }
     probe = next(tool for tool in captured["tools"] if tool.name == "probe_runtime")
-    with pytest.raises(ValidationError):
-        await probe.ainvoke({"path": "/v2/files"})
+    for path in ("/v2/files", "/_runtime/identity"):
+        with pytest.raises(ValidationError):
+            await probe.ainvoke({"path": path})
     audit_path = tmp_path / "release_reviews" / "activation-1.jsonl"
     audit = audit_path.read_text(encoding="utf-8")
     events = [json.loads(line)["event"] for line in audit.splitlines()]
