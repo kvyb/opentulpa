@@ -212,7 +212,7 @@ class BootstrapNotificationSink:
 
 def _evolution_text(event_type: str, payload: dict[str, Any]) -> str:
     activation_id = str(payload.get("activation_id") or "").strip()
-    label = f"Activation {activation_id[:12]}" if activation_id else "The deployment"
+    label = f"Activation {activation_id}" if activation_id else "The deployment"
     if event_type == "build.preparing":
         return f"{label} is queued and the deployment host is preparing the new build."
     if event_type == "build.switching":

@@ -227,7 +227,7 @@ async def test_evolution_failure_names_activation_phase_and_reason(tmp_path: Pat
         consumer_id="web:owner",
     )[0]
     assert notification.text == (
-        "Activation activation-1 failed during runtime switch: runtime readiness timed out. "
+        "Activation activation-1234567890 failed during runtime switch: runtime readiness timed out. "
         "OpenTulpa kept or restored the previous build."
     )
 
