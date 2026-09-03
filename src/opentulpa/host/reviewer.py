@@ -298,7 +298,12 @@ class DeepAgentDeploymentSupervisor:
         async def run_shell(command: str, timeout_seconds: int = 300) -> dict[str, Any]:
             """Run bounded host diagnostics from / using a scrubbed environment."""
 
-            return await asyncio.to_thread(self._run_shell, command, timeout_seconds)
+            abort = threading.Event()
+            try:
+                return await asyncio.to_thread(self._run_shell, command, timeout_seconds, abort)
+            except asyncio.CancelledError:
+                abort.set()
+                raise
 
         plan = inference_plan or ResolvedInferencePlan.resolve(
             InferenceSelection(
@@ -378,7 +383,12 @@ class DeepAgentDeploymentSupervisor:
             )
             raise
 
-    def _run_shell(self, command: str, timeout_seconds: int) -> dict[str, Any]:
+    def _run_shell(
+        self,
+        command: str,
+        timeout_seconds: int,
+        abort_event: threading.Event,
+    ) -> dict[str, Any]:
         safe_command = str(command or "").strip()
         if not safe_command or "\x00" in safe_command or len(safe_command) > 100_000:
             return {"ok": False, "error": "shell command is invalid"}
@@ -398,8 +408,9 @@ class DeepAgentDeploymentSupervisor:
             ("/bin/sh", "-lc", safe_command),
             cwd=Path("/"),
             env=environment,
-            timeout_seconds=max(1, min(int(timeout_seconds), 600)),
+            timeout_seconds=max(1, min(int(timeout_seconds), self._timeout_seconds)),
             max_output_bytes=500_000,
+            abort_event=abort_event,
         )
         return {
             "ok": result.returncode == 0 and not result.timed_out,
