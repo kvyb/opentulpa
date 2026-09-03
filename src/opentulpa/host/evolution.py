@@ -679,6 +679,18 @@ class _TrustedSourceWorkspace:
         if self.head() != _commit(source_commit) or self.changes():
             raise SourceEvolutionError("trusted source changed after activation was requested")
 
+    def require_descendant(self, ancestor_commit: str, source_commit: str) -> None:
+        result = _git(
+            self.path,
+            "merge-base",
+            "--is-ancestor",
+            _commit(ancestor_commit),
+            _commit(source_commit),
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SourceEvolutionError("new source must preserve the active release history")
+
     def commit(self, message: str) -> tuple[str, bool]:
         safe_message = " ".join(str(message or "").split())[:500] or "OpenTulpa self-update"
         self._validate()
@@ -1198,6 +1210,12 @@ class HostEvolutionControlService:
                     "source_commit": commit,
                     "committed": changed,
                 }
+            if active is not None:
+                await asyncio.to_thread(
+                    self._workspace.require_descendant,
+                    active["source_commit"],
+                    commit,
+                )
             target = await asyncio.to_thread(self._journal.release_for_commit, commit)
             request_hash = self._request_hash(
                 kind="activate",
@@ -1512,6 +1530,29 @@ class HostEvolutionControlService:
                                 "source activation rollback could not restore the previous runtime; "
                                 "activation remains pending"
                             ) from (rollback_error or exc)
+                        failure_message = self._safe_error(exc)
+                        if operation["kind"] == "activate" and self._supervisor is not None:
+                            try:
+                                report = await self._supervise_deployment(
+                                    operation=operation,
+                                    target=target,
+                                    failure_context={
+                                        "phase": failure_phase,
+                                        "message": failure_message,
+                                        "checks": checks,
+                                    },
+                                )
+                                supervision = {
+                                    "status": "completed",
+                                    **report.model_dump(mode="json"),
+                                }
+                            except Exception:
+                                supervision = {
+                                    "status": "unavailable",
+                                    "summary": "Advisory failure investigation was unavailable.",
+                                    "checks_performed": [],
+                                    "findings": [],
+                                }
                         result = {
                             "status": "rolled_back" if restored else "failed",
                             "activation_id": activation_id,
@@ -1523,8 +1564,8 @@ class HostEvolutionControlService:
                             "checks": checks,
                             **({"supervision": supervision} if supervision is not None else {}),
                             "failure_phase": failure_phase,
-                            "failure_message": self._safe_error(exc),
-                            "error": self._safe_error(exc),
+                            "failure_message": failure_message,
+                            "error": failure_message,
                         }
                         operation = await asyncio.to_thread(
                             self._journal.complete_failure,
@@ -1542,6 +1583,7 @@ class HostEvolutionControlService:
         *,
         operation: Mapping[str, Any],
         target: Mapping[str, Any],
+        failure_context: Mapping[str, Any] | None = None,
     ) -> DeploymentSupervisionReport:
         supervisor = self._supervisor
         if supervisor is None:
@@ -1557,6 +1599,7 @@ class HostEvolutionControlService:
             release_id=str(target["id"]),
             source_commit=str(target["source_commit"]),
             review_instructions=str(operation.get("review_instructions") or ""),
+            failure_context=failure_context,
             inference_plan=plan,
             tenant_id=str(operation["tenant_id"]),
         )

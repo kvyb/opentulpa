@@ -389,6 +389,7 @@ def test_failed_deployment_schedules_bounded_repair_and_reports_progress(
                 "status": "completed",
                 "summary": "One observation remains.",
                 "findings": ["Fix the source boundary.", "[P2] Add a regression test.", 3],
+                "repair_handoff": "Inspect candidate startup logs before editing.",
             },
         },
     )
@@ -438,6 +439,7 @@ def test_failed_deployment_schedules_bounded_repair_and_reports_progress(
     assert "source activation check python.compile failed" in request.text
     assert "Fix the source boundary." in request.text
     assert "[P2] Add a regression test." in request.text
+    assert "Repair handoff: Inspect candidate startup logs before editing." in request.text
     assert "\n3" not in request.text
     kinds = [item["notification"].kind for item in notifications.published]
     assert kinds == [

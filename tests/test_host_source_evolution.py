@@ -77,6 +77,35 @@ def test_trusted_workspace_persists_direct_edits_and_imports_exact_commit(
     assert reopened.head() == commit
 
 
+@pytest.mark.asyncio
+async def test_source_activation_rejects_history_that_drops_active_release(
+    tmp_path: Path,
+) -> None:
+    source, bundled = _seed(tmp_path)
+    workspace = _TrustedSourceWorkspace(
+        source_repository=source,
+        path=tmp_path / "control" / "source",
+        max_output_bytes=100_000,
+    )
+    service = HostEvolutionControlService(
+        runtime=_Runtime(),  # type: ignore[arg-type]
+        workspace=workspace,
+        journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
+        runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
+    )
+    await service.prepare()
+    await service.start()
+    tree = _git(workspace.path, "rev-parse", "HEAD^{tree}")
+    divergent = _git(workspace.path, "commit-tree", tree, "-m", "divergent history")
+    _git(workspace.path, "reset", "--hard", divergent)
+
+    with pytest.raises(SourceEvolutionError, match="preserve the active release history"):
+        await service.source_activate(idempotency_key="drop-active-history")
+
+    assert (await service.source_status())["active_source_commit"] == bundled
+    await service.shutdown()
+
+
 @pytest.mark.parametrize(
     "command",
     (
@@ -323,10 +352,24 @@ class _ControllerUpdater:
 class _ConcernedSupervisor:
     async def observe(self, **kwargs: Any) -> DeploymentSupervisionReport:
         assert kwargs["review_instructions"] == "Verify VALUE in deployment."
+        assert kwargs["failure_context"] is None
         assert kwargs["inference_plan"].primary.model == "owner-model"
         return DeploymentSupervisionReport(
             summary="The deployment passed host checks.",
             findings=["An advisory concern remains."],
+        )
+
+
+class _DiagnosticSupervisor:
+    def __init__(self) -> None:
+        self.failure_contexts: list[dict[str, Any] | None] = []
+
+    async def observe(self, **kwargs: Any) -> DeploymentSupervisionReport:
+        self.failure_contexts.append(kwargs["failure_context"])
+        return DeploymentSupervisionReport(
+            summary="Deployment evidence inspected.",
+            findings=["Runtime replacement failed."],
+            repair_handoff="Inspect replacement startup logs.",
         )
 
 
@@ -452,6 +495,7 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
     source, bundled = _seed(tmp_path)
     runtime = _Runtime()
     updater = _ControllerUpdater()
+    supervisor = _DiagnosticSupervisor()
     service = HostEvolutionControlService(
         runtime=runtime,  # type: ignore[arg-type]
         workspace=_TrustedSourceWorkspace(
@@ -462,6 +506,7 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
         journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
         runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
         controller_updater=updater,  # type: ignore[arg-type]
+        supervisor=supervisor,  # type: ignore[arg-type]
     )
 
     async def checks() -> list[Any]:
@@ -522,6 +567,15 @@ async def test_source_service_activates_rolls_back_and_replays(tmp_path: Path) -
     failure = await service.source_status()
     assert failure["active_source_commit"] == bundled
     assert failure["activation"]["status"] == "rolled_back"  # type: ignore[index]
+    supervision = failure["activation"]["supervision"]  # type: ignore[index]
+    assert supervision["status"] == "completed"  # type: ignore[index]
+    assert supervision["repair_handoff"] == "Inspect replacement startup logs."  # type: ignore[index]
+    assert supervisor.failure_contexts[0] is None
+    assert supervisor.failure_contexts[1] == {
+        "phase": "runtime switch",
+        "message": "source activation failed",
+        "checks": [{"name": "focused", "passed": True}],
+    }
     await service.shutdown()
 
 

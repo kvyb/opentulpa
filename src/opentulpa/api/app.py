@@ -268,11 +268,15 @@ def _register_private_runtime_routes(
         repair_correlation = f"evolution-repair:{repair_round}:{repair_id}"
         advisory = event.payload.get("supervision") or event.payload.get("review")
         findings = advisory.get("findings") if isinstance(advisory, dict) else None
-        extra = (
-            "\n".join(str(finding)[:4_000] for finding in findings if isinstance(finding, str))
+        evidence = (
+            [str(finding)[:4_000] for finding in findings if isinstance(finding, str)]
             if isinstance(findings, list)
-            else ""
+            else []
         )
+        handoff = advisory.get("repair_handoff") if isinstance(advisory, dict) else None
+        if isinstance(handoff, str) and handoff.strip():
+            evidence.append(f"Repair handoff: {handoff[:4_000]}")
+        extra = "\n".join(evidence)
         try:
             stream = await agent_service.open_stream(
                 AgentRunRequest(

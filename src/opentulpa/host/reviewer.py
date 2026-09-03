@@ -27,6 +27,7 @@ from opentulpa.deep_agent.service import (
     _with_deepagents_context_budget,
     build_openrouter_chat_model,
 )
+from opentulpa.evolution.process import run_bounded_process
 from opentulpa.host.runtime import RuntimeSupervisor
 from opentulpa.inference.codex import is_transient as is_codex_transient
 from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
@@ -45,6 +46,7 @@ class DeploymentSupervisionReport(BaseModel):
     summary: str = Field(min_length=1, max_length=2_000)
     checks_performed: list[str] = Field(default_factory=list, max_length=30)
     findings: list[str] = Field(default_factory=list, max_length=30)
+    repair_handoff: str | None = Field(default=None, min_length=1, max_length=1_500)
 
 
 class _ReviewAuditLog(BaseCallbackHandler):
@@ -252,6 +254,7 @@ class DeepAgentDeploymentSupervisor:
         release_id: str,
         source_commit: str,
         review_instructions: str,
+        failure_context: Mapping[str, Any] | None = None,
         inference_plan: ResolvedInferencePlan | None,
         tenant_id: str,
     ) -> DeploymentSupervisionReport:
@@ -266,6 +269,7 @@ class DeepAgentDeploymentSupervisor:
                 "release_id": release_id,
                 "source_commit": source_commit,
                 "review_instructions": review_instructions,
+                "failure_context": failure_context,
             },
         )
 
@@ -289,6 +293,12 @@ class DeepAgentDeploymentSupervisor:
             """Run one allowlisted authenticated read-only deployment probe."""
 
             return await self._runtime.review_request(method="GET", path=path)
+
+        @tool
+        async def run_shell(command: str, timeout_seconds: int = 300) -> dict[str, Any]:
+            """Run bounded host diagnostics from / using a scrubbed environment."""
+
+            return await asyncio.to_thread(self._run_shell, command, timeout_seconds)
 
         plan = inference_plan or ResolvedInferencePlan.resolve(
             InferenceSelection(
@@ -317,7 +327,7 @@ class DeepAgentDeploymentSupervisor:
                 graph = create_deep_agent(
                     model=model,
                     name="opentulpa_deployment_supervisor",
-                    tools=[inspect_runtime, probe_runtime],
+                    tools=[inspect_runtime, probe_runtime, run_shell],
                     system_prompt="\n\n".join(
                         (
                             Path(__file__)
@@ -335,6 +345,7 @@ class DeepAgentDeploymentSupervisor:
                     "release_id": release_id,
                     "source_commit": source_commit,
                     "review_instructions": review_instructions,
+                    "failure_context": failure_context,
                     "inference_plan": plan.model_dump(mode="json"),
                 }
                 state = await graph.ainvoke(
@@ -366,6 +377,40 @@ class DeepAgentDeploymentSupervisor:
                 {"type": type(exc).__name__, "message": str(exc)},
             )
             raise
+
+    def _run_shell(self, command: str, timeout_seconds: int) -> dict[str, Any]:
+        safe_command = str(command or "").strip()
+        if not safe_command or "\x00" in safe_command or len(safe_command) > 100_000:
+            return {"ok": False, "error": "shell command is invalid"}
+        environment = {
+            key: os.environ[key]
+            for key in ("LANG", "LC_ALL", "PATH", "TERM", "TMPDIR")
+            if key in os.environ
+        }
+        environment.update(
+            {
+                "HOME": "/tmp",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+            }
+        )
+        result = run_bounded_process(
+            ("/bin/sh", "-lc", safe_command),
+            cwd=Path("/"),
+            env=environment,
+            timeout_seconds=max(1, min(int(timeout_seconds), 600)),
+            max_output_bytes=500_000,
+        )
+        return {
+            "ok": result.returncode == 0 and not result.timed_out,
+            "returncode": result.returncode,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+            "cwd": "/",
+            "output": self._runtime.redact(
+                result.output.decode("utf-8", errors="replace")[-50_000:]
+            ),
+        }
 
     async def _prefer_codex_plan(
         self,

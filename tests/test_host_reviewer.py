@@ -199,7 +199,7 @@ async def test_reviewer_prefers_connected_codex(
 
 
 @pytest.mark.asyncio
-async def test_supervisor_is_bounded_redacted_and_read_only(
+async def test_supervisor_is_bounded_redacted_and_has_host_shell(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,6 +233,7 @@ async def test_supervisor_is_bounded_redacted_and_read_only(
                     "summary": "Deployment works with secret-value.",
                     "checks_performed": ["runtime request"],
                     "findings": [],
+                    "repair_handoff": "Inspect secret-value.",
                 }
             }
 
@@ -267,20 +268,35 @@ async def test_supervisor_is_bounded_redacted_and_read_only(
         release_id="release-1",
         source_commit="a" * 40,
         review_instructions="Verify the deployed endpoint.",
+        failure_context={"phase": "runtime switch", "message": "candidate failed"},
         inference_plan=plan,
         tenant_id="tenant-a",
     )
 
     assert report.summary == "Deployment works with [redacted]."
+    assert report.repair_handoff == "Inspect [redacted]."
     assert "deterministic host lifecycle is authoritative" in captured["system_prompt"]
+    assert "host shell freely" in captured["system_prompt"]
     assert captured["model_config"]["model_name"] == "owner-model"
     assert captured["model_config"]["reasoning_effort"] == "xhigh"
     assert captured["timeout_seconds"] == 120
     message = json.loads(captured["payload"]["messages"][0]["content"])
     assert message["inference_plan"] == plan.model_dump(mode="json")
+    assert message["failure_context"]["phase"] == "runtime switch"
     assert {tool.name for tool in captured["tools"]} == {
         "inspect_runtime",
         "probe_runtime",
+        "run_shell",
+    }
+    shell = next(tool for tool in captured["tools"] if tool.name == "run_shell")
+    shell_result = await shell.ainvoke({"command": "printf secret-value", "timeout_seconds": 1})
+    assert shell_result == {
+        "ok": True,
+        "returncode": 0,
+        "timed_out": False,
+        "truncated": False,
+        "cwd": "/",
+        "output": "[redacted]",
     }
     probe = next(tool for tool in captured["tools"] if tool.name == "probe_runtime")
     for path in ("/v2/files", "/_runtime/identity"):
