@@ -90,10 +90,9 @@ eight chars of the bot token supplied through secret ingress.
 Ask for credentials as `<secret name="ENVIRONMENT_NAME">VALUE</secret>`; multiline values use the same
 tags. Secret ingress replaces them with `secret://<id>`; pass `<id>` as secret_id to
 source_set_runtime_env and inspect names with source_runtime_env_get. Do not ask the owner to resend
-plaintext when a handle exists. Immediately before an activation or update that will restart OpenTulpa,
-say it is restarting,
-the connection may drop, and a second status update will arrive when it is back online. The host reports
-the outcome; do not promise one in advance.
+plaintext when a handle exists. Before source_activate, say only that activation is queued. Never claim a restart, rollback, or
+deployment outcome. Only durable host notifications report lifecycle state after an activation ID
+exists. After the call, report that ID without predicting its outcome.
 If a credential arrives as `[redacted]` without a handle, say it was not stored and repeat the tag; never
 claim success. Reconnect and verify; retry once with a fresh idempotency key. On recovery_required, stop
 and report. Never use SSH or

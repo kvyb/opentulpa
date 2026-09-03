@@ -14,7 +14,6 @@ import sqlite3
 import stat
 import sys
 import tarfile
-import tempfile
 import threading
 from collections.abc import Mapping
 from contextlib import closing, suppress
@@ -34,8 +33,15 @@ from opentulpa.evolution.git_security import (
 from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.evolution.process import run_bounded_process
 from opentulpa.host.controller_update import ControllerUpdateError, SystemdControllerUpdater
-from opentulpa.host.reviewer import DeepAgentReleaseReviewer, ReleaseReviewDecision
-from opentulpa.host.runtime import RuntimeLiveSourceSpec, RuntimeSupervisor
+from opentulpa.host.reviewer import (
+    DeepAgentDeploymentSupervisor,
+    DeploymentSupervisionReport,
+)
+from opentulpa.host.runtime import (
+    RuntimeLiveSourceSpec,
+    RuntimeSupervisor,
+    RuntimeUnavailableError,
+)
 from opentulpa.host.runtime_environment import (
     LiveSourceRuntimeEnvironmentStore,
     RuntimeEnvFileManager,
@@ -248,9 +254,10 @@ class _ActivationJournal:
         review_instructions: str = "",
         inference_plan: Mapping[str, JsonValue] | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        activation_id = "activation_" + hashlib.sha256(
-            f"{tenant_id}\0{idempotency_key}".encode()
-        ).hexdigest()[:48]
+        activation_id = (
+            "activation_"
+            + hashlib.sha256(f"{tenant_id}\0{idempotency_key}".encode()).hexdigest()[:48]
+        )
         with self._lock, closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -369,7 +376,10 @@ class _ActivationJournal:
                 state = connection.execute(
                     "SELECT active_release_id FROM source_state WHERE singleton = 1"
                 ).fetchone()
-                if state is None or str(state["active_release_id"]) != operation["previous_release_id"]:
+                if (
+                    state is None
+                    or str(state["active_release_id"]) != operation["previous_release_id"]
+                ):
                     raise SourceEvolutionError("active source changed during activation")
                 now = self._now()
                 connection.execute(
@@ -389,7 +399,11 @@ class _ActivationJournal:
                     UPDATE source_activations SET status='active', result_json=?, updated_at=?
                     WHERE id=? AND status='preparing'
                     """,
-                    (json.dumps(dict(result), sort_keys=True, separators=(",", ":")), now, activation_id),
+                    (
+                        json.dumps(dict(result), sort_keys=True, separators=(",", ":")),
+                        now,
+                        activation_id,
+                    ),
                 )
                 updated = connection.execute(
                     "SELECT * FROM source_activations WHERE id = ?", (activation_id,)
@@ -448,9 +462,13 @@ class _ActivationJournal:
                 or state["previous_release_id"] is None
             ):
                 return None
-            if not allow_pending and connection.execute(
-                "SELECT 1 FROM source_activations WHERE status='preparing' LIMIT 1"
-            ).fetchone() is not None:
+            if (
+                not allow_pending
+                and connection.execute(
+                    "SELECT 1 FROM source_activations WHERE status='preparing' LIMIT 1"
+                ).fetchone()
+                is not None
+            ):
                 return None
             latest = connection.execute(
                 """
@@ -555,9 +573,7 @@ class _ActivationJournal:
         operation = dict(row)
         operation["audit"] = json.loads(str(operation.pop("audit_json")))
         raw_plan = operation.pop("inference_plan_json")
-        operation["inference_plan"] = (
-            json.loads(str(raw_plan)) if raw_plan is not None else None
-        )
+        operation["inference_plan"] = json.loads(str(raw_plan)) if raw_plan is not None else None
         raw_result = operation.pop("result_json")
         operation["result"] = json.loads(str(raw_result)) if raw_result is not None else None
         operation["notified"] = bool(operation["notified"])
@@ -608,13 +624,16 @@ class _TrustedSourceWorkspace:
                 raise
         self._validate()
         self.path.chmod(0o700)
-        if _git(
-            self.path,
-            "cat-file",
-            "-e",
-            f"{bundled}^{{commit}}",
-            check=False,
-        ).returncode != 0:
+        if (
+            _git(
+                self.path,
+                "cat-file",
+                "-e",
+                f"{bundled}^{{commit}}",
+                check=False,
+            ).returncode
+            != 0
+        ):
             fetched = _git(
                 self.path,
                 "-c",
@@ -636,9 +655,10 @@ class _TrustedSourceWorkspace:
         git_directory, common_directory = discover_git_directories(self.path)
         if git_directory != common_directory:
             raise SourceEvolutionError("trusted source workspace must be an independent repository")
-        if not (self.path / "uv.lock").is_file() or not (
-            self.path / "src" / "opentulpa" / "__init__.py"
-        ).is_file():
+        if (
+            not (self.path / "uv.lock").is_file()
+            or not (self.path / "src" / "opentulpa" / "__init__.py").is_file()
+        ):
             raise SourceEvolutionError("trusted source workspace is not an OpenTulpa checkout")
 
     def head(self) -> str:
@@ -724,9 +744,7 @@ class _TrustedSourceWorkspace:
             if _git(self._source, "rev-parse", "--verify", "FETCH_HEAD^{commit}").strip() != commit:
                 raise SourceEvolutionError("trusted source import selected the wrong commit")
             source_tree = _git(self.path, "show", "--no-patch", "--format=%T", commit).strip()
-            imported_tree = _git(
-                self._source, "show", "--no-patch", "--format=%T", commit
-            ).strip()
+            imported_tree = _git(self._source, "show", "--no-patch", "--format=%T", commit).strip()
             if imported_tree != source_tree:
                 raise SourceEvolutionError("trusted source import changed the commit tree")
             _git(self._source, "update-ref", f"refs/opentulpa/releases/{commit}", commit)
@@ -922,7 +940,7 @@ class HostEvolutionControlService:
         journal: _ActivationJournal,
         runtime_environment_store: LiveSourceRuntimeEnvironmentStore,
         runtime_env_file_manager: RuntimeEnvFileManager | None = None,
-        reviewer: DeepAgentReleaseReviewer | None = None,
+        supervisor: DeepAgentDeploymentSupervisor | None = None,
         controller_updater: SystemdControllerUpdater | None = None,
         check_timeout_seconds: int = 120,
         max_output_bytes: int = 1_000_000,
@@ -932,7 +950,7 @@ class HostEvolutionControlService:
         self._journal = journal
         self._runtime_environment_store = runtime_environment_store
         self._runtime_env_file_manager = runtime_env_file_manager
-        self._reviewer = reviewer
+        self._supervisor = supervisor
         self._controller_updater = controller_updater
         self._check_timeout_seconds = check_timeout_seconds
         self._max_output_bytes = max_output_bytes
@@ -1166,10 +1184,7 @@ class HostEvolutionControlService:
                 public = self._public_operation(existing)
                 public["replayed"] = True
                 return public
-            if (
-                self._controller_updater is not None
-                and self._controller_updater.in_progress()
-            ):
+            if self._controller_updater is not None and self._controller_updater.in_progress():
                 raise SourceEvolutionError(
                     "the previous controller update must finish before another activation"
                 )
@@ -1204,14 +1219,10 @@ class HostEvolutionControlService:
                 audit=audit.as_metadata(),
                 review_instructions=safe_review,
                 inference_plan=(
-                    inference_plan.model_dump(mode="json")
-                    if inference_plan is not None
-                    else None
+                    inference_plan.model_dump(mode="json") if inference_plan is not None else None
                 ),
             )
             if operation["status"] == "preparing":
-                if not replayed:
-                    await self._notify_progress(operation, "build.preparing")
                 self._schedule(str(operation["id"]))
             public = self._public_operation(operation)
             public["replayed"] = replayed
@@ -1253,10 +1264,7 @@ class HostEvolutionControlService:
                 public = self._public_operation(existing)
                 public["replayed"] = True
                 return public
-            if (
-                self._controller_updater is not None
-                and self._controller_updater.in_progress()
-            ):
+            if self._controller_updater is not None and self._controller_updater.in_progress():
                 raise SourceEvolutionError(
                     "the controller update must finish before source rollback"
                 )
@@ -1391,46 +1399,67 @@ class HostEvolutionControlService:
                 if target is None or previous is None:
                     raise SourceEvolutionError("source activation release history is incomplete")
                 checks: list[JsonValue] = []
-                review: dict[str, JsonValue] | None = None
+                supervision: dict[str, JsonValue] | None = None
                 target_spec: RuntimeLiveSourceSpec | None = None
                 previous_spec: RuntimeLiveSourceSpec | None = None
+                failure_phase = "source validation"
                 try:
                     if operation["kind"] == "activate":
+                        if not await self._notify_progress(operation, "build.preparing"):
+                            raise SourceEvolutionError(
+                                "build preparation notice could not be delivered"
+                            )
                         await asyncio.to_thread(
                             self._workspace.require_clean_head, target["source_commit"]
                         )
+                    failure_phase = "runtime preparation"
                     target_spec = await self._prepare_spec(target["source_commit"])
                     if operation["kind"] == "activate":
+                        failure_phase = "source checks"
                         checks = await self._run_checks()
+                    failure_phase = "rollback preparation"
                     previous_spec = self._runtime.live_source
                     if (
                         previous_spec is None
                         or previous_spec.source_commit != previous["source_commit"]
                     ):
                         previous_spec = await self._prepare_spec(previous["source_commit"])
+                    failure_phase = "switch notification"
                     if not await self._notify_progress(operation, "build.switching"):
                         raise SourceEvolutionError("runtime restart notice could not be delivered")
+                    failure_phase = "runtime switch"
                     await self._runtime.replace_live_source(target_spec, rollback=previous_spec)
-                    if operation["kind"] == "activate" and self._reviewer is not None:
-                        decision = await self._review_release(
-                            operation=operation,
-                            target=target,
-                            previous=previous,
-                        )
-                        review = decision.model_dump(mode="json")
-                        if not decision.approved:
-                            raise SourceEvolutionError(decision.diagnostic())
+                    if operation["kind"] == "activate" and self._supervisor is not None:
+                        failure_phase = "deployment supervision"
+                        try:
+                            report = await self._supervise_deployment(
+                                operation=operation,
+                                target=target,
+                            )
+                            supervision = {
+                                "status": "completed",
+                                **report.model_dump(mode="json"),
+                            }
+                        except Exception:
+                            supervision = {
+                                "status": "unavailable",
+                                "summary": (
+                                    "Advisory deployment supervision was unavailable; "
+                                    "deterministic host checks passed."
+                                ),
+                                "checks_performed": [],
+                                "findings": [],
+                            }
+                    failure_phase = "journal finalization"
                     result: dict[str, JsonValue] = {
-                        "status": "rolled_back"
-                        if operation["kind"] == "rollback"
-                        else "active",
+                        "status": "rolled_back" if operation["kind"] == "rollback" else "active",
                         "activation_id": activation_id,
                         "kind": str(operation["kind"]),
                         "active_release_id": str(target["id"]),
                         "source_commit": str(target["source_commit"]),
                         "previous_release_id": str(previous["id"]),
                         "checks": checks,
-                        **({"review": review} if review is not None else {}),
+                        **({"supervision": supervision} if supervision is not None else {}),
                     }
                     operation = await asyncio.to_thread(
                         self._journal.complete_success,
@@ -1441,9 +1470,7 @@ class HostEvolutionControlService:
                     raise
                 except Exception as exc:
                     try:
-                        persisted = await asyncio.to_thread(
-                            self._journal.operation, activation_id
-                        )
+                        persisted = await asyncio.to_thread(self._journal.operation, activation_id)
                     except Exception:
                         await self._runtime.stop()
                         raise
@@ -1489,16 +1516,14 @@ class HostEvolutionControlService:
                             "status": "rolled_back" if restored else "failed",
                             "activation_id": activation_id,
                             "kind": str(operation["kind"]),
-                            "active_release_id": str(previous["id"])
-                            if restored
-                            else None,
-                            "source_commit": str(previous["source_commit"])
-                            if restored
-                            else None,
+                            "active_release_id": str(previous["id"]) if restored else None,
+                            "source_commit": str(previous["source_commit"]) if restored else None,
                             "target_release_id": str(target["id"]),
                             "target_source_commit": str(target["source_commit"]),
                             "checks": checks,
-                            **({"review": review} if review is not None else {}),
+                            **({"supervision": supervision} if supervision is not None else {}),
+                            "failure_phase": failure_phase,
+                            "failure_message": self._safe_error(exc),
                             "error": self._safe_error(exc),
                         }
                         operation = await asyncio.to_thread(
@@ -1512,56 +1537,29 @@ class HostEvolutionControlService:
         finally:
             self._tasks.pop(activation_id, None)
 
-    async def _review_release(
+    async def _supervise_deployment(
         self,
         *,
         operation: Mapping[str, Any],
         target: Mapping[str, Any],
-        previous: Mapping[str, Any],
-    ) -> ReleaseReviewDecision:
-        reviewer = self._reviewer
-        if reviewer is None:
-            raise SourceEvolutionError("source release reviewer is unavailable")
-        target_commit = str(target["source_commit"])
-        previous_commit = str(previous["source_commit"])
-        changed_paths, previous_prompt = await asyncio.gather(
-            asyncio.to_thread(self._workspace.changed_paths, previous_commit, target_commit),
-            asyncio.to_thread(
-                self._workspace.text_at,
-                previous_commit,
-                "src/opentulpa/host/reviewer_prompt.md",
-            ),
-        )
-        if not previous_prompt.strip():
-            previous_prompt = Path(__file__).with_name("reviewer_prompt.md").read_text(
-                encoding="utf-8"
-            )
+    ) -> DeploymentSupervisionReport:
+        supervisor = self._supervisor
+        if supervisor is None:
+            raise SourceEvolutionError("deployment supervisor is unavailable")
         raw_plan = operation.get("inference_plan")
         plan = (
             ResolvedInferencePlan.model_validate(raw_plan)
             if isinstance(raw_plan, Mapping)
             else None
         )
-        with tempfile.TemporaryDirectory(prefix="opentulpa-release-review-") as raw_root:
-            root = Path(raw_root)
-            candidate_root = root / "candidate"
-            reviewer_root = root / "previous"
-            await asyncio.gather(
-                asyncio.to_thread(self._workspace.export, target_commit, candidate_root),
-                asyncio.to_thread(self._workspace.export, previous_commit, reviewer_root),
-            )
-            return await reviewer.review(
-                review_id=str(operation["id"]),
-                release_id=str(target["id"]),
-                source_commit=target_commit,
-                changed_paths=changed_paths,
-                review_instructions=str(operation.get("review_instructions") or ""),
-                inference_plan=plan,
-                tenant_id=str(operation["tenant_id"]),
-                candidate_root=candidate_root,
-                reviewer_root=reviewer_root,
-                system_prompt=previous_prompt,
-            )
+        return await supervisor.observe(
+            supervision_id=str(operation["id"]),
+            release_id=str(target["id"]),
+            source_commit=str(target["source_commit"]),
+            review_instructions=str(operation.get("review_instructions") or ""),
+            inference_plan=plan,
+            tenant_id=str(operation["tenant_id"]),
+        )
 
     async def _prepare_spec(self, source_commit: str) -> RuntimeLiveSourceSpec:
         await asyncio.to_thread(self._workspace.import_into_live_repository, source_commit)
@@ -1624,7 +1622,11 @@ class HostEvolutionControlService:
         if updater is None:
             return
         selected = operation or await asyncio.to_thread(self._journal.latest)
-        if selected is not None and selected.get("status") == "active" and selected.get("kind") == "activate":
+        if (
+            selected is not None
+            and selected.get("status") == "active"
+            and selected.get("kind") == "activate"
+        ):
             target = await asyncio.to_thread(self._journal.release, selected["target_release_id"])
             if target is not None:
                 with suppress(ControllerUpdateError):
@@ -1722,7 +1724,10 @@ class HostEvolutionControlService:
             event_type=event_type,
             release_id=str(operation["target_release_id"]),
             origin=dict(operation.get("audit") or {}),
-            payload={"status": event_type.rsplit(".", 1)[-1]},
+            payload={
+                "status": event_type.rsplit(".", 1)[-1],
+                "activation_id": str(operation["id"]),
+            },
         )
 
     async def _deliver_event(
@@ -1803,9 +1808,7 @@ class HostEvolutionControlService:
                 "message": message,
                 "review_instructions": review_instructions,
                 "inference_plan": (
-                    inference_plan.model_dump(mode="json")
-                    if inference_plan is not None
-                    else None
+                    inference_plan.model_dump(mode="json") if inference_plan is not None else None
                 ),
             },
             sort_keys=True,
@@ -1813,10 +1816,12 @@ class HostEvolutionControlService:
         )
         return hashlib.sha256(payload.encode()).hexdigest()
 
-    @staticmethod
-    def _safe_error(error: Exception) -> str:
-        if isinstance(error, (SourceEvolutionError, RuntimeEnvironmentError)):
-            message = str(error).strip()
+    def _safe_error(self, error: Exception) -> str:
+        if isinstance(
+            error,
+            (SourceEvolutionError, RuntimeEnvironmentError, RuntimeUnavailableError),
+        ):
+            message = self._runtime.redact(str(error).strip())
             return message[:1_000] if message else "source activation failed"
         return "source activation failed"
 

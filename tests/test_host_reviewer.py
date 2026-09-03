@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +12,10 @@ from pydantic import SecretStr, ValidationError
 
 import opentulpa.host.reviewer as reviewer_module
 from opentulpa.host.models import HostConfig
-from opentulpa.host.reviewer import DeepAgentReleaseReviewer, ReleaseReviewDecision
+from opentulpa.host.reviewer import (
+    DeepAgentDeploymentSupervisor,
+    DeploymentSupervisionReport,
+)
 from opentulpa.inference.models import InferenceSelection, ResolvedInferencePlan
 
 
@@ -39,16 +43,17 @@ class _Runtime:
         return text.replace("secret-value", "[redacted]")
 
 
-def test_review_decision_accepts_reviewer_judgment_without_prefixes() -> None:
-    decision = ReleaseReviewDecision(
-        approved=True,
-        summary="Minor issue",
-        findings=["A non-blocking edge case", "[P1] Labels do not override approval"],
+def test_supervision_report_has_no_deployment_veto() -> None:
+    report = DeploymentSupervisionReport(
+        summary="Runtime is healthy.",
+        findings=["A non-blocking edge case"],
     )
 
-    assert decision.approved is True
+    assert report.summary == "Runtime is healthy."
     with pytest.raises(ValidationError):
-        ReleaseReviewDecision.model_validate({"approved": "true", "summary": "Malformed"})
+        DeploymentSupervisionReport.model_validate(
+            {"approved": False, "summary": "Must not control deployment"}
+        )
 
 
 def test_reviewer_retries_transient_codex_model_calls(
@@ -63,7 +68,7 @@ def test_reviewer_retries_transient_codex_model_calls(
 
     monkeypatch.setattr(reviewer_module, "InferenceService", lambda **_: _Inference())
     monkeypatch.setattr(reviewer_module, "load_or_create_host_cipher", lambda _: object())
-    reviewer = DeepAgentReleaseReviewer(
+    reviewer = DeepAgentDeploymentSupervisor(
         _Runtime(),  # type: ignore[arg-type]
         runtime_data_root=tmp_path,
     )
@@ -80,9 +85,7 @@ def test_reviewer_retries_transient_codex_model_calls(
         api_default_model="api-model",
     )
     retry = next(
-        item
-        for item in middleware
-        if isinstance(item, reviewer_module._ProviderFallbackMiddleware)
+        item for item in middleware if isinstance(item, reviewer_module._ProviderFallbackMiddleware)
     )
 
     assert retry._fallback_models == (codex_model, codex_model)  # noqa: SLF001
@@ -118,7 +121,7 @@ async def test_reviewer_prefers_connected_codex(
     inference = _Inference()
     monkeypatch.setattr(reviewer_module, "InferenceService", lambda **_: inference)
     monkeypatch.setattr(reviewer_module, "load_or_create_host_cipher", lambda _: object())
-    reviewer = DeepAgentReleaseReviewer(
+    reviewer = DeepAgentDeploymentSupervisor(
         _Runtime(),  # type: ignore[arg-type]
         runtime_data_root=tmp_path,
     )
@@ -168,7 +171,7 @@ async def test_reviewer_prefers_connected_codex(
         "InferenceService",
         lambda **_: _DisconnectedInference(),
     )
-    disconnected = DeepAgentReleaseReviewer(
+    disconnected = DeepAgentDeploymentSupervisor(
         _Runtime(),  # type: ignore[arg-type]
         runtime_data_root=tmp_path,
     )
@@ -196,14 +199,10 @@ async def test_reviewer_prefers_connected_codex(
 
 
 @pytest.mark.asyncio
-async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
+async def test_supervisor_is_bounded_redacted_and_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    candidate = tmp_path / "candidate"
-    previous = tmp_path / "previous"
-    candidate.mkdir()
-    previous.mkdir()
     captured: dict[str, Any] = {}
 
     class _Graph:
@@ -231,8 +230,7 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
             )
             return {
                 "structured_response": {
-                    "approved": True,
-                    "summary": "Deployment works.",
+                    "summary": "Deployment works with secret-value.",
                     "checks_performed": ["runtime request"],
                     "findings": [],
                 }
@@ -248,51 +246,45 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
 
     monkeypatch.setattr(reviewer_module, "create_deep_agent", create_agent)
     monkeypatch.setattr(reviewer_module, "build_openrouter_chat_model", build_model)
-    monkeypatch.setattr(
-        reviewer_module.asyncio,
-        "timeout",
-        lambda _: pytest.fail("release reviews must not have a whole-review timeout"),
-    )
+    real_timeout = asyncio.timeout
+
+    def timeout(seconds: float) -> Any:
+        captured["timeout_seconds"] = seconds
+        return real_timeout(seconds)
+
+    monkeypatch.setattr(reviewer_module.asyncio, "timeout", timeout)
     plan = ResolvedInferencePlan.resolve(
         InferenceSelection(provider="api", model="owner-model", reasoning_effort="xhigh"),
         preference_revision=3,
     )
-    reviewer = DeepAgentReleaseReviewer(
+    reviewer = DeepAgentDeploymentSupervisor(
         _Runtime(),  # type: ignore[arg-type]
         runtime_data_root=tmp_path,
     )
 
-    decision = await reviewer.review(
-        review_id="activation-1",
+    report = await reviewer.observe(
+        supervision_id="activation-1",
         release_id="release-1",
         source_commit="a" * 40,
-        changed_paths=("src/opentulpa/example.py",),
         review_instructions="Verify the deployed endpoint.",
         inference_plan=plan,
         tenant_id="tenant-a",
-        candidate_root=candidate,
-        reviewer_root=previous,
-        system_prompt="Previous generation prompt",
     )
 
-    assert decision.approved is True
-    assert "# Ponytail" in captured["system_prompt"]
-    assert "Only P0 and P1 findings block a release" in captured["system_prompt"]
-    assert captured["system_prompt"].endswith("Previous generation prompt")
+    assert report.summary == "Deployment works with [redacted]."
+    assert "deterministic host lifecycle is authoritative" in captured["system_prompt"]
     assert captured["model_config"]["model_name"] == "owner-model"
     assert captured["model_config"]["reasoning_effort"] == "xhigh"
+    assert captured["timeout_seconds"] == 120
     message = json.loads(captured["payload"]["messages"][0]["content"])
     assert message["inference_plan"] == plan.model_dump(mode="json")
-    shell = next(tool for tool in captured["tools"] if tool.name == "run_shell")
-    shell_result = await shell.ainvoke(
-        {
-            "command": "printf '%s' \"${OPENAI_COMPATIBLE_API_KEY:-safe}\"",
-            "working_directory": "candidate",
-            "timeout_seconds": 10,
-        }
-    )
-    assert shell_result["cwd"] == str(candidate)
-    assert shell_result["output"] == "safe"
+    assert {tool.name for tool in captured["tools"]} == {
+        "inspect_runtime",
+        "probe_runtime",
+    }
+    probe = next(tool for tool in captured["tools"] if tool.name == "probe_runtime")
+    with pytest.raises(ValidationError):
+        await probe.ainvoke({"path": "/v2/files"})
     audit_path = tmp_path / "release_reviews" / "activation-1.jsonl"
     audit = audit_path.read_text(encoding="utf-8")
     events = [json.loads(line)["event"] for line in audit.splitlines()]
@@ -300,9 +292,9 @@ async def test_reviewer_uses_previous_prompt_owner_plan_and_disposable_source(
     assert audit_path.stat().st_mode & 0o777 == 0o600
     assert "secret-value" not in audit
     assert events == [
-        "review.started",
+        "supervision.started",
         "model.start",
         "tool.start",
         "tool.end",
-        "review.completed",
+        "supervision.completed",
     ]

@@ -82,6 +82,9 @@ def test_owner_prompt_explains_durable_source_activation() -> None:
     assert "returns after queuing the durable operation" in prompt
     assert "reconnect and call source_status" in prompt
     assert "exact active release id" in prompt
+    assert "only durable host notifications report lifecycle state" in prompt
+    assert "never claim a restart, rollback, or deployment outcome" in prompt
+    assert "report that id without predicting its outcome" in prompt
 
 
 def test_owner_prompt_briefs_owner_before_source_changes() -> None:
@@ -100,7 +103,6 @@ def test_owner_prompt_uses_secret_handles_for_runtime_env_writes() -> None:
     assert "secret://<id>" in OWNER_PROMPT
     assert "source_runtime_env_get" in OWNER_PROMPT
     assert "source_set_runtime_env" in OWNER_PROMPT
-    assert "second status update will arrive when it is back" in OWNER_PROMPT
     assert "secret_id" in OWNER_PROMPT
     assert "Never repeat credential values" in OWNER_PROMPT
     assert "Do not ask the owner to resend" in OWNER_PROMPT

@@ -12,6 +12,7 @@ from opentulpa.notifications.service import NotificationService
 from opentulpa.notifications.sinks import (
     BootstrapNotificationSink,
     EvolutionNotificationSink,
+    EvolutionRepairNotificationSink,
     TriggerNotificationSink,
 )
 from opentulpa.notifications.store import (
@@ -24,6 +25,7 @@ __all__ = [
     "ApprovalDecision",
     "BootstrapNotificationSink",
     "EvolutionNotificationSink",
+    "EvolutionRepairNotificationSink",
     "NotificationApproval",
     "NotificationDedupeConflictError",
     "NotificationName",

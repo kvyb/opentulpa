@@ -360,18 +360,22 @@ def test_private_evolution_event_route_requires_exact_child_identity(
     assert notifications.published[0]["tenant_id"] == "tenant-a"
 
 
-def test_rejected_release_schedules_restricted_repair_run(
+def test_failed_deployment_schedules_bounded_repair_and_reports_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Notifications:
-        def publish(self, **_: Any) -> None:
-            pass
+        def __init__(self) -> None:
+            self.published: list[dict[str, Any]] = []
+
+        def publish(self, **values: Any) -> None:
+            self.published.append(values)
 
     nonce = "repair-event-launch-nonce-0000"
     token = "repair-event-owner-token-000000"
     monkeypatch.setenv("OPENTULPA_LAUNCH_NONCE", nonce)
     monkeypatch.setenv("OPENTULPA_OWNER_TOKEN", token)
-    app = _app([], notification_service=Notifications())
+    notifications = Notifications()
+    app = _app([], notification_service=notifications)
     event = EvolutionEvent(
         event_key="source:activation-1:rolled_back",
         event_type="promotion.failed",
@@ -379,11 +383,12 @@ def test_rejected_release_schedules_restricted_repair_run(
         origin={"tenant_id": "tenant-a", "correlation_id": "owner-request"},
         payload={
             "status": "rolled_back",
-            "review": {
-                "approved": False,
-                "summary": "One blocker remains.",
+            "failure_phase": "source checks",
+            "failure_message": "source activation check python.compile failed",
+            "supervision": {
+                "status": "completed",
+                "summary": "One observation remains.",
                 "findings": ["Fix the source boundary.", "[P2] Add a regression test.", 3],
-                "repair_handoff": "Repair the boundary and rerun its test.",
             },
         },
     )
@@ -429,9 +434,18 @@ def test_rejected_release_schedules_restricted_repair_run(
     }
     assert request.context.correlation_id.startswith("evolution-repair:1:")
     assert "source_activate" in request.text
+    assert "source checks" in request.text
+    assert "source activation check python.compile failed" in request.text
     assert "Fix the source boundary." in request.text
     assert "[P2] Add a regression test." in request.text
     assert "\n3" not in request.text
+    kinds = [item["notification"].kind for item in notifications.published]
+    assert kinds == [
+        "evolution.promotion.failed",
+        "evolution.repair.started",
+        "evolution.promotion.failed",
+        "evolution.repair.exhausted",
+    ]
 
 
 def test_probation_child_rejects_private_evolution_event_delivery(

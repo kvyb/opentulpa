@@ -21,11 +21,11 @@ if TYPE_CHECKING:
 
 
 _EVOLUTION_EVENT_TEXT = {
-    "build.preparing": "Preparing a new OpenTulpa build. I will report again before it restarts.",
-    "build.switching": "OpenTulpa is restarting now. I will report again when it is back online.",
-    "build.active": "OpenTulpa is back online. The new build is active.",
-    "promotion.failed": "The new build failed, so OpenTulpa kept or restored the previous build.",
-    "build.rolled_back": "OpenTulpa is back online. The previous build has been restored.",
+    "build.preparing": "The deployment host is preparing a new OpenTulpa build.",
+    "build.switching": "The deployment host is switching to the new OpenTulpa build now.",
+    "build.active": "The deployment host confirmed that the new OpenTulpa build is active.",
+    "promotion.failed": "The deployment host rejected the new build and kept or restored the previous build.",
+    "build.rolled_back": "The deployment host confirmed that the previous build has been restored.",
     "rollback.failed": "OpenTulpa could not restore the requested previous build.",
     "runtime_env.restarting": "OpenTulpa is restarting to apply the runtime environment update. I will report again when it is back online.",
     "runtime_env.updated": "OpenTulpa is back online. The runtime environment update is active.",
@@ -117,13 +117,7 @@ class EvolutionNotificationSink:
             return
         payload = dict(event.payload)
         failed = event.event_type.endswith(".failed")
-        text = str(
-            payload.get("failure_message")
-            or payload.get("summary")
-            or _EVOLUTION_EVENT_TEXT.get(event.event_type)
-            or payload.get("status")
-            or event.event_type
-        ).strip()
+        text = _evolution_text(event.event_type, payload)
         self._notifications.publish(
             tenant_id=tenant_id,
             dedupe_key=f"evolution:{event.event_key}",
@@ -134,6 +128,49 @@ class EvolutionNotificationSink:
                 thread_id=_optional(origin, "thread_id"),
                 run_id=_optional(origin, "run_id"),
                 origin=_evolution_origin(origin),
+            ),
+        )
+
+
+class EvolutionRepairNotificationSink:
+    """Report terminal automatic-repair outcomes independently of the run stream."""
+
+    def __init__(self, notifications: NotificationService) -> None:
+        self._notifications = notifications
+
+    async def __call__(self, snapshot: AgentRunSnapshot) -> None:
+        context = snapshot.context
+        if context.channel != "evolution" or not context.correlation_id.startswith(
+            "evolution-repair:"
+        ):
+            return
+        completed = snapshot.status == "completed"
+        detail = str(snapshot.final_text if completed else snapshot.error).strip().rstrip(".")
+        text = (
+            "The repair agent finished: "
+            + (detail or "no further activation result was reported")
+            if completed
+            else "The repair agent ended without a confirmed result: "
+            + (detail or "no successful replacement deployment was confirmed")
+        )
+        text += ". The deployment host will report any activation outcome separately."
+        self._notifications.publish(
+            tenant_id=context.tenant_id,
+            dedupe_key=f"evolution-repair:{snapshot.run_id}:{snapshot.status}",
+            notification=NotificationWrite(
+                kind=("evolution.repair.completed" if completed else "evolution.repair.failed"),
+                text=text[:50_000],
+                status="completed" if completed else "failed",
+                thread_id=context.thread_id,
+                run_id=snapshot.run_id,
+                origin=NotificationOrigin(
+                    interface=context.origin.interface,
+                    source_id=context.origin.source_id,
+                    conversation_id=context.origin.conversation_id,
+                    message_id=context.origin.message_id,
+                    channel=context.channel,
+                    correlation_id=context.correlation_id,
+                ),
             ),
         )
 
@@ -173,6 +210,37 @@ class BootstrapNotificationSink:
         )
 
 
+def _evolution_text(event_type: str, payload: dict[str, Any]) -> str:
+    activation_id = str(payload.get("activation_id") or "").strip()
+    label = f"Activation {activation_id[:12]}" if activation_id else "The deployment"
+    if event_type == "build.preparing":
+        return f"{label} is queued and the deployment host is preparing the new build."
+    if event_type == "build.switching":
+        return f"{label} is switching to the new build now. I will report the result."
+    if event_type == "build.active":
+        return f"{label} succeeded. OpenTulpa is online with the new build."
+    if event_type == "build.rolled_back":
+        return f"{label} succeeded. OpenTulpa is online with the restored previous build."
+    if event_type == "promotion.failed":
+        phase = str(payload.get("failure_phase") or "deployment").strip()
+        reason = str(
+            payload.get("failure_message")
+            or payload.get("error")
+            or "the new build did not pass host checks"
+        ).strip()
+        return (
+            f"{label} failed during {phase}: {reason}. "
+            "OpenTulpa kept or restored the previous build."
+        )
+    return str(
+        payload.get("failure_message")
+        or payload.get("summary")
+        or _EVOLUTION_EVENT_TEXT.get(event_type)
+        or payload.get("status")
+        or event_type
+    ).strip()
+
+
 def _evolution_origin(value: dict[str, Any]) -> NotificationOrigin:
     raw = value.get("origin")
     parsed: dict[str, Any] = {}
@@ -201,5 +269,6 @@ def _optional(value: dict[str, Any], key: str) -> str | None:
 __all__ = [
     "BootstrapNotificationSink",
     "EvolutionNotificationSink",
+    "EvolutionRepairNotificationSink",
     "TriggerNotificationSink",
 ]

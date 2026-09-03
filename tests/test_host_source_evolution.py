@@ -15,7 +15,7 @@ from opentulpa.host.evolution import (
     _ActivationJournal,
     _TrustedSourceWorkspace,
 )
-from opentulpa.host.reviewer import ReleaseReviewDecision
+from opentulpa.host.reviewer import DeploymentSupervisionReport
 from opentulpa.host.runtime import RuntimeLiveSourceSpec
 from opentulpa.host.runtime_environment import (
     LiveSourceRuntimeEnvironment,
@@ -301,6 +301,9 @@ class _Runtime:
             raise RuntimeError("notification unavailable")
         self.events.append(event)
 
+    def redact(self, text: str) -> str:
+        return text
+
 
 class _ControllerUpdater:
     def __init__(self) -> None:
@@ -317,22 +320,31 @@ class _ControllerUpdater:
         return False
 
 
-class _RejectingReviewer:
-    async def review(self, **kwargs: Any) -> ReleaseReviewDecision:
-        assert Path(kwargs["candidate_root"]).is_dir()
-        assert Path(kwargs["reviewer_root"]).is_dir()
+class _ConcernedSupervisor:
+    async def observe(self, **kwargs: Any) -> DeploymentSupervisionReport:
         assert kwargs["review_instructions"] == "Verify VALUE in deployment."
         assert kwargs["inference_plan"].primary.model == "owner-model"
-        return ReleaseReviewDecision(
-            approved=False,
-            summary="The deployed value is wrong.",
-            findings=["Expected VALUE=2 but observed VALUE=1."],
-            repair_handoff="Fix VALUE in src/opentulpa/__init__.py and rerun its test.",
+        return DeploymentSupervisionReport(
+            summary="The deployment passed host checks.",
+            findings=["An advisory concern remains."],
         )
 
 
+class _UnavailableSupervisor:
+    async def observe(self, **_: Any) -> DeploymentSupervisionReport:
+        raise TimeoutError("provider unavailable")
+
+
 @pytest.mark.asyncio
-async def test_reviewer_rejection_rolls_back_and_notifies_owner_handoff(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("supervisor", "expected_supervision_status"),
+    [(_ConcernedSupervisor(), "completed"), (_UnavailableSupervisor(), "unavailable")],
+)
+async def test_supervisor_cannot_veto_a_healthy_deployment(
+    tmp_path: Path,
+    supervisor: Any,
+    expected_supervision_status: str,
+) -> None:
     source, bundled = _seed(tmp_path)
     runtime = _Runtime()
     service = HostEvolutionControlService(
@@ -344,7 +356,7 @@ async def test_reviewer_rejection_rolls_back_and_notifies_owner_handoff(tmp_path
         ),
         journal=_ActivationJournal(tmp_path / "control" / "activations.db"),
         runtime_environment_store=_EnvironmentStore(),  # type: ignore[arg-type]
-        reviewer=_RejectingReviewer(),  # type: ignore[arg-type]
+        supervisor=supervisor,
     )
 
     async def checks() -> list[Any]:
@@ -371,16 +383,15 @@ async def test_reviewer_rejection_rolls_back_and_notifies_owner_handoff(tmp_path
     await service._tasks[str(queued["activation_id"])]
 
     status = await service.source_status()
-    assert status["active_source_commit"] == bundled
-    assert status["activation"]["status"] == "rolled_back"  # type: ignore[index]
-    assert "Repair handoff:" in status["activation"]["error"]  # type: ignore[index]
+    assert status["active_source_commit"] != bundled
+    assert status["activation"]["status"] == "active"  # type: ignore[index]
+    supervision = status["activation"]["supervision"]  # type: ignore[index]
+    assert supervision["status"] == expected_supervision_status  # type: ignore[index]
     assert [event.event_type for event in runtime.events] == [
         "build.preparing",
         "build.switching",
-        "promotion.failed",
+        "build.active",
     ]
-    assert runtime.events[-1].event_type == "promotion.failed"
-    assert "src/opentulpa/__init__.py" in runtime.events[-1].payload["error"]
     assert status["workspace_head"] != bundled
     await service.shutdown()
 

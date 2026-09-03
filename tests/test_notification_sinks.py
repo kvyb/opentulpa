@@ -11,6 +11,7 @@ from opentulpa.evolution.models import EvolutionEvent
 from opentulpa.notifications import (
     BootstrapNotificationSink,
     EvolutionNotificationSink,
+    EvolutionRepairNotificationSink,
     NotificationService,
     NotificationStore,
     TriggerNotificationSink,
@@ -140,18 +141,22 @@ async def test_evolution_sink_delivers_failure_to_original_owner_thread(tmp_path
         (
             "build.preparing",
             "preparing",
-            "Preparing a new OpenTulpa build. I will report again before it restarts.",
+            "The deployment is queued and the deployment host is preparing the new build.",
         ),
         (
             "build.switching",
             "switching",
-            "OpenTulpa is restarting now. I will report again when it is back online.",
+            "The deployment is switching to the new build now. I will report the result.",
         ),
-        ("build.active", "active", "OpenTulpa is back online. The new build is active."),
+        (
+            "build.active",
+            "active",
+            "The deployment succeeded. OpenTulpa is online with the new build.",
+        ),
         (
             "promotion.failed",
             "failed",
-            "The new build failed, so OpenTulpa kept or restored the previous build.",
+            "The deployment failed during deployment: the new build did not pass host checks. OpenTulpa kept or restored the previous build.",
         ),
         (
             "runtime_env.restarting",
@@ -195,6 +200,75 @@ async def test_evolution_sink_explains_build_transition(
     )[0]
     assert notification.text == expected_text
     assert notification.thread_id == "owner-thread"
+
+
+@pytest.mark.asyncio
+async def test_evolution_failure_names_activation_phase_and_reason(tmp_path: Path) -> None:
+    store = NotificationStore(tmp_path / "failure.db")
+    sink = EvolutionNotificationSink(NotificationService(store))
+
+    await sink.deliver(
+        EvolutionEvent(
+            event_key="source:activation-1234567890:rolled_back",
+            event_type="promotion.failed",
+            release_id="release-1",
+            origin={"tenant_id": "tenant-a", "correlation_id": "activation-test"},
+            payload={
+                "status": "rolled_back",
+                "activation_id": "activation-1234567890",
+                "failure_phase": "runtime switch",
+                "failure_message": "runtime readiness timed out",
+            },
+        )
+    )
+
+    notification = store.list_unacked(
+        tenant_id="tenant-a",
+        consumer_id="web:owner",
+    )[0]
+    assert notification.text == (
+        "Activation activation-1 failed during runtime switch: runtime readiness timed out. "
+        "OpenTulpa kept or restored the previous build."
+    )
+
+
+@pytest.mark.asyncio
+async def test_repair_sink_reports_terminal_outcome(tmp_path: Path) -> None:
+    store = NotificationStore(tmp_path / "repair.db")
+    context = AgentRunContext(
+        tenant_id="tenant-a",
+        actor_id="deployment-repair",
+        thread_id="release-repair-1",
+        channel="evolution",
+        run_kind="owner",
+        correlation_id="evolution-repair:1:repair-1",
+        origin=OriginRef(interface="evolution", source_id="repair-1"),
+        agent_spec=AgentSpecRef(
+            tenant_id="tenant-a",
+            spec_id="release-repair",
+            revision=1,
+        ),
+        trust_class="owner",
+    )
+
+    await EvolutionRepairNotificationSink(NotificationService(store))(
+        AgentRunSnapshot(
+            run_id="repair-run-1",
+            context=context,
+            status="failed",
+            error="Focused tests still fail.",
+        )
+    )
+
+    notification = store.list_unacked(
+        tenant_id="tenant-a",
+        consumer_id="web:owner",
+    )[0]
+    assert notification.kind == "evolution.repair.failed"
+    assert notification.text == (
+        "The repair agent ended without a confirmed result: Focused tests still fail. "
+        "The deployment host will report any activation outcome separately."
+    )
 
 
 @pytest.mark.asyncio

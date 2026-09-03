@@ -117,6 +117,7 @@ from opentulpa.mcp import (
 )
 from opentulpa.notifications import (
     BootstrapNotificationSink,
+    EvolutionRepairNotificationSink,
     NotificationService,
     NotificationStore,
     TriggerNotificationSink,
@@ -1256,9 +1257,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
                 raise RuntimeError(f"active {spec_id} AgentSpec is unavailable")
             return ref
 
-        bot_token = (
-            str(settings.telegram_bot_token or "").strip() if consumers_enabled else ""
-        )
+        bot_token = str(settings.telegram_bot_token or "").strip() if consumers_enabled else ""
 
         capability_state_root = deepagents_root / "capability_state"
         capability_state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1495,6 +1494,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             execution_provider=sandbox_execution,
             execution_backend=execution_backend,
             workspace_backend=workspace_backend,
+            run_observer=EvolutionRepairNotificationSink(notifications),
             attachment_resolver=file_vault,
             audio_transcriber=build_openrouter_audio_transcriber(
                 api_key=api_key,
@@ -1530,6 +1530,7 @@ def build_application(*, project_root: Path, settings: Settings) -> ApplicationC
             ),
             capability=CapabilityPrincipalResolver(capability_credentials),
         )
+
         async def import_configured_villa_inventory() -> None:
             file_id = str(settings.villa_inventory_file_id or "").strip()
             if not file_id:

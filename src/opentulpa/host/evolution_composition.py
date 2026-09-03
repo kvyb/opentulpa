@@ -16,7 +16,7 @@ from opentulpa.host.evolution import (
     _TrustedSourceWorkspace,
     prepare_live_source_repository,
 )
-from opentulpa.host.reviewer import DeepAgentReleaseReviewer
+from opentulpa.host.reviewer import DeepAgentDeploymentSupervisor
 from opentulpa.host.runtime import RuntimeSupervisor
 from opentulpa.host.runtime_environment import (
     LiveSourceRuntimeEnvironmentStore,
@@ -73,7 +73,7 @@ def build_host_evolution_runtime(
             source_root=live_repository,
             runtime=runtime,
         ),
-        reviewer=DeepAgentReleaseReviewer(
+        supervisor=DeepAgentDeploymentSupervisor(
             runtime,
             runtime_data_root=resolved_product / ".opentulpa",
             api_reasoning_effort=settings.llm_reasoning_effort,
@@ -149,7 +149,9 @@ def _systemd_controller_updater(
         or not generation.is_dir()
         or not python.exists()
     ):
-        raise RuntimeError("automatic controller updates require an installed controller generation")
+        raise RuntimeError(
+            "automatic controller updates require an installed controller generation"
+        )
     try:
         port = int(os.environ.get("PORT") or 8000)
     except ValueError as exc:
@@ -195,7 +197,9 @@ def _trusted_root_executable(name: str) -> Path:
 
 
 def _runtime_extras() -> tuple[str, ...]:
-    return tuple(part for part in re.split(r"[\s,]+", os.environ.get("OPENTULPA_EXTRAS", "")) if part)
+    return tuple(
+        part for part in re.split(r"[\s,]+", os.environ.get("OPENTULPA_EXTRAS", "")) if part
+    )
 
 
 __all__ = ["build_host_evolution_runtime"]
